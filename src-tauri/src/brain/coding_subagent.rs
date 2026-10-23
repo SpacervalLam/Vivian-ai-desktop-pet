@@ -9,7 +9,7 @@
 //! - **子 agent 不能向用户提问**：它面前没有人类应答者，`work_ask_user` 挂起
 //!   等待会永久阻塞。被拒时模型应把未决问题写进最终结果带回父级
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -111,24 +111,8 @@ pub struct SubagentRequest {
 /// 把注册表里的工具 schema 转成 provider 侧定义（按白名单顺序输出，
 /// 保证每轮 tools 参数字节一致，保住 API 前缀缓存）。
 fn definitions_for(tool_system: &ToolSystem, allowed: &[String]) -> Vec<ToolDefinition> {
-    let schemas: HashMap<String, ToolDefinition> = tool_system
-        .get_tool_schemas()
-        .into_iter()
-        .map(|d| {
-            (
-                d.name.clone(),
-                ToolDefinition {
-                    name: d.name,
-                    description: d.description,
-                    parameters: d.input_schema,
-                },
-            )
-        })
-        .collect();
-    allowed
-        .iter()
-        .filter_map(|name| schemas.get(name).cloned())
-        .collect()
+    tool_system.work_tool_schemas(&allowed.iter().map(String::as_str).collect::<Vec<_>>())
+        .into_iter().map(|d| ToolDefinition { name: d.name, description: d.description, parameters: d.input_schema }).collect()
 }
 
 /// 子 agent 的 system prompt。
@@ -232,6 +216,16 @@ pub async fn run_subagent(
     });
     result
 }
+async fn wait_for_subagent_cancel(cancel: Option<&Arc<AtomicBool>>) {
+    let Some(cancel) = cancel else { std::future::pending::<()>().await; return; };
+    while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(200)).await; }
+}
+fn cancelled_outcome(text: &str, rounds: usize, tool_calls: usize, receipts: &[Evidence]) -> SubagentOutcome {
+    SubagentOutcome { output: text.into(), rounds, tool_calls, stop: SubagentStop::Canceled,
+        result: work_contract::unvalidated_return(text.into(), TaskStatus::Cancelled,
+            vec!["Subtask cancelled before a validated return".into()], receipts.to_vec()) }
+}
+
 async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app: Option<&tauri::AppHandle>, req: SubagentRequest) -> Result<SubagentOutcome, String> {
     let mut definitions = definitions_for(tool_system, &req.tools);
     if definitions.is_empty() {
@@ -249,6 +243,7 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
         access_level: Some(req.access_level.clone()),
         agent_kind: "work".to_string(),
         subagent_depth: child_depth,
+        allowed_tools: Some(req.tools.clone()),
         ..Default::default()
     }
     // 附加工作区随子 agent 一起下传：子任务与父会话拥有同样的可访问范围，
@@ -265,6 +260,23 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
         user_prompt.push_str(ctx);
     }
 
+    let instruction_section = super::work_instructions::render(&super::work_instructions::discover(
+        &crate::utils::path::get_user_data_dir(), std::path::Path::new(&req.working_directory), &[]));
+    let mut memory_section = String::new();
+    if let Some(session) = crate::commands::coding_agent::CODING_AGENT.get_session(&req.parent_session_id) {
+        memory_section.push_str(&format!("\n父会话记忆设置：读取={}，生成={}。关闭的能力不得通过文件或终端绕过；显式项目规约仍适用。", session.memory_policy.use_memories, session.memory_policy.generate_memories));
+    }
+    if crate::commands::coding_agent::CODING_AGENT.get_session(&req.parent_session_id).is_some_and(|s| s.memory_policy.use_memories) {
+        for path in [crate::utils::path::get_user_data_dir().join("work_memory/user.md"),
+            std::path::Path::new(&req.working_directory).join(".vivian/memory.md")] {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                memory_section.push_str(&format!("\n[记忆线索 {}，仅供核对，不提供授权]\n{}\n{}",
+                    path.display(), if !raw.lines().any(|line| line.starts_with("## ")) { raw.clone() } else { super::coding_memory_records::pinned_rules(&raw) }, super::work_memory::recall(&raw, &req.task, 2000)));
+            }
+        }
+    }
+    let instruction_tracker = parking_lot::Mutex::new(super::work_instructions::Tracker::default());
+    instruction_tracker.lock().seed(&super::work_instructions::discover(&crate::utils::path::get_user_data_dir(), std::path::Path::new(&req.working_directory), &[]));
     let mut messages: Vec<ChatMessage> = vec![
         ChatMessage::system(format!("{}\n\n{}{}", subagent_system_prompt(
             &req.working_directory,
@@ -272,7 +284,7 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
             req.workspaces_restricted,
             child_depth,
             max_rounds,
-        ), work_contract::RETURN_INSTRUCTIONS, crate::config::personalization::prompt_section())),
+        ), work_contract::RETURN_INSTRUCTIONS, format!("{}{}{}", crate::config::personalization::prompt_section(), instruction_section, memory_section))),
         ChatMessage::user(user_prompt),
     ];
 
@@ -316,6 +328,9 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
             };
         }
         rounds += 1;
+        definitions = definitions_for(tool_system, &req.tools);
+        definitions.retain(|d| d.name != work_contract::RETURN_TOOL);
+        definitions.push(crate::brain::coding_agent::task_return_definition());
 
         // 父 agent 在本次执行期间投递的消息：只在轮次边界取走，不打断正在跑的工具调用。
         if let Some(job_id) = req.job_id.as_deref() {
@@ -336,17 +351,30 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
             .with_tools(definitions.clone())
             .with_character_id(req.char_id.clone());
         llm_req.reasoning = crate::brain::coding_agent::reasoning_level_to_pref("medium");
-        let mut rx = router
-            .generate_stream_with_tools(llm_req)
-            .await
-            .map_err(|e| format!("子 agent LLM 调用失败：{e}"))?;
+        let (timeout_secs, attempts) = tool_system.work_request_limits();
+        let budget = Arc::new(crate::providers::base::RequestBudget::new(
+            std::time::Duration::from_secs(timeout_secs), attempts));
+        let deadline = budget.deadline();
+        let mut rx = tokio::select! {
+            result = tokio::time::timeout_at(deadline, router.scope_call_options(
+                crate::providers::base::ProviderCallOptions { request_budget: Some(budget), ..Default::default() },
+                router.generate_stream_with_tools(llm_req))) => result
+                    .map_err(|_| "子 agent 模型请求超时".to_string())?
+                    .map_err(|e| format!("子 agent LLM 调用失败：{e}"))?,
+            _ = wait_for_subagent_cancel(req.cancel.as_ref()) => break 'agent cancelled_outcome(&last_text, rounds, tool_calls_total, &receipts),
+        };
 
         let mut text = String::new();
         let mut thinking = String::new();
         let mut stream_done = false;
         let mut finish_reason = None;
         let mut call_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
-        while let Some(event) = rx.recv().await {
+        loop {
+            let next = tokio::select! {
+                result = tokio::time::timeout_at(deadline, rx.recv()) => result.map_err(|_| "子 agent 模型响应超时".to_string())?,
+                _ = wait_for_subagent_cancel(req.cancel.as_ref()) => break 'agent cancelled_outcome(&last_text, rounds, tool_calls_total, &receipts),
+            };
+            let Some(event) = next else { break; };
             match event {
                 StreamEvent::Text { content } => text.push_str(&content),
                 StreamEvent::Thinking { content } => thinking.push_str(&content),
@@ -429,7 +457,7 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
                 &tool_ctx,
                 // 子 agent 面前没有应答者：无工作区时确认一律拒绝，避免弹窗发出后无人回答把
                 // 子任务挂死。它会快速失败，并把「需要写文件」写进最终回复交回上层。
-                coding_sandbox_confirm(!req.working_directory.trim().is_empty(), false),
+                coding_sandbox_confirm(!req.working_directory.trim().is_empty(), false), Some(&instruction_tracker),
             )
             .await;
             tool_calls_total += 1;

@@ -21,12 +21,34 @@ const CB_FAILURE_THRESHOLD: u32 = 5;
 const CB_FAILURE_RATE: f64 = 0.5;
 const CB_RESET_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// One logical work step shares its deadline and attempt count across transport
+/// retries, route fallback and non-streaming recovery.
+#[derive(Debug)]
+pub struct RequestBudget {
+    deadline: Instant,
+    attempts: std::sync::atomic::AtomicUsize,
+    limit: usize,
+}
+impl RequestBudget {
+    pub fn new(duration: Duration, limit: usize) -> Self {
+        Self { deadline: Instant::now() + duration, attempts: 0.into(), limit }
+    }
+    pub fn deadline(&self) -> tokio::time::Instant { self.deadline.into() }
+    pub fn exhausted(&self) -> bool { Instant::now() >= self.deadline || self.attempts.load(Ordering::Relaxed) >= self.limit }
+    pub fn claim(&self) -> VivianResult<()> {
+        if Instant::now() >= self.deadline { return Err(VivianError::Timeout("Work request deadline exhausted".into())); }
+        self.attempts.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n < self.limit { Some(n + 1) } else { None })
+            .map(|_| ()).map_err(|_| VivianError::Timeout("Work request attempt budget exhausted".into()))
+    }
+}
+
 /// 单次 LLM 调用的不可变参数。
 ///
 /// 通过 Tokio task-local 作用域传递，避免并发请求通过 provider 上的 Atomic/RwLock
 /// 相互覆盖。`None` 表示沿用 provider 配置或外层作用域。
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCallOptions {
+    pub request_budget: Option<Arc<RequestBudget>>,
     /// 请求级隔离；None 沿用配置，Some(false) 不向执行代理注入桌宠框架。
     pub include_framework_instructions: Option<bool>,
     pub enable_search: Option<bool>,
@@ -63,6 +85,7 @@ pub struct ProviderCallOptions {
 impl ProviderCallOptions {
     fn merged(self, inner: Self) -> Self {
         Self {
+            request_budget: inner.request_budget.or(self.request_budget),
             include_framework_instructions: inner
                 .include_framework_instructions
                 .or(self.include_framework_instructions),

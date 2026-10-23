@@ -249,6 +249,45 @@ impl SnsStore {
         // Other participants keep both these messages and their own memories.
         tx.commit().map_err(|e| e.to_string())
     }
+
+    /// Settings shares append fresh identities, so no existing history or memory is reused.
+    pub fn append_shared_contacts(&self, inputs: Vec<ContactInput>) -> Result<Vec<Contact>, String> {
+        let mut conn = self.open()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut names: HashSet<String> = self.contacts()?.iter()
+            .map(|c| c.name.to_lowercase()).chain(["vivian".into(), "nana".into()]).collect();
+        let mut profiles = Vec::new();
+        for input in inputs {
+            let base = input.name.trim();
+            if base.is_empty() || base.chars().count() > 80 || input.persona.trim().is_empty()
+                || input.avatar.len() > 8 * 1024 * 1024
+                || (!input.avatar.is_empty() && !input.avatar.starts_with("data:image/")
+                    && input.avatar != "/icons/charaters/deepseek.webp") {
+                return Err("分享文件中的好友定义无效".into());
+            }
+            if let Some(model) = &input.model {
+                if !model.is_object() || ["model", "endpoint"].iter().any(|key|
+                    model.get(*key).and_then(Value::as_str).unwrap_or("").trim().is_empty()) {
+                    return Err("分享文件中的好友模型配置无效".into());
+                }
+            }
+            let mut name = base.to_string();
+            let mut suffix = 2;
+            while names.contains(&name.to_lowercase()) {
+                name = format!("{} ({suffix})", base.chars().take(65).collect::<String>());
+                suffix += 1;
+            }
+            names.insert(name.to_lowercase());
+            let profile = Contact { id: format!("contact_{}", uuid::Uuid::new_v4()),
+                name, persona: input.persona, model: input.model, avatar: input.avatar };
+            tx.execute("INSERT INTO contacts(id,profile) VALUES(?1,?2)",
+                params![profile.id, serde_json::to_string(&profile).map_err(|e| e.to_string())?])
+                .map_err(|e| e.to_string())?;
+            profiles.push(profile);
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(profiles)
+    }
     pub fn groups(&self) -> Result<Vec<Group>, String> {
         let conn = self.open()?;
         let mut stmt = conn

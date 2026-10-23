@@ -42,13 +42,13 @@ impl Tool for RunWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Run a multi-step workflow: steps is an array of {tool, arguments, parallel}. Consecutive steps marked parallel:true run concurrently as a group (fan-out); others run in order. Each step is a full tool call going through the sandbox/approval pipeline. Returns a per-step outcome summary. A step failure does not abort the workflow."
+        "Run a multi-step workflow: steps is an array of {tool, arguments, parallel}. Consecutive safe read-only steps marked parallel:true run in a bounded group; writes and control operations run in order as barriers. Each step uses the sandbox/approval pipeline. Returns per-step outcomes; a step failure does not abort later steps. Cancellation stops further dispatch."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "运行多步工作流：steps 为 {tool, arguments, parallel} 数组。连续标记 parallel:true 的步骤作为一组并发执行（扇出）；其余顺序执行。每步都是完整工具调用（经过沙箱/审批管线）。返回逐步结果汇总；单步失败不中止整个工作流。",
-            "ja" => "複数ステップのワークフローを実行：steps は {tool, arguments, parallel} の配列。parallel:true が連続するステップは1グループとして並行実行（ファンアウト）、それ以外は順次実行。各ステップは完全なツール呼び出し（サンドボックス/承認パイプラインを通る）。ステップごとの結果サマリーを返す。1ステップの失敗でワークフロー全体は中断されない。",
+            "zh" => "运行多步工作流：steps 为 {tool, arguments, parallel} 数组。连续标记 parallel:true 的安全只读步骤有界并发；写入与控制步骤按顺序执行并形成屏障。每步经过沙箱/审批管线。返回逐步结果；单步失败不中止后续步骤，取消后停止派发。",
+            "ja" => "複数ステップを実行。steps は {tool, arguments, parallel} の配列。parallel:true の連続した安全な読み取りのみ上限付きで並行実行し、書き込みと制御は順序を保つ。各ステップにサンドボックスと承認を適用。失敗後も後続を続けるが、キャンセル後は新たに開始しない。",
             _ => self.description(),
         }
     }
@@ -74,7 +74,7 @@ impl Tool for RunWorkflowTool {
                         "properties": {
                             "tool": {"type": "string", "description": "Tool name to call"},
                             "arguments": {"type": "object", "description": "Tool arguments"},
-                            "parallel": {"type": "boolean", "description": "true to run concurrently with adjacent parallel steps (default false)"}
+                            "parallel": {"type": "boolean", "description": "Request bounded concurrency for adjacent safe reads; writes remain ordered (default false)"}
                         },
                         "required": ["tool", "arguments"]
                     }
@@ -97,7 +97,7 @@ impl Tool for RunWorkflowTool {
                             "properties": {
                                 "tool": {"type": "string", "description": "要调用的工具名"},
                                 "arguments": {"type": "object", "description": "工具参数"},
-                                "parallel": {"type": "boolean", "description": "true 表示与相邻并行步骤并发执行（默认 false）"}
+                                "parallel": {"type": "boolean", "description": "请求相邻安全读取有界并发；写入保持顺序（默认 false）"}
                             },
                             "required": ["tool", "arguments"]
                         }

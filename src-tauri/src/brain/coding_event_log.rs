@@ -115,8 +115,12 @@ pub fn record(session: &str, call_id: Option<&str>, kind: &str, payload: Value) 
 }
 fn record_context(context: &Context, call_id: Option<&str>, kind: &str, payload: Value) {
     let root = context.root.clone().unwrap_or_else(|| crate::utils::path::get_user_data_dir().join("coding_events"));
-    if let Err(error) = append(&root, context, call_id, kind, payload) {
-        tracing::warn!(session_id = %context.session_id, kind, "Session audit write failed: {error}");
+    let (context, call_id, kind) = (context.clone(), call_id.map(str::to_owned), kind.to_owned());
+    let payload = bounded(&payload, &mut 12000, 0);
+    if let Err(error) = super::coding_io::enqueue(move || {
+        append(&root, &context, call_id.as_deref(), &kind, payload).map(|_| ())
+    }) {
+        tracing::error!("Session audit queue failed: {error}");
     }
 }
 pub fn begin_turn(session: &str, payload: Value) -> Context {
@@ -128,6 +132,7 @@ pub fn begin_turn(session: &str, payload: Value) -> Context {
 }
 pub fn release_turn(session: &str) { TURNS.lock().remove(session); }
 pub fn remove_session(root: &Path, session: &str) -> Result<(), String> {
+    if let Err(error) = super::coding_io::flush() { tracing::warn!("Audit flush before deletion: {error}"); }
     let target = path(root, session);
     let mut writers = WRITERS.lock();
     RETIRED.lock().insert(target.clone());
@@ -139,6 +144,7 @@ pub fn read_page(root: &Path, session: &str, after: u64, limit: usize) -> Result
     read_page_snapshot(root, session, after, limit, None)
 }
 pub fn read_page_snapshot(root: &Path, session: &str, after: u64, limit: usize, snapshot_bytes: Option<u64>) -> Result<Value, String> {
+    if let Err(error) = super::coding_io::flush() { tracing::warn!("Audit flush before reading: {error}"); }
     let (file, end) = {
         let _writers = WRITERS.lock();
         let file = std::fs::File::open(path(root, session)).map_err(|e| e.to_string())?;

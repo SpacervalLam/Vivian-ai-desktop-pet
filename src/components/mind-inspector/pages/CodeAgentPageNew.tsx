@@ -24,7 +24,7 @@ import {
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
   Wrench, FolderOpen, Braces, XCircle, X, Globe,
   Folder, Lock, Shield, Sparkles, Check, Cpu, Zap, Code2,
-  Activity, Send, Square, ArrowUp, List,
+  Activity, Send, Square, Play, ArrowUp, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Goal, ClipboardList, History, MessageSquare, Download, Copy, ThumbsUp, ThumbsDown, GitFork, Mic, Brain,
   HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote, Maximize2, Minimize2,
@@ -35,6 +35,7 @@ import { workActivitySummary } from './workActivitySummary';
 import './workflowStrings';
 import './browserStrings';
 import SessionSearch from './SessionSearch';
+import WorkMemoryPanel from './WorkMemoryPanel';
 import SessionSidebar from './SessionSidebar';
 import WebEvidenceCard from './WebEvidenceCard';
 import { parseWebEvidence } from './webEvidence';
@@ -203,6 +204,7 @@ interface CodingSession {
   reasoning_level?: 'low' | 'medium' | 'high' | string;
   messages: CodingMessage[];
   status: 'idle' | 'running' | 'canceled';
+  resume_available?: boolean;
   updated_at: number;
   /** 会话目标（/goal 设置） */
   goal?: string | null;
@@ -320,8 +322,8 @@ interface SlashCommand {
 const SLASH_COMMANDS: SlashCommand[] = [
   { cmd: '/goal', label: '设置目标', description: '为长期任务设置或查看目标', icon: <Goal size={14} /> },
   { cmd: '/plan', label: '计划模式', description: '进入或退出计划模式', icon: <ClipboardList size={14} /> },
-  { cmd: '/compact', label: '压缩历史', description: '压缩较早的对话历史（同时沉淀项目记忆）', icon: <History size={14} /> },
-  { cmd: '/memory', label: '项目记忆', description: '查看/提炼/追加跨会话的项目记忆（应用数据目录）', icon: <Brain size={14} /> },
+  { cmd: '/compact', label: '压缩历史', description: '压缩较早的对话历史，保留原始会话', icon: <History size={14} /> },
+  { cmd: '/memory', label: '项目记忆', description: '查看/提炼/追加项目记忆；读取 开/关、写入 开/关、全局 <内容>', icon: <Brain size={14} /> },
   { cmd: '/permission', label: '切换权限', description: '切换权限预设（沙箱模式 + 审批策略）', icon: <Shield size={14} /> },
   { cmd: '/feedback', label: '反馈', description: '记录关于本次会话的反馈', icon: <MessageSquare size={14} /> },
   { cmd: '/export', label: '导出会话', description: '将会话日志下载为 ZIP 压缩包', icon: <Download size={14} /> },
@@ -3540,8 +3542,10 @@ const CodeAgentPage: React.FC = () => {
   const [queue, setQueue] = useState<string[]>([]);
   // 引导消息：不打断当前任务，待当前 run 结束后优先发送（后端加"引导"标注）
   const guideRef = useRef<string | null>(null);
+  const resumeStartedAtRef = useRef<number | null>(null);
   const [turnStart, setTurnStart] = useState<number | null>(null);
   const [turnElapsed, setTurnElapsed] = useState(0);
+  const [stoppedTurns, setStoppedTurns] = useState<Record<string, number>>({});
   const [turnOutput, setTurnOutput] = useState({ tokens: 0, estimated: true });
   const confirmedOutputRef = useRef(0);
   const streamedEstimateRef = useRef(0);
@@ -4535,8 +4539,14 @@ const CodeAgentPage: React.FC = () => {
 
   useEffect(() => {
     if (running) {
+      if (activeId) setStoppedTurns(previous => {
+        const next = { ...previous };
+        delete next[activeId];
+        return next;
+      });
       const lastUser = [...messages].reverse().find(message => message.role === 'user');
-      setTurnStart(lastUser?.timestamp ?? Date.now());
+      setTurnStart(resumeStartedAtRef.current ?? lastUser?.timestamp ?? Date.now());
+      resumeStartedAtRef.current = null;
       confirmedOutputRef.current = 0;
       streamedEstimateRef.current = 0;
       setTurnOutput({ tokens: 0, estimated: true });
@@ -4555,9 +4565,21 @@ const CodeAgentPage: React.FC = () => {
 
   const handleCancel = useCallback(async () => {
     if (!activeId) return;
-    try { await invoke('coding_cancel_session', { sessionId: activeId }); }
-    catch (error) { notifyError(String(error)); }
-  }, [activeId, notifyError]);
+    const sid = activeId;
+    const seconds = Math.floor(Math.max(0, Date.now() - (turnStart ?? Date.now())) / 1000);
+    setStoppedTurns(previous => ({ ...previous, [sid]: seconds }));
+    try {
+      const canceled = await invoke<boolean>('coding_cancel_session', { sessionId: sid });
+      if (!canceled) setStoppedTurns(previous => {
+        const next = { ...previous }; delete next[sid]; return next;
+      });
+    } catch (error) {
+      setStoppedTurns(previous => {
+        const next = { ...previous }; delete next[sid]; return next;
+      });
+      notifyError(String(error));
+    }
+  }, [activeId, turnStart, notifyError]);
 
   /** 引导：不打断当前任务，把该条标记为引导消息，待当前 run 结束后优先发送（后端加引导标注）。 */
   const handleGuideSend = useCallback((index: number) => {
@@ -4821,7 +4843,9 @@ const CodeAgentPage: React.FC = () => {
         setCompacting(false);
         setStreamingText('');
         setRunning(false);
-        const turnStats = (p as { stats?: CodingStats | null }).stats;
+        const { stats: turnStats, resume_available } = p as { stats?: CodingStats | null; resume_available?: boolean };
+        setSessions(previous => previous.map(session => session.session_id === activeIdRef.current
+          ? { ...session, status: 'idle', resume_available: resume_available ?? false } : session));
         if (turnStats) setStats(turnStats);
         void (async () => {
           const id = activeIdRef.current;
@@ -4924,6 +4948,8 @@ const CodeAgentPage: React.FC = () => {
   }, [messages, thinking, streamingText, thinkingText, queue]);
 
   const canSend = input.trim().length > 0 || draftImages.length > 0 || draftRefs.length > 0;
+  const stoppedSeconds = activeId ? stoppedTurns[activeId] : undefined;
+  const canResume = !running && !canSend && (stoppedSeconds !== undefined || activeSession?.resume_available === true || activeSession?.status === 'canceled');
   const isEmptyChat = !activeSession || messages.length === 0;
 
   // 左侧对话定位轨：一轮对话一根横杠（锚点由消息列表按轮首下标投放）
@@ -4956,6 +4982,24 @@ const CodeAgentPage: React.FC = () => {
       setRunning(false);
     });
   }, [activeId, running]);
+
+  const handleResume = useCallback(async () => {
+    if (!activeId || running) return;
+    const sid = activeId;
+    const stopped = stoppedTurns[sid];
+    resumeStartedAtRef.current = Date.now();
+    setRunning(true);
+    atBottomRef.current = true;
+    setAtBottom(true);
+    try {
+      await invoke('coding_resume_session', { sessionId: sid });
+    } catch (error) {
+      resumeStartedAtRef.current = null;
+      if (activeIdRef.current === sid) setRunning(false);
+      if (stopped !== undefined) setStoppedTurns(previous => ({ ...previous, [sid]: stopped }));
+      notifyError(String(error));
+    }
+  }, [activeId, running, stoppedTurns, notifyError]);
 
   const handleSlashCommandSelect = useCallback((cmd: string) => {
     setSlashMenu((prev) => ({ ...prev, visible: false }));
@@ -5379,12 +5423,13 @@ const CodeAgentPage: React.FC = () => {
           ) : (
             <button
               type="button"
-              onClick={() => void handleSend()}
-              disabled={!canSend}
-              title={canSend ? t('mind_inspector.code_send_hint') : t('mind_inspector.code_send_disabled')}
+              onClick={() => canResume ? void handleResume() : void handleSend()}
+              disabled={!canSend && !canResume}
+              aria-label={canResume ? t('workbench.resumeTask') : t('mind_inspector.code_send_hint')}
+              title={canResume ? t('workbench.resumeTask') : canSend ? t('mind_inspector.code_send_hint') : t('mind_inspector.code_send_disabled')}
               className="codex-send-btn"
             >
-              <Send size={14} />
+              {canResume ? <Play size={14} /> : <Send size={14} />}
             </button>
           )}
         </div>
@@ -5563,11 +5608,13 @@ const CodeAgentPage: React.FC = () => {
             </span>
           </div>
           <div className="codex-topbar-actions">
+            {activeId && <WorkMemoryPanel key={activeId} sessionId={activeId} />}
             <button type="button" className="codex-icon-btn" title={t('workbench.searchShortcut')} aria-label={t('workbench.searchTitle')} onClick={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }}><Search size={15} /></button>
             <button type="button" className="codex-icon-btn" aria-pressed={focusMode} title={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} aria-label={t(focusMode ? 'workbench.focusExit' : 'workbench.focus')} onClick={() => { setLeftDrawerOpen(false); setFocusMode((mode) => !mode); }}>
               {focusMode ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
             </button>
 
+              {!running && stoppedSeconds !== undefined && <span className="codex-working">{t('workbench.stoppedAfter', { seconds: stoppedSeconds })}</span>}
               {running && (
                 <span className="codex-working">
                   {t('mind_inspector.code_working', { defaultValue: '工作中…' })}
@@ -5795,6 +5842,7 @@ const CodeAgentPage: React.FC = () => {
                           )}
                         </div>
                       )}
+                      {!running && stoppedSeconds !== undefined && <div className="codex-live-turn" role="status">{t('workbench.stoppedAfter', { seconds: stoppedSeconds })}</div>}
                       {running && <div className="codex-live-turn" aria-label={t('workbench.liveTurn')}>
                         <Loader2 size={15} className="codex-spin" aria-hidden />
                         <span>{formatClock(turnElapsed)}</span><span aria-hidden>·</span>

@@ -33,19 +33,55 @@ const MIN_KEEP_CHARS: usize = 50;
 /// 幻觉检测超时时间
 const HALLUCINATION_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 
+#[derive(Clone)]
 pub struct ValidationRunnable {
+    audits: Arc<std::sync::OnceLock<tokio::sync::mpsc::Sender<AuditJob>>>,
     /// 可选的 LLM 路由器：注入后启用轻量幻觉检测
     router: Option<Arc<ModelRouter>>,
 }
 
+struct AuditJob { evidence: super::faithfulness::Evidence, character: String, trace: String }
+
+fn record_audit(job: &AuditJob, report: Value, elapsed: std::time::Duration) {
+    use crate::mind::reasoning_trace::{ReasoningStep, TRACE_STORE};
+    TRACE_STORE.write().append_step(&job.character, &job.trace, ReasoningStep {
+        name: "faithfulness_audit".into(), input_summary: String::new(),
+        output_summary: report["status"].as_str().unwrap_or("unknown").into(),
+        duration_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
+        success: !matches!(report["status"].as_str(), Some("unknown")), error: None, details: report,
+    });
+    crate::mind::reasoning_trace::emit_trace_added(&job.character);
+}
+
 impl ValidationRunnable {
     pub fn new() -> Self {
-        Self { router: None }
+        Self { router: None, audits: Arc::new(std::sync::OnceLock::new()) }
     }
 
     /// 注入 LLM 路由器，启用轻量幻觉检测
     pub fn with_router(router: Arc<ModelRouter>) -> Self {
-        Self { router: Some(router) }
+        Self { router: Some(router), audits: Arc::new(std::sync::OnceLock::new()) }
+    }
+
+    pub(crate) fn schedule_audit(&self, state: &PipelineState, character: &str, trace: &str) {
+        if state.metadata["hallucination_check"]["status"] != "pending" { return; }
+        let Some(router) = self.router.clone() else { return; };
+        let sender = self.audits.get_or_init(|| {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel::<AuditJob>(8);
+            tokio::spawn(async move {
+                while let Some(job) = receiver.recv().await {
+                    let started = std::time::Instant::now();
+                    let report = Self::check_evidence(&router, &job.evidence).await
+                        .unwrap_or_else(|reason| json!({"status":"unknown","reason":reason}));
+                    record_audit(&job, report, started.elapsed());
+                }
+            });
+            sender
+        });
+        let job = AuditJob { evidence: super::faithfulness::Evidence::from_state(state), character:character.into(), trace:trace.into() };
+        if let Err(error) = sender.try_send(job) {
+            record_audit(&error.into_inner(), json!({"status":"unknown","reason":"audit_queue_full_or_closed"}), Duration::ZERO);
+        }
     }
 
     /// 在句边界截断文本
@@ -116,9 +152,13 @@ impl ValidationRunnable {
 
     /// 单次有截止时间的事实核对；失败和证据不足都不能当成通过。
     async fn check_faithfulness(router: &ModelRouter, state: &PipelineState) -> Result<Value, String> {
-        use super::faithfulness::{Evidence, CHECK_PROMPT, schema, assess};
+        use super::faithfulness::Evidence;
+        Self::check_evidence(router, &Evidence::from_state(state)).await
+    }
+
+    async fn check_evidence(router: &ModelRouter, evidence: &super::faithfulness::Evidence) -> Result<Value, String> {
+        use super::faithfulness::{CHECK_PROMPT, schema, assess};
         use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
-        let evidence = Evidence::from_state(state);
         let request = LLMRequest::new("memory", vec![
             ChatMessage::system(CHECK_PROMPT),
             ChatMessage::user(evidence_json(&evidence)),
@@ -129,7 +169,10 @@ impl ValidationRunnable {
             .with_reasoning_pref(ReasoningPreference { mode: ReasoningMode::Off,
                 effort: Some(ReasoningEffort::Minimal), budget_tokens: None })
             .without_framework_instructions();
-        let raw = tokio::time::timeout(HALLUCINATION_CHECK_TIMEOUT, router.generate(request)).await
+        let budget = Arc::new(crate::providers::base::RequestBudget::new(HALLUCINATION_CHECK_TIMEOUT, 2));
+        let raw = tokio::time::timeout_at(budget.deadline(), router.scope_call_options(
+            crate::providers::base::ProviderCallOptions { request_budget: Some(budget.clone()), ..Default::default() },
+            router.generate(request))).await
             .map_err(|_| "事实核对超时，未得出结论".to_string())?
             .map_err(|e| format!("事实核对调用失败: {e}"))?;
         assess(&raw, &evidence)
@@ -142,7 +185,7 @@ impl Runnable for ValidationRunnable {
     async fn ainvoke(
         &self,
         input: Value,
-        _config: Option<RunnableConfig>,
+        config: Option<RunnableConfig>,
     ) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
 
@@ -209,6 +252,8 @@ impl Runnable for ValidationRunnable {
         // 跨角色工具路径预算有限，显式记录未核对，而不是给出“通过”。
         state.metadata["hallucination_check"] = if state.current_channel == "cross_character" {
             json!({"status":"skipped", "reason":"cross_character_latency_budget"})
+        } else if self.router.is_some() && config.as_ref().is_some_and(|c| c.tags.iter().any(|tag| tag == "stream")) {
+            json!({"status":"pending", "reason":"deferred_diagnostic_audit"})
         } else if let Some(router) = &self.router {
             match Self::check_faithfulness(router, &state).await {
                 Ok(report) => {
@@ -233,6 +278,53 @@ impl Runnable for ValidationRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streaming_validation_returns_without_audit_and_late_report_targets_exact_trace() {
+        use axum::{routing::post, Json, Router};
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let notice = started.clone(); let gate = release.clone();
+        let app = Router::new().route("/v1/chat/completions", post(move || {
+            let notice = notice.clone(); let gate = gate.clone();
+            async move {
+                notice.notify_one(); gate.notified().await;
+                Json(json!({"choices":[{"message":{"role":"assistant","content":r#"{"non_factual":true,"claims":[]}"#},"finish_reason":"stop"}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::manager::AppConfig::default();
+        config.enable_routing_matrix = false; config.ai.provider = "chat_completions".into();
+        config.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.ai.api_key = Some("local-test-key".into()); config.ai.model = uuid::Uuid::new_v4().to_string();
+        config.network.proxy_mode = "direct".into();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let validator = ValidationRunnable::with_router(Arc::new(ModelRouter::new(&config).unwrap()));
+        let state = PipelineState { user_input:"你好".into(), text:"你好呀".into(), ..Default::default() };
+        let mut options = RunnableConfig::default(); options.tags.push("stream".into());
+        let before = std::time::Instant::now();
+        let state = PipelineState::from_json(validator.ainvoke(state.to_json(), Some(options)).await.unwrap());
+        assert_eq!(state.metadata["hallucination_check"]["status"], "pending");
+        assert!(before.elapsed() < Duration::from_millis(250));
+        use crate::mind::reasoning_trace::{ReasoningTrace, TRACE_STORE};
+        let character = format!("audit-test-{}", uuid::Uuid::new_v4());
+        let first = ReasoningTrace::new(&character, "first"); let id = first.id.clone();
+        TRACE_STORE.write().add_trace(first);
+        validator.schedule_audit(&state, &character, &id);
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+        let mut later = ReasoningTrace::new(&character, "later"); later.id = "later-turn".into();
+        TRACE_STORE.write().add_trace(later);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if TRACE_STORE.read().get_recent_traces(&character, 2).iter().any(|trace|
+                    trace.id == id && trace.steps.iter().any(|step| step.name == "faithfulness_audit")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(TRACE_STORE.read().get_last_trace(&character).unwrap().steps.is_empty());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn short_reply_without_memory_uses_current_tool_evidence_and_invalid_report_is_unknown() {

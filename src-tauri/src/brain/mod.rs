@@ -36,6 +36,9 @@ pub mod coding_cancel;
 pub mod coding_workflow;
 pub mod coding_workflow_capture;
 pub mod coding_compaction;
+pub mod coding_io;
+pub mod work_harness;
+pub mod work_memory_cache;
 pub mod coding_memory_persistence;
 pub mod coding_memory_navigation;
 pub mod coding_session_store;
@@ -68,3 +71,6 @@ pub use work_question::{
 pub mod reference_research;
 pub mod coding_event_log;
 pub mod coding_event_capture;
+
+pub mod work_memory;
+pub mod work_instructions;

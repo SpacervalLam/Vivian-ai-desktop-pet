@@ -405,6 +405,15 @@ pub async fn execute_tool_use(
     let resolved = tool_system.find_tool_versioned(tool_name);
     let name = resolved.as_ref()
         .map(|(tool, _)| tool.name().to_string()).unwrap_or_else(|| tool_name.to_string());
+    if context.agent_kind == "work" {
+        if let Some(session) = crate::commands::coding_agent::CODING_AGENT.get_session(&context.session_id) {
+            let reading = name.starts_with("session_") || matches!(name.as_str(), "search_memories" | "search_memory" | "read_memory" | "get_recent_interactions" | "summarize_today_context");
+            let writing = matches!(name.as_str(), "save_memory" | "write_memory");
+            if (reading && !session.memory_policy.use_memories) || (writing && !session.memory_policy.generate_memories) {
+                return ToolResult::standard_error("本会话已关闭相应的记忆读取或生成。", Some("MemoryDisabled"), None);
+            }
+        }
+    }
     let mut observed = ObservedExecution {
         observability: &tool_system.observability,
         record: Some(tool_system.observability.start_call(&name, arguments.clone())),

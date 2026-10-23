@@ -43,3 +43,12 @@ pub fn set_gauge_metric(name: String, value: f64) -> Result<(), String> {
     g.set(value);
     Ok(())
 }
+
+/// Frontend durations use its own monotonic clock; never subtract host timestamps.
+#[tauri::command]
+pub fn observe_companion_latency(stage: String, elapsed_ms: f64) -> Result<(), String> {
+    if !matches!(stage.as_str(), "paragraph_ready" | "paragraph_painted") || !elapsed_ms.is_finite()
+        || !(0.0..=300_000.0).contains(&elapsed_ms) { return Err("Invalid companion timing".into()); }
+    metrics::metrics().histogram(&format!("companion.{stage}")).observe(elapsed_ms);
+    Ok(())
+}

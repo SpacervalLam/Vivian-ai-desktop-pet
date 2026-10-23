@@ -494,6 +494,7 @@ pub fn coding_list_sessions(offset: Option<usize>, limit: Option<usize>, session
 pub async fn coding_workflow_list(session_id: String) -> Result<Vec<crate::brain::coding_workflow::WorkflowRequestSummary>, String> {
     let running = CODING_AGENT.session_status(&session_id).ok_or("会话不存在")? == crate::brain::coding_agent::CodingStatus::Running;
     tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = crate::brain::coding_io::flush() { tracing::warn!("Workflow flush: {error}"); }
         let mut requests = crate::brain::coding_workflow::list(&crate::utils::path::get_user_data_dir().join("coding_workflow"), &session_id)?;
         for request in &mut requests { crate::brain::coding_workflow::recover_summary(request, running); }
         Ok(requests)
@@ -505,6 +506,7 @@ pub async fn coding_workflow_list(session_id: String) -> Result<Vec<crate::brain
 pub async fn coding_workflow_detail(session_id: String, request_id: String) -> Result<crate::brain::coding_workflow::WorkflowRequestDetail, String> {
     let running = CODING_AGENT.session_status(&session_id).ok_or("会话不存在")? == crate::brain::coding_agent::CodingStatus::Running;
     tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = crate::brain::coding_io::flush() { tracing::warn!("Workflow flush: {error}"); }
         let mut detail = crate::brain::coding_workflow::detail(&crate::utils::path::get_user_data_dir().join("coding_workflow"), &session_id, &request_id)?;
         crate::brain::coding_workflow::recover_summary(&mut detail.summary, running);
         Ok(detail)
@@ -572,6 +574,18 @@ pub fn coding_send_message(
     )
 }
 
+/// Continue a canceled workflow from persisted history without a user message.
+#[tauri::command]
+pub fn coding_resume_session(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+) -> Result<(), String> {
+    let router = state.model_router.read().clone().ok_or("模型路由未初始化（请先配置模型）")?;
+    let max_rounds = state.config.read().get_all().tools.max_coding_rounds as usize;
+    CODING_AGENT.resume(app, session_id, router, state.tool_system.clone(), max_rounds)
+}
+
 /// 设置单条消息级反馈（up / down，空串清除）。
 #[tauri::command]
 pub fn coding_set_message_feedback(
@@ -630,4 +644,28 @@ pub fn coding_pending_question(
     session_id: String,
 ) -> Option<crate::brain::work_question::WorkQuestionRequest> {
     crate::brain::work_question::global_work_question_registry().pending_for(&session_id)
+}
+
+
+#[tauri::command]
+pub fn coding_memory_snapshot(session_id: String) -> Result<serde_json::Value, String> {
+    let session = CODING_AGENT.get_session(&session_id).ok_or("会话不存在")?;
+    let instructions = crate::brain::work_instructions::discover(&crate::utils::path::get_user_data_dir(),
+        std::path::Path::new(&session.working_directory), &[]);
+    Ok(serde_json::json!({ "policy": session.memory_policy, "documents": CODING_AGENT.memory_documents(&session_id)?, "jobs": CODING_AGENT.memory_jobs(&session_id)?, "instructions": instructions }))
+}
+#[tauri::command]
+pub fn coding_memory_settings(session_id: String, use_memories: bool, generate_memories: bool) -> Result<(), String> {
+    CODING_AGENT.set_memory_policy(&session_id, crate::brain::work_memory::MemoryPolicy { use_memories, generate_memories, revision: 0 })
+}
+#[tauri::command]
+pub fn coding_memory_save(session_id: String, document: String, content: String, expected: Option<String>) -> Result<(), String> {
+    CODING_AGENT.save_memory_document(&session_id, &document, &content, expected.as_deref())
+}
+
+
+#[tauri::command]
+pub async fn coding_memory_action(state: State<'_, Arc<AppState>>, session_id: String, action: String) -> Result<String, String> {
+    let router = state.model_router.read().clone().ok_or("模型路由未初始化（请先配置模型）")?;
+    CODING_AGENT.memory_action(&session_id, &router, &action).await
 }

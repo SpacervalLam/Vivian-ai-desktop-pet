@@ -47,8 +47,10 @@ const modulePath = name => JSON.stringify(path.resolve(`src-tauri/src/brain/${na
 const types = ['CodingImage', 'CodingWidget', 'CodingFileRef', 'CodingMessage', 'CodingTokenUsage',
   'CodingStats', 'ExtraWorkspace', 'CodingSession', 'WorkTodo', 'FileChange', 'CodingFileChangeView']
   .map(name => item(source, `pub struct ${name} {`, true)).join('\n');
+const requestView = item(source, 'struct WorkRequestView {');
 const enums = ['CodingRole', 'CodingStatus'].map(name => item(source, `pub enum ${name} {`, true)).join('\n');
 const tests = ['work_task_scope_survives_compaction_and_user_interjections',
+  'model_receipt_preview_is_bounded_without_discarding_host_evidence',
   'work_context_changes_preserve_the_actual_system_prefix',
   'task_results_distinguish_text_returns_cancellation_and_restart',
   'rendered_snapshot_is_included_in_compaction_pressure']
@@ -87,14 +89,19 @@ pub mod tools {
     #[derive(Clone,Default)] pub struct ToolUseContext;
     #[derive(Clone)] pub struct ToolResult {pub success:bool,pub data:Option<serde_json::Value>,pub error:Option<String>}
   }
-  pub struct ToolSystem {pub outcomes:std::collections::HashMap<String,types::ToolResult>}
+  pub struct ToolSystem {pub outcomes:std::collections::HashMap<String,types::ToolResult>,pub started:Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>}
+  impl ToolSystem { pub fn can_parallelize_read(&self,name:&str)->bool {crate::brain::work_harness::parallel_read(name)} }
   pub mod executor {
     pub async fn execute_tool_use(name:&str,_:serde_json::Value,tools:&super::ToolSystem,_:&super::types::ToolUseContext,_:Option<()>)->super::types::ToolResult {
-      tools.outcomes.get(name).expect("fixture outcome").clone()
+      if let Some(started)=&tools.started {started.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
+      let result=tools.outcomes.get(name).expect("fixture outcome").clone();
+      if result.data.as_ref().is_some_and(|v|v["pending"]==true) {std::future::pending::<()>().await;}
+      result
     }
   }
 }
 pub mod brain {
+  #[path=${modulePath('work_harness')}] pub mod work_harness;
   #[path=${modulePath('coding_cancel')}] pub mod coding_cancel;
   #[path=${modulePath('work_contract')}] pub mod work_contract;
   #[path=${modulePath('work_context')}] pub mod work_context;
@@ -108,7 +115,7 @@ pub mod brain {
   #[cfg(test)] mod workflow_tests {
     use super::*;
     #[tokio::test] async fn nonzero_exit_codes_fail_both_parallel_and_sequential_steps() {
-      let tools=std::sync::Arc::new(crate::tools::ToolSystem {outcomes:std::collections::HashMap::from([
+      let tools=std::sync::Arc::new(crate::tools::ToolSystem {started:None,outcomes:std::collections::HashMap::from([
         ("pass".into(),crate::tools::types::ToolResult {success:true,error:None,data:Some(serde_json::json!({"data":{"exit_code":0}}))}),
         ("fail".into(),crate::tools::types::ToolResult {success:true,error:None,data:Some(serde_json::json!({"data":{"exit_code":1}}))}),
       ])});
@@ -117,21 +124,44 @@ pub mod brain {
       assert_eq!(result.total,3); assert_eq!(result.succeeded,1); assert_eq!(result.failed,2);
       assert!(!work_contract::execution_succeeded(true,Some(&serde_json::to_value(result).unwrap())));
     }
+    #[tokio::test] async fn cancelled_workflow_stops_the_scoped_pool_without_dispatching_later_reads() {
+      use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+      let started=Arc::new(AtomicUsize::new(0));
+      let tools=Arc::new(crate::tools::ToolSystem {started:Some(started.clone()),outcomes:std::collections::HashMap::from([
+        ("read_file".into(),crate::tools::types::ToolResult {success:true,error:None,data:Some(serde_json::json!({"pending":true}))}),
+      ])});
+      let steps=(0..20).map(|_|workflow::WorkflowStep {tool:"read_file".into(),arguments:serde_json::json!({}),parallel:true}).collect();
+      assert!(tokio::time::timeout(std::time::Duration::from_millis(20),workflow::run_workflow("cancel",steps,&tools,&crate::tools::types::ToolUseContext)).await.is_err());
+      tokio::task::yield_now().await;
+      assert_eq!(started.load(Ordering::SeqCst),work_harness::MAX_PARALLEL_READS);
+    }
   }
-  pub mod coding_memory_records {pub fn pinned_rules(raw:&str)->String {raw.into()}}
+  #[path=${modulePath('coding_memory_records')}] pub mod coding_memory_records;
+  #[path=${modulePath('work_memory')}] pub mod work_memory;
+  #[path=${modulePath('work_instructions')}] pub mod work_instructions;
+  #[path=${modulePath('coding_memory_navigation')}] pub mod coding_memory_navigation;
+  #[path=${modulePath('work_memory_cache')}] pub mod work_memory_cache;
   pub mod coding_agent {
     use std::collections::{BTreeMap,HashMap}; use parking_lot::RwLock;
     use serde::{Serialize,Deserialize}; use std::sync::Arc;
     use crate::types::response::{ChatMessage,MessageToolCall};
     use super::work_contract::{self,Artifact,Evidence,TaskResult,TaskStatus,WorkTask};
-    ${types}\n${enums}
+    ${types}\n${enums}\n${requestView}
+    ${item(source, "pub struct WorkMemoryDocument {", true)}
+    static MEMORY_POLICY_GATE: std::sync::LazyLock<parking_lot::Mutex<()>> = std::sync::LazyLock::new(Default::default);
     ${['default_context_window_tokens', 'default_mode', 'default_permission', 'default_reasoning_level', 'default_history_loaded', 'default_work_todo_status'].map(fn).join('\n')}
     ${item(source, 'impl WorkTodo {')}
     ${fn('normalize_session')}\n${fn('restored_session')}
     ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}
     ${fn('web_capability_section')}
-    ${['MAX_HISTORY_MESSAGES','TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
+    ${['TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
+    static MEMORY_TEST_DATA: once_cell::sync::Lazy<tempfile::TempDir> = once_cell::sync::Lazy::new(||tempfile::tempdir().unwrap());
+    fn get_user_data_dir()->std::path::PathBuf {MEMORY_TEST_DATA.path().to_path_buf()}
+    ${fn('global_work_memory_path')}
+    ${fn('memory_working_directory')}
+    ${fn('instruction_targets')}
     fn read_project_memory_raw(_:&str)->Option<String> {None}
+    fn read_project_memory_snapshot(_:&str)->Option<Arc<super::work_memory_cache::Snapshot>> {None}
     fn read_project_memory_navigation(_:&str)->Option<String> {None}
     fn project_memory_path(wd:&str)->std::path::PathBuf {std::path::Path::new(wd).join(".vivian/memory.md")}
     fn intact_history_boundary(_:&[CodingMessage],split:usize)->usize {split}
@@ -139,6 +169,11 @@ pub mod brain {
     fn session_cache_from_loaded(sessions:BTreeMap<String,CodingSession>)->BTreeMap<String,CodingSession> {sessions}
     struct CodingAgentService {active_runs:Arc<super::coding_cancel::Runs>,sessions:RwLock<BTreeMap<String,CodingSession>>}
     impl CodingAgentService {
+      fn persist(&self) {}
+      fn get_session(&self,id:&str)->Option<CodingSession> {self.sessions.read().get(id).cloned()}
+      ${pubFn('set_memory_policy')}
+      ${pubFn('memory_documents')}
+      ${fn('memory_document_path')}
       fn system_prompt(_:&str,_:&str,_:&[ExtraWorkspace],_:&str)->String {"fixed work policy".into()}
       ${pubFn('render_work_plan')}
       ${fn('build_llm_messages')}
@@ -147,7 +182,33 @@ pub mod brain {
       ${fn('validate_task_return')}
       ${fn('settle_unvalidated_task')}
     }
-    #[cfg(test)] mod tests {use super::*; ${fn('message')} ${fn('test_session')} ${tests} }
+    #[cfg(test)] mod tests {use super::*; ${fn('message')} ${fn('test_session')} ${tests}
+      #[test] fn memory_controls_persist_independently_and_revoke_old_jobs() {
+        let mut session=test_session("memory-controls","",0);
+        session.role_memory_context="stale role memory".into();
+        let service=CodingAgentService {active_runs:Arc::new(super::super::coding_cancel::Runs::default()),sessions:RwLock::new(BTreeMap::from([("memory-controls".into(),session)]))};
+        service.set_memory_policy("memory-controls",super::super::work_memory::MemoryPolicy {use_memories:false,generate_memories:true,revision:0}).unwrap();
+        let current=service.get_session("memory-controls").unwrap();
+        assert!(!current.memory_policy.use_memories && current.memory_policy.generate_memories);
+        assert!(current.role_memory_context.is_empty());
+        assert!(!current.memory_policy.accepts_generation(0));
+        let decoded:CodingSession=serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        assert_eq!(decoded.memory_policy,current.memory_policy);
+        let messages=service.build_llm_messages("memory-controls","vivian","standard");
+        assert!(!messages.iter().any(|m|m.content.contains("stale role memory")));
+      }
+      #[test] fn memory_editor_addresses_the_same_override_as_the_loader() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.override.md"),"explicit override").unwrap();
+        let session=test_session("editor",dir.path().to_str().unwrap(),0);
+        let service=CodingAgentService {active_runs:Arc::new(super::super::coding_cancel::Runs::default()),sessions:RwLock::new(BTreeMap::from([("editor".into(),session)]))};
+        let docs=service.memory_documents("editor").unwrap();
+        let rules=docs.iter().find(|d|d.id=="rules").unwrap();
+        assert!(rules.path.ends_with("AGENTS.override.md"));
+        assert_eq!(rules.content.as_deref(),Some("explicit override"));
+        assert!(service.memory_document_path("editor","../../escape").is_err());
+      }
+    }
   }
 }
 `);
@@ -160,6 +221,9 @@ path="lib.rs"
 [dependencies]
 serde={version="1",features=["derive"]}
 serde_json="1"
+sha2="0.10"
+chrono="0.4"
+futures="0.3"
 parking_lot="0.12"
 once_cell="1"
 tracing="0.1"

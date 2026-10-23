@@ -4,7 +4,7 @@
 //! Without a remote embedding, turns that miss every literal cue fall back to
 //! bounded surface overlap — capped at one example per turn.
 use std::{collections::BTreeSet, sync::Arc};
-use parking_lot::Mutex;
+use super::embedding_snapshot::EmbeddingSnapshot;
 use serde::Deserialize;
 use crate::memory::{embedding::MemoryEmbeddingProvider, vector_search::cosine_similarity};
 use crate::types::response::ChatMessage;
@@ -28,7 +28,7 @@ struct Example {
 
 pub struct ExampleRetriever {
     entries: Vec<Example>,
-    vectors: Mutex<Option<Vec<Vec<f32>>>>,
+    vectors: EmbeddingSnapshot,
     embedding: Arc<dyn MemoryEmbeddingProvider>,
 }
 
@@ -39,22 +39,19 @@ impl ExampleRetriever {
             "vivian" => include_str!("../../prompts/characters/vivian/example_library.json"),
             _ => "[]",
         };
-        Self { entries: serde_json::from_str(source).expect("valid factory example library"), vectors: Mutex::new(None), embedding }
+        let entries: Vec<Example> = serde_json::from_str(source).expect("valid factory example library");
+        let texts = entries.iter().map(|e| format!("{}\n{}\n{}", e.cues.join(" "), e.situation, e.user)).collect();
+        let vectors = EmbeddingSnapshot::new(embedding.clone(), format!("examples_{char_id}"), texts);
+        Self { entries, vectors, embedding }
     }
 
-    pub fn preload(&self) {
-        let mut vectors = self.vectors.lock();
-        if vectors.is_some() { return; }
-        let texts: Vec<_> = self.entries.iter().map(|e| format!("{}\n{}\n{}", e.cues.join(" "), e.situation, e.user)).collect();
-        // Hash vectors are not semantic evidence. Offline mode uses explicit cues instead.
-        *vectors = Some(if self.embedding.is_remote() && !texts.is_empty() {
-            self.embedding.embed_batch(&texts).ok().filter(|v| v.len() == texts.len()).unwrap_or_default()
-        } else { Vec::new() });
-    }
+    pub(crate) fn request_preload(&self) { self.vectors.request(); }
+    #[cfg(test)]
+    pub fn preload(&self) { self.vectors.preload(); }
 
     pub fn retrieve(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String]) -> Option<String> {
         if user.trim().is_empty() { return None; }
-        self.preload();
+        self.request_preload();
         let history = recent_context(user, messages);
         let normalized_user = user.trim().to_lowercase();
         let normalized_history = history.to_lowercase();
@@ -65,14 +62,14 @@ impl ExampleRetriever {
             .take(4).map(|m| response_terms(&m.content)).collect();
         let continuation = is_continuation(user);
         let valid = |v: &[f32]| v.len() == self.embedding.dimension() && v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0);
-        let has_vectors = self.vectors.lock().as_ref().is_some_and(|v| !v.is_empty());
+        let vectors = self.vectors.get();
+        let has_vectors = vectors.as_ref().is_some_and(|v| !v.is_empty());
         let current = if self.embedding.is_remote() && has_vectors {
             query.filter(|v| valid(v)).map(|v| v.to_vec()).or_else(|| self.embedding.embed(user).ok().filter(|v| valid(v)))
         } else { None };
         let contextual = if current.is_some() && !history.is_empty() {
             self.embedding.embed(&format!("Recent dialogue:\n{history}\nCurrent user: {user}")).ok().filter(|v| valid(v))
         } else { None };
-        let vectors = self.vectors.lock();
         let mut scored = Vec::new();
         for (index, e) in self.entries.iter().enumerate() {
             if learned.contains(&e.scope) { continue; }

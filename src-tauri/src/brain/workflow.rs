@@ -1,7 +1,7 @@
 //! 编排引擎 —— 执行模型产出的多步工作流脚本（可扇出并行步骤）。
 //!
 //! 模型用 `run_workflow` 工具提交一个 JSON 编排：步骤序列中标记 `parallel: true`
-//! 的连续步骤会被分为一组并发执行，其余顺序执行；每步是一个工具调用（完整经过
+//! 的连续只读步骤有界并发执行，写入及控制步骤保持顺序；每步是一个工具调用（完整经过
 //! 沙箱/审批管线）。执行完返回逐步结果汇总，任一失败不中断后续（失败信息进入汇总）。
 
 use std::sync::Arc;
@@ -46,7 +46,7 @@ pub struct WorkflowRun {
 ///
 /// 执行语义：
 /// - 顺序步骤依次执行（前一步结果可通过 `${{steps.N}}` 占位引用，暂不支持——保持简单）
-/// - 连续 `parallel: true` 的步骤并发执行并等待整组完成
+/// - 连续 `parallel: true` 的安全读取有界并发，写入与控制步骤作为屏障
 /// - 单步失败不中断工作流，失败信息进入汇总
 pub async fn run_workflow(
     name: &str,
@@ -59,33 +59,25 @@ pub async fn run_workflow(
 
     let mut i = 0usize;
     while i < steps.len() {
-        if steps[i].parallel {
+        if steps[i].parallel && tool_system.can_parallelize_read(&steps[i].tool) {
             // 收集本并行组
             let mut group: Vec<(usize, WorkflowStep)> = Vec::new();
-            while i < steps.len() && steps[i].parallel {
+            while i < steps.len() && steps[i].parallel && tool_system.can_parallelize_read(&steps[i].tool) {
                 group.push((i, steps[i].clone()));
                 i += 1;
             }
-            // 并发执行（克隆所需字段进 task，避免借用组容器）
-            let mut futs = Vec::with_capacity(group.len());
-            for (idx, step) in group.iter() {
+            // Scoped futures stop dispatching when the parent is cancelled.
+            let results = super::work_harness::run_reads(group, super::work_harness::MAX_PARALLEL_READS, |(idx, step)| {
                 let ts = Arc::clone(tool_system);
                 let ctx = context.clone();
-                let tool = step.tool.clone();
-                let args = step.arguments.clone();
-                let idx = *idx;
-                futs.push(tokio::spawn(async move {
-                    let result = execute_tool_use(&tool, args, &ts, &ctx, None).await;
+                async move {
+                    let result = execute_tool_use(&step.tool, step.arguments, &ts, &ctx, None).await;
                     let success = super::work_contract::execution_succeeded(result.success, result.data.as_ref());
-                    (idx, tool, success, summarize_result(&result))
-                }));
-            }
-            let mut group_outcomes: Vec<StepOutcome> = Vec::with_capacity(futs.len());
-            for f in futs {
-                if let Ok((idx, tool, success, summary)) = f.await {
-                    group_outcomes.push(StepOutcome { index: idx, tool, success, parallel: true, summary });
+                    (idx, step.tool, success, summarize_result(&result))
                 }
-            }
+            }, |_, _| {}).await;
+            let mut group_outcomes: Vec<StepOutcome> = results.into_iter()
+                .map(|((index, tool, success, summary), _)| StepOutcome { index, tool, success, parallel: true, summary }).collect();
             group_outcomes.sort_by_key(|o| o.index);
             outcomes.extend(group_outcomes);
         } else {

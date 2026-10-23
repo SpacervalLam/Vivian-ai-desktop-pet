@@ -190,6 +190,13 @@ impl TraceStore {
         }
     }
 
+    /// A late diagnostic may only update its exact turn, never the latest trace.
+    pub fn append_step(&mut self, character: &str, id: &str, step: ReasoningStep) -> bool {
+        let Some(trace) = self.traces.get_mut(character).and_then(|list| list.iter_mut().find(|trace| trace.id == id)) else { return false; };
+        trace.add_step(step);
+        true
+    }
+
     pub fn get_recent_traces(&self, char_id: &str, limit: usize) -> Vec<ReasoningTrace> {
         self.traces
             .get(char_id)

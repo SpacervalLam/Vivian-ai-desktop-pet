@@ -1,0 +1,15 @@
+.work-memory-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 12px; color: var(--codex-ink, #302c28); background: var(--codex-paper, #fffaf2); box-shadow: 0 18px 70px #0003; }
+.work-memory-dialog::backdrop { background: #0006; }
+.work-memory-dialog header, .work-memory-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; }
+.work-memory-dialog footer { flex-wrap: wrap; justify-content: flex-end; border-top: 1px solid var(--codex-line, #d6d0c6); }
+.work-memory-dialog button, .work-memory-dialog select { color: inherit; background: transparent; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 6px; padding: 7px 12px; cursor: pointer; }
+.work-memory-dialog button:disabled { opacity: .5; cursor: default; }
+.work-memory-body { padding: 0 20px; overflow: auto; max-height: calc(100dvh - 180px); }
+.work-memory-body fieldset { display: flex; flex-wrap: wrap; gap: 10px 20px; border: 0; padding: 10px 0; margin: 0; }
+.work-memory-body label { display: flex; align-items: center; gap: 7px; }
+.work-memory-body p { font-size: 12px; line-height: 1.6; opacity: .8; }
+.work-memory-body textarea { box-sizing: border-box; width: 100%; height: 260px; resize: vertical; border: 1px solid var(--codex-line, #d6d0c6); border-radius: 6px; padding: 12px; font: 13px/1.6 var(--codex-mono, monospace); color: inherit; background: transparent; }
+.work-memory-path { display: block; overflow-wrap: anywhere; margin: 10px 0; font-size: 11px; }
+.work-memory-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.work-memory-body details code { overflow-wrap: anywhere; }
+.work-memory-body .work-memory-error { color: #c53030; opacity: 1; }

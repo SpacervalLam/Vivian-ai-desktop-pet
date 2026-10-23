@@ -560,6 +560,7 @@ impl ModelRouter {
             disable_json_schema: false,
             request_fingerprint: Some(crate::utils::fnv1a_64(&fingerprint_source)),
             response_cache_allowed: Some(request.tools.is_empty() && !request.enable_search),
+            request_budget: None,
         }
     }
 
@@ -978,7 +979,9 @@ impl ModelRouter {
         route: String,
     ) -> mpsc::Receiver<StreamEvent> {
         let (tx, rx) = mpsc::channel(32);
+        let timing = crate::voice_diagnostics::capture_chat();
         tokio::spawn(async move {
+            let mut first_text = true;
             let _permit = permit;
             let mut usage = usage_store::StreamUsageAccumulator::default();
             let mut content_bytes = 0usize;
@@ -993,6 +996,10 @@ impl ModelRouter {
                     break;
                 };
                 if let StreamEvent::Text { content } = &event {
+                    if first_text && !content.is_empty() && matches!(route.as_str(), "companion" | "chat" | "chat_partner") {
+                        first_text = false;
+                        if let Some(timing) = &timing { timing.mark("provider_first_text"); }
+                    }
                     content_bytes += content.len();
                     for byte in content.bytes() {
                         content_hash ^= byte as u64;
@@ -1306,7 +1313,7 @@ impl ModelRouter {
             json_schema,
             character_id,
             ..
-        } = request.clone();
+        } = request;
         // tools 非空应走 generate_with_tools,这里防御性检查
         if !tools.is_empty() {
             return Err(VivianError::Provider(
@@ -1380,7 +1387,7 @@ impl ModelRouter {
             stream: _,
             character_id,
             ..
-        } = request.clone();
+        } = request;
         if !tools.is_empty() {
             return Err(VivianError::Provider(
                 "generate_stream() 不支持 tools 非空,请用 generate_stream_with_tools()".to_string(),
@@ -1431,7 +1438,7 @@ impl ModelRouter {
             stream: _,
             character_id,
             ..
-        } = request.clone();
+        } = request;
         let result = usage_store::with_context(
             &usage_tag,
             &task_type,
@@ -1482,7 +1489,7 @@ impl ModelRouter {
             stream: _,
             character_id,
             ..
-        } = request.clone();
+        } = request;
         let rx = scope_provider_call(
             options,
             self.query_stream_with_tools(
@@ -1723,6 +1730,8 @@ impl ModelRouter {
     /// query_stream_with_tools）调用前埋点，输出 task_type、消息序列（role + 截断后的
     /// content 长度/摘要、tools 名称列表。默认日志永不写入 prompt、响应或工具参数。
     fn log_llm_request(task_type: &str, messages: &[ChatMessage], tools: &[ToolDefinition]) {
+        match task_type { "companion" => crate::voice_diagnostics::mark_chat("companion_provider_request"),
+            "simple_judge" => crate::voice_diagnostics::mark_chat("intent_provider_request"), _ => {} }
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         let lines: Vec<String> = messages
             .iter()

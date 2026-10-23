@@ -40,6 +40,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// - 每条消息的格式开销
 pub fn estimate_message_tokens(msg: &ChatMessage) -> usize {
     let mut tokens = estimate_tokens(&msg.content) + MESSAGE_OVERHEAD_TOKENS;
+    tokens += msg.images.as_ref().map_or(0, |images| images.len().saturating_mul(IMAGE_TOKEN_ESTIMATE));
 
     // reasoning 内容（思维链）
     if let Some(reasoning) = &msg.reasoning {

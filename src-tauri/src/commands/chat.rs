@@ -71,6 +71,44 @@ fn seal_episode_on_close(
     brain.mind.clear_working_memory();
 }
 
+// At most one optional close judgment per character; new input cancels the old one.
+static CLOSE_JOBS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>> =
+    once_cell::sync::Lazy::new(Default::default);
+fn cancel_close(character: &str) {
+    if let Some(job) = CLOSE_JOBS.lock().remove(character) { job.abort(); }
+}
+fn schedule_close(state: &AppState, brain: crate::brain::Brain, lock: Arc<tokio::sync::Mutex<()>>,
+    character: &str, message: &str, reply: &str) {
+    let Some(conv) = crate::conversation::CONVERSATION_MANAGER.get("user", character).filter(|c| c.is_alive()) else { return; };
+    let router = state.model_router.read().as_ref().map(|router| Arc::new(router.clone()));
+    let history: Vec<String> = brain.dialogue.get_history().iter().rev().take(6)
+        .map(|m| m.content.clone()).collect::<Vec<_>>().into_iter().rev().collect();
+    let message = message.to_owned(); let reply = reply.to_owned();
+    let priority = state.session_coordinator.background_priority();
+    let input_revision = priority.revision();
+    let mut jobs = CLOSE_JOBS.lock();
+    if let Some(old) = jobs.remove(character) { old.abort(); }
+    let job = tokio::spawn(async move {
+        let judge = crate::dialogue::intent_judge::IntentJudge::new(router);
+        let reason = if let Some(reason) = judge.judge_close_reason(&message, &history).await { Some(reason) }
+            else { judge.judge_close_reason(&reply, &history).await };
+        let Some(reason) = reason else { return; };
+        // The generation lock protects presence and working-memory side effects too.
+        let closed = {
+            let Ok(_guard) = lock.try_lock() else { return; };
+            if priority.revision() != input_revision { return; }
+            let Some(closed) = crate::conversation::CONVERSATION_MANAGER.close_if_current(&conv.id, conv.user_turn_revision, reason) else { return; };
+            seal_episode_on_close(&brain, &closed);
+            if matches!(reason, crate::conversation::CloseReason::Interrupted | crate::conversation::CloseReason::GoodBye) {
+                let _ = brain.presence.transition(crate::presence::PresenceState::Busy, crate::presence::PresenceChangeReason::UserLeft);
+            }
+            closed
+        };
+        maybe_mark_open_loop(&closed, &brain).await;
+    });
+    jobs.insert(character.into(), job);
+}
+
 /// 校验主 LLM API 是否已配置
 ///
 /// 主 LLM API（`config.ai` 的 api_key / endpoint / model）是必须配置的；
@@ -121,6 +159,7 @@ pub async fn send_message(
 
     let instance = state.get_character(character_id.as_deref())?;
     let brain = instance.brain.clone();
+    cancel_close(&char_id);
 
     state.session_coordinator.signal_user_input(&char_id);
 
@@ -189,35 +228,7 @@ pub async fn send_message(
             if mode.needs_speech() { Some(&reply_text) } else { None },
             &message,
         );
-        // 意图判断：规则预检 + LLM 判断，优先检查用户输入，再检查 Agent 回复
-        let history: Vec<String> = brain.dialogue.get_history().iter().map(|m| m.content.clone()).collect();
-        let judge = crate::dialogue::intent_judge::IntentJudge::new(
-            state.model_router.read().as_ref().map(|r| std::sync::Arc::new(r.clone())),
-        );
-        let user_close = judge.judge_close_reason(&message, &history).await;
-        let agent_close = if user_close.is_none() {
-            judge.judge_close_reason(&reply_text, &history).await
-        } else {
-            None
-        };
-        if let Some(reason) = user_close.or(agent_close) {
-            let closed_conv = crate::conversation::CONVERSATION_MANAGER.close_with_reason(&conv.id, reason);
-            seal_episode_on_close(&brain, &conv);
-            // Open Loop 检测：关闭的会话也检查是否有未聊完的话题
-            if let Some(closed) = closed_conv {
-                maybe_mark_open_loop(&closed, &brain).await;
-            }
-            // 用户说"去忙了"/"我先走了" → 角色也跟着去做自己的事（Online→Busy）
-            if matches!(
-                reason,
-                crate::conversation::CloseReason::Interrupted | crate::conversation::CloseReason::GoodBye
-            ) {
-                let _ = brain.presence.transition(
-                    crate::presence::PresenceState::Busy,
-                    crate::presence::PresenceChangeReason::UserLeft,
-                );
-            }
-        }
+        schedule_close(&state, brain.clone(), instance.think_lock.clone(), &char_id, &message, &reply_text);
     }
     drop(_session_guard);
 
@@ -308,7 +319,8 @@ pub async fn send_message_stream(
             return Err("聊天专属角色不支持桌宠悄悄话".into());
         }
     }
-    send_message_stream_impl(state.inner(), message, stream_id, character_id, channel, whisper, file_metadata, app, None).await.map(|_| ())
+    crate::voice_diagnostics::scope_chat(stream_id.clone(),
+        send_message_stream_impl(state.inner(), message, stream_id, character_id, channel, whisper, file_metadata, app, None)).await.map(|_| ())
 }
 
 async fn send_message_stream_impl(
@@ -316,6 +328,7 @@ async fn send_message_stream_impl(
     channel: Option<String>, whisper: Option<bool>, file_metadata: Option<serde_json::Value>,
     app: tauri::AppHandle, visual_evidence: Option<&str>,
 ) -> Result<Option<AiResponse>, String> {
+    crate::voice_diagnostics::mark_chat("backend_received");
     let char_id = character_id
         .clone()
         .unwrap_or_else(|| state.active_character_id.read().clone());
@@ -371,6 +384,7 @@ async fn send_message_stream_impl(
         }
     };
     let brain = instance.brain.clone();
+    cancel_close(&char_id);
 
     // 广播渠道（broadcast）：用户只说了一遍、当众对在场所有人说的。
     // 它与 direct 共享"说出口的话"的全部行为（口语化回复、剥离括号动作、在场门禁），
@@ -575,7 +589,7 @@ async fn send_message_stream_impl(
             let buf_for_chunk = buffer.clone();
             paren_buffer = Some(buffer);
             Arc::new(move |chunk: &str| {
-                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
                 let mut s = scanner_for_chunk.lock();
                 let after_inline = s.feed(chunk);
                 if !after_inline.is_empty() {
@@ -592,7 +606,7 @@ async fn send_message_stream_impl(
             })
         } else {
             Arc::new(move |chunk: &str| {
-                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
                 let mut s = scanner_for_chunk.lock();
                 let clean = s.feed(chunk);
                 if !clean.is_empty() {
@@ -608,7 +622,7 @@ async fn send_message_stream_impl(
         let buf_for_chunk = buffer.clone();
         paren_buffer = Some(buffer);
         Arc::new(move |chunk: &str| {
-            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
             let mut buf = buf_for_chunk.lock();
             let (clean, remaining) = crate::utils::filter_parentheses(chunk, &buf);
             *buf = remaining;
@@ -621,7 +635,7 @@ async fn send_message_stream_impl(
         })
     } else {
         Arc::new(move |chunk: &str| {
-            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); }
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
             let _ = app_for_emitter.emit(
                 "chat:chunk",
                 json!({ "text": chunk, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
@@ -634,6 +648,7 @@ async fn send_message_stream_impl(
     // 记录排队时刻：brain.think 完成后用此时刻修正用户消息的 timestamp，
     // 确保并发发送时用户消息按实际发送顺序排列（而非 think 完成顺序）。
     let queued_at = chrono::Local::now();
+    crate::voice_diagnostics::mark_chat("queue_entered");
     state.session_coordinator.signal_user_input(&char_id);
     let _brain_lock = instance.think_lock.clone();
     // 等待必须有上限：持锁方一旦卡死（例如在持有 Mind / 记忆锁时死锁），
@@ -660,6 +675,7 @@ async fn send_message_stream_impl(
             return Ok(None);
         }
     };
+    crate::voice_diagnostics::mark_chat("generation_lock_acquired");
     // 排队耗时打点：定位「发出去后久久没有反应」是卡在排队还是卡在 think 内部
     tracing::info!(
         "[Chat:{}] 已获得 think_lock stream_id={} 排队等待 {}ms",
@@ -852,41 +868,7 @@ async fn send_message_stream_impl(
             &message,
         );
 
-        // 意图判断：规则预检 + LLM 判断，优先检查用户输入，再检查 Agent 回复
-        let history: Vec<String> = brain.dialogue.get_history().iter().map(|m| m.content.clone()).collect();
-        let judge = crate::dialogue::intent_judge::IntentJudge::new(
-            state.model_router.read().as_ref().map(|r| std::sync::Arc::new(r.clone())),
-        );
-        let user_close = judge.judge_close_reason(&message, &history).await;
-        let agent_close = if user_close.is_none() {
-            judge.judge_close_reason(&reply_text, &history).await
-        } else {
-            None
-        };
-        if let Some(reason) = user_close.or(agent_close) {
-            let closed_conv = crate::conversation::CONVERSATION_MANAGER.close_with_reason(&conv.id, reason);
-            tracing::debug!(
-                "[Conversation] 会话 {} 因意图判断关闭，原因: {}",
-                conv.id,
-                reason.as_str()
-            );
-            // 触发 Episode 封包：让经历边界对齐会话边界
-            seal_episode_on_close(&brain, &conv);
-            // Open Loop 检测：关闭的会话也检查是否有未聊完的话题
-            if let Some(closed) = closed_conv {
-                maybe_mark_open_loop(&closed, &brain).await;
-            }
-            // 用户说"去忙了"/"我先走了" → 角色也跟着去做自己的事（Online→Busy）
-            if matches!(
-                reason,
-                crate::conversation::CloseReason::Interrupted | crate::conversation::CloseReason::GoodBye
-            ) {
-                let _ = brain.presence.transition(
-                    crate::presence::PresenceState::Busy,
-                    crate::presence::PresenceChangeReason::UserLeft,
-                );
-            }
-        }
+        schedule_close(&state, brain.clone(), instance.think_lock.clone(), &char_id, &message, &reply_text);
     }
 
     // 清理流式回调（避免非流式调用误触发）
@@ -966,6 +948,7 @@ async fn send_message_stream_impl(
                 (None, None)
             };
 
+            crate::voice_diagnostics::mark_chat("done_emitted");
             let _ = app.emit(
                 "chat:done",
                 json!({
@@ -1624,6 +1607,7 @@ pub async fn wake_from_presence(
                     }),
                 );
             }
+            crate::voice_diagnostics::mark_chat("done_emitted");
             let _ = app.emit(
                 "chat:done",
                 json!({

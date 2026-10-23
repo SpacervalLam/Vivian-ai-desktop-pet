@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use super::embedding_snapshot::EmbeddingSnapshot;
 
 use crate::memory::embedding::{default_embedding, MemoryEmbeddingProvider};
 use crate::memory::vector_search::cosine_similarity;
@@ -35,8 +35,7 @@ struct SceneEntry {
     samples: Vec<String>,
     /// 参考台词（命中后注入 prompt）
     quotes: Vec<String>,
-    /// 预计算的样本 embedding（仅远程 embedding 时填充）
-    sample_embeddings: Vec<Vec<f32>>,
+
 }
 
 /// 场景语气注入器
@@ -47,11 +46,11 @@ pub struct ToneInjector {
     /// 角色 ID
     char_id: String,
     /// 场景列表（按 scenes.md 顺序）
-    scenes: RwLock<Vec<SceneEntry>>,
+    scenes: Vec<SceneEntry>,
     /// embedding 服务
     embedding: Arc<dyn MemoryEmbeddingProvider>,
     /// 是否已初始化 embedding
-    initialized: RwLock<bool>,
+    vectors: EmbeddingSnapshot,
 }
 
 impl ToneInjector {
@@ -71,40 +70,15 @@ impl ToneInjector {
             scenes.len()
         );
 
+        let texts = scenes.iter().flat_map(|scene| scene.samples.iter().cloned()).collect();
+        let vectors = EmbeddingSnapshot::new(embedding.clone(), format!("tone_{char_id}"), texts);
         Self {
             examples: super::example_retriever::ExampleRetriever::new(char_id, Arc::clone(&embedding)),
             char_id: char_id.to_string(),
-            scenes: RwLock::new(scenes),
+            scenes,
             embedding,
-            initialized: RwLock::new(false),
+            vectors,
         }
-    }
-
-    /// 惰性初始化：预计算所有场景样本的 embedding（仅远程 embedding 时有意义）
-    fn ensure_initialized(&self) {
-        let mut initialized = self.initialized.write();
-        if *initialized {
-            return;
-        }
-
-        // 只有远程 embedding 才预计算（哈希嵌入每次计算很快，无需缓存）
-        if self.embedding.is_remote() {
-            let mut scenes = self.scenes.write();
-            for scene in scenes.iter_mut() {
-                scene.sample_embeddings = scene
-                    .samples
-                    .iter()
-                    .filter_map(|s| self.embedding.embed(s).ok())
-                    .collect();
-            }
-            tracing::info!(
-                "[ToneInjector] 角色 {} 已预计算 {} 个场景的 embedding",
-                self.char_id,
-                scenes.len()
-            );
-        }
-
-        *initialized = true;
     }
 
     /// 匹配场景并构建注入文本
@@ -128,18 +102,17 @@ impl ToneInjector {
         self.build_tone_injection_with_embedding(user_input, lang, learned, None)
     }
 
-    pub(crate) fn preload(&self) { self.ensure_initialized(); self.examples.preload(); }
+    pub(crate) fn preload(&self) { self.vectors.request(); self.examples.request_preload(); }
 
     pub(crate) fn build_tone_injection_with_embedding(&self, user_input: &str, lang: &str, learned: &[&str], query_embedding: Option<&[f32]>) -> Option<String> {
         if user_input.trim().is_empty() {
             return None;
         }
 
-        self.ensure_initialized();
+        self.preload();
 
         // 两种匹配都只看当前发言。历史场景不能在换话题后继续施加语气。
-        let match_text = user_input.trim();
-        let scenes = self.scenes.read();
+        let scenes = &self.scenes;
 
         // 1. 关键词匹配（primary）只看当前用户输入。旧实现把最近三轮也用于硬匹配，
         // 一个场景会在用户换话题后继续注入，模型因而反复表演同一种语气。
@@ -155,15 +128,18 @@ impl ToneInjector {
         }
 
         // 2. embedding 匹配（secondary，仅远程 embedding 时启用）
-        if self.embedding.is_remote() {
+        if let Some(vectors) = self.vectors.get().filter(|v| !v.is_empty()) {
             let query_emb = query_embedding
                 .filter(|embedding| embedding.len() == self.embedding.dimension() && embedding.iter().all(|value| value.is_finite()))
                 .map(std::borrow::Cow::Borrowed)
-                .or_else(|| self.embedding.embed(match_text).ok().map(std::borrow::Cow::Owned));
+                .or_else(|| self.embedding.embed(user_input.trim()).ok().map(std::borrow::Cow::Owned));
             if let Some(query_emb) = query_emb {
                 let mut best: Option<(&SceneEntry, f64)> = None;
+                let mut index = 0;
                 for scene in scenes.iter() {
-                    for sample_emb in &scene.sample_embeddings {
+                    for _ in &scene.samples {
+                        let sample_emb = &vectors[index];
+                        index += 1;
                         let sim = cosine_similarity(&query_emb, sample_emb);
                         if best.is_none() || sim > best.unwrap().1 {
                             best = Some((scene, sim));
@@ -262,7 +238,6 @@ fn parse_scenes_md(md: &str) -> Vec<SceneEntry> {
                 id,
                 samples: Vec::new(),
                 quotes: Vec::new(),
-                sample_embeddings: Vec::new(),
             });
             current_section = "";
         } else if line.starts_with("### 匹配样本") {

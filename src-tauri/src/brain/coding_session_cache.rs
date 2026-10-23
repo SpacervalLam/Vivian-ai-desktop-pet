@@ -11,6 +11,8 @@ struct Slot<T> {
 pub struct Catalog<T> {
     slots: BTreeMap<String, Slot<T>>,
     removed: std::collections::BTreeSet<String>,
+    dirty: BTreeMap<String, u64>,
+    revision: u64,
     load: Arc<dyn Fn(&str) -> Option<T> + Send + Sync>,
     summarize: Arc<dyn Fn(&T) -> T + Send + Sync>,
 }
@@ -35,12 +37,16 @@ impl<T: Clone> Catalog<T> {
                 })
                 .collect(),
             removed: Default::default(),
+            dirty: Default::default(),
+            revision: 0,
             load: Arc::new(load),
             summarize: Arc::new(summarize),
         }
     }
     pub fn insert(&mut self, id: String, value: T) -> Option<T> {
         self.removed.remove(&id);
+        self.revision += 1;
+        self.dirty.insert(id.clone(), self.revision);
         let head = (self.summarize)(&value);
         let cell = OnceLock::new();
         cell.set(Some(value)).ok();
@@ -66,11 +72,16 @@ impl<T: Clone> Catalog<T> {
         self.retry_failed(id);
         let slot = self.slots.get_mut(id)?;
         slot.value.get_or_init(|| (self.load)(id));
-        slot.value.get_mut()?.as_mut()
+        let value = slot.value.get_mut()?.as_mut()?;
+        self.revision += 1;
+        self.dirty.insert(id.into(), self.revision);
+        Some(value)
     }
     pub fn remove(&mut self, id: &str) -> Option<T> {
         if self.slots.contains_key(id) {
             self.removed.insert(id.to_string());
+            self.revision += 1;
+            self.dirty.insert(id.into(), self.revision);
         }
         self.slots
             .remove(id)
@@ -117,12 +128,61 @@ impl<T: Clone> Catalog<T> {
             })
             .collect()
     }
+
+    /// Copy only changed sessions. Acknowledgement cannot erase a later edit.
+    pub fn pending(&self) -> Pending<T> {
+        let mut pending = Pending { loaded: Vec::new(), heads: Vec::new(), deleted: Vec::new(), revisions: Vec::new() };
+        for (id, revision) in &self.dirty {
+            pending.revisions.push((id.clone(), *revision));
+            if let Some(slot) = self.slots.get(id) {
+                if let Some(value) = slot.value.get().and_then(Option::as_ref) {
+                    pending.loaded.push((id.clone(), value.clone()));
+                    pending.heads.push((id.clone(), (self.summarize)(value)));
+                }
+            } else if self.removed.contains(id) { pending.deleted.push(id.clone()); }
+        }
+        pending
+    }
+    pub fn has_pending(&self) -> bool { !self.dirty.is_empty() }
+    pub fn acknowledge(&mut self, revisions: &[(String, u64)]) {
+        for (id, revision) in revisions {
+            if self.dirty.get(id) == Some(revision) {
+                self.dirty.remove(id);
+                if !self.slots.contains_key(id) { self.removed.remove(id); }
+            }
+        }
+    }
+}
+
+pub struct Pending<T> {
+    pub loaded: Vec<(String, T)>,
+    pub heads: Vec<(String, T)>,
+    pub deleted: Vec<String>,
+    pub revisions: Vec<(String, u64)>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn saving_one_session_does_not_clone_unrelated_histories_or_clear_new_edits() {
+        let mut catalog = Catalog::new(vec![("old".into(), 0)], |_| Some(1), |_| 0);
+        catalog.get("old");
+        assert!(catalog.pending().loaded.is_empty());
+        catalog.insert("new".into(), 7);
+        let first = catalog.pending();
+        assert_eq!(first.loaded, [("new".into(), 7)]);
+        *catalog.get_mut("new").unwrap() = 8;
+        catalog.acknowledge(&first.revisions);
+        assert_eq!(catalog.pending().loaded, [("new".into(), 8)]);
+        let latest = catalog.pending(); catalog.acknowledge(&latest.revisions);
+        assert!(catalog.pending().revisions.is_empty());
+        catalog.remove("new"); let deleted = catalog.pending();
+        assert_eq!(deleted.deleted, ["new"]);
+        catalog.insert("new".into(), 9); catalog.acknowledge(&deleted.revisions);
+        assert_eq!(catalog.pending().loaded, [("new".into(), 9)]);
+    }
     #[test]
     fn recent_window_and_page_iteration_do_not_read_old_histories() {
         let reads = Arc::new(AtomicUsize::new(0));

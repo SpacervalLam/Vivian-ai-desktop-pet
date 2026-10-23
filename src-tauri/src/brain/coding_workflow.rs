@@ -2,6 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 
 static WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -70,15 +71,75 @@ pub fn save(root: &Path, session_id: &str, detail: &WorkflowRequestDetail) -> Re
 
 fn save_unlocked(root: &Path, session_id: &str, detail: &WorkflowRequestDetail) -> Result<(), String> {
     let (body, meta) = paths(root, session_id, &detail.summary.id);
-    write(&body, detail)?;
+    let assets = session_dir(root, session_id).join("assets");
+    let mut stored = serde_json::to_value(detail).map_err(|e| e.to_string())?;
+    stored.as_object_mut().unwrap().remove("system");
+    let tools_ref = save_asset(&assets, &serde_json::to_vec(&detail.tools).map_err(|e| e.to_string())?)?;
+    stored["tools"] = Value::Null;
+    stored["tools_ref"] = tools_ref.into();
+    externalize_images(&assets, &mut stored["messages"])?;
+    write(&body, &stored)?;
     write(&meta, &detail.summary)
+}
+
+fn save_asset(root: &Path, bytes: &[u8]) -> Result<String, String> {
+    let id = format!("{:x}", Sha256::digest(bytes));
+    let path = root.join(&id);
+    if !path.exists() { crate::utils::fs::atomic_write(&path, bytes).map_err(|e| e.to_string())?; }
+    Ok(id)
+}
+fn read_asset(root: &Path, id: &str) -> Result<Vec<u8>, String> {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("Invalid workflow asset reference".into()); }
+    let bytes = std::fs::read(root.join(id)).map_err(|e| e.to_string())?;
+    if format!("{:x}", Sha256::digest(&bytes)) != id { return Err("Workflow asset checksum mismatch".into()); }
+    Ok(bytes)
+}
+fn externalize_images(root: &Path, value: &mut Value) -> Result<(), String> {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("media_type").and_then(Value::as_str).is_some_and(|s| s.starts_with("image/")) {
+                if let Some(data) = fields.remove("data") {
+                    if let Some(text) = data.as_str() {
+                        fields.insert("data_ref".into(), save_asset(root, text.as_bytes())?.into());
+                    } else { fields.insert("data".into(), data); }
+                }
+            }
+            for child in fields.values_mut() { externalize_images(root, child)?; }
+        }
+        Value::Array(items) => for child in items { externalize_images(root, child)?; },
+        _ => {}
+    }
+    Ok(())
+}
+fn restore_images(root: &Path, value: &mut Value) -> Result<(), String> {
+    match value {
+        Value::Object(fields) => {
+            if fields.get("media_type").and_then(Value::as_str).is_some_and(|s| s.starts_with("image/")) {
+                if let Some(id) = fields.remove("data_ref") {
+                    let bytes = read_asset(root, id.as_str().ok_or("Invalid image reference")?)?;
+                    fields.insert("data".into(), String::from_utf8(bytes).map_err(|e| e.to_string())?.into());
+                }
+            }
+            for child in fields.values_mut() { restore_images(root, child)?; }
+        }
+        Value::Array(items) => for child in items { restore_images(root, child)?; },
+        _ => {}
+    }
+    Ok(())
+}
+
+fn result_path(root: &Path, session_id: &str, request_id: &str) -> PathBuf {
+    session_dir(root, session_id).join(format!("{}.result.json", encoded(request_id)))
 }
 
 /// A late completion must not recreate snapshots after session deletion.
 pub fn settle(root: &Path, session_id: &str, detail: &WorkflowRequestDetail) -> Result<(), String> {
     let _guard = WRITER.lock().map_err(|e| e.to_string())?;
     if !paths(root, session_id, &detail.summary.id).0.exists() { return Ok(()); }
-    save_unlocked(root, session_id, detail)
+    write(&result_path(root, session_id, &detail.summary.id), &serde_json::json!({
+        "summary": detail.summary, "response": detail.response,
+    }))?;
+    write(&paths(root, session_id, &detail.summary.id).1, &detail.summary)
 }
 
 pub fn remove_session(root: &Path, session_id: &str) -> Result<(), String> {
@@ -96,7 +157,22 @@ fn read<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
 }
 
 pub fn detail(root: &Path, session_id: &str, request_id: &str) -> Result<WorkflowRequestDetail, String> {
-    read(&paths(root, session_id, request_id).0)
+    let mut value: Value = read(&paths(root, session_id, request_id).0)?;
+    let assets = session_dir(root, session_id).join("assets");
+    if let Some(id) = value.get("tools_ref").and_then(Value::as_str) {
+        value["tools"] = serde_json::from_slice(&read_asset(&assets, id)?).map_err(|e| e.to_string())?;
+    }
+    restore_images(&assets, &mut value["messages"])?;
+    if value.get("system").is_none() {
+        value["system"] = Value::Array(value["messages"].as_array().into_iter().flatten()
+            .filter(|m| m["role"] == "system").cloned().collect());
+    }
+    let settled = result_path(root, session_id, request_id);
+    if settled.exists() {
+        let result: Value = read(&settled)?;
+        value["summary"] = result["summary"].clone(); value["response"] = result["response"].clone();
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
 /// Listing reads only small metadata files, never message histories or tool schemas.
@@ -142,6 +218,38 @@ mod tests {
             messages: json!([{"role":"user","content":"hello"}]), tools: json!([]),
             reasoning: Value::Null, response: Value::Null,
         }
+    }
+
+    #[test]
+    fn input_is_immutable_on_settlement_and_shared_assets_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = request("first");
+        first.messages = json!([{"role":"system","content":"fixed"},
+            {"role":"user","content":"look","images":[{"media_type":"image/png","data":"a".repeat(10000)}]}]);
+        first.tools = json!([{"name":"read","parameters":{"type":"object"}}]);
+        save(root.path(), "session", &first).unwrap();
+        let input = std::fs::read(paths(root.path(), "session", "first").0).unwrap();
+        assert!(!String::from_utf8_lossy(&input).contains(&"a".repeat(1000)));
+        first.summary.status = "complete".into(); first.response = json!({"content":"done"});
+        settle(root.path(), "session", &first).unwrap();
+        assert_eq!(std::fs::read(paths(root.path(), "session", "first").0).unwrap(), input);
+        let restored = detail(root.path(), "session", "first").unwrap();
+        assert_eq!(restored.messages, first.messages); assert_eq!(restored.tools, first.tools);
+        assert_eq!(restored.system, [json!({"role":"system","content":"fixed"})]);
+        assert_eq!(restored.response, first.response);
+        let mut second = first.clone(); second.summary.id = "second".into();
+        save(root.path(), "session", &second).unwrap();
+        assert_eq!(std::fs::read_dir(session_dir(root.path(), "session").join("assets")).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn legacy_inputs_remain_readable_and_asset_paths_cannot_escape() {
+        let root = tempfile::tempdir().unwrap(); let legacy = request("old");
+        write(&paths(root.path(), "session", "old").0, &legacy).unwrap();
+        assert_eq!(detail(root.path(), "session", "old").unwrap().messages, legacy.messages);
+        let mut malformed = serde_json::to_value(&legacy).unwrap(); malformed["tools_ref"] = "../outside".into();
+        write(&paths(root.path(), "session", "old").0, &malformed).unwrap();
+        assert!(detail(root.path(), "session", "old").is_err());
     }
 
     #[test]

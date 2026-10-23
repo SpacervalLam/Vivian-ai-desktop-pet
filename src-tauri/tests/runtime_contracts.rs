@@ -18,6 +18,12 @@ pub mod coding_event_log;
 pub mod drag_motion;
 #[path = "../src/brain/coding_compaction.rs"]
 pub mod coding_compaction;
+#[path = "../src/brain/work_harness.rs"]
+pub mod work_harness;
+#[path = "../src/brain/work_memory_cache.rs"]
+pub mod work_memory_cache;
+#[path = "../src/brain/coding_io.rs"]
+pub mod coding_io;
 #[path = "../src/brain/coding_workflow.rs"]
 pub mod coding_workflow;
 #[path = "../src/brain/coding_memory_persistence.rs"]
@@ -122,3 +128,8 @@ pub mod summary_commit;
 
 #[path = "../src/brain/coding_cancel.rs"]
 pub mod coding_cancel;
+
+#[path = "../src/brain/work_memory.rs"]
+pub mod work_memory;
+#[path = "../src/brain/work_instructions.rs"]
+pub mod work_instructions;

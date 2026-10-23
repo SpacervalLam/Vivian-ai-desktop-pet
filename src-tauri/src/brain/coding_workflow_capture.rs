@@ -20,7 +20,7 @@ impl Capture {
         let messages = serde_json::to_value(&request.messages).unwrap_or(Value::Null);
         let system = messages.as_array().into_iter().flatten()
             .filter(|m| m["role"] == "system").cloned().collect();
-        let capture = Self {
+        let mut capture = Self {
             app: app.clone(), session_id: session_id.into(), started: std::time::Instant::now(), settled: false,
             detail: WorkflowRequestDetail {
                 summary: WorkflowRequestSummary {
@@ -39,18 +39,24 @@ impl Capture {
         capture
     }
 
-    fn publish(&self) {
+    fn publish(&mut self) {
         let root = get_user_data_dir().join("coding_workflow");
-        let result = if self.detail.summary.status == "running" {
-            coding_workflow::save(&root, &self.session_id, &self.detail)
-        } else {
-            coding_workflow::settle(&root, &self.session_id, &self.detail)
+        let detail = WorkflowRequestDetail {
+            summary: self.detail.summary.clone(), capture_stage: self.detail.capture_stage.clone(),
+            system: std::mem::take(&mut self.detail.system), messages: self.detail.messages.take(),
+            tools: self.detail.tools.take(), reasoning: self.detail.reasoning.take(), response: self.detail.response.take(),
         };
-        if let Err(error) = result {
-            tracing::error!("Workflow snapshot: {error}");
-            let _ = self.app.emit("coding:workflow_error", json!({"session_id":self.session_id,"message":error}));
-        }
-        let _ = self.app.emit("coding:workflow", json!({"session_id":self.session_id,"request":self.detail.summary}));
+        let (app, session_id) = (self.app.clone(), self.session_id.clone());
+        if let Err(error) = super::coding_io::enqueue(move || {
+            let result = if detail.summary.status == "running" { coding_workflow::save(&root, &session_id, &detail) }
+                else { coding_workflow::settle(&root, &session_id, &detail) };
+            if let Err(error) = &result {
+                let _ = app.emit("coding:workflow_error", json!({"session_id":session_id,"message":error}));
+            } else {
+                let _ = app.emit("coding:workflow", json!({"session_id":session_id,"request":detail.summary}));
+            }
+            result
+        }) { tracing::error!("Workflow queue: {error}"); }
     }
 
     pub fn finish(&mut self, response: Value, usage: Option<Value>, error: Option<String>) {

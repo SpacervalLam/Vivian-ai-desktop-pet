@@ -1590,48 +1590,15 @@ impl PromptBuildingStep {
         })
     }
 
-    /// Bounded scene continuity runs alongside retrieval and never becomes a conversation turn.
-    async fn prepare_interaction_guidance(&self, state: &PipelineState) -> Option<String> {
-        if state.is_command || state.metadata["system_directive"] == true
-            || state.metadata["proactive_greeting"] == true || state.user_input.trim().is_empty() { return None; }
-        let world = self.world_provider.clone()?;
-        let router = self.interaction_router.as_ref()?;
-        let character = self.char_id.clone();
+    /// Only an already completed, current-revision hint may affect this turn.
+    fn prepared_interaction_guidance(&self, state: &PipelineState) -> Option<String> {
+        if state.is_command || state.metadata["system_directive"] == true || state.metadata["proactive_greeting"] == true { return None; }
+        let world = self.world_provider.as_ref()?;
         let (_, speaker, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
         let listener = if state.current_channel == "cross_character" {
-            speaker.filter(|speaker| speaker != &character && speaker != "user")?
+            speaker.filter(|speaker| speaker != &self.char_id && speaker != "user")?
         } else { "user".into() };
-        let memory = self.memory.clone();
-        let snapshot = state.clone();
-        let activity = self.activity_journal.clone();
-        let language = self.language.clone();
-        let target = listener.clone();
-        let owner = character.clone();
-        let provider = world.clone();
-        let (material,evidence) = tokio::task::spawn_blocking(move || {
-            use crate::world::{environment_agent::{scene_evidence,scene_observations},interaction_guidance::Evidence};
-            let now = crate::memory::types::current_timestamp();
-            let mut evidence = scene_evidence(&owner,memory.as_deref(),now);
-            if target != "user" { evidence.retain(|source| source.shareable); }
-            evidence.push(Evidence{id:"current_turn".into(),at:now,character_id:owner.clone(),kind:"current_utterance".into(),
-                text:snapshot.user_input.chars().take(1600).collect(),shareable:target != "user"});
-            let history: Vec<_> = snapshot.messages.iter().rev().filter(|message|
-                matches!(message.role.as_str(),"user"|"assistant") && (target == "user" || message.meta.as_ref()
-                    .and_then(|meta| meta.channel.as_deref()).is_some_and(|channel|
-                        matches!(channel,"direct"|"cross_character"|"broadcast"|"wechat_group"))))
-                .take(8).collect::<Vec<_>>().into_iter().rev().map(|message| json!({
-                    "role":message.role,"text":message.content.chars().take(600).collect::<String>(),
-                    "at":message.timestamp,"communication":message.meta.as_ref().and_then(|meta| meta.communication.as_ref())
-                })).collect();
-            let material=json!({"character_id":owner,"listener_id":target,"language":language,
-                "current_utterance":snapshot.user_input.chars().take(2000).collect::<String>(),"history":history,
-                "observations":scene_observations(&provider.environment,&provider.snapshot(None)),
-                "activity":activity.map(|journal| journal.to_brief()),"evidence":evidence,
-                "ongoing_task":(target == "user").then(|| snapshot.metadata.get("task_continuation")).flatten(),
-                "latest_intent":(target == "user").then(|| snapshot.metadata.get("contextual_intent")).flatten()});
-            (material,evidence)
-        }).await.ok()?;
-        world.environment.reply_guidance(router,&character,&listener,material,evidence).await
+        world.environment.interaction_hint(&self.char_id, &listener)
     }
 
     /// Query-derived candidates run beside recall/web; final visibility uses completed memory.
@@ -1668,9 +1635,8 @@ impl PromptBuildingStep {
             let snapshot = state.clone();
             tokio::task::spawn_blocking(move || step.match_tone(&snapshot)).await.ok().flatten()
         };
-        let guidance = async { tokio::time::timeout(std::time::Duration::from_millis(2800),
-            self.prepare_interaction_guidance(state)).await.ok().flatten() };
-        let (tool_scope, examples, tone_injection, interaction_guidance) = tokio::join!(tool_scope, examples, tone, guidance);
+        let interaction_guidance = self.prepared_interaction_guidance(state);
+        let (tool_scope, examples, tone_injection) = tokio::join!(tool_scope, examples, tone);
         Ok(PreparedQueryContext { tool_scope: tool_scope?, examples, tone_injection, interaction_guidance,
             elapsed_ms: started.elapsed().as_millis() as u64 })
     }

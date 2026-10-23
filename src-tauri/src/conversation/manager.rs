@@ -315,6 +315,17 @@ impl ConversationManager {
         Some(conv.clone())
     }
 
+    /// Commit a deferred close only if no newer human turn has begun.
+    pub fn close_if_current(&self, id: &str, revision: u64, reason: CloseReason) -> Option<Conversation> {
+        let mut inner = self.inner.write();
+        let conv = inner.active.values_mut().find(|conv| conv.id == id && conv.is_alive()
+            && conv.user_turn_revision == revision)?;
+        conv.state = ConversationState::Closed;
+        conv.closed_at = Some(chrono::Local::now().timestamp() as f64);
+        conv.close_reason = Some(reason);
+        Some(conv.clone())
+    }
+
     /// 关闭两个角色（或 user↔char）之间的活跃会话
     ///
     /// 便捷方法：不需要 conv_id，直接按参与者 pair 关闭。
@@ -344,6 +355,7 @@ impl ConversationManager {
         let mut inner = self.inner.write();
         if let Some(conv) = inner.active.get_mut(&key) {
             conv.last_user_message_at = Some(now);
+            conv.user_turn_revision = conv.user_turn_revision.wrapping_add(1);
         }
     }
 
@@ -732,6 +744,21 @@ mod channel_tests {
     fn manager() -> ConversationManager {
         ConversationManager { inner: RwLock::new(ManagerInner { active: Default::default(), seq: 0 }) }
     }
+    #[test]
+    fn deferred_close_cannot_close_new_turn_or_replaced_session() {
+        let m = manager();
+        let first = m.force_new_session("user", "nana", "first");
+        m.touch_user_message("nana");
+        let revision = m.get("user", "nana").unwrap().user_turn_revision;
+        m.touch_user_message("nana"); // even within the same wall-clock second
+        assert!(m.close_if_current(&first.id, revision, CloseReason::GoodBye).is_none());
+        let current = m.get("user", "nana").unwrap();
+        assert!(current.is_alive());
+        assert!(m.close_if_current(&current.id, current.user_turn_revision, CloseReason::GoodBye).is_some());
+        m.force_new_session("user", "nana", "replacement");
+        assert!(m.close_if_current(&first.id, current.user_turn_revision, CloseReason::GoodBye).is_none());
+    }
+
     #[test]
     fn channel_survives_turns_and_resets_with_topic() {
         let m = manager();

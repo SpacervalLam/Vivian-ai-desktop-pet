@@ -58,6 +58,18 @@ fn embedding_cache_key(text: &str, provider: &str, model: &str, dim: usize) -> E
     (fnv1a_64(text), text.len(), provider.to_string(), model.to_string(), dim)
 }
 
+// Coalesce identical in-flight queries without holding the cache across network I/O.
+static EMBEDDING_FLIGHTS: Lazy<Mutex<HashMap<EmbeddingCacheKey, std::sync::Weak<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+fn query_flight(key: EmbeddingCacheKey) -> Arc<tokio::sync::Mutex<()>> {
+    let mut flights = EMBEDDING_FLIGHTS.lock();
+    if let Some(flight) = flights.get(&key).and_then(std::sync::Weak::upgrade) { return flight; }
+    flights.retain(|_, flight| flight.strong_count() > 0);
+    let flight = Arc::new(tokio::sync::Mutex::new(()));
+    if flights.len() < EMBEDDING_CACHE_CAP { flights.insert(key, Arc::downgrade(&flight)); }
+    flight
+}
+
 /// 查询全局嵌入缓存
 pub fn embedding_cache_get(text: &str, provider: &str, model: &str, dim: usize) -> Option<Vec<f32>> {
     let key = embedding_cache_key(text, provider, model, dim);
@@ -539,6 +551,9 @@ impl EmbeddingService for OpenAIEmbedding {
         ) {
             return Ok(cached);
         }
+        let flight = query_flight(embedding_cache_key(text, self.cache_provider_id(), &self.model, self.dimension));
+        let _query = flight.lock().await;
+        if let Some(cached) = embedding_cache_get(text, self.cache_provider_id(), &self.model, self.dimension) { return Ok(cached); }
         let resp = self
             .post_embeddings(serde_json::Value::String(text.to_string()))
             .await?;
@@ -961,6 +976,29 @@ pub fn build_embedding(config: &AppConfig) -> Arc<dyn MemoryEmbeddingProvider> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn identical_inflight_queries_issue_one_request_and_release_afterward() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0)); let count = calls.clone();
+        let app = axum::Router::new().route("/embeddings", axum::routing::post(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                axum::Json(serde_json::json!({"data":[{"embedding":[1.0,0.0]}]}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let provider = OpenAIEmbedding::new("test".into(), Some(format!("http://{}", listener.local_addr().unwrap())), Some("singleflight".into())).with_dimension(2);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let (a, b, c) = tokio::join!(provider.embed("same query"), provider.embed("same query"), provider.embed("same query"));
+        assert_eq!(a.unwrap(), b.unwrap()); assert_eq!(c.unwrap(), vec![1.0,0.0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let key = embedding_cache_key("same query", provider.cache_provider_id(), &provider.model, provider.dimension);
+        assert!(EMBEDDING_FLIGHTS.lock().get(&key).unwrap().upgrade().is_none());
+        server.abort();
+    }
 
     #[tokio::test]
     async fn startup_embedding_quota_fails_once_but_rate_limit_recovers() {

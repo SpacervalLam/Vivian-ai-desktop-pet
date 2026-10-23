@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use parking_lot::RwLock;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::cache::ToolCache;
 use super::catalog::ToolCatalog;
@@ -124,6 +124,7 @@ pub fn is_tool_locked(name: &str, side: AgentSide) -> bool {
 pub struct ToolSystem {
     /// Names, aliases, ownership and revision change atomically.
     catalog: RwLock<ToolCatalog<Arc<dyn Tool>>>,
+    schema_cache: RwLock<(u64, HashMap<String, ToolDefinition>)>,
     /// 工具结果缓存
     pub cache: Arc<ToolCache>,
     /// 沙箱
@@ -159,10 +160,23 @@ pub struct ToolSystem {
 }
 
 impl ToolSystem {
+    pub fn can_parallelize_read(&self, name: &str) -> bool {
+        crate::brain::work_harness::parallel_read(name) && self.find_tool(name).is_some_and(|tool| tool.is_read_only())
+    }
+    pub fn work_request_limits(&self) -> (u64, usize) {
+        if let Some(app) = self.app_handle.read().clone() {
+            if let Some(state) = app.try_state::<Arc<crate::state::AppState>>() {
+                let tools = state.config.read().get_all().tools;
+                return (tools.work_request_timeout_secs.max(1), tools.work_request_max_attempts.max(1));
+            }
+        }
+        (crate::brain::work_harness::STEP_TIMEOUT_SECS, crate::brain::work_harness::MAX_PROVIDER_ATTEMPTS)
+    }
     /// 创建新的工具系统（使用默认配置：缓存 TTL=300s / max=1000 / 确认超时=600s）
     pub fn new() -> Self {
         Self {
             catalog: RwLock::new(ToolCatalog::default()),
+            schema_cache: RwLock::new((u64::MAX, HashMap::new())),
             cache: Arc::new(ToolCache::new(300, 1000)),
             sandbox: Arc::new(ToolSandbox::new(ProtectionMode::Cautious, 600)),
             observability: Arc::new(ToolObservability::new(1000)),
@@ -187,6 +201,7 @@ impl ToolSystem {
         let effective_ttl = if enable_cache { cache_ttl_secs } else { 0 };
         Self {
             catalog: RwLock::new(ToolCatalog::default()),
+            schema_cache: RwLock::new((u64::MAX, HashMap::new())),
             cache: Arc::new(ToolCache::new(effective_ttl, cache_max_size as usize)),
             sandbox: Arc::new(ToolSandbox::new(ProtectionMode::Cautious, 600)),
             observability: Arc::new(ToolObservability::new(1000)),
@@ -508,7 +523,21 @@ impl ToolSystem {
     /// 编程智能体的 FC tools 字段由此生成（再与 `CODING_TOOLS` 白名单取交集）。
     /// 陪伴侧的过滤在 [`Self::list_tools_for_scene`] 中按陪伴侧集合独立进行。
     pub fn get_tool_schemas(&self) -> Vec<ToolDefinition> {
-        self.list_tools_for_side(AgentSide::Work).iter().map(|t| t.to_definition()).collect()
+        let names = self.list_tool_names();
+        self.work_tool_schemas(&names.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// Render only requested, currently enabled schemas. Registry replacement
+    /// invalidates cached definitions; per-side disables are checked every time.
+    pub fn work_tool_schemas(&self, names: &[&str]) -> Vec<ToolDefinition> {
+        let (revision, tools) = {
+            let catalog = self.catalog.read();
+            (catalog.revision(), names.iter().filter_map(|name| catalog.find(name).cloned()).collect::<Vec<_>>())
+        };
+        let mut cache = self.schema_cache.write();
+        if cache.0 != revision { *cache = (revision, HashMap::new()); }
+        tools.into_iter().filter(|tool| !self.is_tool_disabled(tool.name(), AgentSide::Work))
+            .map(|tool| cache.1.entry(tool.name().into()).or_insert_with(|| tool.to_definition()).clone()).collect()
     }
 
     /// 获取所有工具的 OpenAI 格式定义
@@ -633,6 +662,26 @@ mod tests {
             ts.register_tool(Arc::new(NamedTool(n)));
         }
         ts
+    }
+
+    #[test]
+    fn cached_schemas_refresh_after_replacement_and_respect_live_disables() {
+        use crate::tools::custom_tools::{CustomToolDef, DynamicTool};
+        let system = ToolSystem::new();
+        let register = |description: &str| system.register_tool(Arc::new(DynamicTool::new(CustomToolDef {
+            name: "fixture_schema".into(), description: description.into(),
+            parameters: json!({"type":"object"}), script: "Write-Output 'fixture'".into(),
+            deferred: true, created_at: 0.,
+        })));
+        register("first");
+        assert_eq!(system.work_tool_schemas(&["fixture_schema"])[0].description, "first");
+        assert_eq!(system.work_tool_schemas(&["fixture_schema"])[0].description, "first");
+        register("replacement");
+        assert_eq!(system.work_tool_schemas(&["fixture_schema"])[0].description, "replacement");
+        system.set_disabled_tools(Vec::new(), vec!["fixture_schema".into()]);
+        assert!(system.work_tool_schemas(&["fixture_schema"]).is_empty());
+        system.set_disabled_tools(Vec::new(), Vec::new());
+        assert_eq!(system.work_tool_schemas(&["fixture_schema"])[0].description, "replacement");
     }
 
     /// 别名表必须能将改名后的旧名解析到新名——这是它存在的唯一理由。

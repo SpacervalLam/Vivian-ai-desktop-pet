@@ -18,9 +18,7 @@ use crate::tools::types::{
 use crate::utils::path::get_user_data_dir;
 
 /// 单次扫描的会话文件上限（按修改时间取最近 N 个）。
-const MAX_SESSIONS_SCAN: usize = 60;
-/// 单条消息参与匹配的最大字符数（避免一条超长工具输出拖垮检索）。
-const MAX_MATCH_CHARS: usize = 4000;
+const MAX_SESSIONS_SCAN: usize = 200;
 
 fn sessions_dir() -> PathBuf {
     get_user_data_dir().join("coding_sessions")
@@ -71,9 +69,7 @@ fn msg_content(m: &Value) -> String {
     m.get("content")
         .and_then(|v| v.as_str())
         .unwrap_or("")
-        .chars()
-        .take(MAX_MATCH_CHARS)
-        .collect()
+        .to_string()
 }
 
 fn msg_tool(m: &Value) -> Option<&str> {
@@ -86,8 +82,10 @@ fn snippet(text: &str, needle_lower: &str, radius: usize) -> String {
     let Some(pos) = lower.find(needle_lower) else {
         return text.chars().take(radius * 2).collect();
     };
-    let start = pos.saturating_sub(radius);
-    let end = (pos + needle_lower.len() + radius).min(text.len());
+    let mut start = pos.saturating_sub(radius).min(text.len());
+    let mut end = (pos + needle_lower.len() + radius).min(text.len());
+    while !text.is_char_boundary(start) { start -= 1; }
+    while !text.is_char_boundary(end) { end -= 1; }
     let mut out = String::new();
     if start > 0 {
         out.push('…');
@@ -147,7 +145,10 @@ impl Tool for SessionSearchTool {
             "properties": {
                 "query": { "type": "string", "description": "关键词（不区分大小写，子串匹配）" },
                 "limit": { "type": "integer", "description": "最多返回多少条命中（默认 20，上限 100）", "minimum": 1 },
-                "max_sessions": { "type": "integer", "description": "最多扫描多少个最近会话（默认 40，上限 60）", "minimum": 1 }
+                "max_sessions": { "type": "integer", "description": "每页最多扫描多少个会话（默认 40，上限 200）；可用返回游标继续查更早历史", "minimum": 1 },
+                "session_offset": { "type": "integer", "minimum": 0, "description": "返回游标中的 session_offset" },
+                "message_offset": { "type": "integer", "minimum": 0, "description": "返回游标中的 message_offset" },
+                "all_workspaces": { "type": "boolean", "description": "显式跨工作区搜索当前角色的会话；默认只查当前工作区" }
             },
             "required": ["query"]
         })
@@ -178,54 +179,43 @@ impl Tool for SessionSearchTool {
             .unwrap_or(40)
             .clamp(1, MAX_SESSIONS_SCAN as u64) as usize;
 
+        let session_offset = args.get("session_offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let message_offset = args.get("message_offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let all_workspaces = args.get("all_workspaces").and_then(Value::as_bool).unwrap_or(false);
+        let files = recent_session_files(usize::MAX);
         let mut hits: Vec<Value> = Vec::new();
         let mut scanned = 0usize;
-        for path in recent_session_files(max_sessions) {
+        let mut next_cursor = None;
+        'sessions: for (file_index, path) in files.iter().enumerate().skip(session_offset).take(max_sessions) {
             scanned += 1;
-            let Some(doc) = load_session(&path) else { continue };
+            next_cursor = (file_index + 1 < files.len()).then(|| json!({"session_offset":file_index + 1,"message_offset":0}));
+            let Some(doc) = load_session(path) else { continue };
             let sid = session_id_of(&doc);
-            if sid == ctx.session_id {
-                continue; // 当前会话在上下文里，不必搜
+            if sid == ctx.session_id || doc.get("char_id").and_then(Value::as_str) != Some(ctx.char_id.as_str()) { continue; }
+            if !all_workspaces && !ctx.working_directory.trim().is_empty() {
+                let wd = doc.get("working_directory").and_then(Value::as_str).unwrap_or("");
+                let same = std::path::Path::new(wd).canonicalize().ok().zip(std::path::Path::new(&ctx.working_directory).canonicalize().ok())
+                    .is_some_and(|(a,b)| a == b) || wd == ctx.working_directory;
+                if !same { continue; }
             }
-            for (idx, msg) in messages_of(&doc).iter().enumerate() {
-                if hits.len() >= limit {
-                    break;
-                }
-                let content = msg_content(msg);
+            let messages = messages_of(&doc);
+            for (idx, msg) in messages.iter().enumerate().skip(if file_index == session_offset { message_offset } else { 0 }) {
+                let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
                 if content.to_lowercase().contains(&needle) {
-                    hits.push(json!({
-                        "session_id": sid,
-                        "message_index": idx,
-                        "role": msg_role(msg),
-                        "tool": msg_tool(msg),
-                        "snippet": snippet(&content, &needle, 120),
-                    }));
+                    hits.push(json!({"session_id":sid,"message_index":idx,"role":msg_role(msg),"tool":msg_tool(msg),"snippet":snippet(content,&needle,120)}));
+                    if hits.len() >= limit {
+                        next_cursor = if idx + 1 < messages.len() { Some(json!({"session_offset":file_index,"message_offset":idx+1})) }
+                            else { (file_index+1 < files.len()).then(|| json!({"session_offset":file_index+1,"message_offset":0})) };
+                        break 'sessions;
+                    }
                 }
             }
-            if hits.len() >= limit {
-                break;
-            }
         }
-
-        if hits.is_empty() {
-            return ToolResult::standard_success(
-                &format!("扫了 {scanned} 个历史会话，没有命中「{query}」。换个更具体的关键词（函数名、错误码、文件名）再试。"),
-                Some(json!({"query": query, "hits": [], "scanned": scanned})),
-            );
-        }
-        let mut text = format!("命中 {} 条（扫描 {scanned} 个历史会话）：\n", hits.len());
-        for h in &hits {
-            text.push_str(&format!(
-                "- {} #{} [{}]{} {}\n",
-                h["session_id"].as_str().unwrap_or(""),
-                h["message_index"],
-                h["role"].as_str().unwrap_or(""),
-                h["tool"].as_str().map(|t| format!(" tool={t}")).unwrap_or_default(),
-                h["snippet"].as_str().unwrap_or("")
-            ));
-        }
-        text.push_str("\n要继续读某个会话的原文，用 session_event_read 指定 session_id 与偏移。\n");
-        ToolResult::standard_success(&text, Some(json!({"query": query, "hits": hits, "scanned": scanned})))
+        let mut text = format!("本页命中 {} 条（扫描 {scanned} 个会话）；结果仅为线索，需核对原文。\n", hits.len());
+        for h in &hits { text.push_str(&format!("- {} #{} {}\n", h["session_id"], h["message_index"], h["snippet"])); }
+        if let Some(cursor) = &next_cursor { text.push_str(&format!("尚有更早历史，请把游标参数传入下次 session_search：{cursor}\n")); }
+        text.push_str("用 session_event_read 读取命中会话原文。游标基于当前历史排序，新会话写入后可从头重新检索。\n");
+        ToolResult::standard_success(&text, Some(json!({"query":query,"hits":hits,"scanned":scanned,"next_cursor":next_cursor})))
     }
 
     fn is_read_only(&self) -> bool {
@@ -305,7 +295,7 @@ impl Tool for SessionTraceTool {
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let Some(doc) = find_session(sid, &ctx.session_id) else {
+        let Some(doc) = find_session(sid, &ctx.session_id, &ctx.char_id) else {
             return ToolResult::standard_error(
                 &format!("找不到会话 {sid}。用 session_search 拿到正确的 id。"),
                 Some("NotFound"),
@@ -359,17 +349,13 @@ impl Tool for SessionTraceTool {
     }
 }
 
-fn find_session(session_id: &str, current: &str) -> Option<Value> {
-    if session_id == current {
-        return None;
-    }
-    for path in recent_session_files(MAX_SESSIONS_SCAN) {
-        let Some(doc) = load_session(&path) else { continue };
-        if session_id_of(&doc) == session_id {
-            return Some(doc);
-        }
-    }
-    None
+fn find_session(session_id: &str, current: &str, char_id: &str) -> Option<Value> {
+    if session_id == current { return None; }
+    let dir = sessions_dir();
+    let heads = crate::brain::coding_session_store::load_heads::<Value>(&dir).ok().flatten()?;
+    if !heads.iter().any(|(id, _)| id == session_id) { return None; }
+    let doc = load_session(&crate::brain::coding_session_store::body_path(&dir, session_id))?;
+    (session_id_of(&doc) == session_id && doc.get("char_id").and_then(Value::as_str) == Some(char_id)).then_some(doc)
 }
 
 // ============================================================================
@@ -453,6 +439,9 @@ impl Tool for SessionEventReadTool {
         let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("").trim();
         let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(8).clamp(1, 30) as usize;
+        if sid != ctx.session_id && find_session(sid, &ctx.session_id, &ctx.char_id).is_none() {
+            return ToolResult::standard_error("无法访问该角色之外或不存在的会话", Some("NotFound"), None);
+        }
         if args["source"].as_str() == Some("audit") {
             return match crate::brain::coding_event_log::read_page_snapshot(&get_user_data_dir().join("coding_events"), sid,
                 args["after_seq"].as_u64().unwrap_or(0), limit, args["snapshot_bytes"].as_u64()) {
@@ -460,7 +449,7 @@ impl Tool for SessionEventReadTool {
                 Err(error) => ToolResult::standard_error("无法读取会话审计日志；旧会话可能尚无事件记录", Some("AuditUnavailable"), Some(json!({"detail":error}))),
             };
         }
-        let Some(doc) = find_session(sid, &ctx.session_id) else {
+        let Some(doc) = find_session(sid, &ctx.session_id, &ctx.char_id) else {
             return ToolResult::standard_error(&format!("找不到会话 {sid}。"), Some("NotFound"), None);
         };
         let messages = messages_of(&doc);
@@ -568,7 +557,7 @@ impl Tool for SessionEventSearchTool {
         let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("").trim();
         let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10).clamp(1, 50) as usize;
-        let Some(doc) = find_session(sid, &ctx.session_id) else {
+        let Some(doc) = find_session(sid, &ctx.session_id, &ctx.char_id) else {
             return ToolResult::standard_error(&format!("找不到会话 {sid}。"), Some("NotFound"), None);
         };
         let needle = query.to_lowercase();
@@ -681,7 +670,7 @@ impl Tool for SessionEventTraceTool {
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let sid = args.get("session_id").and_then(|v| v.as_str()).unwrap_or("").trim();
         let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(60).clamp(1, 200) as usize;
-        let Some(doc) = find_session(sid, &ctx.session_id) else {
+        let Some(doc) = find_session(sid, &ctx.session_id, &ctx.char_id) else {
             return ToolResult::standard_error(&format!("找不到会话 {sid}。"), Some("NotFound"), None);
         };
         let mut rows = Vec::new();

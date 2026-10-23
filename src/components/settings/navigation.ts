@@ -22,7 +22,7 @@ export const settingsPages: SettingsPage[] = [
   { key: 'connections', group: 'services', icon: Cable, searchKeys: ["config.tab_connections"], keywords: ["MCP", "OAuth", "连接", "connection", "接続"] },
   { key: 'plugins', group: 'services', icon: Puzzle, searchKeys: ["config.tab_plugins"], keywords: ["插件", "plugin", "扩展", "拡張"] },
   { key: 'usage', group: 'services', icon: Activity, searchKeys: ["config.section_work_models"], keywords: ["Token", "用量", "usage", "使用量"] },
-  { key: 'data', group: 'services', icon: Archive, searchKeys: ["common.saving", "config.backup_btn", "config.backup_help", "config.clear_memories_btn", "config.restore_btn", "config.restore_btn_loading", "config.section_backup", "config.section_operations"], keywords: [] },
+  { key: 'data', group: 'services', icon: Archive, searchKeys: ["common.saving", "config.backup_btn", "config.backup_help", "config.clear_memories_btn", "config.restore_btn", "config.restore_btn_loading", "config.section_backup", "config.section_operations"], keywords: ["配置迁移", "分享", "导入", "导出", "altn", "share", "migration", "import", "export", "設定共有", "移行"] },
   { key: 'about', group: 'services', icon: Info, searchKeys: ["config.about_contact", "config.about_os", "config.about_project", "config.about_subtitle", "config.section_about"], keywords: [] },
 ];
 interface SettingsCopy { search: string; clearSearch: string; noResults: string; contents: string; reload: string; groups: Record<SettingsGroup, string>; pages: Record<SettingsPageKey, readonly [string, string]> }
@@ -106,7 +106,7 @@ export const settingsCopy: Record<'zh' | 'en' | 'ja', SettingsCopy> = {
     ],
     "data": [
       "备份与恢复",
-      "导出备份、恢复数据或重置应用。"
+      "分享与迁移配置、导出备份、恢复数据或重置应用。"
     ],
     "about": [
       "关于 Vivian",
@@ -193,7 +193,7 @@ export const settingsCopy: Record<'zh' | 'en' | 'ja', SettingsCopy> = {
     ],
     "data": [
       "Backup & restore",
-      "Export backups, restore data or reset the application."
+      "Share settings, migrate preferences, export backups, restore data or reset the application."
     ],
     "about": [
       "About Vivian",
@@ -280,7 +280,7 @@ export const settingsCopy: Record<'zh' | 'en' | 'ja', SettingsCopy> = {
     ],
     "data": [
       "バックアップと復元",
-      "バックアップの出力、データ復元とアプリのリセット。"
+      "設定の共有と移行、バックアップの出力、データ復元とリセット。"
     ],
     "about": [
       "Vivian について",

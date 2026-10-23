@@ -36,6 +36,7 @@ import CompanionSettings from './settings/CompanionSettings';
 import './settings/SettingsWindow.css';
 import WeatherKitPrivateKeyField from './settings/WeatherKitPrivateKeyField';
 import StorageSettings from './settings/StorageSettings';
+import ConfigTransferSettings from './settings/ConfigTransferSettings';
 import PersonalInstructionsSettings from './settings/PersonalInstructionsSettings';
 
 interface TtsConfigState {
@@ -815,6 +816,7 @@ const ConfigWindow: React.FC = () => {
   // 操作系统信息（platform + version + arch）
   const [osInfo, setOsInfo] = useState<string>('');
   const [saving, setSaving] = useState(false);
+  const [importingSettings, setImportingSettings] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   // 快捷键配置抽屉展开状态
@@ -2428,6 +2430,7 @@ const ConfigWindow: React.FC = () => {
   };
 
   const handleSave = async () => {
+    if (importingSettings) return;
     setSaving(true);
     setSaveError(null);
     // 任何失败都收集为错误信息显示给用户；主配置保存失败则不关闭窗口
@@ -3083,6 +3086,7 @@ const ConfigWindow: React.FC = () => {
       case 'data':
         return (
           <>
+            <ConfigTransferSettings disabled={backingUp || restoring || saving || importingSettings} onImporting={setImportingSettings} />
             <div style={sectionTitleStyle}>{t('config.section_backup')}</div>
             <p className="settings-data-help">{t('config.backup_help')}</p>
             {backupResult && <p role={backupResult.error ? 'alert' : 'status'} className="settings-data-help" style={{ overflowWrap: 'anywhere' }}>
@@ -7281,6 +7285,7 @@ const ConfigWindow: React.FC = () => {
         )}
         <button
           onClick={handleReset}
+          disabled={importingSettings}
           style={{
             padding: '9px 18px',
             minWidth: 120,
@@ -7298,7 +7303,7 @@ const ConfigWindow: React.FC = () => {
         </button>
         <button
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || importingSettings}
           style={{
             padding: '9px 18px',
             minWidth: 120,

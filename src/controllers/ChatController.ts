@@ -1,3 +1,4 @@
+import { beginCompanionTurn } from '../utils/companionLatency';
 /**
  * 聊天控制器
  *
@@ -356,6 +357,7 @@ class ChatControllerClass {
     });
 
     const streamId = generateStreamId();
+    beginCompanionTurn(streamId);
     this.handlers.onThinkingStarted?.(streamId);
 
     // Layer 1: 用户消息到达瞬间触发即时情绪反应（不等 AI 回复）
@@ -408,6 +410,7 @@ class ChatControllerClass {
     const ch = 'direct';
 
     const streamId = generateStreamId();
+    beginCompanionTurn(streamId);
     this.handlers.onThinkingStarted?.(streamId);
 
     return new Promise<AiResponse | null>((resolve) => {

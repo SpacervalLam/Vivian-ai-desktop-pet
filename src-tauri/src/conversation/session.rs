@@ -204,6 +204,8 @@ pub struct Conversation {
     ///
     /// 仅 User↔Agent 会话使用；Agent↔Agent 会话此字段始终等于 last_active_at。
     pub last_user_message_at: Option<f64>,
+    #[serde(default)]
+    pub user_turn_revision: u64,
     /// 最近一轮的响应模式
     pub last_response_mode: ResponseMode,
     /// 会话期间产生的记忆 ID 列表（用于 close 时触发 seal_episode）
@@ -335,6 +337,7 @@ impl Conversation {
             closed_at: None,
             close_reason: None,
             last_user_message_at: None,
+            user_turn_revision: 0,
             last_response_mode: ResponseMode::Speak,
             memory_ids: Vec::new(),
             recent_continuation_scores: Vec::new(),

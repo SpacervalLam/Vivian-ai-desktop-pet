@@ -437,6 +437,10 @@ pub fn run() {
             commands::config::set_config,
             commands::config::report_effective_theme,
             commands::config::get_all_config,
+            commands::config_transfer::export_settings_share,
+            commands::config_transfer::inspect_settings_share,
+            commands::config_transfer::import_settings_share,
+            commands::config_transfer::restart_after_settings_import,
             commands::config::save_config,
             commands::config::reload_config,
             commands::config::diagnose_network,
@@ -519,6 +523,7 @@ pub fn run() {
             commands::metrics::reset_metrics,
             commands::metrics::increment_metric,
             commands::metrics::set_gauge_metric,
+            commands::metrics::observe_companion_latency,
             commands::history::get_chat_history,
             commands::history::clear_chat_history,
             commands::history::get_chat_history_all,
@@ -545,6 +550,10 @@ pub fn run() {
             commands::coding_agent::coding_set_permission,
             commands::coding_agent::coding_set_model,
             commands::coding_agent::coding_set_reasoning_level,
+            commands::coding_agent::coding_memory_snapshot,
+            commands::coding_agent::coding_memory_settings,
+            commands::coding_agent::coding_memory_save,
+            commands::coding_agent::coding_memory_action,
             commands::coding_agent::coding_list_available_models,
             commands::coding_agent::coding_list_sessions,
             commands::coding_agent::coding_workflow_list,
@@ -553,6 +562,7 @@ pub fn run() {
             commands::coding_agent::coding_rename_session,
             commands::coding_agent::coding_cancel_session,
             commands::coding_agent::coding_send_message,
+            commands::coding_agent::coding_resume_session,
             commands::coding_agent::coding_list_dir_tree,
             commands::coding_agent::coding_read_file,
             commands::coding_agent::coding_read_file_lines,
@@ -1657,6 +1667,11 @@ pub fn run() {
                         async {
                             // 退出前落盘 token 用量（防抖期间未写入的当日数据）
                             crate::providers::usage_store::flush();
+                            if let Some(agent) = once_cell::sync::Lazy::get(&crate::commands::coding_agent::CODING_AGENT) {
+                                if let Err(error) = agent.flush_for_backup() {
+                                    tracing::error!("[exit] Work persistence flush failed: {error}");
+                                }
+                            }
                             // 应用退出前强制落盘所有角色的记忆脏数据（5s 节流期间未写入的数据）
                             if let Some(state) = app_handle
                                 .try_state::<std::sync::Arc<crate::state::AppState>>()
@@ -1717,6 +1732,9 @@ pub fn run() {
                             // 即使本调用被遗漏，spawn_pty 已把 powershell.exe 绑定到全局 Job Object，
                             // OS 关闭 Job 句柄时会自动连带终止子进程及其子孙
                             crate::commands::terminal::kill_all_sessions(app_handle);
+                            if let Err(error) = crate::brain::coding_io::flush() {
+                                tracing::error!("[exit] Work journal flush failed: {error}");
+                            }
                             // 注销所有系统级全局快捷键，避免进程退出后插件残留监听
                             {
                                 use tauri_plugin_global_shortcut::GlobalShortcutExt;

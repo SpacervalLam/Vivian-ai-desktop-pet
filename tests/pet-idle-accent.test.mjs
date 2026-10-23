@@ -52,7 +52,9 @@ try{
  const armed=timerWith(1000);
  assert.ok(armed,'idle accent arms the configured interval');
  assert.equal([...timers.values()].filter(timer=>timer.ms===1000).length,1,'only one accent timer is armed');
- assert.match(sprite(render()).props.style.backgroundImage,/nana-idle-sheet\.webp/,'idle uses the cached look opening frame');
+ assert.equal(sprite(render()).props.style.backgroundImage,undefined,'Nana idle uses her original CSS atlas');
+ assert.equal(sprite(render()).props.style.backgroundPosition,'0% 0%','Nana idle uses the first atlas cell');
+ assert.equal(sprite(render()).props.style.backgroundSize,'300% 200%');
 
  // 说话 / 被占用时顺延：不改姿态，改用短重试间隔。
  speechStore.currentBubble='正在说话';

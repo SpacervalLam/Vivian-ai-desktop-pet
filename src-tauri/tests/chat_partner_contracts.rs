@@ -4,12 +4,16 @@ mod chat_partner_memory;
 mod chat_partner_policy;
 #[path = "../src/sns_store.rs"]
 mod sns_store;
+#[path = "../src/config/transfer.rs"]
+mod config_transfer;
 
 mod memory {
     #[path = "../../src/memory/tokenize.rs"]
     pub mod tokenize;
 }
 mod utils {
+    #[path = "../../src/utils/fs.rs"]
+    pub mod fs;
     #[path = "../../src/utils/sqlite.rs"]
     pub mod sqlite;
 }

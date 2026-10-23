@@ -1,7 +1,6 @@
 //! Scheduling policy for work-context compaction.
 
 pub const KEEP_RECENT: usize = 24;
-pub const MAX_ARCHIVE: usize = 24;
 pub const MIN_ARCHIVE: usize = 8;
 
 /// Token pressure is independent of message count.
@@ -13,7 +12,7 @@ pub fn token_pressure(used: u64, window: u64) -> bool {
 /// The caller adjusts this boundary to keep tool calls/results intact.
 pub fn archive_target(count: usize, pressure: bool) -> usize {
     let keep = if pressure { 1 } else { KEEP_RECENT };
-    count.saturating_sub(keep).min(MAX_ARCHIVE)
+    count.saturating_sub(keep)
 }
 
 #[cfg(test)]
@@ -31,7 +30,7 @@ mod tests {
     #[test]
     fn ordinary_history_keeps_recent_messages() {
         assert_eq!(archive_target(40, false), 16);
-        assert_eq!(archive_target(100, false), MAX_ARCHIVE);
+        assert_eq!(archive_target(100, false), 76);
         assert!(!token_pressure(7_499, 10_000));
         assert!(token_pressure(7_500, 10_000));
         assert!(!token_pressure(1, 0));

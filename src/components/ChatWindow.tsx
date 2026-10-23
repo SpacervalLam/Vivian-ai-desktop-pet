@@ -1,3 +1,4 @@
+import { beginCompanionTurn, companionParagraphId, companionParagraphCommitted } from '../utils/companionLatency';
 import { openWebsite } from '../utils/openWebsite';
 import StickerImage from './stickers/StickerImage';
 import { parseSticker, stickerLabel } from './stickers/stickers';
@@ -794,6 +795,7 @@ const Bubble = React.memo(function Bubble({ message, onOpenImage, onAvatarClick,
   const isUser = message.role === 'user';
   const entranceRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
+    if (!isUser && hasVisibleChatText(message.content, message.role)) companionParagraphCommitted(message.id, entranceRef.current);
     const createdAt = pendingMessageAnimations.get(message.id);
     pendingMessageAnimations.delete(message.id);
     const element = entranceRef.current;
@@ -2789,7 +2791,7 @@ const ChatWindow: React.FC = () => {
             groupStreamBuffersRef.current.set(sid, remaining);
             if (completeParts.length > 0) {
               const newMsgs: ChatMessage[] = completeParts.map((part) => ({
-                id: nextId(),
+                id: companionParagraphId(sid, nextId()),
                 role: 'assistant',
                 content: part,
                 timestamp: Date.now(),
@@ -2818,7 +2820,7 @@ const ChatWindow: React.FC = () => {
           streamBuffersRef.current.set(sid, remaining);
           if (completeParts.length > 0) {
             const newMsgs: ChatMessage[] = completeParts.map((part) => ({
-              id: nextId(),
+              id: companionParagraphId(sid, nextId()),
               role: 'assistant',
               content: part,
               timestamp: Date.now(),
@@ -2852,7 +2854,7 @@ const ChatWindow: React.FC = () => {
           if (isVoiceMessage) {
             // 语音消息：不显示文本，以语音气泡发出
             newMsgs.push({
-              id: nextId(),
+              id: companionParagraphId(sid, nextId()),
               role: 'assistant',
               content: '',
               timestamp: Date.now(),
@@ -2865,7 +2867,7 @@ const ChatWindow: React.FC = () => {
             });
           } else if (hasVisibleChatText(trimmedBuf)) {
             newMsgs.push({
-              id: nextId(),
+              id: companionParagraphId(sid, nextId()),
               role: 'assistant',
               content: trimmedBuf,
               timestamp: Date.now(),
@@ -2904,7 +2906,7 @@ const ChatWindow: React.FC = () => {
         if (isVoiceMessage) {
           // 语音消息：不显示流式文本，以语音气泡发出
           setMessages((prev) => [...prev, {
-            id: nextId(),
+            id: companionParagraphId(sid, nextId()),
             role: 'assistant',
             content: '',
             timestamp: Date.now(),
@@ -2916,7 +2918,7 @@ const ChatWindow: React.FC = () => {
           }]);
         } else if (hasVisibleChatText(trimmedBuf)) {
           setMessages((prev) => [...prev, {
-            id: nextId(),
+            id: companionParagraphId(sid, nextId()),
             role: 'assistant',
             content: trimmedBuf,
             timestamp: Date.now(),
@@ -3290,6 +3292,7 @@ const ChatWindow: React.FC = () => {
         const sid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
           ? crypto.randomUUID()
           : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        beginCompanionTurn(sid);
         groupStreamCharMapRef.current.set(sid, c.id);
         groupStreamBuffersRef.current.set(sid, '');
         void invoke('send_message_stream', { message: text, streamId: sid, characterId: c.id, channel: 'wechat_group' }).catch((err) => {
@@ -3888,6 +3891,7 @@ const ChatWindow: React.FC = () => {
             const sid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
               ? crypto.randomUUID()
               : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            beginCompanionTurn(sid);
             groupStreamCharMapRef.current.set(sid, c.id);
             groupStreamBuffersRef.current.set(sid, '');
             void invoke('send_message_stream', {

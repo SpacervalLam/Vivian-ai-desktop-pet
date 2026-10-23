@@ -294,6 +294,13 @@ impl IntentJudge {
     /// 2. LLM 判断：通过 `intent_judge` 任务路由，让 LLM 在 9 个枚举值中判断
     /// 3. 异常兜底：返回 None（不关闭）
     pub async fn judge_close_reason(&self, text: &str, history: &[String]) -> Option<CloseReason> {
+        let budget = Arc::new(crate::providers::base::RequestBudget::new(Duration::from_secs(JUDGE_TIMEOUT_SECS), 2));
+        let options = crate::providers::base::ProviderCallOptions { request_budget: Some(budget.clone()), ..Default::default() };
+        tokio::time::timeout_at(budget.deadline(), crate::providers::base::scope_provider_call(options,
+            self.judge_close_inner(text, history))).await.ok().flatten()
+    }
+
+    async fn judge_close_inner(&self, text: &str, history: &[String]) -> Option<CloseReason> {
         // 规则预检：明确告别词直接判定，跳过 LLM 调用
         if let Some(reason) = Self::rule_based_check(text) {
             return Some(reason);

@@ -132,7 +132,8 @@ pub struct BrainChatChain {
     reflection: Arc<ReflectionRunnable>,
     reflection_gate: Arc<tokio::sync::Mutex<()>>,
     reflection_revision: Arc<AtomicU64>,
-    task_tracker: parking_lot::Mutex<crate::pipeline::task_continuity::TaskTracker>,
+    task_tracker: Arc<parking_lot::Mutex<crate::pipeline::task_continuity::TaskTracker>>,
+    validation: Arc<crate::pipeline::steps::validation::ValidationRunnable>,
     /// 工具调用管理器：每次对话前刷新 context，让工具感知情绪/关系/记忆
     pub tool_call_manager: Option<Arc<ToolCallManager>>,
     /// 用户事实画像存储（name/age/gender/occupation/location + 自由事实）
@@ -255,6 +256,7 @@ impl BrainChatChain {
         let user_model = Arc::new(UserModelManager::new(char_id));
 
         // 组装流水线步骤（每步用 TimingMiddleware 包装，输出 stage 耗时日志）
+        let task_tracker = Arc::new(parking_lot::Mutex::new(crate::pipeline::task_continuity::TaskTracker::default()));
         let mut steps = RunnableSequence::new();
         steps.add_step(Box::new(TimingMiddleware::new(
             "pre_processing",
@@ -339,6 +341,7 @@ impl BrainChatChain {
             &char_id,
             memory.embedding(),
         ));
+        tone_injector.preload();
         let prompt_step = prompt_step.with_tone_injector(tone_injector);
         // 注入工具语义筛选器（启用后 PromptBuildingStep 在 intent=tool_request 时做语义粗筛）
         let prompt_step = if let Some(filter) = tool_semantic_filter.clone() {
@@ -356,7 +359,8 @@ impl BrainChatChain {
             "context_and_prompt",
             Box::new(CompanionContextGather::new(rewrite, semantic, retrieval,
                 Box::new(TimingMiddleware::new("web_context",
-                    Box::new(WebContextRunnable::with_router(router.clone())))), prompt_step)),
+                    Box::new(WebContextRunnable::with_router(router.clone())))), prompt_step)
+                .with_turn_resolution(router.clone(), char_id.into(), task_tracker.clone())),
         )));
         // AI 响应生成（智能路由 + 故障降级 + JSON 提取 + 工具调用执行）
         // 工具调用管理器：max_iterations / feedback_history_chars 从 config.tools 读取
@@ -403,12 +407,8 @@ impl BrainChatChain {
             ),
         )));
         // 回复格式验证：空文本检测 + 长度截断 + 空白清理 + 轻量幻觉检测
-        steps.add_step(Box::new(TimingMiddleware::new(
-            "validation",
-            Box::new(crate::pipeline::steps::validation::ValidationRunnable::with_router(
-                router.clone(),
-            )),
-        )));
+        let validation = Arc::new(crate::pipeline::steps::validation::ValidationRunnable::with_router(router.clone()));
+        steps.add_step(Box::new(TimingMiddleware::new("validation", Box::new((*validation).clone()))));
         // 反思调用（合并表情/动作 + 心理状态推断 + 世界状态更新）：
         // 单次 LLM 调用产出全部结构化字段，复用主对话 system_prompt 前缀命中 API 缓存。
         // inline_expression 启用时仅做心理推断（表情/动作已由流式扫描器实时处理）。
@@ -466,7 +466,8 @@ impl BrainChatChain {
             reflection,
             reflection_gate: Arc::new(tokio::sync::Mutex::new(())),
             reflection_revision: Arc::new(AtomicU64::new(0)),
-            task_tracker: parking_lot::Mutex::new(crate::pipeline::task_continuity::TaskTracker::default()),
+            task_tracker,
+            validation,
             tool_call_manager: tcm_handle,
             user_facts,
             hook_judge,
@@ -566,7 +567,7 @@ impl BrainChatChain {
         user_input: &str,
         final_state: &PipelineState,
         response: &crate::types::response::AiResponse,
-    ) {
+    ) -> String {
         use crate::mind::reasoning_trace::{
             truncate_chars, ApiParamInfo, PromptBreakdown, PromptSection, ReasoningStep, ReasoningTrace,
             TRACE_STORE,
@@ -574,6 +575,8 @@ impl BrainChatChain {
 
         let char_id = self.char_id.clone();
         let mut trace = ReasoningTrace::new(&char_id, user_input);
+        trace.id = format!("trace_{}", uuid::Uuid::new_v4());
+        let trace_id = trace.id.clone();
         trace.session_id = if final_state.conversation_id.is_empty() {
             None
         } else {
@@ -837,6 +840,7 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             };
             TRACE_STORE.write().set_last_prompt(breakdown);
         }
+        trace_id
     }
 
     /// Parse the `[X says to me]` prefix from user_input, returns (text, speaker, listener)
@@ -1052,7 +1056,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         let tts_ctrl = crate::speech::tts::parse_tts_controls(&response.text);
         response.text = crate::utils::strip_markdown_syntax(&tts_ctrl.text);
 
-        self.record_reasoning_trace(user_input, &final_state, &response);
+        let trace = self.record_reasoning_trace(user_input, &final_state, &response);
+        self.validation.schedule_audit(&final_state, &self.char_id, &trace);
 
         Ok((final_state, response))
     }
@@ -1127,23 +1132,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         let mut state = self.prepare_pipeline_state(user_input).await?;
         if !skip_dialogue_write && !state.is_command && !user_input.trim().is_empty() && state.current_channel != "cross_character"
             && state.metadata["system_directive"] != true && state.metadata["proactive_greeting"] != true {
-            let tracked = self.task_tracker.lock().snapshot(crate::memory::types::current_timestamp());
-            let resolved = AIResponseGenerationRunnable::resolve_contextual_intent(&self.router, &state, &self.char_id, tracked).await?;
-            tracing::debug!(character = %self.char_id, action = resolved.action,
-                continues_task = resolved.continues_task, needs_clarification = resolved.needs_clarification,
-                "[ContextualIntent] full conversation interpretation");
-            state.metadata["contextual_intent"] = serde_json::json!(resolved);
-            let request = AIResponseGenerationRunnable::requests_execution(&state);
-            let (revision, context) = self.task_tracker.lock().begin_resolved(user_input, request,
-                !state.messages.iter().any(|message| matches!(message.role.as_str(), "user" | "assistant")),
-                crate::memory::types::current_timestamp(), Some(&resolved));
-            state.metadata["task_turn_revision"] = serde_json::json!(revision);
-            if let Some(context) = context {
-                tracing::debug!(character = %self.char_id, phase = ?context.task.phase,
-                    needs_clarification = context.needs_clarification, "[TaskContinuity] resuming task context");
-                state.metadata["task_continuation"] = serde_json::json!(context);
-            }
+            state.metadata["resolve_contextual_intent"] = serde_json::json!(true);
         }
+
         if let Some(evidence) = visual_evidence {
             state.metadata["visual_evidence"] = serde_json::json!(evidence);
         }

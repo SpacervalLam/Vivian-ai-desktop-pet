@@ -108,16 +108,22 @@ impl ToolSearchTool {
         max_results: usize,
         include_work_only: bool,
     ) -> (String, Vec<String>) {
+        self.search_allowed(query, max_results, include_work_only, None)
+    }
+
+    fn search_allowed(&self, query: &str, max_results: usize, include_work_only: bool,
+        allowed: Option<&[String]>) -> (String, Vec<String>) {
         let query = query.trim();
         let max_results = max_results.min(20);
         if max_results == 0 {
             return ("No matching deferred tools found".into(), Vec::new());
         }
-        let live = self.live_tools(if include_work_only {
+        let mut live = self.live_tools(if include_work_only {
             AgentSide::Work
         } else {
             AgentSide::Companion
         });
+        if let Some(allowed) = allowed { live.retain(|tool| allowed.iter().any(|name| name == tool.name())); }
         let all_tools = &live;
 
         // 1. select: 前缀精确加载（在全量工具中查找）
@@ -525,7 +531,7 @@ impl Tool for ToolSearchTool {
             .clamp(1, 20) as usize;
         // 工作智能体专属工具只在 agent_kind == "work" 的检索域中出现
         let include_work_only = ctx.agent_kind == "work";
-        let (block, matches) = self.search(query, max_results, include_work_only);
+        let (block, matches) = self.search_allowed(query, max_results, include_work_only, ctx.allowed_tools.as_deref());
         ToolResult::standard_success(
             &format!("ToolSearch 返回 {} 个工具", matches.len()),
             Some(serde_json::json!({
@@ -622,6 +628,14 @@ mod tests {
         assert_eq!(search.search("select:late", 20, false).1, ["late"]);
         system.unregister_tool("late");
         assert!(search.search("select:late", 20, false).1.is_empty());
+    }
+
+    #[test]
+    fn discovery_does_not_offer_tools_outside_the_callers_allowlist() {
+        let (_system, search) = setup();
+        let allowed = vec!["alpha".into()];
+        let (_, found) = search.search_allowed("select:alpha,beta", 10, true, Some(&allowed));
+        assert_eq!(found, ["alpha"]);
     }
 
     #[tokio::test]

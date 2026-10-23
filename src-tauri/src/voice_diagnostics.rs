@@ -42,6 +42,24 @@ pub fn record(mode:&str, stage:&str, start:u64, end:u64) {
 pub fn finish(mode:&str, key:&str, stage:&str) { LEDGER.lock().finish(mode,key,stage,now_ms()); }
 pub fn report() -> serde_json::Value { LEDGER.lock().report() }
 
+#[derive(Clone)]
+pub struct ChatTiming { id: String, start: u64 }
+tokio::task_local! { static CHAT_TIMING: ChatTiming; }
+pub async fn scope_chat<F: std::future::Future>(id: String, work: F) -> F::Output {
+    CHAT_TIMING.scope(ChatTiming { id, start: now_ms() }, work).await
+}
+pub fn capture_chat() -> Option<ChatTiming> { CHAT_TIMING.try_with(Clone::clone).ok() }
+pub fn mark_chat(stage: &str) { if let Some(timing) = capture_chat() { timing.mark(stage); } }
+impl ChatTiming {
+    pub fn mark(&self, stage: &str) {
+        let end = now_ms();
+        let mut ledger = LEDGER.lock();
+        ledger.begin("chat", &self.id, stage, self.start);
+        ledger.finish("chat", &self.id, stage, end);
+        tracing::info!(stream_id=%self.id, stage, elapsed_ms=end.saturating_sub(self.start), "Companion response timeline");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

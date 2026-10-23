@@ -16,6 +16,7 @@ pub struct RequestGuard {
 
 impl RequestGuard {
     pub fn begin(base: &ProviderBase) -> VivianResult<Self> {
+        if let Some(budget) = super::base::ProviderCallOptions::current().request_budget { budget.claim()?; }
         let mut breaker = base.circuit_breaker.write();
         if !breaker.allow_request() {
             return Err(VivianError::CircuitBreaker(breaker.name.clone()));
@@ -128,6 +129,9 @@ where
     let guard = RequestGuard::begin(base)?;
     let mut backoff = std::time::Duration::from_millis(500);
     for attempt in 0..3 {
+        if attempt > 0 {
+            if let Some(budget) = super::base::ProviderCallOptions::current().request_budget { budget.claim()?; }
+        }
         match operation().await {
             Ok(value) => {
                 guard.success();
@@ -363,6 +367,27 @@ mod tests {
             0.7,
             100,
         )
+    }
+
+    #[tokio::test]
+    async fn nested_retry_and_fallback_share_one_attempt_budget() {
+        use super::super::base::{scope_provider_call, ProviderCallOptions, RequestBudget};
+        let budget = std::sync::Arc::new(RequestBudget::new(std::time::Duration::from_secs(5), 2));
+        let options = ProviderCallOptions { request_budget: Some(budget.clone()), ..Default::default() };
+        scope_provider_call(options, async {
+            let mut attempts = 0;
+            let result = with_retry(&base(), || {
+                attempts += 1;
+                std::future::ready(Err::<(), _>(VivianError::Network("temporary".into())))
+            }).await;
+            assert!(result.is_err()); assert_eq!(attempts, 2);
+            let mut fallback_called = false;
+            assert!(with_retry(&base(), || { fallback_called = true; std::future::ready(Ok(())) }).await.is_err());
+            assert!(!fallback_called);
+        }).await;
+        assert!(budget.exhausted());
+        let expired = RequestBudget::new(std::time::Duration::ZERO, 10);
+        assert!(expired.claim().is_err());
     }
 
     #[test]

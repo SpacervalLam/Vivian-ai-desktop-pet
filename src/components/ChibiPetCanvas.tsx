@@ -370,8 +370,9 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
     useEffect(() => {
       if (gameMode && poseName === 'idle') sheetLoader.clear(true);
     }, [gameMode, poseName, sheetLoader]);
-    const idleSheet = `/chibi/motion/${characterId}/${characterId}-idle-sheet.webp`;
+    const idleSheet = characterId === 'nana' ? null : `/chibi/motion/${characterId}/${characterId}-idle-sheet.webp`;
     useEffect(() => {
+      if (!idleSheet) return;
       let cancelled = false;
       void sheetLoader.pin(idleSheet).then(() => {
         if (!cancelled) setSheetVersion(version => version + 1);
@@ -1711,7 +1712,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       activeSpec.kind === 'animation'
         ? sheetUrl(activeSpec, characterId, walkDirection)
         : null;
-    const idleFrameStyle = sheetLoader.isReady(idleSheet)
+    const idleFrameStyle = idleSheet && sheetLoader.isReady(idleSheet)
       ? { backgroundImage: `url('${idleSheet}')`, backgroundSize: '100% 100%', backgroundPosition: '0% 0%' }
       : frameStyle(IDLE_SPEC, IDLE_SLOT, characterId, walkDirection);
     const spriteFrameStyle = activeSpec.name === 'idle' ? idleFrameStyle :

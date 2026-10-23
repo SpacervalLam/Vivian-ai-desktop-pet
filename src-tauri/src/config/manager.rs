@@ -788,6 +788,11 @@ pub struct ToolConfig {
     /// 到达上限自动停止，可发送新消息继续）
     #[serde(default = "default_tool_max_coding_rounds")]
     pub max_coding_rounds: u32,
+    /// Shared deadline per work-model step, including retries and fallback.
+    #[serde(default = "default_work_request_timeout_secs")]
+    pub work_request_timeout_secs: u64,
+    #[serde(default = "default_work_request_max_attempts")]
+    pub work_request_max_attempts: usize,
 
     // ── 结果大小预算 ──
     /// 单工具结果字符预算，超出则截断为预览版（`executor.rs` 的 `MAX_RESULT_CHARS`）
@@ -862,6 +867,8 @@ impl Default for ToolConfig {
             max_iterations: default_tool_max_iterations(),
             max_rounds: default_tool_max_rounds(),
             max_coding_rounds: default_tool_max_coding_rounds(),
+            work_request_timeout_secs: default_work_request_timeout_secs(),
+            work_request_max_attempts: default_work_request_max_attempts(),
             max_result_chars: default_tool_max_result_chars(),
             feedback_history_chars: default_tool_feedback_history_chars(),
             default_tool_timeout_secs: default_tool_default_timeout_secs(),
@@ -998,6 +1005,8 @@ pub(crate) fn default_tool_max_rounds() -> u32 {
 fn default_tool_max_coding_rounds() -> u32 {
     48
 }
+fn default_work_request_timeout_secs() -> u64 { 300 }
+fn default_work_request_max_attempts() -> usize { 6 }
 fn default_tool_max_result_chars() -> u32 {
     4000
 }
@@ -1971,6 +1980,21 @@ impl ConfigManager {
 
     pub fn save(&self) -> VivianResult<()> {
         Self::save_to_file(&self.config_file, &*self.config.read())
+    }
+
+    /// Publish a validated complete settings import; failed persistence leaves memory intact.
+    pub fn replace_all(&self, mut next: AppConfig) -> VivianResult<()> {
+        ensure_task_routes(&mut next);
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut next.window.smart_positioning_enabled,
+            &mut next.window.desktop_physics_enabled, "window");
+        let mut config = self.config.write();
+        // The observer may discover another game while the import is being validated.
+        next.companion.game_processes = config.companion.game_processes.clone();
+        Self::save_to_file(&self.config_file, &next)?;
+        *config = next;
+        self.revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     pub fn reload(&self) -> VivianResult<()> {

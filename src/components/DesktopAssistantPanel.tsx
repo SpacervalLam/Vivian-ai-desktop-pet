@@ -185,7 +185,7 @@ export default function DesktopAssistantPanel({ initialCharacter, panel }: Deskt
                         <p className="assistant-shortcut-target" title={item.target}>{item.target}</p>
                       </div>
                       <ArrowUpRight size={14} className="assistant-shortcut-go" />
-                      <button className="assistant-shortcut-open" title={item.target} aria-label={label('打开 ' + item.name, item.name + 'を開く', 'Open ' + item.name)} disabled={busy} onClick={() => void run(async () => { await invoke('companion_launch_shortcut', { shortcutId: item.id, characterId: character }); await feedback(label('已打开 ' + item.name + '。', item.name + 'を開きました。', 'Opened ' + item.name + '.')); })} />
+                      <button className="assistant-shortcut-open" title={item.target} aria-label={label('打开 ' + item.name, item.name + 'を開く', 'Open ' + item.name)} disabled={busy} onClick={() => void run(async () => { await invoke('companion_launch_shortcut', { shortcutId: item.id, characterId: character }); try { await feedback(label('已打开 ' + item.name + '。', item.name + 'を開きました。', 'Opened ' + item.name + '.')); } finally { await invoke('close_chat_window'); } })} />
                       <button className="assistant-shortcut-edit" aria-label={label('编辑 ' + item.name, item.name + 'を編集', 'Edit ' + item.name)} disabled={busy} onClick={() => openShortcutForm(item)}><Pencil size={13} /></button>
                       <button className="assistant-shortcut-remove" aria-label={label('删除 ' + item.name, item.name + 'を削除', 'Remove ' + item.name)} disabled={busy} onClick={() => void run(() => saveShortcuts((context?.shortcuts ?? []).filter(s => s.id !== item.id)))}><Trash2 size={13} /></button>
                     </div>)}

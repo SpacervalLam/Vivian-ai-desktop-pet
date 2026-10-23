@@ -22,6 +22,8 @@ mod types {
 }
 #[path = "../src-tauri/src/brain/coding_event_log.rs"]
 pub mod audit_log;
+#[path = "../src-tauri/src/brain/coding_io.rs"]
+pub mod coding_io;
 pub use audit_log as coding_event_log;
 #[path = "../src-tauri/src/brain/coding_event_capture.rs"]
 pub mod audit_capture;

@@ -8,6 +8,7 @@ pub mod chat;
 pub mod sns;
 pub mod coding_agent;
 pub mod config;
+pub mod config_transfer;
 pub mod diary;
 pub mod discovery;
 pub mod emotion;

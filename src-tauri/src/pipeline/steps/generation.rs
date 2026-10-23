@@ -447,6 +447,59 @@ impl AIResponseGenerationRunnable {
         }
     }
 
+    async fn reply_only_stream(router: &ModelRouter, task: &str, messages: Vec<ChatMessage>, emitter: &SharedStreamEmitter) -> VivianResult<String> {
+        let rx = router.generate_stream(Self::build_native_chat_request(task, messages, vec![]).with_stream(true)).await?;
+        Self::forward_reply_stream(rx, emitter).await
+    }
+
+    async fn forward_reply_stream(mut rx: tokio::sync::mpsc::Receiver<ProviderStreamEvent>, emitter: &SharedStreamEmitter) -> VivianResult<String> {
+        let mut raw = String::new();
+        let mut json_mode = None;
+        let mut parser = StreamingJsonParser::new();
+        let mut plain = crate::brain::tool_leak_filter::ToolLeakFilter::new();
+        let mut emitted = false;
+        let mut sources = Vec::new();
+        let mut fenced = false;
+        while let Some(event) = rx.recv().await {
+            match event {
+                ProviderStreamEvent::Text { content } => {
+                    raw.push_str(&content);
+                    if json_mode.is_none() && raw.trim().is_empty() { continue; }
+                    if raw.trim_start().starts_with('`') { fenced = true; continue; }
+                    let first = json_mode.is_none();
+                    let mode = *json_mode.get_or_insert_with(|| matches!(raw.trim_start().chars().next(), Some('{') | Some('[')));
+                    let current = if first { raw.as_str() } else { content.as_str() };
+                    let clean = if mode { parser.feed(current).into_iter().filter_map(|event| match event {
+                        JsonStreamEvent::TextChunk(text) => Some(text), _ => None,
+                    }).collect::<String>() } else { plain.feed(current) };
+                    if !clean.is_empty() { emitted = true; push_stream_chunk(emitter, &clean); }
+                }
+                ProviderStreamEvent::Error { message } => return Err(VivianError::Provider(message)),
+                ProviderStreamEvent::WebSources { sources: extra } => sources.extend(extra),
+                ProviderStreamEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        if fenced {
+            if !crate::pipeline::tool_execution::calls_from_text(&raw).is_empty() || raw.contains("DSML") {
+                return Err(VivianError::Engine("Reply-only stream returned tool protocol".into()));
+            }
+            let speech = JsonProcessor::new().process_response(&raw).text;
+            let speech = crate::utils::protocol_text::strip_protocol_text(&speech);
+            push_stream_chunk(emitter, &speech);
+            return Ok(speech);
+        }
+        if json_mode == Some(false) { let tail = plain.flush(); if !tail.is_empty() { push_stream_chunk(emitter, &tail); } }
+        if raw.trim().is_empty() { return Err(VivianError::Provider("模型返回了空白响应".into())); }
+        if !emitted && json_mode == Some(true) {
+            // Never expose an unparsed JSON/tool protocol as dialogue.
+            if let Some(text) = JsonParser::extract_text(&raw) { push_stream_chunk(emitter, &text); }
+        }
+        let links = crate::providers::web_citations::links(&sources, &raw);
+        if !links.is_empty() { push_stream_chunk(emitter, &links); }
+        Ok(crate::providers::web_citations::attach(&raw, &sources))
+    }
+
     /// 原生 function calling 路径（非流式入口）
     ///
     /// 首轮响应通过 `generate_with_tools` 一次性获取（完整人设轮）并推送文本；
@@ -613,7 +666,7 @@ impl AIResponseGenerationRunnable {
         })).collect();
         let evidence = json!({"conversation": conversation, "latest_human_utterance": state.user_input,
             "host_task": tracked_task});
-        let response = router.generate(LLMRequest::new("simple_judge", vec![
+        let request = LLMRequest::new("simple_judge", vec![
             ChatMessage::system(crate::pipeline::task_continuity::RESOLVE_SYSTEM),
             ChatMessage::user(evidence.to_string()),
         ]).with_character_id(char_id).with_usage_tag("contextual_intent")
@@ -622,7 +675,11 @@ impl AIResponseGenerationRunnable {
                 "properties":{"action":{"type":"boolean"},"continues_task":{"type":"boolean"},
                     "needs_clarification":{"type":"boolean"},"task":{"type":"string"}},
                 "required":["action","continues_task","needs_clarification","task"]
-            }))).await?;
+            })).with_max_tokens(700).with_reasoning(false);
+        let budget = Arc::new(crate::providers::base::RequestBudget::new(std::time::Duration::from_secs(8), 2));
+        let response = tokio::time::timeout_at(budget.deadline(), router.scope_call_options(
+            ProviderCallOptions { request_budget: Some(budget.clone()), ..Default::default() }, router.generate(request)))
+            .await.map_err(|_| VivianError::Timeout("Contextual intent deadline exceeded".into()))??;
         let parsed = Self::extract_json(&response)
             .and_then(|value| serde_json::from_value::<crate::pipeline::task_continuity::ResolvedTurn>(value).ok())
             .ok_or_else(|| VivianError::Engine("会话意图解析未返回有效结构".into()))?;
@@ -1250,7 +1307,9 @@ impl AIResponseGenerationRunnable {
                 "The latest human utterance, interpreted in the complete conversation, requests conversation or explanation rather than an operation. Respond naturally to that meaning. Do not perform operations, promise execution, or output tool calls."
             };
             messages_vec.push(ChatMessage::system(reply_instruction));
-            let content = router.generate(Self::build_native_chat_request(&task_type, messages_vec, vec![])).await?;
+            let content = if stream {
+                Self::reply_only_stream(&router, &task_type, messages_vec, &self.stream_emitter).await?
+            } else { router.generate(Self::build_native_chat_request(&task_type, messages_vec, vec![])).await? };
             if !crate::pipeline::tool_execution::calls_from_text(&content).is_empty() || content.contains("DSML") {
                 return Err(VivianError::Engine("Task clarification returned tool protocol instead of a reply".into()));
             }
@@ -1260,7 +1319,6 @@ impl AIResponseGenerationRunnable {
             state.tool_calls.clear();
             state.ai_response = Some(AiResponse::new(text.clone()));
             state.generation_status = "task_clarification".into();
-            if stream { push_stream_chunk(&self.stream_emitter, &text); }
             return Ok(state.to_json());
         }
         if let Some(context) = state.metadata.get("cross_delivery_context").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
@@ -1884,6 +1942,29 @@ impl Runnable for ResponseParsingRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reply_only_stream_releases_first_paragraph_before_completion() {
+        for json in [false, true] {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let seen = Arc::new(parking_lot::Mutex::new(String::new()));
+            let ready = Arc::new(tokio::sync::Notify::new());
+            let emitter = new_shared_stream_emitter();
+            let output = seen.clone(); let notification = ready.clone();
+            *emitter.write() = Some(Arc::new(move |text| { output.lock().push_str(text); notification.notify_one(); }));
+            let job = tokio::spawn(async move { AIResponseGenerationRunnable::forward_reply_stream(rx, &emitter).await });
+            tx.send(ProviderStreamEvent::Text { content: "  ".into() }).await.unwrap();
+            let first = if json { r#"{"text":"第一段。\n"# } else { "第一段。\n" };
+            tx.send(ProviderStreamEvent::Text { content: first.into() }).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), ready.notified()).await.unwrap();
+            assert!(seen.lock().contains("第一段。\n"));
+            assert!(!job.is_finished(), "first paragraph must not wait for model completion");
+            tx.send(ProviderStreamEvent::Text { content: if json { "第二段。\"}".into() } else { "第二段。".into() } }).await.unwrap();
+            drop(tx);
+            job.await.unwrap().unwrap();
+            assert!(seen.lock().contains("第二段。"));
+        }
+    }
 
     #[tokio::test]
     async fn contextual_intent_uses_the_whole_window_for_identical_followups() {
