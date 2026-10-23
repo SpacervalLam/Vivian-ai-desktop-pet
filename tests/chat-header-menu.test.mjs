@@ -70,7 +70,8 @@ assert.match(chat, /t\('chat\.screen_saved'/, 'the saved hint goes through i18n'
 
 // —— 3. 分析结果由桌宠转述：后端 emit 气泡，前端不插手 ——
 const assistant = await readFile('src-tauri/src/commands/desktop_assistant.rs', 'utf8');
-assert.match(assistant, /relay_visual_description\(app, state, character_id, turn\.description\)/, 'the vision description is handed to the pet, not dropped');
+assert.match(assistant, /let analysis = analyze_snapshot\(app, state, analysis_character, selected\.png\)\.await;[\s\S]*?let description = analysis\.map_err\([\s\S]*?relay_visual_description\(app, state, analysis_character, description\);/, 'the selected pet receives the screenshot analysis after error handling');
+assert.match(assistant, /let description = analyze_snapshot\(app, state, character_id, png\)\.await\?;\s*relay_visual_description\(app, state, character_id, description\);/, 'the frozen screenshot analysis is handed to the same pet');
 assert.match(assistant, /emit\("companion:interaction"/, 'the relay rides the existing bubble channel');
 assert.match(assistant, /"motion": "happy"/, 'the relay carries an expression so the pet visibly reacts');
 assert.match(assistant, /"replace": true/, 'the relay replaces the in-flight image bubble instead of being swallowed');
