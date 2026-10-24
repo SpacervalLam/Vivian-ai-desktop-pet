@@ -137,11 +137,11 @@ mod tests {
     fn web_native_search_and_function_tools_coexist() {
         for native in [json!({"type":"web_search"}), json!({"google_search":{}})] {
             let mut body = json!({"tools":[native]});
-            let functions = json!([{"type":"function","name":"web_fetch"}]);
+            let functions = json!([{"type":"function","name":"read_content"}]);
             append_tools(&mut body, &functions);
             assert_eq!(body["tools"].as_array().unwrap().len(), 2);
             assert_eq!(body["tools"][0], native);
-            assert_eq!(body["tools"][1]["name"], "web_fetch");
+            assert_eq!(body["tools"][1]["name"], "read_content");
         }
     }
     #[test]

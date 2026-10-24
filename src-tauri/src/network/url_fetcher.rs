@@ -1,4 +1,4 @@
-//! Bounded document retrieval shared by chat links and web_fetch.
+//! Bounded document retrieval shared by chat links and read_content.
 use crate::error::{VivianError, VivianResult};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;

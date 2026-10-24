@@ -657,9 +657,19 @@ impl PromptBuildingStep {
             fp.intent.confidence >= PROMPT_ROUTING_CONFIDENCE
                 && !crate::tools::should_filter_tools(&fp.intent.label)
         }).unwrap_or(false);
-        let hidden = if quiet_chat && !super::generation::AIResponseGenerationRunnable::requests_execution(state) && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
+        let mut hidden = if quiet_chat && !super::generation::AIResponseGenerationRunnable::requests_execution(state) && recalled.as_ref().map(|hits| hits.is_empty()).unwrap_or(false) {
             hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search" && !crate::tools::tool_call_manager::is_core_tool(name))).collect()
         } else { hidden };
+
+        let reader = crate::tools::content_visibility::READER;
+        if crate::tools::content_visibility::has_direct_source(&state.user_input) {
+            hidden.remove(reader);
+            recalled.get_or_insert_with(HashSet::new).insert(reader.into());
+        } else {
+            hidden.insert(reader.into());
+            if let Some(hits) = recalled.as_mut() { hits.remove(reader); }
+        }
+        let recalled_order = recalled_order.into_iter().filter(|name| !hidden.contains(name)).collect();
 
         ToolScope {
             scene,
@@ -1623,9 +1633,10 @@ impl PromptBuildingStep {
                 let (user, _, _) = crate::cross_character::parse_any_speaker_prefix(&state.user_input);
                 let messages = state.messages.clone();
                 let query = state.fast_perception.as_ref().map(|p| p.query_embedding.clone());
-                let learned: Vec<String> = self.persona.as_ref().map(|p| p.evolution_entries()).unwrap_or_default()
-                    .into_iter().filter(|e| e.active()).map(|e| e.scope).collect();
-                let examples = tokio::task::spawn_blocking(move || injector.examples.retrieve(&user, &messages, query.as_ref().map(|q| q.as_slice()), &learned))
+                let evolution = self.persona.as_ref().map(|p| p.evolution_snapshot())
+                    .unwrap_or_else(crate::persona::PersonaEvolution::empty);
+                let examples = tokio::task::spawn_blocking(move || injector.examples.retrieve_growing(&user, &messages,
+                    query.as_ref().map(|q| q.as_slice()), &evolution.learned(), &evolution.example_overrides))
                     .await.ok().flatten();
                 examples
             } else { None }

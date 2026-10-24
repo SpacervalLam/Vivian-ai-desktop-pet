@@ -186,7 +186,7 @@ impl Runnable for WebContextRunnable {
                 {}\n\n\
                 注意：\n\
                 - 区分搜索得到的事实和你的推断\n\
-                - 摘要不是已确认结论，重要事实须用 web_fetch 阅读原文；在相关结论旁引用实际 URL\n\
+                - 摘要不是已确认结论，重要事实须用 read_content 阅读原文；在相关结论旁引用实际 URL\n\
                 - 如果搜索结果仍无法确认用户的意思，要明确告诉用户\n\
                 - 不要为了保持对话自然而假装知道",
                 format!("{}\n检索提示：{}", search_text, search_warnings)

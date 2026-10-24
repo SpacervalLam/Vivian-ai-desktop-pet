@@ -27,6 +27,7 @@ pub(crate) mod catalog;
 mod catalog_tools;
 pub mod chainer;
 pub mod confirmation;
+pub(crate) mod content_visibility;
 pub mod custom_tools;
 pub mod discovery;
 pub mod executor;

@@ -195,7 +195,7 @@ impl ToolScene {
                  优先低打扰的回应方式。用户明确请求时不受此限制。"
             }
             ToolScene::Chat => {
-                "当前是陪伴对话场景，工作能力已直接注入：查资料（web_search / web_fetch）、\
+                "当前是陪伴对话场景，工作能力已直接注入：查资料（web_search / read_content）、\
                  后台任务（run_job / manage_job）、待办（update_todo / add_todo）、\
                  计划（plan_task）、多步编排（run_workflow）、向用户提问（ask_user）、\
                  把大型工程任务以用户身份写成完整提示词交给共享的工作智能体执行，并读取其总结（delegate_to_work_agent + get_work_status）。\
@@ -442,6 +442,9 @@ pub struct ToolUseContext {
     /// 清单更糟。None 表示调用方没声明（非智能体场景），此时按工作侧全量列。
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// 本轮搜索已经返回可读来源；仅控制读取工具的展示，不授予调用权限。
+    #[serde(default)]
+    pub content_reader_ready: bool,
 }
 
 impl Default for ToolUseContext {
@@ -464,6 +467,7 @@ impl Default for ToolUseContext {
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
             allowed_tools: None,
+            content_reader_ready: false,
         }
     }
 }
@@ -488,6 +492,7 @@ impl ToolUseContext {
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
             allowed_tools: None,
+            content_reader_ready: false,
         }
     }
 

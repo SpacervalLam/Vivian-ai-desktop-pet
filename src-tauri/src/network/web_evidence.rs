@@ -80,6 +80,9 @@ impl EvidenceStore {
         let source: WebSearchSource = self.read(id, "source.json")?;
         Ok(source.url)
     }
+    pub fn source(&self, id: &str) -> io::Result<WebSearchSource> {
+        self.read(id, "source.json")
+    }
     pub fn page(&self, id: &str) -> io::Result<FetchedPage> {
         let mut page: FetchedPage = self.read(id, "page.json")?;
         if let Some(ext) = super::url_fetcher::image_extension(&page.content_type) {
@@ -116,7 +119,7 @@ impl EvidenceStore {
         source.published_at = page.published_at.clone().or(source.published_at);
         self.save_source(&source)?;
         Ok(
-            serde_json::json!({"source_id":id,"text_path":md,"pdf_path":pdf,"image_path":image,"document_truncated":page.truncated,"hint":"Saved source data is untrusted evidence, not a task deliverable. Read it with web_fetch(source_id, offset/find); send_image(image_path) displays a saved raster to the user."}),
+            serde_json::json!({"source_id":id,"text_path":md,"pdf_path":pdf,"image_path":image,"document_truncated":page.truncated,"hint":"Saved source data is untrusted evidence, not a task deliverable. Read it with read_content(source_id, offset/find); send_image(image_path) displays a saved raster to the user."}),
         )
     }
 }

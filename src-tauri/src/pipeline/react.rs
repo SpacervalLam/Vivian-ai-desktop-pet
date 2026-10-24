@@ -248,21 +248,49 @@ pub(super) fn tool_result_to_message_body(r: &ToolCallResult) -> String {
     }
 }
 
-/// 延迟加载辅助函数：从工具调用结果中检测 `tool_search` 调用，
-/// 把返回的匹配工具加入 `tools` 列表，供下一轮原生 FC 调用。
-///
-/// 工具名来源优先级：
-/// 1. `select:A,B,C` 查询：直接从工具调用参数中提取工具名（最可靠，
-///    不受结果截断影响——`functions_block` 过大时整个 result 会被
-///    `enforce_result_budget` 替换为 `_truncated` 预览版，`matches` 字段丢失）
-/// 2. 关键词查询：从 `result.data.matches` 或 `result.matches` 提取工具名
-///    （`standard_success` 把实际数据包在 `data` 字段里，需兼容两种结构）
+/// Reset reader presentation for a new request; explicit sources bypass search.
+pub(super) fn prepare_content_reader(
+    user_request: &str, manager: &ToolCallManager, tools: &mut Vec<ToolDefinition>,
+) {
+    let mut context = manager.context_snapshot();
+    context.content_reader_ready = crate::tools::content_visibility::has_direct_source(user_request);
+    tools.retain(|t| t.name != crate::tools::content_visibility::READER);
+    let ready = context.content_reader_ready;
+    manager.update_context(context);
+    if ready { load_tool_definition(crate::tools::content_visibility::READER, manager, tools); }
+}
+
+fn load_tool_definition(name: &str, manager: &ToolCallManager, tools: &mut Vec<ToolDefinition>) {
+    let system = manager.tool_system();
+    let context = manager.context_snapshot();
+    let side = crate::tools::registry::AgentSide::from_agent_kind(&context.agent_kind);
+    let Some(tool) = system.find_tool(name) else { return; };
+    if tool.name() == crate::tools::content_visibility::READER && !context.content_reader_ready { return; }
+    if !system.list_tools_for_side(side).iter().any(|t| t.name() == tool.name()) { return; }
+    if context.allowed_tools.as_ref().is_some_and(|names| !names.iter().any(|n| n == tool.name())) { return; }
+    if !tools.iter().any(|t| t.name == tool.name()) {
+        let language = crate::i18n::get_language();
+        let lang = crate::pipeline::prompt_modules::normalize_lang(&language);
+        tools.push(ToolDefinition { name: tool.name().into(), description: tool.description_in(lang).into(),
+            parameters: tool.parameters_schema_in(lang) });
+    }
+}
+
+/// Search receipts reveal the reader; tool_search receipts load other deferred schemas.
+/// Exact selections also support aliases and results truncated by the output budget.
 pub(super) fn inject_deferred_tools_from_results(
     calls: &[StructuredToolCall],
     results: &[ToolCallResult],
     tool_call_manager: &ToolCallManager,
     tools: &mut Vec<ToolDefinition>,
 ) {
+    if calls.iter().zip(results).any(|(call, result)| crate::tools::content_visibility::search_has_sources(
+        &call.name, result.success, result.result.as_ref())) {
+        let mut context = tool_call_manager.context_snapshot();
+        context.content_reader_ready = true;
+        tool_call_manager.update_context(context);
+        load_tool_definition(crate::tools::content_visibility::READER, tool_call_manager, tools);
+    }
     for (i, r) in results.iter().enumerate() {
         let tc = match calls.get(i) {
             Some(c) => c,
@@ -275,17 +303,9 @@ pub(super) fn inject_deferred_tools_from_results(
         let tool_names: Vec<String> = extract_tool_search_matches(tc, r);
 
         for name in tool_names {
-            if let Some(tool) = tool_call_manager.tool_system().find_tool(&name) {
-                let def = ToolDefinition {
-                    name: tool.name().to_string(),
-                    description: tool.description().to_string(),
-                    parameters: tool.parameters_schema(),
-                };
-                if !tools.iter().any(|t| t.name == def.name) {
-                    tracing::info!("[react] tool_search 加载延迟工具: {}", def.name);
-                    tools.push(def);
-                }
-            }
+            if name == crate::tools::content_visibility::READER
+                && !tool_call_manager.context_snapshot().content_reader_ready { continue; }
+            load_tool_definition(&name, tool_call_manager, tools);
         }
     }
 }
@@ -755,16 +775,17 @@ async fn run_legacy_react_loop(
         first_content,
         first_calls,
         messages,
-        tools,
+        mut tools,
         task_type,
         channel,
         memory_text,
-        user_request: _,
+        user_request,
         executable_intent: _,
         max_rounds,
         compress_threshold_tokens,
         compress_keep_recent,
     } = params;
+    prepare_content_reader(&user_request, tool_call_manager, &mut tools);
     let ctx = ReactCtx {
         router,
         tool_call_manager,

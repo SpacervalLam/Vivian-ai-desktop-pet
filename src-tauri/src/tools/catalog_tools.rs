@@ -335,6 +335,8 @@ impl Tool for AvailableToolsTool {
         let mut rows: Vec<(String, String, String)> = self
             .live_tools(AgentSide::from_agent_kind(&ctx.agent_kind))
             .into_iter()
+            .filter(|t| t.name() != super::content_visibility::READER || ctx.content_reader_ready
+                || ctx.user_message.as_deref().is_some_and(super::content_visibility::has_direct_source))
             .filter(|t| allowed.as_ref().map_or(true, |set| set.contains(t.name())))
             .filter_map(|t| {
                 let name = t.name().to_string();
@@ -531,7 +533,12 @@ impl Tool for ToolSearchTool {
             .clamp(1, 20) as usize;
         // 工作智能体专属工具只在 agent_kind == "work" 的检索域中出现
         let include_work_only = ctx.agent_kind == "work";
-        let (block, matches) = self.search_allowed(query, max_results, include_work_only, ctx.allowed_tools.as_deref());
+        let reader_ready = ctx.content_reader_ready
+            || ctx.user_message.as_deref().is_some_and(super::content_visibility::has_direct_source);
+        let mut allowed = ctx.allowed_tools.clone().unwrap_or_else(||
+            self.live_tools(AgentSide::from_agent_kind(&ctx.agent_kind)).iter().map(|t| t.name().to_string()).collect());
+        if !reader_ready { allowed.retain(|name| name != super::content_visibility::READER); }
+        let (block, matches) = self.search_allowed(query, max_results, include_work_only, Some(&allowed));
         ToolResult::standard_success(
             &format!("ToolSearch 返回 {} 个工具", matches.len()),
             Some(serde_json::json!({
@@ -636,6 +643,26 @@ mod tests {
         let allowed = vec!["alpha".into()];
         let (_, found) = search.search_allowed("select:alpha,beta", 10, true, Some(&allowed));
         assert_eq!(found, ["alpha"]);
+    }
+
+    #[tokio::test]
+    async fn content_reader_discovery_waits_for_sources_and_preserves_user_switches() {
+        let (system, search) = setup();
+        system.register_tool(Arc::new(Named("read_content")));
+        system.register_alias("web_fetch", "read_content");
+        let args = json!({"query":"select:read_content,web_fetch"});
+        let ctx = ToolUseContext::default();
+        let result = search.call(args.clone(), &ctx).await;
+        assert_eq!(result.data.unwrap()["data"]["matches"], json!([]));
+        for ctx in [ToolUseContext { content_reader_ready:true, ..Default::default() },
+            ToolUseContext::default().with_user_message("读取 https://www.bilibili.com/video/BV1234567890 的弹幕")] {
+            let result = search.call(args.clone(), &ctx).await;
+            assert_eq!(result.data.unwrap()["data"]["matches"], json!(["read_content"]));
+        }
+        let ready = ToolUseContext { content_reader_ready:true, ..Default::default() };
+        system.set_disabled_tools(vec!["read_content".into()], vec![]);
+        let result = search.call(args, &ready).await;
+        assert_eq!(result.data.unwrap()["data"]["matches"], json!([]));
     }
 
     #[tokio::test]

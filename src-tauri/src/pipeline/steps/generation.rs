@@ -703,7 +703,8 @@ impl AIResponseGenerationRunnable {
     }
 
     /// Short imperative selections still request execution even when the embedding
-    /// classifier calls them chat. Do not promote a mention, refusal or explanation.
+    /// classifier calls them chat. Do not promote a mention, explanation or question.
+    /// 否定与假设由 `request_intent::withheld` 统一把关，这里只留疑问形态的排除。
     fn explicit_action_followup(input: &str) -> bool {
         use once_cell::sync::Lazy;
         use regex::Regex;
@@ -711,8 +712,7 @@ impl AIResponseGenerationRunnable {
             r"^(?:请|麻烦你?|那就|那|现在|给我|再|就)*\s*(?:换(?:成|为|到|那|这|一张|张|个|一下|壁纸)|切换到|设置为|设置成|设为|设成|用(?:那|这|第)|选(?:那|这|第)|把.{1,60}?(?:换成|切换到|设为|设置为|设置成))"
         ).expect("action followup regex"));
         IMPERATIVE.is_match(input.trim())
-            && !["不要", "别换", "不用", "先不", "不想", "不需要", "是什么", "怎么", "为什么", "如果", "假如",
-                "会不会", "会怎样", "有什么", "的原理"]
+            && !["是什么", "怎么", "为什么", "会不会", "会怎样", "有什么", "的原理"]
                 .iter().any(|word| input.contains(word))
     }
 
@@ -744,14 +744,18 @@ impl AIResponseGenerationRunnable {
         // Capability questions such as “can you make a PPT?” are requests too.
         // This lexical fallback must also work when embeddings are unavailable.
         let input = state.user_input.to_lowercase();
+        // 拒绝与假设不升级。"别帮我查这个" 以前会命中 `帮我` 被送进执行器——
+        // 三条词表各维护一份否定词就会这样，改成统一的语法闸门。
+        if crate::pipeline::request_intent::withheld(&input) {
+            return false;
+        }
         let explicit = ["帮我", "帮忙", "请帮", "做一个", "做一份", "制作一", "生成一", "整理一下",
             "作って", "作成して"].iter().any(|word| input.contains(word))
             || (["can you", "could you", "please"].iter().any(|word| input.contains(word))
                 && (crate::tools::types::contains_task_keyword(&input)
                     || ["ppt", "presentation", "slides", "document", "spreadsheet"].iter().any(|word| input.contains(word))));
-        let embedded_action = !["不要给我", "别给我", "不用给我", "先不给我", "不需要给我", "如果", "假如"]
-            .iter().any(|word| input.contains(word))
-            && input.split_once("给我").is_some_and(|(_, action)| Self::explicit_action_followup(action.trim()));
+        let embedded_action = input.split_once("给我")
+            .is_some_and(|(_, action)| Self::explicit_action_followup(action.trim()));
         if explicit || embedded_action || Self::explicit_action_followup(&input)
             { return true; }
         let Some(perception) = state.fast_perception.as_ref() else {

@@ -58,6 +58,7 @@ pub struct VideoMeta {
     pub cid: u64,
     pub aid: u64,
     pub title: String,
+    pub duration_secs: u64,
 }
 
 /// 评论样本（字幕/评论判断用的一条热门评论）
@@ -225,6 +226,40 @@ impl BilibiliClient {
         resp.json::<Value>()
             .await
             .map_err(|e| format!("json parse failed: {}", e))
+    }
+
+    /// 拉取二进制响应（弹幕分段是 protobuf，走不了 get_json）
+    async fn get_bytes(
+        &self,
+        path: &str,
+        query: &[(String, String)],
+        headers: &[(String, String)],
+        cookie: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        let client = get_global_client();
+        let url = format!("{}{}", BASE_URL, path);
+        let mut req = client.get(&url).query(query).header("User-Agent", UA);
+        if let Some(c) = cookie {
+            req = req
+                .header("Cookie", c)
+                .header("Referer", "https://www.bilibili.com/");
+        }
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("http status {}", resp.status()));
+        }
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("body read failed: {}", e))?;
+        Ok(body.to_vec())
     }
 
     /// 获取 WBI 密钥（img_key, sub_key），带 5 分钟缓存
@@ -474,6 +509,11 @@ impl BilibiliClient {
 
     /// 视频元信息：`/x/web-interface/view` → cid / aid（无需 WBI）
     pub async fn video_view(&self, bvid: &str, cookie: Option<&str>) -> Result<VideoMeta, String> {
+        self.video_part(bvid, 1, cookie).await
+    }
+
+    /// 选择分 P 的 cid；page 从 1 开始，不存在的分 P 明确报错。
+    pub async fn video_part(&self, bvid: &str, page: u32, cookie: Option<&str>) -> Result<VideoMeta, String> {
         let payload = self
             .get_json(
                 "/x/web-interface/view",
@@ -484,20 +524,7 @@ impl BilibiliClient {
             .await?;
         check_api_response(&payload)?;
         let data = payload.get("data").cloned().unwrap_or(Value::Null);
-        let cid = data.get("cid").and_then(|v| v.as_u64()).unwrap_or(0);
-        let aid = data.get("aid").and_then(|v| v.as_u64()).unwrap_or(0);
-        if cid == 0 || aid == 0 {
-            return Err("view 接口缺少 cid/aid".to_string());
-        }
-        Ok(VideoMeta {
-            cid,
-            aid,
-            title: data
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        })
+        extract_video_part(&data, page)
     }
 
     /// 字幕全文：`/x/player/wbi/v2`（WBI 签名 + 登录态）→ subtitle_url → 字幕 JSON
@@ -594,6 +621,57 @@ impl BilibiliClient {
         check_api_response(&payload)?;
         Ok(extract_comments(&payload, limit))
     }
+
+    /// 弹幕分段：`/x/v2/dm/web/seg.so`（protobuf，6 分钟一段，`segment_index` 从 1 起）
+    ///
+    /// 空分段返回空 `Vec`——视频前段确实可能没有弹幕，不能推出「弹幕接口坏了」。
+    /// 只有 HTTP 或响应结构异常才返回 `Err`。
+    pub async fn danmaku_segment(
+        &self,
+        cid: u64,
+        aid: u64,
+        segment_index: u32,
+        cookie: Option<&str>,
+    ) -> Result<Vec<crate::discovery::danmaku::DanmakuElem>, String> {
+        let params = vec![
+            ("type".to_string(), "1".to_string()),
+            ("oid".to_string(), cid.to_string()),
+            ("pid".to_string(), aid.to_string()),
+            (
+                "segment_index".to_string(),
+                segment_index.max(1).to_string(),
+            ),
+        ];
+        let body = self
+            .get_bytes("/x/v2/dm/web/seg.so", &params, &[], cookie)
+            .await?;
+        crate::discovery::danmaku::parse_segment_checked(&body)
+    }
+}
+
+fn extract_video_part(data: &Value, page: u32) -> Result<VideoMeta, String> {
+    if page == 0 {
+        return Err("分 P 编号必须从 1 开始".into());
+    }
+    let part = data.get("pages").and_then(Value::as_array)
+        .and_then(|pages| pages.iter().find(|p| p["page"].as_u64() == Some(u64::from(page))));
+    // 旧响应可能没有 pages；仅 P1 可以使用顶层 cid。
+    let part = match part {
+        Some(part) => part,
+        None if page == 1 && data.get("pages").is_none() => data,
+        None => return Err(format!("视频没有 P{page} 或接口缺少该分 P 信息")),
+    };
+    let cid = part["cid"].as_u64().unwrap_or(0);
+    let aid = data["aid"].as_u64().unwrap_or(0);
+    if cid == 0 || aid == 0 {
+        return Err("view 接口缺少 cid/aid".into());
+    }
+    Ok(VideoMeta {
+        cid,
+        aid,
+        title: data["title"].as_str().unwrap_or("").to_string(),
+        duration_secs: part["duration"].as_u64().unwrap_or(0),
+    })
 }
 
 /// HTTP 200 仍可能是登录失效/风控；不能把业务错误当成「没有字幕/评论」。
@@ -729,6 +807,20 @@ fn md5_hex(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_part_uses_the_selected_cid_and_part_duration() {
+        let data = serde_json::json!({"aid":7,"cid":11,"duration":1000,"title":"视频",
+            "pages":[{"page":1,"cid":11,"duration":100},{"page":2,"cid":22,"duration":900}]});
+        let part = extract_video_part(&data, 2).unwrap();
+        assert_eq!(part.cid, 22);
+        assert_eq!(part.duration_secs, 900);
+        assert!(extract_video_part(&data, 0).is_err());
+        assert!(extract_video_part(&data, 3).is_err());
+        let legacy = serde_json::json!({"aid":7,"cid":11,"duration":100});
+        assert_eq!(extract_video_part(&legacy, 1).unwrap().cid, 11);
+        assert!(extract_video_part(&legacy, 2).is_err());
+    }
 
     #[test]
     fn api_errors_are_not_empty_content() {

@@ -219,6 +219,8 @@ pub struct ContentDetail {
     pub status: DetailStatus,
     /// 高赞优先、已截断的评论
     pub comments: Vec<String>,
+    /// 弹幕时间锚聚合（按分钟密度 + 该分钟代表句）；仅 B 站有
+    pub danmaku_line: Option<String>,
     /// 证据类型：subtitle / article / post / thread
     pub kind: &'static str,
     /// 给用户/模型的下一步提示（登录、换链接、稍后重试等）
@@ -270,6 +272,7 @@ impl ContentDetail {
             body_chars: ctx.subtitle_chars,
             status,
             comments: ctx.comments.clone(),
+            danmaku_line: ctx.danmaku.as_ref().and_then(|d| d.to_prompt_line()),
             kind: "subtitle",
             hint,
         }
@@ -375,19 +378,26 @@ pub async fn fetch(platform: &str, content_id: &str, url: &str) -> ContentDetail
 ///
 /// 支持 App 分享出来的短链（b23.tv / v.douyin.com / xhslink.com）：先跟随重定向还原。
 pub async fn fetch_by_url(url: &str) -> Result<ContentDetail, String> {
-    let mut url = url.trim().to_string();
-    if platform_and_id(&url).is_none() {
-        if let Some(expanded) = expand_short_link(&url).await {
-            url = expanded;
-        }
-    }
-    let (platform, id) = platform_and_id(&url).ok_or_else(|| {
+    let (url, platform, id) = resolve_platform_url(url).await.ok_or_else(|| {
         format!(
             "暂不支持这个链接。目前支持：{}",
             supported_summary()
         )
     })?;
     Ok(fetch(&platform, &id, &url).await)
+}
+
+pub async fn resolve_platform_url(url: &str) -> Option<(String, String, String)> {
+    let mut url = url.trim().to_string();
+    if platform_and_id(&url).is_none() {
+        if let Some(expanded) = expand_short_link(&url).await { url = expanded; }
+    }
+    let (platform, id) = platform_and_id(&url)?;
+    Some((url, platform, id))
+}
+
+pub fn invalidate(platform: &str, id: &str) {
+    CACHE.write().remove(&(platform.to_string(), id.to_string()));
 }
 
 /// 短链还原：只对已知分享域名发一次只读 GET（跟随重定向）
@@ -1222,6 +1232,7 @@ fn detail_from_parts(body: Option<&str>, comments: Vec<String>, kind: &'static s
         body_chars,
         status,
         comments,
+        danmaku_line: None,
         kind,
         hint: None,
     }

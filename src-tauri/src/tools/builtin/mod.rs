@@ -8,6 +8,7 @@ pub mod cross_character_tools;
 pub mod coding_tools;
 pub mod diary_tools;
 pub mod discovery_tools;
+pub mod bilibili_danmaku_tool;
 pub mod extended_system_ops;
 pub mod file_tools;
 pub mod input_control_tools;
@@ -24,6 +25,9 @@ pub mod perception_tools;
 pub mod pet_tools;
 pub mod pet_interaction_tools;
 pub mod plan_tools;
+/// 平台内检索：web_search 之外去 B站 / 番组 / 微博 / V2EX / Reddit / X 找可引用条目。
+pub mod platform_search_policy;
+pub mod platform_search_tool;
 pub mod plugin_tools;
 pub mod provider_preset_tools;
 pub mod presence_tools;
@@ -46,6 +50,9 @@ pub mod wallpaper_tools;
 pub mod wakeup_tool;
 pub mod weather_tools;
 pub mod web_fetch_tool;
+pub(crate) mod web_platform_search;
+pub(crate) mod web_platform_fetch;
+pub(crate) mod web_tool_compat;
 pub mod web_search_tool;
 pub mod work_agent_tools;
 pub mod work_todo_tools;
@@ -173,7 +180,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(wallpaper_tools::WallpaperControlTool::new()),
         // 网络搜索（LLM 原生搜索的补充，支持 DuckDuckGo/SearXNG/Tavily）
         Arc::new(web_search_tool::WebSearchTool::new()),
-        // 网页抓取（web_fetch：从具体 URL 提取正文）
+        // 统一读取网页与平台正文、字幕、评论、弹幕。
         Arc::new(web_fetch_tool::WebFetchTool::new()),
         // 链接分享（搜索后分享有价值的链接卡片）
         Arc::new(share_link_tool::ShareLinkTool::new()),
@@ -253,8 +260,6 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(discovery_tools::SubmitContentFeedbackTool::new()),
         Arc::new(discovery_tools::GetInterestProbesTool::new()),
         Arc::new(discovery_tools::AnswerInterestProbeTool::new()),
-        // 按链接读取平台正文 + 热评（复用浏览器登录态）
-        Arc::new(discovery_tools::ReadPlatformContentTool::new()),
     ];
 
     // 内嵌浏览器工具（经 browser_bridge 调用进程内 WebView2，共享普通配置的登录态）

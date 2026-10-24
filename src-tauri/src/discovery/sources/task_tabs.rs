@@ -153,7 +153,9 @@ pub async fn refresh_from_task_tabs(char_id: &str) {
     if !bridge.is_connected() { return; }
     let platform_status = bridge.platform_status().map(|(_, m)| m);
 
-    for plan in task_tab_plans() {
+    let mut plans = task_tab_plans();
+    plans.sort_by_key(|plan| plan.platform != crate::discovery::learning_policy::primary_platform(char_id));
+    for plan in plans {
         if !task_tab_due(char_id, plan.platform) {
             continue;
         }
@@ -206,6 +208,26 @@ pub async fn refresh_from_task_tabs(char_id: &str) {
             admitted
         );
     }
+}
+
+/// 主题驱动的平台内搜索，供知识与语言语料采集使用，不以通用搜索命中为前提。
+pub async fn search_platform(char_id: &str, platform: &str, query: &str, limit: usize) -> Result<Vec<ContentCandidate>, String> {
+    let plan = task_tab_plans().into_iter().find(|plan| plan.platform == platform)
+        .ok_or_else(|| format!("不支持后台搜索平台 {platform}"))?;
+    let bridge = crate::browser_bridge::tools::global_bridge().filter(|bridge| bridge.is_connected())
+        .ok_or_else(|| "内嵌浏览器未连接，无法读取平台资料".to_string())?;
+    if plan.needs_login && !bridge.platform_status()
+        .and_then(|(_, status)| status.get(platform).copied()).unwrap_or(false) {
+        return Err(format!("请先在内嵌浏览器登录 {platform}，再读取平台资料"));
+    }
+    let args = serde_json::json!({"platform":platform,"query":query,"extractor":platform,"waitMs":plan.wait_ms});
+    // 直调 bridge 会绕过工具包装层，需要先把 platform + query 解析成固定平台 URL。
+    let args = crate::browser_bridge::sites::task_args(&args)?;
+    let text = bridge.request_tool("browser_task_tab", &args, std::time::Duration::from_secs(25),
+        Some(&format!("knowledge:{char_id}"))).await.map_err(|error| error.to_string())?;
+    Ok(parse_task_tab_items(&text).iter()
+        .filter_map(|item| raw_to_candidate(platform, item, &format!("search:{query}")))
+        .take(limit.min(TASK_TAB_LIMIT)).collect())
 }
 
 // ============================================================================

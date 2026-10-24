@@ -17,8 +17,10 @@
 //! content_store.json / speculative_state.json），全部原子写。
 
 pub mod bilibili;
+pub mod danmaku;
 pub mod duty;
 pub mod engine;
+pub mod learning_policy;
 pub mod profile;
 pub mod recommend;
 pub mod sources;
@@ -180,6 +182,11 @@ pub async fn maintenance_pass(char_id: &str) {
         );
     }
 
+    // Nana 先浏览自己的主平台，再做其他平台的维护。
+    let task_tabs_first = learning_policy::primary_platform(char_id) == "xiaohongshu";
+    if task_tabs_first {
+        sources::task_tabs::refresh_from_task_tabs(char_id).await;
+    }
     // 每日刷B站值班（一天最多一轮）：日报 + 月度归档 + 每天配额
     duty::maybe_run_daily(char_id).await;
 
@@ -193,7 +200,9 @@ pub async fn maintenance_pass(char_id: &str) {
 
     // 3. 隔离任务 tab 自动发现：小红书/抖音/知乎后台静默采集（平台级 3 小时冷却 +
     //    登录态门槛；扩展未连接/未登录时静默跳过）
-    sources::task_tabs::refresh_from_task_tabs(char_id).await;
+    if !task_tabs_first {
+        sources::task_tabs::refresh_from_task_tabs(char_id).await;
+    }
 
     // 4. 低库存跨平台补货
     let store = ContentStore::load(char_id);

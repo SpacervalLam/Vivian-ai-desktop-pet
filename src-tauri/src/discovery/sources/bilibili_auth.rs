@@ -14,6 +14,8 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use tokio::sync::Semaphore;
 
+use crate::discovery::danmaku::{self, DanmakuDigest};
+
 /// 每轮最多富化几个视频（成本与风控上限）
 pub const SUBTITLE_FETCH_CAP: usize = 6;
 /// 字幕注入 LLM 前的字数上限
@@ -21,6 +23,11 @@ const SUBTITLE_MAX_CHARS: usize = 4000;
 /// 评论样本条数 / 每条字数上限
 const COMMENTS_PER_VIDEO: usize = 5;
 const COMMENT_MAX_CHARS: usize = 120;
+/// 弹幕只取第一个分段（前 6 分钟的黄金段，密度最高）；多取分段收益递减
+/// 而请求数线性增长，评估阶段用不上
+const DANMAKU_SEGMENT_INDEX: u32 = 1;
+const DANMAKU_SEGMENT_SECS: u64 = 360;
+const DANMAKU_TIMEOUT_SECS: u64 = 6;
 /// 单个视频富化的整体超时
 const FETCH_TIMEOUT_SECS: u64 = 12;
 /// 缓存 TTL（同一 bvid 会被 discovery 的多条路径反复取）
@@ -40,13 +47,15 @@ pub enum SubtitleStatus {
     Excerpt,
 }
 
-/// 一个候选的富化上下文（字幕 + 热门评论），供 LLM 评估注入
+/// 一个候选的富化上下文（字幕 + 热门评论 + 弹幕密度），供 LLM 评估注入
 #[derive(Debug, Clone, Default)]
 pub struct CandidateContext {
     pub subtitle: Option<String>,
     pub comments: Vec<String>,
     pub subtitle_status: SubtitleStatus,
     pub subtitle_chars: usize,
+    /// 弹幕时间锚聚合（公开接口，未登录也有）；`None` = 未取得或该段无弹幕
+    pub danmaku: Option<DanmakuDigest>,
 }
 
 impl CandidateContext {
@@ -103,6 +112,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 fn cache_ttl(ctx: &CandidateContext) -> i64 {
+    // 拿到弹幕就按内容缓存：弹幕是稳定数据，不该因为字幕未登录而在 60 秒后失效
+    if ctx.danmaku.is_some() {
+        return CACHE_TTL_SECS;
+    }
     match ctx.subtitle_status {
         SubtitleStatus::Full | SubtitleStatus::Excerpt | SubtitleStatus::Missing => CACHE_TTL_SECS,
         _ => FAILURE_TTL_SECS,
@@ -118,21 +131,32 @@ fn cached(key: &(String, String)) -> Option<CandidateContext> {
 }
 
 /// 按登录态隔离缓存；短缓存故障、限制容量，并将排队时间纳入总超时。
+///
+/// 没有登录态时**仍然抓弹幕**（公开接口）——字幕与评论都拿不到，但观众反应
+/// 的密度信号还能作为评估锚点，比只报「LoginRequired」多一层信息。
 pub async fn fetch_context(bvid: &str) -> CandidateContext {
+    fetch_part_context(bvid, 1).await
+}
+
+pub fn invalidate_context(bvid: &str, page: u32) {
+    let key = if page == 1 { bvid.to_string() } else { format!("{bvid}:p{page}") };
+    CACHE.write().retain(|(cached, _), _| cached != &key);
+}
+
+pub async fn fetch_part_context(bvid: &str, page: u32) -> CandidateContext {
     let bvid = bvid.trim();
     if bvid.is_empty() {
         return CandidateContext::default();
     }
-    let Some(cookie) = resolve_cookie() else {
-        return CandidateContext {
-            subtitle_status: SubtitleStatus::LoginRequired,
-            ..Default::default()
-        };
-    };
+    let cookie = resolve_cookie();
     use md5::{Digest, Md5};
+    // 缓存按登录态隔离：未登录拿到的弹幕结果不能与登录后的字幕结果共用同一格
     let key = (
-        bvid.to_string(),
-        format!("{:x}", Md5::digest(cookie.as_bytes())),
+        if page == 1 { bvid.to_string() } else { format!("{bvid}:p{page}") },
+        match cookie.as_deref() {
+            Some(c) => format!("{:x}", Md5::digest(c.as_bytes())),
+            None => "anon".to_string(),
+        },
     );
     if let Some(ctx) = cached(&key) {
         return ctx;
@@ -142,7 +166,7 @@ pub async fn fetch_context(bvid: &str) -> CandidateContext {
         if let Some(ctx) = cached(&key) {
             return Some(ctx);
         }
-        let ctx = fetch_inner(bvid, &cookie).await;
+        let ctx = fetch_inner(bvid, page, cookie.as_deref()).await;
         let now = chrono::Utc::now().timestamp();
         let mut cache = CACHE.write();
         cache.retain(|_, (at, c)| now - *at < cache_ttl(c));
@@ -167,16 +191,51 @@ pub async fn fetch_context(bvid: &str) -> CandidateContext {
     })
 }
 
-async fn fetch_inner(bvid: &str, cookie: &str) -> CandidateContext {
+/// 分段解析结果 → 聚合摘要
+///
+/// 「何时算取到」的判定在 `danmaku::DanmakuDigest::new_if_useful` 里，
+/// 那是纯逻辑，能进隔离 harness 覆盖。
+fn digest_danmaku(elems: Vec<danmaku::DanmakuElem>) -> Option<DanmakuDigest> {
+    DanmakuDigest::new_if_useful(&elems, DANMAKU_SEGMENT_SECS)
+}
+
+async fn fetch_inner(bvid: &str, page: u32, cookie: Option<&str>) -> CandidateContext {
     let client = &crate::discovery::BILI_CLIENT;
-    let Ok(meta) = client.video_view(bvid, Some(cookie)).await else {
+    let Ok(meta) = client.video_part(bvid, page, cookie).await else {
         return CandidateContext {
-            subtitle_status: SubtitleStatus::Unavailable,
+            // 无登录态时请求失败也不能报「接口不可用」——根因仍然是没登录，
+            // 状态会直接决定 hint 措辞与日报里的证据档位
+            subtitle_status: if cookie.is_some() {
+                SubtitleStatus::Unavailable
+            } else {
+                SubtitleStatus::LoginRequired
+            },
             ..Default::default()
         };
     };
+
+    // 弹幕是公开数据，不发送登录凭据（与字幕 CDN 同一口径）
+    let danmaku_fut = client.danmaku_segment(meta.cid, meta.aid, DANMAKU_SEGMENT_INDEX, None);
+
+    let Some(cookie) = cookie else {
+        // 无登录态：字幕与评论都要登录，只有弹幕还能取到
+        let danmaku = tokio::time::timeout(
+            Duration::from_secs(DANMAKU_TIMEOUT_SECS),
+            danmaku_fut,
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(digest_danmaku);
+        return CandidateContext {
+            subtitle_status: SubtitleStatus::LoginRequired,
+            danmaku,
+            ..Default::default()
+        };
+    };
+
     // 每条支路独立超时：评论失败不能抹掉已经读到的字幕，反之亦然。
-    let (subtitle, comments) = tokio::join!(
+    let (subtitle, comments, danmaku) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(6),
             client.subtitles(bvid, meta.cid, Some(cookie))
@@ -184,6 +243,10 @@ async fn fetch_inner(bvid: &str, cookie: &str) -> CandidateContext {
         tokio::time::timeout(
             Duration::from_secs(6),
             client.top_comments(bvid, meta.aid, Some(cookie), COMMENTS_PER_VIDEO)
+        ),
+        tokio::time::timeout(
+            Duration::from_secs(DANMAKU_TIMEOUT_SECS),
+            danmaku_fut
         ),
     );
     let (subtitle, subtitle_status, subtitle_chars) = match subtitle {
@@ -210,11 +273,13 @@ async fn fetch_inner(bvid: &str, cookie: &str) -> CandidateContext {
         .map(|c| truncate_chars(c.text.trim(), COMMENT_MAX_CHARS))
         .filter(|s| !s.is_empty())
         .collect();
+    let danmaku = danmaku.ok().and_then(Result::ok).and_then(digest_danmaku);
     CandidateContext {
         subtitle,
         comments,
         subtitle_status,
         subtitle_chars,
+        danmaku,
     }
 }
 

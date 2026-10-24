@@ -234,7 +234,7 @@ impl ToolSystem {
     /// 它们不可被禁用，配置里即使残留对应条目也不生效。
     pub fn is_tool_disabled(&self, name: &str, side: AgentSide) -> bool {
         let catalog = self.catalog.read();
-        let canonical = catalog.resolve(name).unwrap_or(name);
+        let canonical = catalog.resolve(name).or_else(|| super::builtin::web_tool_compat::target(name)).unwrap_or(name);
         if is_tool_locked(canonical, side) {
             return false;
         }
@@ -243,7 +243,7 @@ impl ToolSystem {
             .get(&side)
             .map(|set| {
                 set.iter().any(|disabled| {
-                    catalog.resolve(disabled).unwrap_or(disabled) == canonical
+                    catalog.resolve(disabled).or_else(|| super::builtin::web_tool_compat::target(disabled)).unwrap_or(disabled) == canonical
                 })
             })
             .unwrap_or(false)
@@ -454,13 +454,15 @@ impl ToolSystem {
     /// 2. 别名匹配
     /// 3. 规范化匹配（lowercase + 去除 `_`/`-`/`.` 分隔符），容错 LLM 输出大小写或分隔符偏差
     pub fn find_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.catalog.read().find(name).cloned()
+        self.find_tool_versioned(name).map(|(tool,_)| tool)
     }
 
     /// The implementation and revision must come from the same registry snapshot.
     pub(crate) fn find_tool_versioned(&self, name: &str) -> Option<(Arc<dyn Tool>, u64)> {
         let catalog = self.catalog.read();
-        Some((catalog.find(name)?.clone(), catalog.revision()))
+        if let Some(tool) = catalog.find(name) { return Some((tool.clone(),catalog.revision())); }
+        let target = super::builtin::web_tool_compat::target(name)?;
+        Some((super::builtin::web_tool_compat::wrap(name,catalog.find(target)?.clone()),catalog.revision()))
     }
 
     /// 是否存在指定工具
@@ -696,6 +698,17 @@ mod tests {
         let tool = ts.find_tool("set_wallpaper").expect("别名应能解析到真实工具");
         assert_eq!(tool.name(), "wallpaper_set");
         assert!(ts.has_tool("set_wallpaper"));
+    }
+
+    #[test]
+    fn historical_web_names_resolve_without_appearing_in_the_catalog() {
+        let system = system_with(&["web_search","read_content"]);
+        assert_eq!(system.find_tool("platform_search").unwrap().name(),"web_search");
+        assert_eq!(system.find_tool("read_bilibili_danmaku").unwrap().name(),"read_content");
+        assert_eq!(system.find_tool("web_fetch").unwrap().name(),"read_content");
+        assert_eq!(system.list_tools().len(),2);
+        system.set_disabled_tools(vec!["read_platform_content".into()],vec![]);
+        assert!(system.is_tool_disabled("read_content",AgentSide::Companion));
     }
 
     /// 规范化匹配**不能**替代别名表：它只去分隔符、不重排词序。

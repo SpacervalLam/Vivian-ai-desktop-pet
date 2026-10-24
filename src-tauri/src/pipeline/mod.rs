@@ -6,6 +6,7 @@
 //! - [`errors`]：PipelineError / StageTimeoutError / StageExecutionError
 //! - [`steps`]：各阶段 Runnable（pre_processing / memory / mood / prompt / generation）
 //! - [`react`]：原生 FC 的 ReAct 工具循环共享骨架与对话阶段（执行态/表达态）
+//! - [`retrieval_ledger`]：检索来源台账（宿主核验的来源索引 + 表达阶段正文守卫）
 //! - [`prompt_modules`]：模块化 Prompt 构建器
 //! - [`parsers`]：输出解析器（JsonOutputParser / SchemaOutputParser / StateFieldParser / StreamingOutputParser）
 //!
@@ -27,6 +28,8 @@ pub mod parsers;
 pub mod prompt_modules;
 pub mod presentation_grounding;
 pub mod react;
+pub mod request_intent;
+pub mod retrieval_ledger;
 pub(crate) mod tool_execution;
 pub mod state;
 pub(crate) mod task_continuity;

@@ -13,12 +13,12 @@
       "has_pixels": false
     },
     {
-      "tool": "web_fetch",
+      "tool": "read_content",
       "success": false,
       "has_pixels": false
     },
     {
-      "tool": "web_fetch",
+      "tool": "read_content",
       "success": true,
       "has_pixels": false
     },

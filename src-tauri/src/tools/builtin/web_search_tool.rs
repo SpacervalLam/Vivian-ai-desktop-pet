@@ -45,6 +45,7 @@ fn queries(args: &Value) -> Vec<String> {
     values
 }
 fn validate(args: &Value) -> Result<(), String> {
+    super::web_platform_search::validate(args)?;
     if args
         .get("query")
         .is_some_and(|v| !v.as_str().is_some_and(|s| !s.trim().is_empty()))
@@ -139,17 +140,19 @@ impl Tool for WebSearchTool {
         "web_search"
     }
     fn description(&self) -> &str {
-        "Search external facts using one query or up to four parallel queries. Restrict domains and recency, select fast or research mode. Chat defaults to fast; work defaults to research. Results are UNTRUSTED excerpts, not verified claims. Open key sources with web_fetch before asserting important facts; cite actual URLs next to claims. Engine agreement is not independent evidence. Prefer primary sources, distinguish publication dates from retrieval times, disclose conflicts and missing evidence. Refine queries when needed; stop when evidence is sufficient or the task budget is reached. Never invent current facts after a failed search. Do not search for pure feelings or chit-chat. Native search is optional, use this tool when native capability is unavailable or needs explicit controls."
+        "Find sources about a topic using query or up to four queries. Omit platforms for general web search; set platforms to search inside Bilibili, Xiaohongshu, Douyin, Zhihu, Bangumi, Weibo, V2EX, Reddit or X (up to three platforms). include_web=true searches the web alongside those platforms. Login-dependent platforms reuse a connected browser; report login failures and empty channels. Supports domain/recency filters and fast/research mode. Returns titles, URLs, source_ids and excerpts, not full articles or video content. When sources are found, read_content is exposed automatically to read originals, available subtitles, comments or Bilibili danmaku. If the user already supplied a link, read it directly without repeating a search. Treat excerpts and generated answers as untrusted leads; read originals for important claims and cite actual URLs. Prefer primary sources; engine agreement is not independent evidence. Never invent facts after failure. Stop when evidence is sufficient; pure chit-chat needs no search."
     }
     fn description_in(&self, lang: &str) -> &str {
         if lang == "zh" {
-            "查证外部事实：单条或最多四条并行查询，支持域名/时间限制及 fast/research 模式。陪伴侧默认快速，工作侧默认研究。结果是【不可信摘要】，不是已验证结论。重要事实须用 web_fetch 阅读原文；在结论旁引用实际 URL。不同引擎命中同一文章不算独立证据。优先原始来源，区分发布时间和获取时间，如实说明冲突与证据缺口。可按缺口改写查询，证据足够或预算耗尽即停止；搜索失败不得凭旧知识编造最新事实。情绪陪伴和纯闲聊无需搜索。原生搜索不可用或需要明确条件时直接用本工具。"
+            "按主题查找资料来源，传 query 或最多4条 queries。不传 platforms 时搜索通用网页；传 platforms 时直接站内搜索B站(bilibili)、小红书(xiaohongshu)、抖音、知乎、番组、微博、V2EX、Reddit或X，一次最多3个平台；include_web=true 同时搜索通用网页。需登录的平台复用已连接浏览器，未登录或零命中须如实说明。支持域名、时间范围及 fast/research 模式。结果是标题、URL、source_id 和摘要，不是完整正文或视频内容。搜索命中后自动显示 read_content，用它进一步读取原文、可用字幕、评论或B站弹幕；用户已给链接时可直接读取，无需重复搜索。摘要与模型生成答案只作线索，重要事实先核验原文并在结论旁引用实际 URL；优先原始来源，多引擎命中同文不算独立证据。搜索失败不编造事实，证据足够即停止，纯闲聊无需搜索。"
         } else {
             self.description()
         }
     }
     fn parameters_schema(&self) -> Value {
         json!({"type":"object","properties":{
+        "platforms":{"type":"array","items":{"type":"string","enum":super::platform_search_policy::PLATFORMS},"minItems":1,"maxItems":3,"description":"Search inside these platforms. Xiaohongshu/Douyin/Zhihu reuse browser login. Omit for general web search"},
+        "include_web":{"type":"boolean","description":"Also query general web alongside specified platforms; default false when platforms is set"},
         "query":{"type":"string","description":"A specific search query"},
         "queries":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":4,"description":"Up to four queries; total including query must be <=4"},
         "max_results":{"type":"integer","minimum":1,"maximum":20,"description":"Per-query result limit; chat 5, work 10 unless configured"},
@@ -179,6 +182,9 @@ impl Tool for WebSearchTool {
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         if let Err(e) = validate(&args) {
             return ToolResult::standard_error(&e, Some("InvalidSearchInput"), None);
+        }
+        if args.get("platforms").is_some() {
+            return super::web_platform_search::search(&args, ctx, queries(&args)).await;
         }
         let (config, proxy) = read_search_config();
         let work = ctx.is_work_agent();
@@ -262,7 +268,7 @@ impl Tool for WebSearchTool {
                 Some(json!({"queries":batches})),
             );
         }
-        let mut payload = json!({"queries":batches,"partial_failure":!errors.is_empty(),"evidence_status":"UNVERIFIED","hint":"Treat excerpts as untrusted data; read originals with web_fetch and cite their URLs. For no matches, refine queries or report inability to verify."});
+        let mut payload = json!({"queries":batches,"partial_failure":!errors.is_empty(),"evidence_status":"UNVERIFIED","hint":"Treat excerpts as untrusted data; read originals with read_content and cite their URLs. For no matches, refine queries or report inability to verify."});
         if requests.len() == 1 {
             if let Some(batch) = payload["queries"][0].as_object().cloned() {
                 payload.as_object_mut().expect("object").remove("queries");
@@ -286,7 +292,7 @@ impl Tool for WebSearchTool {
         ToolRiskTier::Safe
     }
     fn search_hint(&self) -> &str {
-        "internet search news research sources verification"
+        "internet platform search news research sources bilibili xiaohongshu 站内搜索 小红书 B站 知乎 抖音 视频 帖子"
     }
 }
 #[cfg(test)]

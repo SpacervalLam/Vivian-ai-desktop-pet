@@ -106,7 +106,7 @@ pub fn tool_failure_to_character_text(tool: &str, _error: &str) -> String {
         "save_memory" => {
             "这个…我没能记住呢，可以再说一次吗？".to_string()
         }
-        "web_search" | "web_fetch" => {
+        "web_search" | "read_content" => {
             "网络好像有点问题，查不到呢…".to_string()
         }
         "create_todo" | "update_todo" | "delete_todo" => {
