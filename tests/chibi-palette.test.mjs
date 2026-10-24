@@ -23,7 +23,14 @@ for(const item of report){
    if(after[k+c]!==before[k+c])changed++;
   }
  }
- assert.equal(alphaErrors,0,`${item.name}: original alpha and silhouette, including empty cells`);assert.equal(outlineErrors,0,'visible dark outline channels unchanged');assert.ok(changed>100000,'colour correction is present');
+ assert.equal(alphaErrors,0,`${item.name}: original alpha and silhouette, including empty cells`);assert.equal(outlineErrors,0,'visible dark outline channels unchanged');
+ // 已经与默认配色对齐的 sheet 再跑一次构建是幂等的（改动为 0），不能因此判失败；
+ // 是否真的对齐由后面的 default-state colour match 逐帧断言。
+ if(changed<=100000){
+  const already=await lightPalette(file,item.cols,item.rows,item.frames);
+  assert.ok(already.some(f=>f.count>1000),`${item.name}: sheet holds no correctable material`);
+  for(const frame of already)assert.ok(Math.abs(luminance(frame.rgb)-luminance(reference))<6,`${item.name}/${frame.frame}: unchanged sheet must already match default colours`);
+ }
  if(item.toneMatch)for(let frame=0;frame<item.frames;frame++){
   const a=Buffer.alloc(512*512*4),b=Buffer.alloc(a.length);
   for(let y=0;y<512;y++){const start=((Math.floor(frame/item.cols)*512+y)*info.width+frame%item.cols*512)*4;before.copy(a,y*512*4,start,start+512*4);after.copy(b,y*512*4,start,start+512*4);}

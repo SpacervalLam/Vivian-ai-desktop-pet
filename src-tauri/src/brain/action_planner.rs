@@ -653,6 +653,7 @@ mod tests {
             away_seconds: 0.0,
             user_present: true,
             user_contact_blocked: false,
+            character_presence: crate::presence::PresenceState::Online,
             interaction_count_today: 5,
             active_window: "VSCode".to_string(),
             window_changed: false,

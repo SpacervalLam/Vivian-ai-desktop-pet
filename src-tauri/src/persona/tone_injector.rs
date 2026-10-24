@@ -1,7 +1,20 @@
 //! 场景语气注入器（Tone Injector）
 //!
-//! 基于 embedding + 关键词匹配用户输入的场景，命中后注入对应场景的语气规则 + 参考台词。
-//! 不依赖 LLM 主动调用，是硬约束——每轮对话都会执行。
+//! 基于 embedding + 关键词匹配用户输入的场景，命中后给出对应场景的语气方向。
+//! 不依赖 LLM 主动调用。
+//!
+//! ## 在主对话链路里的真实地位（2026-10-24 勘误）
+//!
+//! ** CompanionPrompt 按设计不消费场景语气注入**：脚本化的台词/语气参考会让角色
+//! 表演预设反应，压过当下这句原话（见 `companion_prompt.rs` 的
+//! `automated_response_scripts_do_not_overrule_current_dialogue` 测试与
+//! "Real state wins" 注释）。主链路因此不再计算它——2026-10-24 删掉了
+//! PromptBuildingStep 里「算了但被 CompanionPrompt 丢弃」的整段废功
+//! （场景台词 + 情绪浮点向量 + 心情读数 + 热梗回响都只喂那个被丢弃的字段）。
+//!
+//! 本类型在主链路的现存职责只有一个：**承载 ExampleRetriever**（few-shot 检索），
+//! `PromptBuildingStep::tone_injector` 就是为拿 `injector.examples` 而存在的。
+//! 场景匹配 API 保留给设置页预览与后续实验，`pub` 但不被生产调用。
 //!
 //! ## 匹配策略
 //!
@@ -11,10 +24,6 @@
 //! 2. **embedding 匹配**（secondary）：仅当配置了远程 embedding 服务时启用
 //!    - 语义相似度匹配，能识别关键词未覆盖的同义表达
 //!    - 命中阈值 0.72
-//!
-//! ## 注入位置
-//!
-//! 动态区末尾（工具列表前），利用近因效应强化语气控制。
 
 use std::sync::Arc;
 
@@ -104,7 +113,14 @@ impl ToneInjector {
 
     pub(crate) fn preload(&self) { self.vectors.request(); self.examples.request_preload(); }
 
-    pub(crate) fn build_tone_injection_with_embedding(&self, user_input: &str, lang: &str, learned: &[&str], query_embedding: Option<&[f32]>) -> Option<String> {
+    #[cfg(test)]
+    pub(crate) fn preload_scene_vectors_for_test(&self) {
+        self.vectors.preload();
+        self.examples.preload();
+    }
+
+    /// 主对话链路不调用本方法（见模块文档）：保留给预览与实验，故为 `pub`。
+    pub fn build_tone_injection_with_embedding(&self, user_input: &str, lang: &str, learned: &[&str], query_embedding: Option<&[f32]>) -> Option<String> {
         if user_input.trim().is_empty() {
             return None;
         }

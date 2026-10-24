@@ -50,7 +50,7 @@ impl CancelToken {
     ///
     /// 幂等：多次调用效果相同，只有第一次实际发送信号。
     pub fn cancel(&self) {
-        let _ = self.0.sender.send(true);
+        self.0.sender.send_replace(true);
     }
 
     /// 是否已被取消
@@ -72,5 +72,19 @@ impl CancelToken {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancellation_before_any_subscriber_is_retained() {
+        let (sender, receiver) = watch::channel(false);
+        drop(receiver);
+        let token = CancelToken(Arc::new(Inner { sender }));
+        token.cancel();
+        assert!(token.is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_millis(100), token.cancelled()).await.unwrap();
     }
 }

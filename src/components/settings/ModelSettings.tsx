@@ -13,14 +13,45 @@ export interface ConfigObject {
 
 /** Shared with Rust defaults, routing semantics, and task-specific prompt contracts.
  *
+ *  设置页的默认视图是 `ROUTING_TIERS`——用户真正要选的是"这段活要多贵的模型"，
+ *  而不是二十几个任务各配一遍。`ROUTING_TASKS` 作为高级覆盖留在下面，未配置时
+ *  自动继承所属档位。
+ *
  *  catalog 里标了 `hidden` 的路由不出现在这里：它们不放进通用设置页的路由矩阵，
  *  由各自的专属界面提供配置入口（如聊天专属角色的模型面板）。后端仍完整支持
- *  这些路由——解析、fallback、用量统计、连通性测试都照常。 */
-export const ROUTING_TASKS = taskCatalog
-  .filter((task) => !(task as { hidden?: boolean }).hidden)
-  .map(({ groupKey, labelKey, id, helpKey }) => ({
-    groupKey, labelKey, taskType: id, helpKey,
+ *  这些路由——解析、fallback、用量统计、连通性测试都照常。
+ *
+ *  `kind !== 'llm'` 的任务（目前只有图片生成）走独立 HTTP 客户端，不参与档位继承，
+ *  单独渲染在 `NON_LLM_TASKS` 里。 */
+type CatalogTask = {
+  id: string;
+  tier?: string | null;
+  kind?: string;
+  hidden?: boolean;
+  groupKey: string;
+  labelKey: string;
+  helpKey: string;
+};
+
+const CATALOG = taskCatalog as unknown as {
+  tiers: { id: string; labelKey: string; helpKey: string }[];
+  tasks: CatalogTask[];
+};
+
+export const ROUTING_TIERS = CATALOG.tiers.map(({ id, labelKey, helpKey }) => ({
+  tierType: id, labelKey, helpKey,
+}));
+
+export const ROUTING_TASKS = CATALOG.tasks
+  .filter((task) => !task.hidden && (task.kind ?? 'llm') === 'llm')
+  .map(({ groupKey, labelKey, id, helpKey, tier }) => ({
+    groupKey, labelKey, taskType: id, helpKey, tier: tier ?? '',
   }));
+
+/** 非 LLM 任务：由各自的客户端直连厂商接口，不进档位。 */
+export const NON_LLM_TASKS = CATALOG.tasks
+  .filter((task) => !task.hidden && (task.kind ?? 'llm') !== 'llm')
+  .map(({ labelKey, id, helpKey }) => ({ taskType: id, labelKey, helpKey }));
 
 /** 厂商下的一个嵌入模型（插件 llm-providers 的 embedding-providers.json） */
 interface EmbeddingProviderModelPreset {

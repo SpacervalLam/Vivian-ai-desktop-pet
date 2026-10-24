@@ -64,6 +64,10 @@ pub fn normalize_lang(lang: &str) -> &'static str {
 /// first_contact / proactive / initiative / inner_monologue）全部三语化。
 /// 其余**结构/协议类**规则（safety / session / address / output_format /
 /// pet_identity / contract）保持英文：它们约束行为边界，不约束措辞风格。
+///
+/// `weather_care` 是条件能力指南（有天气数据或用户提到出行才注入），
+/// 2026-10-24 从 companion_dialogue 拆出——它占主语气文件近一半篇幅，
+/// 放在每轮里既稀释语气规则又教模型把背景天气当话题。
 pub fn tone_rule(lang: &str, base: &str) -> &'static str {
     match normalize_lang(lang) {
         "en" => match base {
@@ -77,6 +81,8 @@ pub fn tone_rule(lang: &str, base: &str) -> &'static str {
             "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.en.md"),
             "initiative" => include_str!("../../prompts/framework/initiative.en.md"),
             "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.en.md"),
+            "weather_care" => include_str!("../../prompts/framework/weather_care.en.md"),
+            "current_thought" => include_str!("../../prompts/framework/current_thought.en.md"),
             _ => "",
         },
         "ja" => match base {
@@ -90,6 +96,8 @@ pub fn tone_rule(lang: &str, base: &str) -> &'static str {
             "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.ja.md"),
             "initiative" => include_str!("../../prompts/framework/initiative.ja.md"),
             "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.ja.md"),
+            "weather_care" => include_str!("../../prompts/framework/weather_care.ja.md"),
+            "current_thought" => include_str!("../../prompts/framework/current_thought.ja.md"),
             _ => "",
         },
         _ => match base {
@@ -103,6 +111,8 @@ pub fn tone_rule(lang: &str, base: &str) -> &'static str {
             "proactive_companionship" => include_str!("../../prompts/framework/proactive_companionship.zh.md"),
             "initiative" => include_str!("../../prompts/framework/initiative.zh.md"),
             "inner_monologue" => include_str!("../../prompts/framework/inner_monologue.zh.md"),
+            "weather_care" => include_str!("../../prompts/framework/weather_care.zh.md"),
+            "current_thought" => include_str!("../../prompts/framework/current_thought.zh.md"),
             _ => "",
         },
     }
@@ -128,6 +138,11 @@ pub fn companion_post_history_rules(lang: &str) -> &'static str {
     tone_rule(lang, "companion_post_history")
 }
 
+pub(crate) fn companion_reply_language(lang: &str) -> String {
+    let language = match normalize_lang(lang) { "en" => "English", "ja" => "Japanese", _ => "Chinese" };
+    format!("[REPLY LANGUAGE]\nUse {language} for spoken text. Write the complete reply in {language} unless the current user explicitly requests another language or a translation. Character-card and example languages do not override this choice. Preserve code, quoted source and proper names as needed.\n[/REPLY LANGUAGE]")
+}
+
 pub fn conversation_focus_rules(lang: &str) -> &'static str {
     tone_rule(lang, "conversation_focus")
 }
@@ -146,6 +161,33 @@ pub fn initiative_rules(lang: &str) -> &'static str {
 
 pub fn inner_monologue_rules(lang: &str) -> &'static str {
     tone_rule(lang, "inner_monologue")
+}
+
+/// 天气关心指南（条件注入，见 companion_prompt 的 weather 门控）。
+pub fn weather_care_rules(lang: &str) -> &'static str {
+    tone_rule(lang, "weather_care")
+}
+
+/// 主对话语气块：五个语气文件按「风格 → 活人感 → 本轮焦点 → 节奏 → 用语分寸」
+/// 顺序拼接，一次注入。
+///
+/// 2026-10-24 之前主链路只推 `companion_dialogue` 一个语气文件，
+/// MOSTLY_SHORT / SILENCE_OK / 禁用词表这些真正管「短、口语、不客服腔」的规则
+/// 只活在 legacy PromptBuilder、proactive 和单句路径——桌宠主对话因此
+/// 收不到它们。这里把五个文件接进主链路，companion_dialogue 里重复的
+/// 段落已同步删除（每条规则只有一个真源）。
+pub fn dialogue_tone_rules(lang: &str) -> String {
+    [
+        chat_style_framework(lang),
+        human_feel_rules(lang),
+        conversation_focus_rules(lang),
+        conversation_rhythm(lang),
+        banned_phrases(lang),
+    ]
+    .into_iter()
+    .filter(|rule| !rule.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 // ========== 模块 1：身份模块（Identity） ==========
@@ -189,6 +231,15 @@ pub fn banned_phrases(lang: &str) -> &'static str {
 
 pub fn output_format() -> &'static str {
     include_str!("../../prompts/framework/output_format.en.md")
+}
+
+/// 工具轮专用输出格式示例（工具调用 JSON / 多段链式 / 语音消息 / 就寝）。
+///
+/// 2026-10-24 从 output_format 拆出：这些示例只在真有工具可调时有意义，
+/// 闲聊轮注入它们等于每轮都教模型「回复是一个带工具字段的 JSON 对象」，
+/// 既占 token 又强化机器语域。
+pub fn output_format_tools() -> &'static str {
+    include_str!("../../prompts/framework/output_format_tools.en.md")
 }
 
 /// Speaker Prefix 规则
@@ -1237,6 +1288,8 @@ pub struct PromptParts {
     pub user_level: u8,
     /// 当前任务类型（chat / reasoning / memory / ...）。
     pub task_type: String,
+    /// Current human request needs operations; discovery tools alone do not imply this.
+    pub operation_context: bool,
     /// 用户输入
     pub user_input: String,
     /// 检索到的记忆富文本（含时间/标签/重要性/陈旧度提示，由 MemoryRetrievalStep 组装）
@@ -1342,11 +1395,6 @@ pub struct PromptParts {
     /// 告知 LLM 可在回复文本中嵌入 <e name="happy" dur="3000"/>、<m name="wave"/> 标签，
     /// 流式扫描器会即时剥离并触发前端表情/动作切换。
     pub inline_tag_section: Option<String>,
-    /// 场景语气注入（可选，由 ToneInjector 匹配用户输入场景后注入）
-    ///
-    /// 命中场景时注入对应场景的参考台词，利用近因效应强化语气控制。
-    /// 注入位置在动态区末尾（工具列表前），让 LLM 生成前最后看到语气参考。
-    pub tone_injection: Option<String>,
     /// 快速语义感知引导（可选，由 FastSemanticAnalyzer 多维度嵌入分类生成）
     ///
     /// 基于用户输入的即时嵌入分类（情绪/意图/话题/记忆重要性/关系信号）合成的
@@ -1656,12 +1704,16 @@ pub fn resolve_prompt_budget(parts: &PromptParts) -> usize {
         3 => 110,
         _ => 120,
     };
-    let task_percent = match parts.task_type.as_str() {
-        "reasoning" | "work_agent" | "coding" => 120,
-        "chat" => 100,
-        "vision_describe" => 90,
-        "memory" | "reflection" | "diary" | "knowledge_acquisition" => 80,
-        _ => 90,
+    // 按档位给提示词预算权重：新增任务自动继承所属档位的份额，不必逐条登记。
+    let task_percent = match crate::providers::task_catalog::tier_of(&parts.task_type) {
+        Some("execution") | Some("work") => 120,
+        Some("vision") => 90,
+        Some("memory") | Some("cognition") => 80,
+        Some("dialogue") => 100,
+        _ => match parts.task_type.as_str() {
+            "coding" => 120,
+            _ => 90,
+        },
     };
     // 原为不超过模型窗口的 40%；放宽到 60%，仍为历史、工具结果和回复保留硬余量。
     // 预算是上限不是目标——实际系统提示（静态 17.3K + 动态数 K）远低于此，
@@ -2029,11 +2081,6 @@ impl PromptBuilder {
             push!(0, "inner_reaction", parts.inner_reaction.clone().unwrap_or_default());
         }
 
-        // 场景语气注入（命中场景时注入参考台词，利用近因效应强化语气控制）
-        // rank=0：这是语气控制的直接抓手，过去排在 rank=3（最先被裁），
-        // 导致"怎么说话"这件事在超预算时第一个消失。
-        push!(0, "tone_injection", parts.tone_injection.clone().unwrap_or_default());
-
         // 近期自我发言清单 + 反重复指令
         // rank=0：只占几百字节，但它是对抗"套话化"的唯一事前手段。
         // LoopDetectionAdvisor 是事后补救（生成完才发现完全重复再重试），
@@ -2169,8 +2216,7 @@ impl PromptBuilder {
 /// - `direct`：用户直接说话（面对面），回复应更像口语对话
 /// - `wechat` / `wechat_group`：用户通过聊天面板发消息（线上/群聊），回复应更像线上聊天
 ///
-/// 规则部分压缩为 [CHANNEL_STYLE] flag 格式；示例对话保留原样——
-/// 示例是语气锚点，标记化会丢失示教信号。规则类内容统一英文。
+/// 渠道只约束投递形式；角色语气与当前场景由角色卡及检索示例承担。
 pub(crate) fn build_channel_style_guide(channel: &str) -> String {
     match channel {
         "direct" => r#"## Channel: Direct Speech
@@ -2179,24 +2225,13 @@ pub(crate) fn build_channel_style_guide(channel: &str) -> String {
 face-to-face spoken language | short conversational sentences | verbal fillers fit (y'know, like, mhm)
 avoid formal writing / long structured paragraphs | one complete utterance per turn — no splitting into bursts | no emoji or chat punctuation — you're talking, not typing
 no markdown formatting ever — no **bold**, no *emphasis*, no `code spans`, no # headers, no bullet lists | your words land in a plain speech bubble and get saved to memory verbatim, so any syntax symbol would show up raw
-[/CHANNEL_STYLE]
-
-Example (direct):
-User: "帮我看看这个代码哪里错了"
-You: "嗯我看看……这块逻辑有点问题，循环里没判空，可能会炸。你加个 null check 应该就好了。"#.to_string(),
+[/CHANNEL_STYLE]"#.to_string(),
         "wechat" => r#"## Channel: Text Chat
 
 [CHANNEL_STYLE]
 texting style, concise and casual | messages short like real texting | sparing emoji
-2-4 short messages per turn, one beat each (one point / reaction / question) | fragments OK ("看起来挺好") | share content as a separate link card
-[/CHANNEL_STYLE]
-
-Example (wechat):
-User: "代码跑不通了"
-You (multiple messages):
-  "啊？哪行报错"
-  "你把log发我看看"
-  "我感觉是那个null check的事""#.to_string(),
+one short reply can be complete | separate paragraphs only for separate thoughts, with no message-count quota | fragments OK | share content as a separate link card
+[/CHANNEL_STYLE]"#.to_string(),
         // 广播：用户当众说了一次，在场所有人（含室友）同时听到。
         // 这一段是修"同一句话被理解成分别说了两遍"的关键——LLM 必须知道
         // 这不是对自己一个人的私聊，也不能推断用户把同一句重复给了别人。
@@ -2208,25 +2243,14 @@ you are one of several addressed listeners, not the only one | never treat it as
 never say or imply the user said the same thing twice, repeated themselves to someone else, or told each of you separately — there is only one utterance, and you both heard it
 if you reply, you reply out loud in front of the others — say it to the room, not as a whisper to the user
 same spoken-language rules as face-to-face: short conversational sentences, verbal fillers fit, no markdown, no emoji or chat punctuation, one complete utterance per turn
-[/CHANNEL_STYLE]
-
-Example (broadcast):
-User (aloud, to both of you): "我今晚把代码收尾了"
-You: "哟，真收工了？那今晚总算不用听你敲键盘了——Nana你听见没，他解放了。""#.to_string(),
+[/CHANNEL_STYLE]"#.to_string(),
         "wechat_group" => r#"## Channel: Group Chat
 
 [CHANNEL_STYLE]
-group-chat texting style | short and casual | 2-4 short messages per turn | fragments OK | emoji fit
+group-chat texting style | short and casual | one reply is enough when it answers the turn; no message-count quota | fragments OK | emoji fit
 etiquette: everyone sees what you say — don't repeat points others made, speak only with something new
 user talking to a specific character (named or clear from context) → listen by default, don't jump in | several people present → short ack beats a long essay
-[/CHANNEL_STYLE]
-
-Example (group):
-User: "code won't run"
-You (multiple messages):
-  "huh? which line's the error"
-  "send me the log"
-  "bet it's that null check""#.to_string(),
+[/CHANNEL_STYLE]"#.to_string(),
         _ => String::new(),
     }
 }
@@ -2698,7 +2722,7 @@ mod tests {
         let baseline = PromptParts {
             model_context_window: Some(131_072),
             user_level: 2,
-            task_type: "chat".to_string(),
+            task_type: crate::providers::base::TASK_COMPANION.to_string(),
             ..Default::default()
         };
         // window/2 × level2(100%) × chat(100%) = 65_536。
@@ -2748,13 +2772,17 @@ mod tests {
         let format = output_format();
         for key in [
             "no_reply", "response_mode", "tool", "arguments", "voice_message",
-            "set_presence_state", "THINKING", "PAUSE", "SPEED", "EMO", "markdown",
+            "THINKING", "PAUSE", "SPEED", "EMO", "markdown",
         ] {
             assert!(format.contains(key), "output_format 丢失语义锚点: {key}");
         }
         // 示例对话必须原样保留（语气锚点不压缩）
         assert!(format.contains("{\"text\": \"好，就这么定。\""));
-        assert!(format.contains("\"voice_message\": true"));
+        let tool_format = output_format_tools();
+        assert!(tool_format.contains("set_presence_state"));
+        assert!(tool_format.contains("\"voice_message\": true"));
+        assert!(tool_format.contains("Multi-step tool chaining"));
+        assert!(!format.contains("Multi-step tool chaining"));
         // 其他规则文件的标记块
         assert!(pet_identity().contains("[CAPABILITY_BOUNDARY]"));
         assert!(session_rules().contains("[SESSION_RULES]"));

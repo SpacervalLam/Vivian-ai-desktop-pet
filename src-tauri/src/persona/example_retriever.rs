@@ -40,15 +40,15 @@ impl ExampleRetriever {
     #[cfg(test)]
     pub fn preload(&self) { self.vectors.preload(); }
 
-    pub fn retrieve(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String]) -> Option<String> {
-        self.retrieve_from(user, messages, query, learned, &self.entries, &self.vectors, &BTreeSet::new())
+    pub fn retrieve(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String], lang: &str) -> Option<String> {
+        self.retrieve_from(user, messages, query, learned, &self.entries, &self.vectors, &BTreeSet::new(), lang)
     }
 
     pub fn retrieve_growing(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>,
-        learned: &[(String, String)], overrides: &[ExampleOverride]) -> Option<String> {
+        learned: &[(String, String)], overrides: &[ExampleOverride], lang: &str) -> Option<String> {
         let scopes: Vec<_> = learned.iter().map(|(scope, _)| scope.clone()).collect();
         let active: Vec<_> = overrides.iter().filter(|update| update.applies(learned)).cloned().collect();
-        if active.is_empty() { return self.retrieve(user, messages, query, &scopes); }
+        if active.is_empty() { return self.retrieve(user, messages, query, &scopes, lang); }
         let key = example_library::fingerprint(&active);
         let cached = self.revised.read().as_ref().filter(|snapshot| snapshot.key == key).cloned();
         let snapshot = cached.unwrap_or_else(|| {
@@ -60,12 +60,12 @@ impl ExampleRetriever {
             *self.revised.write() = Some(snapshot.clone());
             snapshot
         });
-        self.retrieve_from(user, messages, query, &scopes, &snapshot.entries, &snapshot.vectors, &snapshot.revised_ids)
+        self.retrieve_from(user, messages, query, &scopes, &snapshot.entries, &snapshot.vectors, &snapshot.revised_ids, lang)
     }
 
     fn retrieve_from(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String],
-        entries: &[Example], snapshot: &EmbeddingSnapshot, revised_ids: &BTreeSet<String>) -> Option<String> {
-        if user.trim().is_empty() { return None; }
+        entries: &[Example], snapshot: &EmbeddingSnapshot, revised_ids: &BTreeSet<String>, lang: &str) -> Option<String> {
+        if user.trim().is_empty() || source_transformation(user) { return None; }
         snapshot.request();
         let history = recent_context(user, messages);
         let normalized_user = user.trim().to_lowercase();
@@ -86,8 +86,15 @@ impl ExampleRetriever {
             self.embedding.embed(&format!("Recent dialogue:\n{history}\nCurrent user: {user}")).ok().filter(|v| valid(v))
         } else { None };
         let mut scored = Vec::new();
+        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         for (index, e) in entries.iter().enumerate() {
             if learned.contains(&e.scope) && !revised_ids.contains(&e.id) { continue; }
+            // 语种门：三语示例混在同一库文件里，检索必须按界面语言选档。
+            // 不过滤时，配了远程多语 embedding 的中文对话会召回 style-en/ja 示例
+            // （跨语言相似度过准入线），而英文/日文界面更是一直在吃中文示例——
+            // 模型会直接跟着示例的语言说话。2026-10-24 补上这道门。
+            let e_lang = entry_lang(e);
+            if e_lang != "any" && e_lang != lang_norm { continue; }
             // Generic confirmations/duration answers require the right ongoing scene.
             if !e.context_cues.is_empty() && !e.context_cues.iter().any(|cue| cue_matches(&normalized_history, &cue.trim().to_lowercase())) { continue; }
             let literal_score = e.cues.iter().filter_map(|cue| {
@@ -159,6 +166,47 @@ impl ExampleRetriever {
         tracing::debug!(examples = %ids.join(","), chars = out.chars().count(), continuation, "Persona example retrieval");
         Some(out)
     }
+}
+
+/// Quoted source material and code are not the user's emotional self-report.
+pub(crate) fn source_transformation(input: &str) -> bool {
+    let input = input.to_lowercase();
+    if ["把", "请把", "帮我把", "能把", "可以把"].iter().any(|cue| input.starts_with(cue))
+        && ["翻译成", "翻译为", "译成", "翻译一下", "润色一下", "改写成"].iter().any(|cue| input.contains(cue)) { return true; }
+    input.split(['，', ',', '。', ';', '；', '\n']).any(|clause| {
+        let clause = clause.trim();
+        // Talking about a rewrite is different from requesting one.
+        if ["润色后", "润色完", "改写后", "翻译后", "翻訳後"].iter().any(|cue| clause.starts_with(cue)) { return false; }
+        let directive = ["翻译", "译成", "改写", "润色", "把", "请", "帮我", "麻烦", "能把", "可以把", "这句", "怎么",
+            "translate ", "rewrite ", "please ", "can you ", "could you ", "how to "]
+            .iter().any(|cue| clause.starts_with(cue));
+        let transform = ["翻译", "译成", "translate ", "改写", "润色", "rewrite "]
+            .iter().any(|cue| clause.contains(cue));
+        let japanese_request = ["翻訳して", "訳して", "翻訳してください", "訳してください"].iter().any(|cue| clause.contains(cue));
+        let code = ["代码", "code", "コード"].iter().any(|cue| clause.contains(cue));
+        let analysis = ["分析", "解释", "检查", "修复", "debug", "review", "analyze", "analyse", "explain"];
+        let analysis_request = directive || analysis.iter().any(|cue| clause.starts_with(cue));
+        (directive && transform) || japanese_request || (code && analysis_request && analysis.iter().any(|cue| clause.contains(cue)))
+    })
+}
+
+/// 示例条目的语种：先看显式 id 前缀（style-en-* / style-ja-*），否则按文本判定
+/// （假名→ja，汉字→zh，纯 ASCII→en）。
+///
+/// 与 persona 的 examples.md 不同，example_library.json 是三语混排的单文件，
+/// 消费侧必须自己选档——`resolve_section` 那套按语言解析的逻辑到不了这里。
+fn entry_lang(entry: &Example) -> &'static str {
+    // 生产约定：跨语言示例一律带 style-en-* / style-ja-* 前缀（few-shot-library
+    // 测试强制 ≥12 条），前缀即权威标记。
+    if entry.id.starts_with("style-en-") { return "en"; }
+    if entry.id.starts_with("style-ja-") { return "ja"; }
+    let text = format!("{}{}{}", entry.user, entry.situation,
+        entry.response["text"].as_str().unwrap_or_default());
+    if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}')) { return "ja"; }
+    if text.chars().any(|c| matches!(c, '\u{4E00}'..='\u{9FFF}')) { return "zh"; }
+    // 纯 ASCII 没有任何文字证据：判为「中立」，不参与语种门。
+    // 生产库里的英文条目前缀已覆盖；这条只放过语言无关的测试夹具。
+    "any"
 }
 
 /// 离线模式下的表面重叠回退打分（无远程 embedding 且字面 cue 未命中时）。
@@ -286,17 +334,17 @@ mod tests {
         let mut update = ExampleOverride { scope:"comfort".into(), understanding:Some("先倾听".into()), updated_at:1.0,
             edit:ExampleEdit {id:"old".into(), reference:None, reason:"修订表达".into(), example:Some(changed.clone())} };
         let learned = vec![("comfort".into(), "先倾听".into())];
-        let first = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()]).unwrap();
+        let first = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()], "zh").unwrap();
         assert!(first.contains("现在先听你说")); assert!(!first.contains("原来的回应"));
         changed.response["text"] = "想说的时候我都在".into();
         update.edit.example = Some(changed);
-        let second = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()]).unwrap();
+        let second = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()], "zh").unwrap();
         assert!(second.contains("想说的时候我都在")); assert!(!second.contains("现在先听你说"));
-        assert!(r.retrieve_growing("难过", &[], None, &[("comfort".into(), "新的理解".into())], &[update.clone()]).is_none());
+        assert!(r.retrieve_growing("难过", &[], None, &[("comfort".into(), "新的理解".into())], &[update.clone()], "zh").is_none());
         // Withdrawing the interpretation withdraws its samples and restores the seed.
-        assert!(r.retrieve_growing("难过", &[], None, &[], &[update.clone()]).unwrap().contains("原来的回应"));
+        assert!(r.retrieve_growing("难过", &[], None, &[], &[update.clone()], "zh").unwrap().contains("原来的回应"));
         update.understanding = None; update.edit.example = None;
-        assert!(r.retrieve_growing("难过", &[], None, &[], &[update]).is_none());
+        assert!(r.retrieve_growing("难过", &[], None, &[], &[update], "zh").is_none());
     }
     #[test]
     fn restored_corpus_basis_and_evolved_samples_are_used_after_restart() {
@@ -306,12 +354,12 @@ mod tests {
         let original:Example = serde_json::from_value(example("portable-base", "comfort", "难过", "归档中的原始语气")).unwrap();
         example_library::save_base_at(&path, &[original]).unwrap();
         let restored = ExampleRetriever::new(&char_id, default_embedding());
-        assert!(restored.retrieve("难过", &[], None, &[]).unwrap().contains("归档中的原始语气"));
+        assert!(restored.retrieve("难过", &[], None, &[], "zh").unwrap().contains("归档中的原始语气"));
         let sample:Example = serde_json::from_value(example("grown-portable", "comfort", "难过", "进化之后先陪你歇会儿")).unwrap();
         let updates = vec![ExampleOverride {scope:"comfort".into(),understanding:Some("尊重沉默".into()),updated_at:2.0,
             edit:ExampleEdit {id:sample.id.clone(),reference:None,reason:"随备份继承的成长".into(),example:Some(sample)}}];
         let roundtrip:Vec<ExampleOverride> = serde_json::from_str(&serde_json::to_string(&updates).unwrap()).unwrap();
-        let output = restored.retrieve_growing("难过", &[], None, &[("comfort".into(),"尊重沉默".into())], &roundtrip).unwrap();
+        let output = restored.retrieve_growing("难过", &[], None, &[("comfort".into(),"尊重沉默".into())], &roundtrip, "zh").unwrap();
         assert!(output.contains("进化之后先陪你歇会儿"));
         assert!(!output.contains("归档中的原始语气"));
     }
@@ -324,10 +372,10 @@ mod tests {
             example("grass", "slang", "草", "What a surprise")
         ]));
         for input in ["this is a book", "token lookup", "16分钟", "草率决定"] {
-            assert!(r.retrieve(input, &[], None, &[]).is_none(), "false cue in {input}");
+            assert!(r.retrieve(input, &[], None, &[], "zh").is_none(), "false cue in {input}");
         }
         for (input, id) in [("HI!", "hi"), ("OK，可以", "ok"), ("6!", "six"), ("草", "grass")] {
-            assert!(r.retrieve(input, &[], None, &[]).unwrap().contains(&format!("Example {id}\n")));
+            assert!(r.retrieve(input, &[], None, &[], "zh").unwrap().contains(&format!("Example {id}\n")));
         }
         assert!(!cue_matches("anything", ""));
         assert!(cue_matches("晚上下雨还得出门呢", "下雨还得出门"));
@@ -339,7 +387,7 @@ mod tests {
             example("rain", "care", "下雨还得出门", "Bring your umbrella")
         ]));
         let history = vec![message("assistant", "Bring your umbrella")];
-        let out = r.retrieve("下雨还得出门", &history, None, &[]).unwrap();
+        let out = r.retrieve("下雨还得出门", &history, None, &[], "zh").unwrap();
         assert!(out.contains("Example rain\n"));
         assert!(!out.contains("Example generic\n"));
     }
@@ -350,24 +398,24 @@ mod tests {
             example("b", "play", "猜猜", "I bet it is a drawing")
         ]);
         let r = fixture(entries.clone());
-        let first = r.retrieve("猜猜", &[], None, &[]).unwrap();
-        assert_eq!(first, r.retrieve("猜猜", &[], None, &[]).unwrap(), "retries stay stable");
+        let first = r.retrieve("猜猜", &[], None, &[], "zh").unwrap();
+        assert_eq!(first, r.retrieve("猜猜", &[], None, &[], "zh").unwrap(), "retries stay stable");
         let (used, alternative) = if first.contains("Example a\n") {
             ("Maybe a new game", "b")
         } else { ("I bet it is a drawing", "a") };
         let history = vec![message("assistant", used)];
-        let next = r.retrieve("猜猜", &history, None, &[]).unwrap();
+        let next = r.retrieve("猜猜", &history, None, &[], "zh").unwrap();
         assert!(next.contains(&format!("Example {alternative}\n")));
-        assert_eq!(first, r.retrieve("猜猜", &[], None, &[]).unwrap(), "another session is independent");
-        assert_eq!(next, fixture(entries).retrieve("猜猜", &history, None, &[]).unwrap(), "restart is reproducible");
+        assert_eq!(first, r.retrieve("猜猜", &[], None, &[], "zh").unwrap(), "another session is independent");
+        assert_eq!(next, fixture(entries).retrieve("猜猜", &history, None, &[], "zh").unwrap(), "restart is reproducible");
     }
     #[test]
     fn repetition_never_removes_the_only_relevant_example_or_relaxes_gates() {
         let r = fixture(serde_json::json!([example("only", "care", "下雨", "Take an umbrella")]));
         let history = vec![message("assistant", "Take an umbrella")];
-        assert!(r.retrieve("下雨", &history, None, &[]).unwrap().contains("Example only\n"));
-        assert!(r.retrieve("新话题", &history, None, &[]).is_none());
-        assert!(r.retrieve("下雨", &history, None, &["care".into()]).is_none());
+        assert!(r.retrieve("下雨", &history, None, &[], "zh").unwrap().contains("Example only\n"));
+        assert!(r.retrieve("新话题", &history, None, &[], "zh").is_none());
+        assert!(r.retrieve("下雨", &history, None, &["care".into()], "zh").is_none());
     }
 
     fn scenario(id: &str, scope: &str, cue: &str, situation: &str, user: &str, text: &str) -> serde_json::Value {
@@ -382,14 +430,14 @@ mod tests {
             scenario("rain", "care", "带伞", "用户下班时下雨，没带伞", "外面下雨了我没带伞", "那先找个地方躲一躲。")
         ]));
         // 与 situation 同措辞的 paraphrase：字面 cue 全部未命中，表面重叠接住
-        let out = r.retrieve("周三要面试，特别紧张", &[], None, &[]).unwrap();
+        let out = r.retrieve("周三要面试，特别紧张", &[], None, &[], "zh").unwrap();
         assert!(out.contains("Example interview\n"), "{out}");
         assert!(!out.contains("Example rain\n"), "{out}");
         // 字面 cue 命中时优先，且回退分恒低于字面分
-        let out = r.retrieve("周三要面试，特别紧张，也没带伞", &[], None, &[]).unwrap();
+        let out = r.retrieve("周三要面试，特别紧张，也没带伞", &[], None, &[], "zh").unwrap();
         assert!(out.find("Example rain\n") < out.find("Example interview\n"), "literal must outrank fallback: {out}");
         // 纯字面场景不受影响
-        let out = r.retrieve("今天没带伞", &[], None, &[]).unwrap();
+        let out = r.retrieve("今天没带伞", &[], None, &[], "zh").unwrap();
         assert!(out.contains("Example rain\n") && !out.contains("Example interview\n"), "{out}");
     }
 
@@ -401,12 +449,12 @@ mod tests {
             scenario("b", "care", "乙", "用户面试前紧张", "面试前紧张", "b"),
             scenario("c", "daily", "丙", "用户面试前紧张", "面试前紧张", "c")
         ]));
-        let out = r.retrieve("面试前紧张", &[], None, &[]).unwrap();
+        let out = r.retrieve("面试前紧张", &[], None, &[], "zh").unwrap();
         assert_eq!(out.lines().filter(|l| l.starts_with("Example ") && !l.starts_with("Example response:")).count(), 1, "{out}");
         assert!(out.contains("Example a\n"), "{out}");
         // 内容词不足或无重叠的输入不触发
-        assert!(r.retrieve("嗯", &[], None, &[]).is_none());
-        assert!(r.retrieve("去吃饭", &[], None, &[]).is_none());
+        assert!(r.retrieve("嗯", &[], None, &[], "zh").is_none());
+        assert!(r.retrieve("去吃饭", &[], None, &[], "zh").is_none());
     }
 
     #[test]
@@ -429,7 +477,7 @@ mod tests {
             example("b", "second", "猜猜", "Maybe a new game!"),
             example("c", "third", "猜猜", "I bet it is a drawing")
         ]));
-        let out = r.retrieve("猜猜", &[], None, &[]).unwrap();
+        let out = r.retrieve("猜猜", &[], None, &[], "zh").unwrap();
         assert_eq!(out.lines().filter(|l| l.starts_with("Example response:")).count(), 2);
         assert!(out.contains("Example c\n"));
         assert!(out.chars().count() <= MAX_CHARS);
@@ -439,8 +487,8 @@ mod tests {
         let mut e = example("duration", "task", "8分钟", "Eight minutes works");
         e["context_cues"] = serde_json::json!(["talk"]);
         let r = fixture(serde_json::json!([e]));
-        assert!(r.retrieve("8分钟", &[message("assistant", "A stalk of celery")], None, &[]).is_none());
-        assert!(r.retrieve("8分钟", &[message("assistant", "How long is the talk?")], None, &[]).is_some());
+        assert!(r.retrieve("8分钟", &[message("assistant", "A stalk of celery")], None, &[], "zh").is_none());
+        assert!(r.retrieve("8分钟", &[message("assistant", "How long is the talk?")], None, &[], "zh").is_some());
     }
     #[test]
     fn natural_delivery_social_references_are_bounded_and_obey_learned_scopes() {
@@ -451,36 +499,36 @@ mod tests {
                 ("我偷偷织了两周围巾", "personal-effort", "sharing"),
                 ("你是什么性格", "personal-description", "self"),
             ] {
-                let out = r.retrieve(input, &[], None, &[]).unwrap();
+                let out = r.retrieve(input, &[], None, &[], "zh").unwrap();
                 assert!(out.contains(id));
                 assert!(out.chars().count() <= MAX_CHARS);
                 assert!(out.contains("Fictional context (not user history)"));
-                assert!(r.retrieve(input, &[], None, &[scope.into()]).is_none());
+                assert!(r.retrieve(input, &[], None, &[scope.into()], "zh").is_none());
             }
         }
     }
     #[test]
     fn duration_requires_current_presentation_context() {
         let r = ExampleRetriever::new("nana", default_embedding());
-        assert!(r.retrieve("8分钟左右", &[], None, &[]).is_none());
+        assert!(r.retrieve("8分钟左右", &[], None, &[], "zh").is_none());
         let history = vec![message("assistant", "英语演讲要讲多久？"), message("user", "8分钟左右")];
-        let out = r.retrieve("8分钟左右", &history, None, &[]).unwrap();
+        let out = r.retrieve("8分钟左右", &history, None, &[], "zh").unwrap();
         assert!(out.contains("presentation-duration"));
         assert!(out.chars().count() <= MAX_CHARS);
     }
     #[test]
     fn confirmation_does_not_end_an_active_task() {
         let r = ExampleRetriever::new("vivian", default_embedding());
-        assert!(r.retrieve("嗯", &[message("assistant", "要用蓝色吗？")], None, &[]).is_none());
-        assert!(r.retrieve("嗯", &[message("assistant", "晚安")], None, &[]).unwrap().contains("closed-confirmation"));
-        assert!(r.retrieve("好，我想聊新话题", &[message("assistant", "晚安")], None, &[]).is_none());
+        assert!(r.retrieve("嗯", &[message("assistant", "要用蓝色吗？")], None, &[], "zh").is_none());
+        assert!(r.retrieve("嗯", &[message("assistant", "晚安")], None, &[], "zh").unwrap().contains("closed-confirmation"));
+        assert!(r.retrieve("好，我想聊新话题", &[message("assistant", "晚安")], None, &[], "zh").is_none());
     }
     #[test]
     fn old_emotion_does_not_match_new_topic_and_learned_scope_wins() {
         let r = ExampleRetriever::new("nana", default_embedding());
         let history = vec![message("user", "委屈"), message("assistant", "发生什么了？")];
-        assert!(r.retrieve("怎么安装软件", &history, None, &[]).is_none());
-        assert!(r.retrieve("方案明明是我写的", &[], None, &["comfort".into()]).is_none());
+        assert!(r.retrieve("怎么安装软件", &history, None, &[], "zh").is_none());
+        assert!(r.retrieve("方案明明是我写的", &[], None, &["comfort".into()], "zh").is_none());
     }
     #[test]
     fn libraries_have_unique_ids_and_valid_output() {
@@ -562,7 +610,7 @@ mod tests {
             for e in modern {
                 assert!(e.context_cues.is_empty(), "{} must work without group history", e.id);
                 for input in std::iter::once(&e.user).chain(e.cues.iter()) {
-                    let examples = r.retrieve(input, &[], None, &[]).expect("offline cue retrieval");
+                    let examples = r.retrieve(input, &[], None, &[], "zh").expect("offline cue retrieval");
                     assert!(examples.contains(&format!("Example {}\n", e.id)), "{name}/{} missing for {input}", e.id);
                     assert!(examples.chars().count() <= MAX_CHARS);
                     for channel in ["", "desktop", "private", "group"] {
@@ -586,7 +634,7 @@ mod tests {
                 let e = r.entries.iter().find(|e| e.id == id).unwrap();
                 let history = vec![message("user", "明天工作好多"), message("assistant", "先做最急的那件吧")];
                 for input in std::iter::once(&e.user).chain(e.cues.iter()) {
-                    let result = r.retrieve(input, &history, None, &[]).unwrap();
+                    let result = r.retrieve(input, &history, None, &[], "zh").unwrap();
                     assert!(result.contains(&format!("Example {id}\n")), "{name}: {input}");
                     assert!(result.chars().count() <= MAX_CHARS);
                 }
@@ -601,12 +649,12 @@ mod tests {
             let r = ExampleRetriever::new(name, default_embedding());
             for id in ["vent-no-advice", "tired-no-questions", "uncertain-motive", "repair-feeling"] {
                 let e = r.entries.iter().find(|e| e.id == id).unwrap();
-                let result = r.retrieve(&e.user, &[], None, &[]).unwrap();
+                let result = r.retrieve(&e.user, &[], None, &[], "zh").unwrap();
                 assert!(result.contains(&format!("Example {id}\n")), "{name}/{id}");
                 assert!(result.chars().count() <= MAX_CHARS);
                 assert!(e.situation.contains("虚构"));
                 assert!(e.attention.contains("不可借来当事实"));
-                let learned = r.retrieve(&e.user, &[], None, &[e.scope.clone()]).unwrap_or_default();
+                let learned = r.retrieve(&e.user, &[], None, &[e.scope.clone()], "zh").unwrap_or_default();
                 assert!(!learned.contains(&format!("Example {id}\n")));
                 voices.push(e.response["text"].as_str().unwrap().to_string());
             }
@@ -628,13 +676,13 @@ mod tests {
         let r = ExampleRetriever::new("nana", provider.clone());
         r.preload();
         provider.0.store(0, std::sync::atomic::Ordering::Relaxed);
-        let result = r.retrieve("名字太明显，会不会泄露故事", &[], Some(&[1.0, 0.0]), &[]).unwrap();
+        let result = r.retrieve("名字太明显，会不会泄露故事", &[], Some(&[1.0, 0.0]), &[], "zh").unwrap();
         assert!(result.contains("creative-choice"));
         r.preload();
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert!(result.lines().filter(|line| line.starts_with("Example ") && !line.starts_with("Example response:")).count() <= MAX_EXAMPLES);
         // A wrong-dimension shared query must be replaced, never silently compared.
-        r.retrieve("标题", &[], Some(&[1.0]), &[]);
+        r.retrieve("标题", &[], Some(&[1.0]), &[], "zh");
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
     #[test]
@@ -646,20 +694,56 @@ mod tests {
         let mut update = ExampleOverride {scope:"daily".into(),understanding:None,updated_at:1.0,
             edit:ExampleEdit{id:sample.id.clone(),reference:None,reason:"更新场景".into(),example:Some(sample)}};
         // An empty preview builds the immutable corpus but starts no embedding I/O.
-        assert!(r.retrieve_growing("", &[], None, &[], &[update.clone()]).is_none());
+        assert!(r.retrieve_growing("", &[], None, &[], &[update.clone()], "zh").is_none());
         let first = r.revised.read().as_ref().unwrap().clone();
         first.vectors.preload();
         assert_eq!(first.vectors.get().unwrap()[0], vec![1.0, 0.0]);
         let sample = update.edit.example.as_mut().unwrap();
         sample.cues = vec!["面试".into()]; sample.user = "面试".into();
         sample.response["text"] = "第二种表达".into();
-        r.retrieve_growing("", &[], None, &[], &[update.clone()]);
+        r.retrieve_growing("", &[], None, &[], &[update.clone()], "zh");
         let second = r.revised.read().as_ref().unwrap().clone();
         assert_ne!(first.key, second.key);
         second.vectors.preload();
         assert_eq!(second.vectors.get().unwrap()[0], vec![0.0, 1.0]);
         assert_eq!(first.vectors.get().unwrap()[0], vec![1.0, 0.0]);
-        let output = r.retrieve_growing("准备迎接新的挑战", &[], Some(&[0.0, 1.0]), &[], &[update]).unwrap();
+        let output = r.retrieve_growing("准备迎接新的挑战", &[], Some(&[0.0, 1.0]), &[], &[update], "zh").unwrap();
         assert!(output.contains("第二种表达")); assert!(!output.contains("第一种表达"));
+    }
+
+    #[test]
+    fn retrieval_selects_examples_by_interface_language() {
+        // 三语示例混在同一个 example_library.json 里：检索必须按界面语言选档，
+        // 否则中文对话会召回 style-en/ja 示例，英文对话会一直吃中文示例
+        // （模型直接跟着示例的语言说话）。2026-10-24 补的语种门。
+        let r = ExampleRetriever::new("vivian", default_embedding());
+        // 离线哈希嵌入下只有字面/回退通道：用中文 cue 拿中文示例，用英文 cue 拿英文示例。
+        let zh = r.retrieve("给你准备了个东西，猜猜？", &[], None, &[], "zh").unwrap();
+        assert!(zh.contains("Example "));
+        assert!(!zh.contains("style-en-") && !zh.contains("style-ja-"), "zh turn must not pull non-zh examples: {zh}");
+        // 英文界面：同一个场景拿到的是 style-en-* 示例，不是中文条目。
+        let en = r.retrieve("Guess what I made. Hint: it fits in a pocket.", &[], None, &[], "en").unwrap();
+        assert!(en.contains("style-en-guess-game"), "en turn must resolve the en example: {en}");
+        assert!(!en.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)), "en turn must not contain Chinese: {en}");
+        // 日文界面同理。
+        let ja = r.retrieve("何を作ったか当てて。手のひらに乗るものだよ。", &[], None, &[], "ja").unwrap();
+        assert!(ja.contains("style-ja-guess-game"), "ja turn must resolve the ja example: {ja}");
+        // Japanese legitimately contains Han characters (模型, 最初, etc.).
+        // Check the selected entries' language, rather than banning kanji.
+        for id in ja.lines().filter_map(|line| line.strip_prefix("Example ")).filter(|id| !id.starts_with("response:")) {
+            let entry = r.entries.iter().find(|entry| entry.id == id).unwrap();
+            assert!(matches!(entry_lang(entry), "ja" | "any"), "wrong-language entry: {id}");
+        }
+    }
+
+    #[test]
+    fn source_tasks_do_not_borrow_venting_or_emotion_repair_scripts() {
+        let retriever = ExampleRetriever::new("vivian", default_embedding());
+        assert!(retriever.retrieve("把“别给我建议”翻译成英文。", &[], None, &[], "zh").is_none());
+        assert!(source_transformation("把“今天累死了，不想解释”翻译成英文。"));
+        assert!(retriever.retrieve("别分析我，帮我分析这段代码。", &[], None, &[], "zh").is_none());
+        assert!(retriever.retrieve("我只想吐槽，别给我建议。", &[], None, &[], "zh").is_some());
+        assert!(retriever.retrieve("今天累死了，不想讲经过。", &[], None, &[], "zh").is_some());
+        assert!(!source_transformation("润色后不像自己"));
     }
 }

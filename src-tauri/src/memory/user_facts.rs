@@ -763,15 +763,10 @@ impl UserFactStore {
         if l0_has_content {
             for fact_type in &l0_types {
                 if let Some(fact) = inner.basic_data.get(fact_type) {
-                    lines.push(format!(
-                        "- {}：{} [置信度 {:.0}%，更新 {}]",
-                        fact_type.label_zh(),
-                        fact.content,
-                        fact.confidence * 100.0,
-                        chrono::DateTime::from_timestamp(fact.timestamp as i64, 0)
-                            .map(|d| d.format("%Y-%m-%d").to_string())
-                            .unwrap_or_else(|| "未知".to_string())
-                    ));
+                    // 只写事实本身。置信度百分比、来源记录 id、更新日期是数据库元数据，
+                    // 写进来只会把「自然回忆」变成「查表结果」，并让模型模仿这种
+                    // key: value [元数据] 的记录体说话（2026-10-24 去掉）。
+                    lines.push(format!("- {}：{}", fact_type.label_zh(), fact.content));
                 } else if *fact_type == UserFactType::Gender {
                     lines.push(format!("- {}：未知（勿猜测）", fact_type.label_zh()));
                 }
@@ -792,11 +787,7 @@ impl UserFactStore {
             lines.push("【偏好档案】".to_string());
             for fact_type in &l05_types {
                 if let Some(fact) = inner.basic_data.get(fact_type) {
-                    let source = fact.source_memory_id.as_deref().unwrap_or("user-turn");
-                    lines.push(format!(
-                        "- {}：{} [置信度 {:.0}%；来源记录 {}]",
-                        fact_type.label_zh(), fact.content, fact.confidence * 100.0, source
-                    ));
+                    lines.push(format!("- {}：{}", fact_type.label_zh(), fact.content));
                 }
             }
         }
@@ -834,11 +825,7 @@ impl UserFactStore {
                 let stale = Self::freshness_note(fact.timestamp, now, 30)
                     .map(|note| format!("（⚠ {}）", note))
                     .unwrap_or_default();
-                let source = fact.source_memory_id.as_deref().unwrap_or("user-turn");
-                lines.push(format!(
-                    "- {}{stale} [置信度 {:.0}%；来源记录 {}]",
-                    fact.content, fact.confidence * 100.0, source
-                ));
+                lines.push(format!("- {}{stale}", fact.content));
             }
         }
 

@@ -46,6 +46,32 @@ impl EmotionLabel {
         }
     }
 
+    /// 心理状态注入 prompt 时用的日文标签（manager.rs 心境描述）。
+    pub fn display_ja(&self) -> &'static str {
+        match self {
+            EmotionLabel::Joy => "楽しい",
+            EmotionLabel::Sadness => "悲しい",
+            EmotionLabel::Anger => "怒り",
+            EmotionLabel::Fear => "不安",
+            EmotionLabel::Closeness => "親しみ",
+            EmotionLabel::Loneliness => "寂しさ",
+            EmotionLabel::Curiosity => "好奇心",
+        }
+    }
+
+    /// 心理状态注入 prompt 时用的英文标签（manager.rs 心境描述）。
+    pub fn display_en(&self) -> &'static str {
+        match self {
+            EmotionLabel::Joy => "joy",
+            EmotionLabel::Sadness => "sadness",
+            EmotionLabel::Anger => "anger",
+            EmotionLabel::Fear => "unease",
+            EmotionLabel::Closeness => "closeness",
+            EmotionLabel::Loneliness => "loneliness",
+            EmotionLabel::Curiosity => "curiosity",
+        }
+    }
+
     /// 全部 7 类（按枚举声明顺序）
     pub fn all() -> &'static [EmotionLabel] {
         &[

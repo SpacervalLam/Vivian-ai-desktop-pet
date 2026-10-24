@@ -1,4 +1,5 @@
 import { beginCompanionTurn, companionParagraphId, companionParagraphCommitted } from '../utils/companionLatency';
+import { settleChatStream } from '../utils/chatStreamSettlement';
 import { openWebsite } from '../utils/openWebsite';
 import StickerImage from './stickers/StickerImage';
 import { parseSticker, stickerLabel } from './stickers/stickers';
@@ -1658,6 +1659,7 @@ const ChatWindow: React.FC = () => {
   const [groupMessages, setGroupMessages] = useState<ChatMessage[]>([]);
   /** 群聊流式缓冲：按 `charId:streamId` 索引累积未换行文本 */
   const groupStreamBuffersRef = useRef<Map<string, string>>(new Map());
+  const groupStreamSegmentIdsRef = useRef<Map<string, string[]>>(new Map());
   /** 群聊 stream_id → charId 映射，用于事件路由 */
   const groupStreamCharMapRef = useRef<Map<string, string>>(new Map());
   /** 群聊视图是否正在流式生成（至少一个角色在生成） */
@@ -2798,6 +2800,7 @@ const ChatWindow: React.FC = () => {
                 streaming: false,
                 character_id: cid,
               }));
+              groupStreamSegmentIdsRef.current.set(sid, [...(groupStreamSegmentIdsRef.current.get(sid) ?? []), ...newMsgs.map(message => message.id)]);
               setGroupMessages((prev) => [...prev, ...newMsgs]);
             }
           } else {
@@ -2826,6 +2829,7 @@ const ChatWindow: React.FC = () => {
               timestamp: Date.now(),
               streaming: false,
             }));
+            streamSegmentIdsRef.current.set(sid, [...(streamSegmentIdsRef.current.get(sid) ?? []), ...newMsgs.map(message => message.id)]);
             setMessages((prev) => [...prev, ...newMsgs]);
           }
         } else {
@@ -2846,41 +2850,19 @@ const ChatWindow: React.FC = () => {
         if (groupStreamCharMapRef.current.has(sid)) {
           if (ch && ch !== 'wechat_group') return;
           const cid = groupStreamCharMapRef.current.get(sid) ?? '';
-          const buf = groupStreamBuffersRef.current.get(sid) ?? '';
-          // 输出缓冲区剩余文本（未遇到换行符的最后一段）
-          const trimmedBuf = buf.trim();
-          // 合并文本+表情为一次 setGroupMessages，避免双倍渲染开销
-          const newMsgs: ChatMessage[] = [];
-          if (isVoiceMessage) {
-            // 语音消息：不显示文本，以语音气泡发出
-            newMsgs.push({
-              id: companionParagraphId(sid, nextId()),
-              role: 'assistant',
-              content: '',
-              timestamp: Date.now(),
-              streaming: false,
-              character_id: cid,
-              voice: {
-                audioPath: event.payload.voice_audio_path ?? undefined,
-                duration: event.payload.voice_duration ?? 0,
-              },
-            });
-          } else if (hasVisibleChatText(trimmedBuf)) {
-            newMsgs.push({
-              id: companionParagraphId(sid, nextId()),
-              role: 'assistant',
-              content: trimmedBuf,
-              timestamp: Date.now(),
-              streaming: false,
-              character_id: cid,
-            });
-          }
-          if(sticker)newMsgs.push({id:`sticker:${sid}`,role:'assistant',content:'',timestamp:Date.now()+1,sticker,character_id:cid});
-          if (newMsgs.length > 0) {
-            setGroupMessages((prev) => [...prev, ...newMsgs]);
-          }
+          const paragraphIds = groupStreamSegmentIdsRef.current.get(sid) ?? [];
+          const newMsgs: ChatMessage[] = isVoiceMessage ? [{
+            id: companionParagraphId(sid, nextId()), role: 'assistant', content: '',
+            timestamp: Date.now(), streaming: false, character_id: cid,
+            voice: { audioPath: event.payload.voice_audio_path ?? undefined, duration: event.payload.voice_duration ?? 0 },
+          }] : finalText.split('\n').map(part => part.trim()).filter(part => hasVisibleChatText(part)).map(part => ({
+            id: companionParagraphId(sid, nextId()), role: 'assistant', content: part,
+            timestamp: Date.now(), streaming: false, character_id: cid,
+          }));
+          if (sticker) newMsgs.push({ id: 'sticker:' + sid, role: 'assistant', content: '', timestamp: Date.now() + 1, sticker, character_id: cid });
+          setGroupMessages(prev => settleChatStream(prev, paragraphIds, newMsgs));
           // 立即刷新主面板群聊预览（乐观更新）
-          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim() || buf.trim()) || (sticker ? `[${stickerLabel(sticker)}]` : '');
+          const previewText = isVoiceMessage ? '[语音]' : stripActions(finalText.trim()) || (sticker ? `[${stickerLabel(sticker)}]` : '');
           if (previewText) {
             setLastPreviews((prev) => ({
               ...prev,
@@ -2888,6 +2870,7 @@ const ChatWindow: React.FC = () => {
             }));
           }
           groupStreamBuffersRef.current.delete(sid);
+          groupStreamSegmentIdsRef.current.delete(sid);
           groupStreamCharMapRef.current.delete(sid);
           groupStreamActiveIdRef.current.delete(sid);
           if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
@@ -2900,32 +2883,17 @@ const ChatWindow: React.FC = () => {
         const doneCid = event.payload.character_id;
         if (doneCid && privateCharIdRef.current && doneCid !== privateCharIdRef.current) return;
         if (!streamBuffersRef.current.has(sid)) return;
-        const buf = streamBuffersRef.current.get(sid) ?? '';
-        // 输出缓冲区剩余文本（未遇到换行符的最后一段）
-        const trimmedBuf = buf.trim();
-        if (isVoiceMessage) {
-          // 语音消息：不显示流式文本，以语音气泡发出
-          setMessages((prev) => [...prev, {
-            id: companionParagraphId(sid, nextId()),
-            role: 'assistant',
-            content: '',
-            timestamp: Date.now(),
-            streaming: false,
-            voice: {
-              audioPath: event.payload.voice_audio_path ?? undefined,
-              duration: event.payload.voice_duration ?? 0,
-            },
-          }]);
-        } else if (hasVisibleChatText(trimmedBuf)) {
-          setMessages((prev) => [...prev, {
-            id: companionParagraphId(sid, nextId()),
-            role: 'assistant',
-            content: trimmedBuf,
-            timestamp: Date.now(),
-            streaming: false,
-          }]);
-        }
-        if(sticker)setMessages(prev=>[...prev,{id:`sticker:${sid}`,role:'assistant',content:'',timestamp:Date.now()+1,sticker,character_id:doneCid}]);
+        const paragraphIds = streamSegmentIdsRef.current.get(sid) ?? [];
+        const newMsgs: ChatMessage[] = isVoiceMessage ? [{
+          id: companionParagraphId(sid, nextId()), role: 'assistant', content: '',
+          timestamp: Date.now(), streaming: false,
+          voice: { audioPath: event.payload.voice_audio_path ?? undefined, duration: event.payload.voice_duration ?? 0 },
+        }] : finalText.split('\n').map(part => part.trim()).filter(part => hasVisibleChatText(part)).map(part => ({
+          id: companionParagraphId(sid, nextId()), role: 'assistant', content: part,
+          timestamp: Date.now(), streaming: false,
+        }));
+        if (sticker) newMsgs.push({ id: 'sticker:' + sid, role: 'assistant', content: '', timestamp: Date.now() + 1, sticker, character_id: doneCid });
+        setMessages(prev => settleChatStream(prev, paragraphIds, newMsgs));
         // 立即刷新主面板私聊预览（乐观更新）
         const privatePreviewText = isVoiceMessage ? '[语音]' : stripActions(finalText) || (sticker ? `[${stickerLabel(sticker)}]` : '');
         const previewCharId = privateCharIdRef.current;
@@ -2988,6 +2956,7 @@ const ChatWindow: React.FC = () => {
             }]);
           }
           groupStreamBuffersRef.current.delete(sid);
+          groupStreamSegmentIdsRef.current.delete(sid);
           groupStreamCharMapRef.current.delete(sid);
           groupStreamActiveIdRef.current.delete(sid);
           if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
@@ -3059,6 +3028,7 @@ const ChatWindow: React.FC = () => {
             }]);
           }
           groupStreamBuffersRef.current.delete(sid);
+          groupStreamSegmentIdsRef.current.delete(sid);
           groupStreamCharMapRef.current.delete(sid);
           groupStreamActiveIdRef.current.delete(sid);
           if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
@@ -3109,6 +3079,7 @@ const ChatWindow: React.FC = () => {
         if (!sid) return;
         if (!groupStreamCharMapRef.current.has(sid)) return;
         groupStreamBuffersRef.current.delete(sid);
+        groupStreamSegmentIdsRef.current.delete(sid);
         groupStreamCharMapRef.current.delete(sid);
         groupStreamActiveIdRef.current.delete(sid);
         if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
@@ -3299,6 +3270,7 @@ const ChatWindow: React.FC = () => {
           console.warn(`[群发] 角色 ${c.id} 发送失败:`, err);
           groupStreamCharMapRef.current.delete(sid);
           groupStreamBuffersRef.current.delete(sid);
+          groupStreamSegmentIdsRef.current.delete(sid);
           if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
         });
       }
@@ -3905,6 +3877,7 @@ const ChatWindow: React.FC = () => {
               console.warn(`[语音群发] 角色 ${c.id} 发送失败:`, err);
               groupStreamCharMapRef.current.delete(sid);
               groupStreamBuffersRef.current.delete(sid);
+              groupStreamSegmentIdsRef.current.delete(sid);
               if (groupStreamCharMapRef.current.size === 0) setGroupStreaming(false);
             });
           }

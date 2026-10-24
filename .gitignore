@@ -80,6 +80,7 @@ __pycache__/
 !/scripts/evaluate-prompts.mjs
 !/scripts/prompt-reply-evaluation.mjs
 !/scripts/prompt-eval-support.mjs
+!/scripts/production-prompt-requests.mjs
 !/scripts/audit-companion-dialogue.mjs
 !/scripts/*.test.mjs
 !/scripts/*.test.ts

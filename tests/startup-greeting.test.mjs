@@ -15,9 +15,11 @@ const method = agent.match(/    pub fn startup_context\([\s\S]*?\n    \}/)?.[0];
 const greeting = brain.match(/fn first_contact_prompt\([\s\S]*?\n\}/)?.[0];
 const language = brain.match(/fn language_code_to_name\([\s\S]*?\n\}/)?.[0];
 const normalize = modules.match(/pub fn normalize_lang\([\s\S]*?\n\}/)?.[0];
+const banned = modules.match(/pub fn banned_phrases\([\s\S]*?\n\}/)?.[0]
+  ?.replaceAll('../../prompts/framework/', path.join(root, 'src-tauri/prompts/framework').replaceAll('\\', '/') + '/');
 const dispatchStart = modules.indexOf('pub fn tone_rule(');
 const dispatchEnd = modules.indexOf('// ========== 模块 1', dispatchStart);
-assert.ok(method && greeting && language && normalize && dispatchEnd > dispatchStart);
+assert.ok(method && greeting && language && normalize && banned && dispatchEnd > dispatchStart);
 const dispatch = modules.slice(dispatchStart, dispatchEnd)
   .replaceAll('../../prompts/framework/', path.join(root, 'src-tauri/prompts/framework').replaceAll('\\', '/') + '/');
 assert.doesNotMatch(brain, /fn fixed_startup_greeting\(/);
@@ -34,7 +36,7 @@ serde_json="1"
 `);
 await writeFile(path.join(dir, 'src/lib.rs'), `#![allow(dead_code)]
 use serde_json::json;
-mod pipeline { pub mod prompt_modules { ${normalize}\n${dispatch} } }
+mod pipeline { pub mod prompt_modules { ${normalize}\n${dispatch}\n${banned} } }
 struct Weather {description:String,temperature:f64,cached_at:i64}
 struct Location {city:Option<String>}
 struct Foreground {process:String}

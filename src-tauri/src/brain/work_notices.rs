@@ -29,6 +29,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -79,7 +80,7 @@ const ALERT_TTL_SECS: f64 = 1800.0;
 const MAX_ALERTS_PER_CHAR: usize = 8;
 
 /// 一条待转告的工作完成事实。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkReport {
     pub session_id: String,
     /// 事实标题（如"任务完成"），不做润色
@@ -92,7 +93,7 @@ pub struct WorkReport {
 ///
 /// 与 [`WorkReport`] 的分界：报告是"告知"，说与不说交给陪伴侧的闸门；
 /// 这里是"必须说"，因为工作智能体已经显式要求过了。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkAlert {
     pub notice_id: String,
     /// Key callbacks for all user office sessions bypass discretionary gates.
@@ -108,12 +109,14 @@ impl WorkAlert {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Entry {
     char_id: String,
     report: WorkReport,
     at: f64,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 struct AlertEntry {
     char_id: String,
     alert: WorkAlert,
@@ -121,7 +124,19 @@ struct AlertEntry {
 }
 
 /// 完成报告暂存表 + 强制转达队列 + 提问提醒标记。
+#[derive(Default, Serialize, Deserialize)]
+struct NoticeSnapshot {
+    entries: Vec<Entry>,
+    alerts: Vec<AlertEntry>,
+}
+
+fn terminal_notice(title: &str) -> bool {
+    matches!(title, "工作结果已返回" | "任务完成" | "任务未完成" | "执行已中断" | "模型调用失败")
+}
+
 pub struct WorkNoticeStore {
+    path: Option<std::path::PathBuf>,
+    persistence_gate: parking_lot::Mutex<()>,
     entries: RwLock<Vec<Entry>>,
     alerts: RwLock<Vec<AlertEntry>>,
     /// 已就某条提问提醒过用户的 question_id。
@@ -134,9 +149,33 @@ pub struct WorkNoticeStore {
 impl WorkNoticeStore {
     fn new() -> Self {
         Self {
+            path: None,
+            persistence_gate: parking_lot::Mutex::new(()),
             entries: RwLock::new(Vec::new()),
             alerts: RwLock::new(Vec::new()),
             reminded: RwLock::new(HashSet::new()),
+        }
+    }
+
+    fn persistent(path: std::path::PathBuf) -> Self {
+        let mut snapshot = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice::<NoticeSnapshot>(&raw).ok()).unwrap_or_default();
+        let now = chrono::Local::now().timestamp() as f64;
+        Self::prune_locked(&mut snapshot.entries, now);
+        Self::prune_alerts_locked(&mut snapshot.alerts, now);
+        let mut store = Self::new();
+        store.path = Some(path);
+        *store.entries.write() = snapshot.entries;
+        *store.alerts.write() = snapshot.alerts;
+        store
+    }
+
+    fn persist(&self) {
+        let Some(path) = &self.path else { return; };
+        let _gate = self.persistence_gate.lock();
+        let snapshot = NoticeSnapshot { entries:self.entries.read().clone(), alerts:self.alerts.read().clone() };
+        if let Err(error) = serde_json::to_vec(&snapshot).map_err(std::io::Error::other)
+            .and_then(|raw| crate::utils::fs::atomic_write(path, &raw)) {
+            tracing::warn!("[WorkNotices] 保存待转达消息失败: {error}");
         }
     }
 
@@ -182,6 +221,8 @@ impl WorkNoticeStore {
                 .unwrap_or(0);
             entries.remove(oldest);
         }
+        drop(entries);
+        self.persist();
         true
     }
 
@@ -202,6 +243,8 @@ impl WorkNoticeStore {
                 true
             }
         });
+        drop(entries);
+        self.persist();
         out
     }
 
@@ -226,8 +269,22 @@ impl WorkNoticeStore {
 
         let mut alerts = self.alerts.write();
         Self::prune_alerts_locked(&mut alerts, now);
-        if alerts.iter().any(|a| a.char_id == char_id && a.alert.session_id == session_id
-            && a.alert.title == title && a.alert.body == body) { return true; }
+        if let Some(existing) = alerts.iter_mut().find(|a| a.char_id == char_id && a.alert.session_id == session_id
+            && a.alert.title == title && a.alert.body == body) {
+            let promoted = required && !existing.alert.required;
+            existing.alert.required |= required;
+            drop(alerts);
+            self.persist();
+            if promoted { notify_desktop(char_id, session_id, title); }
+            return true;
+        }
+        // A final result subsumes undelivered milestones and outdated blockers for this run.
+        if required && terminal_notice(title) {
+            alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id));
+        } else if required {
+            // Repeated automatic milestones describe the latest state of that milestone.
+            alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id && a.alert.title == title));
+        }
         if !required { alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id && !a.alert.required)); }
         alerts.push(AlertEntry {
             char_id: char_id.to_string(),
@@ -255,6 +312,7 @@ impl WorkNoticeStore {
             }
         }
         drop(alerts);
+        self.persist();
         if required { notify_desktop(char_id, session_id, title); }
         true
     }
@@ -270,7 +328,9 @@ impl WorkNoticeStore {
         let now = chrono::Local::now().timestamp() as f64;
         let mut alerts = self.alerts.write();
         Self::prune_alerts_locked(&mut alerts, now);
-        alerts.iter().find(|a| a.char_id == char_id && a.alert.required)
+        alerts.iter().find(|a| a.char_id == char_id && a.alert.required && terminal_notice(&a.alert.title))
+            .or_else(|| alerts.iter().find(|a| a.char_id == char_id && a.alert.required && a.alert.title == "任务等待你的决定"))
+            .or_else(|| alerts.iter().find(|a| a.char_id == char_id && a.alert.required))
             .or_else(|| alerts.iter().find(|a| a.char_id == char_id))
             .map(|a| a.alert.clone())
     }
@@ -285,11 +345,13 @@ impl WorkNoticeStore {
     /// A resolved question must not be announced later as a current blocker.
     pub fn clear_attention_callback(&self, session_id: &str) {
         self.alerts.write().retain(|a| !(a.alert.session_id == session_id && a.alert.title == "任务等待你的决定"));
+        self.persist();
     }
 
     /// Acknowledge only the delivered event, preserving callbacks arriving during generation.
     pub fn acknowledge_alert(&self, notice_id: &str) {
         self.alerts.write().retain(|a| a.alert.notice_id != notice_id);
+        self.persist();
     }
 
     /// 一条「必须转达」已成功说出去，移除它。
@@ -297,6 +359,7 @@ impl WorkNoticeStore {
         self.alerts
             .write()
             .retain(|a| a.alert.session_id != session_id);
+        self.persist();
     }
 
     /// 该角色是否还有待转告的完成报告。
@@ -321,6 +384,7 @@ impl WorkNoticeStore {
         self.alerts
             .write()
             .retain(|a| a.alert.session_id != session_id);
+        self.persist();
     }
 
     fn count_for(alerts: &[AlertEntry], char_id: &str) -> usize {
@@ -366,7 +430,8 @@ impl Default for WorkNoticeStore {
     }
 }
 
-static STORE: Lazy<Arc<WorkNoticeStore>> = Lazy::new(|| Arc::new(WorkNoticeStore::new()));
+static STORE: Lazy<Arc<WorkNoticeStore>> = Lazy::new(|| Arc::new(WorkNoticeStore::persistent(
+    crate::utils::path::get_user_data_dir().join("work_notices.json"))));
 
 /// 全局暂存表访问器（工作侧写入、陪伴侧读取共用同一实例）。
 pub fn global() -> Arc<WorkNoticeStore> {
@@ -404,7 +469,7 @@ mod callback_tests {
         // Duplicate queued facts are suppressed, but a new callback during generation survives.
         store.push_callback("vivian", "task", "阶段完成", "资料收集完毕");
         store.push_callback("vivian", "task", "工作结果已返回", "报告已生成并验证");
-        assert!(store.has_alert(&first.notice_id));
+        assert!(!store.has_alert(&first.notice_id), "a final result invalidates the old milestone");
         store.acknowledge_alert(&first.notice_id);
         assert!(!store.has_alert(&first.notice_id));
         let next = store.next_alert_for("vivian").unwrap();
@@ -434,9 +499,36 @@ mod callback_tests {
         let store = WorkNoticeStore::new();
         assert!(!store.push_callback("", "task", "完成", "真实结果"));
         assert!(!store.push_callback("nana", "task", "完成", "  "));
-        for i in 0..20 { store.push_callback("nana", "task", "进展", &format!("阶段 {i}")); }
+        for i in 0..20 { store.push_callback("nana", &format!("task-{i}"), "进展", &format!("阶段 {i}")); }
         assert_eq!(store.alerts.read().len(), MAX_ALERTS_PER_CHAR);
         assert!(store.next_alert_for("vivian").is_none());
+    }
+
+    #[test]
+    fn queued_facts_survive_restart_and_acknowledgement_is_persisted() {
+        let path = std::env::temp_dir().join(format!("vivian-notices-{}.json", uuid::Uuid::new_v4()));
+        let store = WorkNoticeStore::persistent(path.clone());
+        store.push_callback("nana", "work", "任务等待你的决定", "选择格式");
+        let notice = store.next_alert_for("nana").unwrap();
+        drop(store);
+        let restored = WorkNoticeStore::persistent(path.clone());
+        assert_eq!(restored.next_alert_for("nana").unwrap().notice_id, notice.notice_id);
+        assert!(restored.next_alert_for("vivian").is_none());
+        restored.acknowledge_alert(&notice.notice_id);
+        assert!(WorkNoticeStore::persistent(path.clone()).next_alert_for("nana").is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn required_callback_promotes_an_existing_alert_without_duplicate_identity() {
+        let store = WorkNoticeStore::new();
+        store.push_alert("vivian", "task", "发现", "实际事实");
+        let old = store.next_alert_for("vivian").unwrap();
+        store.push_callback("vivian", "task", "发现", "实际事实");
+        let promoted = store.next_alert_for("vivian").unwrap();
+        assert_eq!(old.notice_id, promoted.notice_id);
+        assert!(promoted.required);
+        assert_eq!(store.alerts.read().len(), 1);
     }
 }
 

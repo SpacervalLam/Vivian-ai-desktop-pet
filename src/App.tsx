@@ -1855,9 +1855,10 @@ export default function App() {
           const messageKey = event.payload?.message_key;
           const rawError = event.payload?.error ?? '';
           const taskLabelMap: Record<string, string> = {
-            chat: t('config.routing_chat'),
+            companion: t('config.routing_companion'),
             reasoning: t('config.routing_reasoning'),
             diary: t('config.routing_diary'),
+            persona_evolution: t('config.routing_persona_evolution'),
             memory: t('config.routing_memory'),
             consolidation: t('config.routing_consolidation'),
             reflection: t('config.routing_reflection'),

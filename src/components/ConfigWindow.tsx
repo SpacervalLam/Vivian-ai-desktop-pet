@@ -1,5 +1,5 @@
 import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, sectionTitleStyle } from './settings/SettingsFields';
-import { ROUTING_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
+import { ROUTING_TASKS, ROUTING_TIERS, NON_LLM_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
 export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
 import StickerSettings from './stickers/StickerSettings';
 import OptionalResourceSettings from './settings/OptionalResourceSettings';
@@ -2352,6 +2352,16 @@ const ConfigWindow: React.FC = () => {
   // ===== LLM 一键检测 =====
   // 收集测试目标：主 LLM 配置 + 工作智能体模型预置 + 路由矩阵全部任务
   // （读取当前 UI 值，含未保存的修改）
+  /** 连通性探测与用量归因的统一目标清单：先档位，再按任务覆盖。 */
+  const routeTargets = () => [
+    ...ROUTING_TIERS.map((tier) => ({
+      prefix: `routing_tiers.${tier.tierType}`, key: tier.tierType, labelKey: tier.labelKey,
+    })),
+    ...ROUTING_TASKS.map((task) => ({
+      prefix: `routing_matrix.${task.taskType}`, key: task.taskType, labelKey: task.labelKey,
+    })),
+  ];
+
   const collectLlmTestTargets = () => {
     const s = (path: string, fallback = '') => ((get(path, fallback) as string) ?? '');
     return [
@@ -2383,19 +2393,19 @@ const ConfigWindow: React.FC = () => {
         apiSecret: m.api_secret ?? '',
         appId: m.app_id ?? '',
       })),
-      ...ROUTING_TASKS.map((task) => ({
-        reasoning: get(`routing_matrix.${task.taskType}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null,
-        reasoningOverrides: get(`routing_matrix.${task.taskType}.reasoning_overrides`, null) as Record<string, unknown> | null,
-        sendTemperature: (get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean,
-        sendMaxTokens: (get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean,
-        key: task.taskType,
-        label: t(task.labelKey),
-        providerType: s(`routing_matrix.${task.taskType}.provider_type`) || 'openai',
-        model: s(`routing_matrix.${task.taskType}.model`).trim(),
-        apiKey: s(`routing_matrix.${task.taskType}.api_key`).trim(),
-        endpoint: s(`routing_matrix.${task.taskType}.endpoint`).trim(),
-        apiSecret: s(`routing_matrix.${task.taskType}.api_secret`),
-        appId: s(`routing_matrix.${task.taskType}.app_id`),
+      ...routeTargets().map(({ prefix, key, labelKey }) => ({
+        reasoning: get(`${prefix}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null,
+        reasoningOverrides: get(`${prefix}.reasoning_overrides`, null) as Record<string, unknown> | null,
+        sendTemperature: (get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean,
+        sendMaxTokens: (get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean,
+        key,
+        label: t(labelKey),
+        providerType: s(`${prefix}.provider_type`) || 'openai',
+        model: s(`${prefix}.model`).trim(),
+        apiKey: s(`${prefix}.api_key`).trim(),
+        endpoint: s(`${prefix}.endpoint`).trim(),
+        apiSecret: s(`${prefix}.api_secret`),
+        appId: s(`${prefix}.app_id`),
       })),
     ];
   };
@@ -2448,7 +2458,7 @@ const ConfigWindow: React.FC = () => {
     // 深拷贝 config，避免修改 UI 状态
     const configCopy: ConfigObject = JSON.parse(JSON.stringify(config));
 
-    // routing_matrix 整体设置（前后端均为 HashMap<String, TaskRouteConfig>）
+    // routing_matrix / routing_tiers 整体设置（前后端均为 HashMap<String, TaskRouteConfig>）
     if (configCopy.routing_matrix && typeof configCopy.routing_matrix === 'object') {
       try {
         await invoke('set_config', { key: 'routing_matrix', value: configCopy.routing_matrix });
@@ -2456,6 +2466,14 @@ const ConfigWindow: React.FC = () => {
         console.warn('保存 routing_matrix 失败:', e);
       }
       delete configCopy.routing_matrix;
+    }
+    if (configCopy.routing_tiers && typeof configCopy.routing_tiers === 'object') {
+      try {
+        await invoke('set_config', { key: 'routing_tiers', value: configCopy.routing_tiers });
+      } catch (e) {
+        console.warn('保存 routing_tiers 失败:', e);
+      }
+      delete configCopy.routing_tiers;
     }
 
     // provider_cache 整体设置（前后端均为 HashMap<String, CachedProviderProfile>）
@@ -3290,7 +3308,73 @@ const ConfigWindow: React.FC = () => {
 
           </>
         );
-      case 'routing':
+      case 'routing': {
+        // 档位与任务覆盖共用同一张字段表：只有配置前缀不同。
+        const routeBadge = (modelText: string, status?: 'ok' | 'error', fallbackText?: string) => {
+          if (!modelText) {
+            return fallbackText
+              ? <span style={{ fontSize: 12, color: 'var(--panel-text-quaternary)' }}>{fallbackText}</span>
+              : undefined;
+          }
+          return (
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 500,
+                color: status === 'error' ? '#F44336' : status === 'ok' ? '#4CAF50' : undefined,
+              }}
+              title={modelText}
+            >
+              {modelText}
+            </span>
+          );
+        };
+        const statusOf = (taskTypes: string[]) => {
+          if (taskTypes.some((key) => routeStatus[key] === 'error')) return 'error' as const;
+          if (taskTypes.some((key) => routeStatus[key] === 'ok')) return 'ok' as const;
+          return undefined;
+        };
+        const routeFields = (prefix: string) => (
+          <>
+            <ProviderSelector pathPrefix={prefix} get={get} setNested={setNested} t={t} />
+            <TextField label={t('config.field_model_name')} value={get(`${prefix}.model`, '')} onChange={(v) => setNested(`${prefix}.model`, v)} placeholder={t('config.ph_model')} />
+            <TextField label={t('config.field_api_key')} type="password" value={get(`${prefix}.api_key`, '')} onChange={(v) => setNested(`${prefix}.api_key`, v)} placeholder={t('config.ph_api_key')} />
+            {needsSecretFor(get(`${prefix}.provider_type`, 'openai')) && (
+              <TextField label={t('config.field_api_secret')} type="password" value={get(`${prefix}.api_secret`, '')} onChange={(v) => setNested(`${prefix}.api_secret`, v)} placeholder={t('config.ph_api_secret')} />
+            )}
+            {needsAppIdFor(get(`${prefix}.provider_type`, 'openai')) && (
+              <TextField label={t('config.field_app_id')} value={get(`${prefix}.app_id`, '')} onChange={(v) => setNested(`${prefix}.app_id`, v)} placeholder={t('config.ph_app_id')} />
+            )}
+            <TextField label={t('config.field_endpoint')} value={get(`${prefix}.endpoint`, '')} onChange={(v) => setNested(`${prefix}.endpoint`, v)} placeholder={t('config.ph_endpoint')} />
+            <ToggleField label={t('config.send_temperature')} value={(get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested(`${prefix}.send_temperature`, v)} help={t('config.parameter_send_help')} />
+            {(get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
+              label={t('config.field_temperature')}
+              value={get(`${prefix}.temperature`, get('ai.temperature', 0.70))}
+              onChange={(v) => setNested(`${prefix}.temperature`, v)}
+              min={0}
+              max={2}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+              help={t('config.field_route_temperature_help')}
+            />)}
+            <ToggleField label={t('config.send_max_tokens')} value={(get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested(`${prefix}.send_max_tokens`, v)} help={t('config.parameter_send_help')} />
+            {(get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
+              label={t('config.field_max_tokens')}
+              value={get(`${prefix}.max_tokens`, get('ai.max_tokens', 2048))}
+              onChange={(v) => setNested(`${prefix}.max_tokens`, v)}
+              min={64}
+              step={64}
+              help={t('config.field_route_max_tokens_help')}
+            />)}
+            <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get(`${prefix}.provider_type`, 'openai') as string} model={get(`${prefix}.model`, '') as string}
+              temperature={get<number>(`${prefix}.temperature`, get<number>('ai.temperature', 0.7))} maxTokens={get<number>(`${prefix}.max_tokens`, get<number>('ai.max_tokens', 2048))}
+              sendTemperature={get<boolean>(`${prefix}.send_temperature`, get<boolean>('ai.send_temperature', true))} sendMaxTokens={get<boolean>(`${prefix}.send_max_tokens`, get<boolean>('ai.send_max_tokens', true))}
+              value={get(`${prefix}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null}
+              onChange={v => setNested(`${prefix}.reasoning`, v as ConfigValue)}
+              overrides={get(`${prefix}.reasoning_overrides`, null) as Record<string, unknown> | null}
+              onOverridesChange={v => setNested(`${prefix}.reasoning_overrides`, v as ConfigValue)} t={t}/>
+          </>
+        );
         return (
           <>
             <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_routing')}</div>
@@ -3328,6 +3412,33 @@ const ConfigWindow: React.FC = () => {
             {Object.keys(llmTestResults).length > 0 && (
               <LlmProbeResults targets={collectLlmTestTargets()} results={llmTestResults} testing={llmTesting} />
             )}
+            <div style={{ ...subsectionTitleStyle, marginTop: 22 }}>{t('config.routing_tiers_title')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 10 }}>
+              {t('config.routing_tiers_description')}
+            </div>
+            {ROUTING_TIERS.map((tier) => {
+              const prefix = `routing_tiers.${tier.tierType}`;
+              const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+              return (
+                <CollapsibleSection
+                  key={tier.tierType}
+                  title={t(tier.labelKey)}
+                  subtitle={t(tier.helpKey)}
+                  defaultOpen={false}
+                  titleAccessory={routeBadge(
+                    modelText,
+                    statusOf(ROUTING_TASKS.filter((task) => task.tier === tier.tierType).map((task) => task.taskType)),
+                  )}
+                >
+                  {routeFields(prefix)}
+                </CollapsibleSection>
+              );
+            })}
+
+            <div style={{ ...subsectionTitleStyle, marginTop: 22 }}>{t('config.routing_tasks_title')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 10 }}>
+              {t('config.routing_tasks_description')}
+            </div>
             {[...new Set(ROUTING_TASKS.map((task) => task.groupKey))].map((groupKey) => (
               <details className="settings-routing-group" key={groupKey}>
                 <summary>
@@ -3335,132 +3446,49 @@ const ConfigWindow: React.FC = () => {
                   <span className="settings-routing-group-count">{ROUTING_TASKS.filter((task) => task.groupKey === groupKey).length}</span>
                 </summary>
                 <div className="settings-routing-group-body">
-            {ROUTING_TASKS.filter((task) => task.groupKey === groupKey).map((task) => {
-              const prefix = `routing_matrix.${task.taskType}`;
-              const providerType = get(`${prefix}.provider_type`, '') as string;
-              const modelVal = (get(`${prefix}.model`, '') as string).trim();
-              const apiKeyVal = (get(`${prefix}.api_key`, '') as string).trim();
-              const endpointVal = (get(`${prefix}.endpoint`, '') as string).trim();
-              const apiSecretVal = (get(`${prefix}.api_secret`, '') as string).trim();
-              const appIdVal = (get(`${prefix}.app_id`, '') as string).trim();
-              const needsSecret = needsSecretFor(providerType || 'openai');
-              const needsAppId = needsAppIdFor(providerType || 'openai');
-              const isComplete = !!modelVal
-                && !!apiKeyVal
-                && !!endpointVal
-                && (!needsSecret || !!apiSecretVal)
-                && (!needsAppId || !!appIdVal);
-              return (
-              <React.Fragment key={task.taskType}>
-              <CollapsibleSection
-                title={t(task.labelKey)}
-                subtitle={t(task.helpKey)}
-                defaultOpen={false}
-                titleAccessory={
-                  isComplete && modelVal ? (() => {
-                    const test = llmTestResults[task.taskType];
-                    const errored = test?.state === 'error' || routeStatus[task.taskType] === 'error';
-                    const color = errored
-                      ? '#F44336'
-                      : test?.state === 'testing'
-                        ? 'var(--panel-text-tertiary)'
-                        : '#4CAF50';
+                  {ROUTING_TASKS.filter((task) => task.groupKey === groupKey).map((task) => {
+                    const prefix = `routing_matrix.${task.taskType}`;
+                    const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+                    const tierLabel = ROUTING_TIERS.find((tier) => tier.tierType === task.tier);
                     return (
-                      <span
-                        style={{
-                          color,
-                          fontSize: 12,
-                          fontWeight: 500,
-                          display: 'inline-block',
-                          maxWidth: '100%',
-                        }}
-                        title={test?.error ?? modelVal}
+                      <CollapsibleSection
+                        key={task.taskType}
+                        title={t(task.labelKey)}
+                        subtitle={t(task.helpKey)}
+                        defaultOpen={false}
+                        titleAccessory={routeBadge(
+                          modelText,
+                          routeStatus[task.taskType] as 'ok' | 'error' | undefined,
+                          tierLabel ? `${t('config.routing_inherits')} ${t(tierLabel.labelKey)}` : '',
+                        )}
                       >
-                        {modelVal}
-                      </span>
+                        {routeFields(prefix)}
+                      </CollapsibleSection>
                     );
-                  })() : undefined
-                }
-              >
-                <ProviderSelector
-                  pathPrefix={`routing_matrix.${task.taskType}`}
-                  get={get}
-                  setNested={setNested}
-                  t={t}
-                />
-                <TextField
-                  label={t('config.field_model_name')}
-                  value={get(`routing_matrix.${task.taskType}.model`, '')}
-                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.model`, v)}
-                  placeholder={t('config.ph_model')}
-                />
-                <TextField
-                  label={t('config.field_api_key')}
-                  type="password"
-                  value={get(`routing_matrix.${task.taskType}.api_key`, '')}
-                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.api_key`, v)}
-                  placeholder={t('config.ph_api_key')}
-                />
-                {needsSecretFor(get(`routing_matrix.${task.taskType}.provider_type`, 'openai')) && (
-                  <TextField
-                    label={t('config.field_api_secret')}
-                    type="password"
-                    value={get(`routing_matrix.${task.taskType}.api_secret`, '')}
-                    onChange={(v) => setNested(`routing_matrix.${task.taskType}.api_secret`, v)}
-                    placeholder={t('config.ph_api_secret')}
-                  />
-                )}
-                {needsAppIdFor(get(`routing_matrix.${task.taskType}.provider_type`, 'openai')) && (
-                  <TextField
-                    label={t('config.field_app_id')}
-                    value={get(`routing_matrix.${task.taskType}.app_id`, '')}
-                    onChange={(v) => setNested(`routing_matrix.${task.taskType}.app_id`, v)}
-                    placeholder={t('config.ph_app_id')}
-                  />
-                )}
-                <TextField
-                  label={t('config.field_endpoint')}
-                  value={get(`routing_matrix.${task.taskType}.endpoint`, '')}
-                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.endpoint`, v)}
-                  placeholder={t('config.ph_endpoint')}
-                />
-                <ToggleField label={t('config.send_temperature')} value={(get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested(`routing_matrix.${task.taskType}.send_temperature`, v)} help={t('config.parameter_send_help')} />
-                {(get(`routing_matrix.${task.taskType}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
-                  label={t('config.field_temperature')}
-                  value={get(`routing_matrix.${task.taskType}.temperature`, get('ai.temperature', 0.70))}
-                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.temperature`, v)}
-                  min={0}
-                  max={2}
-                  step={0.05}
-                  format={(v) => v.toFixed(2)}
-                  help={t('config.field_route_temperature_help')}
-                />)}
-                <ToggleField label={t('config.send_max_tokens')} value={(get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested(`routing_matrix.${task.taskType}.send_max_tokens`, v)} help={t('config.parameter_send_help')} />
-                {(get(`routing_matrix.${task.taskType}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
-                  label={t('config.field_max_tokens')}
-                  value={get(`routing_matrix.${task.taskType}.max_tokens`, get('ai.max_tokens', 2048))}
-                  onChange={(v) => setNested(`routing_matrix.${task.taskType}.max_tokens`, v)}
-                  min={64}
-                  step={64}
-                  help={t('config.field_route_max_tokens_help')}
-                />)}
-                <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get(`routing_matrix.${task.taskType}.provider_type`, 'openai') as string} model={get(`routing_matrix.${task.taskType}.model`, '') as string}
-                  temperature={get<number>(`routing_matrix.${task.taskType}.temperature`,get<number>('ai.temperature',0.7))} maxTokens={get<number>(`routing_matrix.${task.taskType}.max_tokens`,get<number>('ai.max_tokens',2048))}
-                  sendTemperature={get<boolean>(`routing_matrix.${task.taskType}.send_temperature`,get<boolean>('ai.send_temperature',true))} sendMaxTokens={get<boolean>(`routing_matrix.${task.taskType}.send_max_tokens`,get<boolean>('ai.send_max_tokens',true))}
-                  value={get(`routing_matrix.${task.taskType}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null}
-                  onChange={v=>setNested(`routing_matrix.${task.taskType}.reasoning`,v as ConfigValue)}
-                  overrides={get(`routing_matrix.${task.taskType}.reasoning_overrides`, null) as Record<string, unknown> | null}
-                  onOverridesChange={v=>setNested(`routing_matrix.${task.taskType}.reasoning_overrides`,v as ConfigValue)} t={t}/>
-              </CollapsibleSection>
-              </React.Fragment>
-              );
-            })}
+                  })}
                 </div>
               </details>
             ))}
 
+            {NON_LLM_TASKS.map((task) => {
+              const prefix = `routing_matrix.${task.taskType}`;
+              const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+              return (
+                <CollapsibleSection
+                  key={task.taskType}
+                  title={t(task.labelKey)}
+                  subtitle={t(task.helpKey)}
+                  defaultOpen={false}
+                  titleAccessory={routeBadge(modelText, routeStatus[task.taskType] as 'ok' | 'error' | undefined)}
+                >
+                  {routeFields(prefix)}
+                </CollapsibleSection>
+              );
+            })}
+
           </>
         );
+      }
       case 'work':
         return (
           <>

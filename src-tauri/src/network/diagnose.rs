@@ -161,7 +161,7 @@ pub struct NetworkDiagnosisReport {
 /// 优先级：路由矩阵 `chat` 任务 → `ai.endpoint` → [`FALLBACK_PROBE_URL`]。
 pub fn resolve_service_endpoint(config: &AppConfig) -> String {
     if config.enable_routing_matrix {
-        if let Some(route) = config.routing_matrix.get("chat") {
+        if let Some(route) = config.routing_matrix.get(crate::providers::base::TASK_COMPANION) {
             let ep = route.endpoint.trim();
             if !ep.is_empty() {
                 return ep.to_string();
@@ -918,7 +918,7 @@ mod tests {
         config.enable_routing_matrix = true;
         config.ai.endpoint = Some("https://api.openai.com/v1".to_string());
         config.routing_matrix.insert(
-            "chat".to_string(),
+            crate::providers::base::TASK_COMPANION.to_string(),
             crate::config::manager::TaskRouteConfig {
                 provider_type: "openai".to_string(),
                 model: "gpt-5.5".to_string(),

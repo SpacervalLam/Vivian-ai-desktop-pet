@@ -128,6 +128,7 @@ impl BehaviorContent {
     pub fn into_action(self, trigger: ProactiveTrigger, now: f64) -> ProactiveAction {
         ProactiveAction {
             work_notice_id: None,
+            wakeup_id: None,
             trigger: trigger.as_str().to_string(),
             content: self.text,
             timestamp: now,
@@ -144,13 +145,19 @@ impl BehaviorContent {
 /// 人设 prompt 兜底（PersonaEngine 未注入时使用，按语言+角色返回）
 pub(crate) fn default_persona_prompt(lang: &str, char_id: &str) -> String {
     let config = crate::persona::default_persona_for(&char_id.to_lowercase());
-    use crate::persona::prompt_render::{default_section_for, render_persona_flags_block, CharacterSection};
-    // Reuse the active voice assets without carrying configuration protocols into short fallbacks.
-    format!("{}\n{}\n{}\n{}\n{}", render_persona_flags_block(&config, lang),
-        include_str!("../../prompts/framework/character_perspective.en.md"),
-        default_section_for(&config.identity.name, CharacterSection::Identity),
-        default_section_for(&config.identity.name, CharacterSection::Personality),
-        default_section_for(&config.identity.name, CharacterSection::Speech))
+    format!("{}\n{}\n{}\n{}\n{}\n{}",
+        crate::pipeline::prompt_modules::companion_dialogue_rules(lang),
+        crate::pipeline::prompt_modules::dialogue_tone_rules(lang),
+        crate::pipeline::prompt_modules::companion_reply_language(lang),
+        include_str!("../../prompts/framework/companion_contract.en.md"),
+        crate::pipeline::prompt_modules::creator_identity_rules(),
+        crate::persona::prompt_render::render_dialogue_card(&config, lang, &[]))
+}
+
+/// Preserve complete caller voices; upgrade older scene-only callers with the same foundation.
+pub(crate) fn speaking_voice(system_prompt: &str, lang: &str, char_id: &str) -> String {
+    if system_prompt.contains("[COMPANION DIALOGUE]") { system_prompt.to_string() }
+    else { format!("{}\n{}", default_persona_prompt(lang, char_id), system_prompt) }
 }
 
 /// 触发类型字符串常量（与 `ProactiveTrigger::as_str` 对齐）
@@ -215,8 +222,8 @@ impl BehaviorDecider {
 
     /// 调用 LLM 生成主动内容
     ///
-    /// `system_prompt` 来自 PersonaEngine.build_style_prompt(intimacy, hour)，
-    /// 为空时回退到内置人设描述。
+    /// `system_prompt` 来自 PersonaEngine.dialogue_voice_prompt(intimacy, hour)，
+    /// 旧的场景风格调用方也会补齐角色身份与语气。
     /// 返回 `None` 时调用方应回退到模板池。
     /// 仅对支持的触发器构造 prompt：HourlyGreeting /
     /// IdleGreeting / TeasingResponse / Spontaneous。其余触发器返回 `None`。
@@ -275,16 +282,11 @@ impl BehaviorDecider {
         if ignored_rounds > 0 {
             prompt.push_str(&format!("\n{}", ignored_directive(ignored_rounds, lang)));
         }
-        let sys = if system_prompt.trim().is_empty() {
-            default_persona_prompt(lang, char_id)
-        } else {
-            system_prompt.to_string()
-        };
+        let sys = speaking_voice(system_prompt, lang, char_id);
         let voice = if trigger == ProactiveTrigger::CrossCharacterReply {
             crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
         } else { String::new() };
-        let mut messages = vec![ChatMessage::system(format!("{sys}\n{voice}\n{}",
-            crate::pipeline::prompt_modules::human_feel_rules(lang)))];
+        let mut messages = vec![ChatMessage::system(format!("{sys}\n{voice}"))];
         // Even the fallback retains real roles and third-party attribution. Flattened
         // assistant text could otherwise become the wrong character's autobiography.
         crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
@@ -326,7 +328,9 @@ impl BehaviorDecider {
         state.self_state_text = self_state_text.to_string();
 
         let mut parts = step.build_parts(&state, None);
-        if parts.examples_block.is_none() { parts.examples_block = step.voice_seed_examples(); }
+        if parts.examples_block.is_none() && step.tone_injector.is_none() {
+            parts.examples_block = step.voice_seed_examples();
+        }
         // 跳过主对话 output_format（主动问候用专属输出格式）
         parts.has_native_schema = true;
         // 主动问候不注入工具列表（不需要工具调用）
@@ -936,6 +940,18 @@ mod structured_context_tests {
     }
 
     #[test]
+    fn fallback_upgrades_scene_only_voices_and_does_not_repeat_tone_rules() {
+        let ctx = LlmContext::default();
+        for supplied in ["scene-only fixture".to_string(), default_persona_prompt("zh", "nana")] {
+            let messages = BehaviorDecider::build_messages(ProactiveTrigger::HourlyGreeting, &ctx,
+                &supplied, "zh", "nana", None, "", "", &[], "", 0).unwrap();
+            assert!(messages[0].content.contains("Nana"));
+            assert_eq!(messages[0].content.matches("[COMPANION DIALOGUE]").count(), 1);
+            assert_eq!(messages[0].content.matches("[HUMAN_FEEL_RULES]").count(), 1);
+        }
+    }
+
+    #[test]
     fn topic_extension_names_the_just_spoken_line_and_asks_for_a_new_angle() {
         let ctx = LlmContext {
             last_own_utterance: "这图挺有意境的。".into(),
@@ -987,7 +1003,7 @@ mod structured_context_tests {
                     assert!(messages.iter().all(|m| m.role != "user"));
                     assert!(messages.iter().any(|m| m.content.contains("quiet_state_fixture")));
                 }
-                assert!(fallback[0].content.contains("[CHARACTER PERSPECTIVE]"));
+                assert!(fallback[0].content.contains("[COMPANION DIALOGUE]") && fallback[0].content.contains("Nana"));
             }
         }
     }

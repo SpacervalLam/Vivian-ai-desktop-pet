@@ -17,6 +17,9 @@
 pub mod background_tasks;
 pub mod config;
 pub mod meme_acquisition;
+pub(crate) mod platform_learning;
+pub(crate) mod activity_budget;
+pub(crate) mod token_budget;
 
 pub use background_tasks::{
     spawn_knowledge_acquisition, spawn_memory_consolidation, spawn_user_cognition_consolidation,
@@ -85,6 +88,11 @@ impl PresenceState {
     /// Online/Busy 正常对话；Rest 允许被叫醒迷糊应答；Offline 拒绝
     pub fn can_direct(&self) -> bool {
         matches!(self, PresenceState::Online | PresenceState::Busy | PresenceState::Rest)
+    }
+
+    /// 非在线状态的面对面消息统一通过私聊投递。
+    pub fn message_channel<'a>(&self, channel: &'a str) -> &'a str {
+        if channel == "direct" && *self != Self::Online { "wechat" } else { channel }
     }
 
     /// 是否允许微信（wechat 渠道）
@@ -212,6 +220,7 @@ pub type TaskSpawner = Arc<dyn Fn() + Send + Sync>;
 /// - 后台任务结束时调 `finish_task()`，若标记了延迟退出则自动 `transition(Online)`
 pub struct PresenceManager {
     state: Arc<RwLock<PresencePersistState>>,
+    transition_gate: parking_lot::Mutex<()>,
     persistence_path: PathBuf,
     char_id: String,
     /// 后台任务进行中标记（Busy 知识采集 / Rest 记忆沉淀）
@@ -298,6 +307,7 @@ impl PresenceManager {
             state: Arc::new(RwLock::new(state)),
             persistence_path,
             char_id: char_id.to_string(),
+            transition_gate: parking_lot::Mutex::new(()),
             task_in_progress: Arc::new(parking_lot::Mutex::new(false)),
             pending_exit_to_online: Arc::new(parking_lot::Mutex::new(false)),
             task_completed_pending: Arc::new(parking_lot::Mutex::new(false)),
@@ -336,6 +346,7 @@ impl PresenceManager {
             state: Arc::new(RwLock::new(state)),
             persistence_path,
             char_id: char_id.to_string(),
+            transition_gate: parking_lot::Mutex::new(()),
             task_in_progress: Arc::new(parking_lot::Mutex::new(false)),
             pending_exit_to_online: Arc::new(parking_lot::Mutex::new(false)),
             task_completed_pending: Arc::new(parking_lot::Mutex::new(false)),
@@ -422,6 +433,28 @@ impl PresenceManager {
         to: PresenceState,
         reason: PresenceChangeReason,
     ) -> Option<PresenceEvent> {
+        let (event, spawner) = {
+            let _gate = self.transition_gate.lock();
+            let event = self.transition_inner(to, reason);
+            let spawner = if event.is_some() {
+                match to {
+                    PresenceState::Busy => self.busy_task_spawner.read().clone(),
+                    PresenceState::Rest => self.rest_task_spawner.read().clone(),
+                    _ => None,
+                }
+            } else { None };
+            if spawner.is_some() { self.begin_task_inner(); }
+            (event, spawner)
+        };
+        // A spawned future can finish immediately. Never invoke a hook under the transition lock.
+        if let Some(spawner) = spawner { spawner(); }
+        event
+    }
+
+    fn transition_inner(&self, to: PresenceState, reason: PresenceChangeReason) -> Option<PresenceEvent> {
+        if matches!(to, PresenceState::Busy | PresenceState::Rest) && self.is_task_in_progress() {
+            return None;
+        }
         // 延迟退出：后台任务进行中切回 Online 时，标记延迟并直接返回 None
         if to == PresenceState::Online && self.is_task_in_progress() {
             *self.pending_exit_to_online.lock() = true;
@@ -477,6 +510,8 @@ impl PresenceManager {
             reason: reason.as_str().to_string(),
         };
 
+        *self.task_completed_pending.lock() = false;
+        *self.pending_exit_to_online.lock() = false;
         state.current = to.as_str().to_string();
         state.since = now;
         if to == PresenceState::Online {
@@ -500,19 +535,6 @@ impl PresenceManager {
             event.to,
             reason.display_zh()
         );
-
-        // 切到 Busy/Rest 时触发对应任务分发钩子（spawn 后台任务）
-        // 钩子内部负责 begin_task + tokio::spawn
-        let spawner = match to {
-            PresenceState::Busy => self.busy_task_spawner.read().clone(),
-            PresenceState::Rest => self.rest_task_spawner.read().clone(),
-            _ => None,
-        };
-        if let Some(spawner) = spawner {
-            // 同步标记任务进行中，避免在 spawn 任务体调 begin_task 之前出现 race window
-            self.begin_task();
-            spawner();
-        }
 
         Some(event)
     }
@@ -555,6 +577,11 @@ impl PresenceManager {
     /// 由 Busy 知识采集 / Rest 记忆沉淀任务在 spawn 后立即调用。
     /// 已有任务在跑时再次调用是 no-op（防止并发任务叠加）。
     pub fn begin_task(&self) {
+        let _gate = self.transition_gate.lock();
+        self.begin_task_inner();
+    }
+
+    fn begin_task_inner(&self) {
         let mut flag = self.task_in_progress.lock();
         if *flag {
             tracing::warn!(
@@ -573,8 +600,10 @@ impl PresenceManager {
     /// 则自动 `transition(Online, UserInteraction)` 并返回该事件，调用方负责写记忆 + emit 事件。
     /// 否则返回 None。
     pub fn finish_task(&self, config: &PresenceConfig) -> Option<PresenceEvent> {
+        let _gate = self.transition_gate.lock();
         {
             let mut flag = self.task_in_progress.lock();
+            if !*flag { return None; }
             *flag = false;
         }
         tracing::info!("[Presence:{}] 后台任务结束", self.char_id);
@@ -590,7 +619,7 @@ impl PresenceManager {
                 "[Presence:{}] 检测到延迟退出标记，自动切回 Online",
                 self.char_id
             );
-            return self.transition(PresenceState::Online, PresenceChangeReason::UserInteraction);
+            return self.transition_inner(PresenceState::Online, PresenceChangeReason::UserInteraction);
         }
 
         // 任务自然结束（无用户唤醒请求）：若当前仍在 Busy/Rest，自动切回 Online
@@ -617,7 +646,7 @@ impl PresenceManager {
                 "[Presence:{}] 后台任务自然结束，自动切回 Online（TaskCompleted）",
                 self.char_id
             );
-            return self.transition(PresenceState::Online, PresenceChangeReason::TaskCompleted);
+            return self.transition_inner(PresenceState::Online, PresenceChangeReason::TaskCompleted);
         }
         None
     }
@@ -785,6 +814,68 @@ impl PresenceManager {
                 "user_left" => "用户去忙了，自己也找点事做".to_string(),
                 _ => "有点事要忙".to_string(),
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn a_hook_can_finish_synchronously_without_reentering_the_transition_lock() {
+        let manager = Arc::new(PresenceManager::new_with_temp_dir("immediate-completion").unwrap());
+        let weak = Arc::downgrade(&manager);
+        manager.set_busy_task_spawner(Arc::new(move || {
+            weak.upgrade().unwrap().finish_task(&PresenceConfig::default());
+        }));
+        manager.transition(PresenceState::Busy, PresenceChangeReason::UserLeft).unwrap();
+        assert!(!manager.is_task_in_progress());
+    }
+    #[test]
+    fn busy_and_rest_never_spawn_overlapping_tasks_and_completion_is_idempotent() {
+        let manager = PresenceManager::new_with_temp_dir("lifecycle").unwrap();
+        let starts = Arc::new(AtomicUsize::new(0));
+        let count = starts.clone();
+        manager.set_busy_task_spawner(Arc::new(move || { count.fetch_add(1, Ordering::SeqCst); }));
+        let count = starts.clone();
+        manager.set_rest_task_spawner(Arc::new(move || { count.fetch_add(1, Ordering::SeqCst); }));
+        manager.transition(PresenceState::Busy, PresenceChangeReason::UserLeft).unwrap();
+        assert!(manager.is_task_in_progress());
+        assert!(manager.transition(PresenceState::Rest, PresenceChangeReason::MoodDriven).is_none());
+        assert_eq!(starts.load(Ordering::SeqCst),1);
+        assert!(manager.transition(PresenceState::Online, PresenceChangeReason::UserInteraction).is_none());
+        assert!(manager.has_pending_exit());
+        manager.finish_task(&PresenceConfig::default()).unwrap();
+        assert_eq!(manager.current(),PresenceState::Online);
+        assert!(!manager.is_task_in_progress());
+        assert!(!manager.has_pending_exit());
+        assert!(manager.finish_task(&PresenceConfig::default()).is_none());
+    }
+    #[test]
+    fn explicit_offline_survives_background_completion_and_minimum_duration_is_respected() {
+        let manager = PresenceManager::new_with_temp_dir("offline-lifecycle").unwrap();
+        manager.set_busy_task_spawner(Arc::new(|| {}));
+        manager.transition(PresenceState::Busy, PresenceChangeReason::UserLeft).unwrap();
+        assert!(manager.finish_task(&PresenceConfig::default()).is_none());
+        assert_eq!(manager.current(),PresenceState::Busy);
+        manager.transition(PresenceState::Offline, PresenceChangeReason::MoodDriven).unwrap();
+        assert!(!*manager.task_completed_pending.lock());
+        assert_eq!(manager.current(),PresenceState::Offline);
+    }
+}
+
+#[cfg(test)]
+mod message_channel_tests {
+    use super::PresenceState;
+
+    #[test]
+    fn non_online_direct_messages_use_wechat() {
+        for state in [PresenceState::Online, PresenceState::Busy, PresenceState::Rest, PresenceState::Offline] {
+            assert_eq!(state.message_channel("direct"), if state == PresenceState::Online { "direct" } else { "wechat" });
+            for channel in ["wechat", "wechat_group", "broadcast", "cross_character"] {
+                assert_eq!(state.message_channel(channel), channel);
+            }
         }
     }
 }

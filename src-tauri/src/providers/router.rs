@@ -29,6 +29,11 @@ enum RouteProvider<'a> {
         route: &'a str,
         provider: &'a Box<dyn BaseProvider>,
     },
+    /// 任务自己没配模型，命中它的档位。
+    Tier {
+        tier: &'a str,
+        provider: &'a Box<dyn BaseProvider>,
+    },
     Main(&'a Box<dyn BaseProvider>),
     Override(Arc<Box<dyn BaseProvider>>),
 }
@@ -36,7 +41,7 @@ enum RouteProvider<'a> {
 impl RouteProvider<'_> {
     fn provider(&self) -> &Box<dyn BaseProvider> {
         match self {
-            Self::Task { provider, .. } | Self::Main(provider) => provider,
+            Self::Task { provider, .. } | Self::Tier { provider, .. } | Self::Main(provider) => provider,
             Self::Override(provider) => provider.as_ref(),
         }
     }
@@ -44,6 +49,7 @@ impl RouteProvider<'_> {
     fn source(&self) -> &'static str {
         match self {
             Self::Task { .. } => "task",
+            Self::Tier { .. } => "tier",
             Self::Main(_) => "main",
             Self::Override(_) => "work_override",
         }
@@ -52,6 +58,7 @@ impl RouteProvider<'_> {
     fn route(&self) -> &str {
         match self {
             Self::Task { route, .. } => route,
+            Self::Tier { tier, .. } => tier,
             Self::Main(_) => "main",
             Self::Override(_) => TASK_WORK_AGENT,
         }
@@ -78,6 +85,11 @@ pub struct ModelRouter {
     main_provider: Arc<Option<Box<dyn BaseProvider>>>,
     /// 任务专属 provider —— 每个任务独立配置的模型实例
     task_providers: Arc<HashMap<String, Box<dyn BaseProvider>>>,
+    /// 档位 provider —— 任务没配模型时按所属档位取
+    ///
+    /// 与 `task_providers` 分开存，是因为两者语义不同：任务是"契约与并发"，
+    /// 档位是"模型选择"。解析时任务级配置优先，档位只做兜底。
+    tier_providers: Arc<HashMap<String, Box<dyn BaseProvider>>>,
     /// Native decision endpoint; Jev does not implement chat completions.
     jev_decision: Option<Arc<crate::providers::jev::JevClient>>,
     /// 工作智能体模型热切换覆盖
@@ -104,12 +116,12 @@ pub struct ModelRouter {
     /// 按任务分组的并发限制信号量
     ///
     /// 防止后处理 LLM 调用（记忆巩固 / 内心独白 / 日记等）同时挤占主对话资源。
-    /// 分组规则见 `semaphore_for_task`：
-    /// - chat / reasoning / vision_describe → 3 并发（用户交互路径，最高优先级）
-    /// - memory / reflection / consolidation → 3 并发（记忆/反思/巩固）
-    /// - emotion_analysis / inner_monologue / diary / knowledge_acquisition
-    ///   / translation / bystander_judge / intent_judge / asr_polish → 2 并发（辅助后台任务）
-    /// - 其他 → 3 并发（兜底）
+    /// 分组由 catalog 的 `concurrency` 字段决定，见 `semaphore_for_task`：
+    /// - `dialogue` / `interactive` → 3 并发（用户交互路径，最高优先级）
+    /// - `memory` → 3 并发（记忆/反思/巩固）
+    /// - `auxiliary` → 2 并发（辅助后台任务）
+    /// - `environment` → 1 并发且不排队，拿不到就跳过
+    /// - `work` → 2 并发，只留给工作智能体这一条产品线
     semaphores: Arc<HashMap<String, Arc<Semaphore>>>,
     /// LLM 错误 toast 冷却追踪：error_kind → 上次发送时间，防止同类型错误反复弹窗
     error_toast_cooldown: Arc<RwLock<HashMap<LlmErrorKind, Instant>>>,
@@ -177,6 +189,20 @@ fn semaphore_for_task(task_type: &str) -> (&'static str, usize) {
     }
 }
 
+/// 执行类路由（`execution` / `work` 档及其下属任务）未显式配置输出上限时，
+/// 按服务商分级取工作模型默认值，避免退回聊天用的 2048 限制长代码输出。
+fn apply_execution_budget(route_key: &str, cfg: &mut TaskRouteConfig) {
+    let execution_like = matches!(route_key, "execution" | "work")
+        || super::task_catalog::tier_of(route_key)
+            .is_some_and(|tier| matches!(tier, "execution" | "work"));
+    if execution_like && cfg.max_tokens.is_none() {
+        cfg.max_tokens = Some(crate::providers::factory::work_model_default_max_tokens(
+            &cfg.provider_type,
+            &cfg.endpoint,
+        ));
+    }
+}
+
 /// 持久化 strict 熔断模型名：避免每次重启对不支持 schema 的模型白跑一次 400
 fn strict_broken_path() -> std::path::PathBuf {
     crate::utils::path::get_user_data_dir().join("strict_broken_model")
@@ -208,6 +234,65 @@ fn save_strict_broken_models(models: &HashSet<String>) {
 }
 
 impl ModelRouter {
+    /// 从一组路由配置构建 provider 表。
+    ///
+    /// 任务表与档位表共用这段逻辑：空配置跳过、Jev 只接 `simple_judge`、
+    /// 执行类补工作模型默认输出上限。`label` 只用于日志区分来源。
+    fn build_providers(
+        config: &AppConfig,
+        client_cache: &ClientCache,
+        entries: &HashMap<String, TaskRouteConfig>,
+        label: &str,
+        jev_decision: &mut Option<Arc<crate::providers::jev::JevClient>>,
+        reasoning_out: &mut HashMap<String, ReasoningPreference>,
+    ) -> HashMap<String, Box<dyn BaseProvider>> {
+        let mut built = HashMap::new();
+        for (key, route_config) in entries {
+            // 跳过空配置（未填写 model 或 endpoint）→ 交给下一层解析兜底
+            if !provider_configuration_complete(route_config) {
+                tracing::debug!("[ModelRouter] {label} {key} 未配置完整，跳过");
+                continue;
+            }
+            if key == "simple_judge" && route_config.provider_type == "jev" {
+                match crate::providers::jev::JevClient::new(route_config) {
+                    Ok(client) => *jev_decision = Some(Arc::new(client)),
+                    Err(e) => tracing::warn!("[ModelRouter] Jev route invalid: {e}"),
+                }
+                continue;
+            }
+            if route_config.provider_type == "jev" {
+                tracing::warn!("[ModelRouter] Jev 只接 simple_judge，跳过 {label} {key}");
+                continue;
+            }
+            let mut cfg = route_config.clone();
+            apply_execution_budget(key, &mut cfg);
+            // 任务契约自带的采样默认值：只在用户没填时生效，用户配置始终优先。
+            // 档位键不在任务目录里，因此这里天然只作用于任务级覆盖。
+            if let Some(spec) = super::task_catalog::find(key) {
+                if cfg.temperature.is_none() { cfg.temperature = spec.temperature; }
+                if cfg.max_tokens.is_none() { cfg.max_tokens = spec.max_tokens; }
+            }
+            match create_task_provider(&cfg, config, client_cache) {
+                Ok(provider) => {
+                    tracing::info!(
+                        "[ModelRouter] {label} {key} 绑定模型 {} @ {}",
+                        cfg.model,
+                        cfg.endpoint
+                    );
+                    if let Some(reasoning) = cfg.reasoning {
+                        reasoning_out.insert(key.clone(), reasoning);
+                    }
+                    built.insert(key.clone(), provider);
+                }
+                Err(e) => tracing::warn!(
+                    "[ModelRouter] 创建 {label} {key} 的 provider 失败: {}，跳过",
+                    e
+                ),
+            }
+        }
+        built
+    }
+
     pub fn new(config: &AppConfig) -> VivianResult<Self> {
         let client_cache: ClientCache = Arc::new(RwLock::new(HashMap::new()));
 
@@ -254,75 +339,39 @@ impl ModelRouter {
             }
         };
 
-        // 2. 任务专属 provider（来自 routing_matrix）
+        // 2. 任务与档位 provider（来自 routing_matrix / routing_tiers）
         //    仅在 enable_routing_matrix=true 时构建；关闭时跳过，所有任务回退到主 API
-        let mut task_providers: HashMap<String, Box<dyn BaseProvider>> = HashMap::new();
         let mut jev_decision = None;
         let mut task_reasoning = HashMap::new();
-        if config.enable_routing_matrix {
-            for (task_type, task_config) in &config.routing_matrix {
-                // 跳过空配置（未填写 model 或 endpoint 的任务）→ 由主 API 兜底
-                if !provider_configuration_complete(task_config) {
-                    tracing::info!(
-                        "[ModelRouter] 任务 {} 未配置完整，回退到主 LLM API",
-                        task_type
-                    );
-                    continue;
-                }
-                if task_type == "simple_judge" && task_config.provider_type == "jev" {
-                    match crate::providers::jev::JevClient::new(task_config) {
-                        Ok(client) => jev_decision = Some(Arc::new(client)),
-                        Err(e) => tracing::warn!("[ModelRouter] Jev route invalid: {e}"),
-                    }
-                    continue;
-                }
-                if task_config.provider_type == "jev" {
-                    tracing::warn!(
-                        "[ModelRouter] Jev only supports simple_judge, skipping {task_type}"
-                    );
-                    continue;
-                }
-                // reasoning（编程 / 深度推理）未显式配置 max_tokens 时按服务商分级默认，
-                // 避免回退到聊天用的 2048 限制代码生成；显式配置仍优先
-                let mut cfg = task_config.clone();
-                if task_type == "reasoning" && cfg.max_tokens.is_none() {
-                    cfg.max_tokens =
-                        Some(crate::providers::factory::work_model_default_max_tokens(
-                            &cfg.provider_type,
-                            &cfg.endpoint,
-                        ));
-                }
-                match create_task_provider(&cfg, config, &client_cache) {
-                    Ok(provider) => {
-                        tracing::info!(
-                            "[ModelRouter] 任务 {} 绑定模型 {} @ {}",
-                            task_type,
-                            cfg.model,
-                            cfg.endpoint
-                        );
-                        task_providers.insert(task_type.clone(), provider);
-                        if let Some(reasoning) = cfg.reasoning {
-                            task_reasoning.insert(task_type.clone(), reasoning);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "[ModelRouter] 创建任务 {} 的 provider 失败: {}，回退到主 LLM API",
-                            task_type,
-                            e
-                        );
-                    }
-                }
-            }
+        let (task_providers, tier_providers) = if config.enable_routing_matrix {
+            let tasks = Self::build_providers(
+                config,
+                &client_cache,
+                &config.routing_matrix,
+                "任务",
+                &mut jev_decision,
+                &mut task_reasoning,
+            );
+            let tiers = Self::build_providers(
+                config,
+                &client_cache,
+                &config.routing_tiers,
+                "档位",
+                &mut jev_decision,
+                &mut task_reasoning,
+            );
+            (tasks, tiers)
         } else {
             tracing::info!(
-                "[ModelRouter] 路由矩阵未启用，所有任务走主 LLM API（{} 个任务配置已忽略）",
-                config.routing_matrix.len()
+                "[ModelRouter] 路由矩阵未启用，所有任务走主 LLM API（{} 个任务配置、{} 个档位配置已忽略）",
+                config.routing_matrix.len(),
+                config.routing_tiers.len()
             );
-        }
+            (HashMap::new(), HashMap::new())
+        };
 
         // 3. 无任何可用 provider 时记录警告，以空 provider 构造 router（运行期 query 返回错误）
-        if main_provider.is_none() && task_providers.is_empty() {
+        if main_provider.is_none() && task_providers.is_empty() && tier_providers.is_empty() {
             tracing::warn!(
                 "[ModelRouter] 主 LLM API 与路由矩阵均未配置，以空 provider 启动（等待用户配置）"
             );
@@ -335,6 +384,7 @@ impl ModelRouter {
         Ok(Self {
             main_provider: Arc::new(main_provider),
             task_providers: Arc::new(task_providers),
+            tier_providers: Arc::new(tier_providers),
             jev_decision,
             reasoning_override: Arc::new(RwLock::new(reasoning_override)),
             enable_routing_matrix: config.enable_routing_matrix,
@@ -451,8 +501,13 @@ impl ModelRouter {
         self.main_provider.is_some()
     }
 
+    /// 该任务是否被用户显式指定了模型（任务级覆盖或它的档位）。
+    ///
+    /// 专用判断任务一旦显式配置，通用 `simple_judge` / Jev 捷径必须让路——
+    /// 档位配置同样是显式选择，因此一并计入。
     pub fn has_task_provider(&self, task_type: &str) -> bool {
-        self.enable_routing_matrix && self.task_providers.contains_key(task_type)
+        self.enable_routing_matrix
+            && (self.task_providers.contains_key(task_type) || self.tier_route(task_type).is_some())
     }
 
     /// 注入 Tauri AppHandle，启用 `chat:route_fallback` 事件发送能力
@@ -546,7 +601,9 @@ impl ModelRouter {
         .to_string();
         let (presence_penalty, frequency_penalty) = self.conversational_penalties(request);
         ProviderCallOptions {
-            include_framework_instructions: request.include_framework_instructions,
+            include_framework_instructions: request.include_framework_instructions.or_else(||
+                request.messages.iter().any(|message| message.role == "system"
+                    && message.content.contains("[COMPANION DIALOGUE]")).then_some(false)),
             enable_search: Some(request.enable_search),
             temperature: request.temperature_override,
             max_tokens: request.max_tokens_override,
@@ -731,6 +788,13 @@ impl ModelRouter {
             for key in super::task_catalog::route_keys(task_type) {
                 if let Some((route, provider)) = self.task_providers.get_key_value(key) {
                     candidates.push(RouteProvider::Task { route, provider });
+                }
+            }
+            // 档位是"任务完全没配模型时的替代"，不是额外的兜底层：任务级（含 fallback
+            // 链上的邻居）已有配置时不再叠加，避免同一个模型被当成两级候选重试一遍。
+            if candidates.is_empty() {
+                if let Some((tier, provider)) = self.tier_route(task_type) {
+                    candidates.push(RouteProvider::Tier { tier, provider });
                 }
             }
         }
@@ -996,7 +1060,8 @@ impl ModelRouter {
                     break;
                 };
                 if let StreamEvent::Text { content } = &event {
-                    if first_text && !content.is_empty() && matches!(route.as_str(), "companion" | "chat" | "chat_partner") {
+                    let spoken = super::task_catalog::find(&route).is_some_and(|spec| spec.spoken);
+                    if first_text && spoken && !content.is_empty() {
                         first_text = false;
                         if let Some(timing) = &timing { timing.mark("provider_first_text"); }
                     }
@@ -1057,13 +1122,22 @@ impl ModelRouter {
         {
             return true;
         }
-        if self.enable_routing_matrix
-            && self
-                .task_providers
-                .get(task_type)
-                .is_some_and(|p| p.supports_native_function_calling())
-        {
-            return true;
+        if self.enable_routing_matrix {
+            for key in super::task_catalog::route_keys(task_type) {
+                if self
+                    .task_providers
+                    .get(key)
+                    .is_some_and(|p| p.supports_native_function_calling())
+                {
+                    return true;
+                }
+            }
+            if self
+                .tier_route(task_type)
+                .is_some_and(|(_, p)| p.supports_native_function_calling())
+            {
+                return true;
+            }
         }
         self.main_provider
             .as_ref()
@@ -1071,12 +1145,13 @@ impl ModelRouter {
             .is_some_and(|p| p.supports_native_function_calling())
     }
 
-    /// 当前 chat 任务的 provider 是否支持原生 JSON Schema 约束
+    /// 陪伴对话路由的 provider 是否支持原生 JSON Schema 约束
     pub fn supports_structured_output(&self) -> bool {
+        let companion = crate::providers::base::TASK_COMPANION;
         if self.enable_routing_matrix
             && self
                 .task_providers
-                .get("chat")
+                .get(companion)
                 .is_some_and(|p| p.supports_structured_output() || p.supports_json_mode())
         {
             return true;
@@ -1622,8 +1697,15 @@ impl ModelRouter {
             for key in super::task_catalog::route_keys(task_type) {
                 if let Some(provider) = self.task_providers.get(key) { return Some(provider); }
             }
+            if let Some((_, provider)) = self.tier_route(task_type) { return Some(provider); }
         }
         self.main_provider.as_ref().as_ref()
+    }
+
+    /// 任务所属档位的 provider（未配置档位时 None）。
+    fn tier_route(&self, task_type: &str) -> Option<(&str, &Box<dyn BaseProvider>)> {
+        let tier = super::task_catalog::tier_of(task_type)?;
+        self.tier_providers.get_key_value(tier).map(|(key, provider)| (key.as_str(), provider))
     }
 
     /// 带原生 function calling 的对话查询
@@ -1846,12 +1928,12 @@ mod conversational_penalty_tests {
     /// 惩罚参数只应注入"角色正在说话"的任务。
     ///
     /// 正例与 `generation.rs::build_chat_request` 注入响应 Schema 的集合一致
-    /// ——`reasoning` 是携带工具定义时由 `chat` 升级而来。
+    /// ——`reasoning` 是携带工具定义时由 `companion` 升级而来。
     #[test]
     fn only_spoken_output_tasks_get_penalties() {
         for task in [
             crate::providers::base::TASK_COMPANION,
-            "chat",
+            "chat_partner",
             "pet_reaction",
         ] {
             assert!(is_conversational_task(task), "{task} 应注入采样惩罚");
@@ -1934,7 +2016,7 @@ mod route_tests {
             calls: calls.clone(),
         })));
         router.task_providers = Arc::new(HashMap::from([(
-            "chat".into(),
+            crate::providers::base::TASK_COMPANION.into(),
             Box::new(MockProvider {
                 model: "primary",
                 events: primary,
@@ -1950,6 +2032,7 @@ mod route_tests {
     fn companion_missing_route_uses_main_and_explicit_route_wins() {
         let (mut router, _) = router(vec![], vec![]);
         let task = crate::providers::base::TASK_COMPANION;
+        router.task_providers = Arc::new(HashMap::new());
         assert_eq!(
             router.resolve_provider(task).unwrap().get_model(),
             "fallback"
@@ -1978,7 +2061,7 @@ mod route_tests {
         };
         let (router, calls) = router(vec![error.clone()], vec![text.clone()]);
         let mut rx = router
-            .query_stream("chat", vec![], None, "", "test")
+            .query_stream(crate::providers::base::TASK_COMPANION, vec![], None, "", "test")
             .await
             .unwrap();
         assert!(
@@ -1988,7 +2071,7 @@ mod route_tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let (router, calls) = self::router(vec![text, error], vec![]);
         let mut rx = router
-            .query_stream("chat", vec![], None, "", "test")
+            .query_stream(crate::providers::base::TASK_COMPANION, vec![], None, "", "test")
             .await
             .unwrap();
         assert!(matches!(rx.recv().await, Some(StreamEvent::Text { .. })));
@@ -2217,7 +2300,7 @@ mod task_contract_tests {
         };
         router.main_provider = Arc::new(Some(Box::new(probe.clone())));
         router.task_providers = Arc::new(
-            super::super::task_catalog::TASK_ROUTES
+            super::super::task_catalog::tasks()
                 .iter()
                 .map(|spec| {
                     let mut provider = probe.clone();
@@ -2246,7 +2329,7 @@ mod task_contract_tests {
     #[tokio::test]
     async fn every_task_reaches_its_provider_with_a_distinct_prompt_in_all_four_modes() {
         let (router, probe) = fixture();
-        for spec in super::super::task_catalog::TASK_ROUTES.iter() {
+        for spec in super::super::task_catalog::tasks().iter() {
             assert_eq!(router.generate(request(&spec.id)).await.unwrap(), spec.id);
             drain(
                 router.generate_stream(request(&spec.id)).await.unwrap(),
@@ -2273,7 +2356,7 @@ mod task_contract_tests {
             .await;
         }
         let captures = probe.calls.lock();
-        assert_eq!(captures.len(), super::super::task_catalog::TASK_ROUTES.len() * 4);
+        assert_eq!(captures.len(), super::super::task_catalog::tasks().len() * 4);
         for (model, messages, framework) in captures.iter() {
             assert_eq!(framework, &Some(false));
             let contract = super::super::task_catalog::prompt(
@@ -2332,11 +2415,46 @@ mod task_contract_tests {
         assert_eq!(router.generate(request("work_agent")).await.unwrap(), "work_override");
         assert_eq!(router.generate(request("reasoning")).await.unwrap(), "reasoning");
         assert_eq!(router.generate(request("companion")).await.unwrap(), "companion");
-        assert_eq!(router.generate(request("tool_execution")).await.unwrap(), "tool_execution");
+        assert_eq!(router.generate(request("faithfulness")).await.unwrap(), "faithfulness");
         let captures = probe.calls.lock();
-        for (i, task) in ["work_agent", "reasoning", "companion", "tool_execution"].iter().enumerate() {
+        for (i, task) in ["work_agent", "reasoning", "companion", "faithfulness"].iter().enumerate() {
             assert_eq!(captures[i].1[0].content, super::super::task_catalog::prompt(super::super::task_catalog::find(task).unwrap()));
         }
+    }
+
+    #[tokio::test]
+    async fn tier_takes_over_only_when_the_task_has_no_route_of_its_own() {
+        let (mut router, probe) = fixture();
+        let mut tier = probe.clone(); tier.model = "dialogue-tier".into();
+        router.task_providers = Arc::new(HashMap::new());
+        router.tier_providers = Arc::new(HashMap::from([(
+            "dialogue".into(),
+            Box::new(tier) as Box<dyn BaseProvider>,
+        )]));
+        assert_eq!(router.generate(request("companion")).await.unwrap(), "dialogue-tier");
+        assert_eq!(router.generate(request("pet_reaction")).await.unwrap(), "dialogue-tier");
+        // 其他档位的任务不该借用 dialogue 档
+        assert_eq!(router.generate(request("memory")).await.unwrap(), "main");
+    }
+
+    #[tokio::test]
+    async fn task_route_wins_over_its_tier_and_the_fallback_chain_precedes_it() {
+        let (mut router, probe) = fixture();
+        let mut companion = probe.clone(); companion.model = "companion-route".into();
+        let mut tier = probe.clone(); tier.model = "dialogue-tier".into();
+        router.task_providers = Arc::new(HashMap::from([(
+            "companion".into(),
+            Box::new(companion) as Box<dyn BaseProvider>,
+        )]));
+        router.tier_providers = Arc::new(HashMap::from([(
+            "dialogue".into(),
+            Box::new(tier) as Box<dyn BaseProvider>,
+        )]));
+        // 任务级覆盖优先
+        assert_eq!(router.generate(request("companion")).await.unwrap(), "companion-route");
+        // pet_reaction 自身没配，先走 fallback 链上的 companion，而不是档位
+        assert_eq!(router.generate(request("pet_reaction")).await.unwrap(), "companion-route");
+        assert_eq!(router.dialogue_model_name("pet_reaction"), "companion-route");
     }
 
     #[tokio::test]

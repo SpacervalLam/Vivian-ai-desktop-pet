@@ -483,12 +483,22 @@ impl UserModel {
         if !active_projects.is_empty() {
             let mut lines = Vec::new();
             for p in active_projects {
-                let focus_str = if p.focus.is_empty() {
-                    String::new()
-                } else {
-                    format!("（关注：{}）", p.focus.join("、"))
+                // 状态用自然语言，不用 Rust Debug 枚举；phase 是 snake_case 标识符，
+                // 展开成可读词——整段要像「我记得你在忙什么」，不像数据库导出。
+                let status_zh = match p.status {
+                    ProjectStatus::Active => "在进行",
+                    ProjectStatus::Dormant => "暂停",
+                    ProjectStatus::Completed => "已完成",
+                    ProjectStatus::Abandoned => "已放下",
                 };
-                lines.push(format!("- {} [{:?}]: {}{}", p.name, p.status, p.phase, focus_str));
+                let mut line = format!("- {}（{}）", p.name, status_zh);
+                if !p.phase.trim().is_empty() {
+                    line.push_str(&format!("，现阶段：{}", p.phase.replace('_', " ")));
+                }
+                if !p.focus.is_empty() {
+                    line.push_str(&format!("，关注：{}", p.focus.join("、")));
+                }
+                lines.push(line);
             }
             sections.push(format!("【当前项目】\n{}", lines.join("\n")));
         }
@@ -503,14 +513,9 @@ impl UserModel {
                 } else {
                     format!("（{}）", t.scope)
                 };
-                lines.push(format!(
-                    "- {}: {} {} [置信度 {:.0}%，证据 {} 条]",
-                    t.key,
-                    t.value,
-                    scope_hint,
-                    t.confidence * 100.0,
-                    t.evidence_count
-                ));
+                // 置信度与证据条数是存储层评分，写进 prompt 只会把「我对你的了解」
+                // 变成数据库导出，并带动模型用记录体说话（2026-10-24 去掉）。
+                lines.push(format!("- {}: {} {}", t.key, t.value, scope_hint));
             }
             sections.push(format!("【对你的了解】\n{}", lines.join("\n")));
         }

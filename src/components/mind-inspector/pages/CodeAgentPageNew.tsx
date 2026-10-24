@@ -297,6 +297,15 @@ const CHAT_MIN_W = WORKBENCH_READING_WIDTH;
  */
 const PINNED_GAP_W = 18;
 
+/** 输入框草稿：切换视图（正式会话 ↔ 预备会话）时整份存取。 */
+type ComposerDraft = {
+  text: string;
+  images: DraftAttachment[];
+  refs: { path: string; label: string }[];
+};
+/** 预备会话在草稿表里的键。正式会话一律用 session_id 作键。 */
+const DRAFT_VIEW_KEY = '\u0000draft-session';
+
 // Composer container queries progressively wrap controls; the editor stays available.
 
 const PERMISSIONS: Array<{ key: 'read_only' | 'workspace_write' | 'full_access'; label: string; icon: React.ReactNode; hint: string }> = [
@@ -1144,7 +1153,7 @@ const ToolCallRow: React.FC<{
       </button>
       {isFileTool(name) ? (
         expanded && <FileToolBody path={filePathFromArgs(argumentsJson)} result={result} name={name} />
-      ) : ((name === 'web_search' || name === 'web_fetch') && parseWebEvidence(result)) ? (
+      ) : ((name === 'web_search' || name === 'read_content' || name === 'web_fetch') && parseWebEvidence(result)) ? (
         expanded && <WebEvidenceCard result={result} />
       ) : (
         <>
@@ -3485,6 +3494,16 @@ const CodeAgentPage: React.FC = () => {
   const sessionRefresh = useRef(0);
   const sessionSelection = useRef(0);
   const [activeId, setActiveId] = useState<string | null>(null);
+  /**
+   * 预备会话：点「新会话」后、首条消息发出前的那个「待创建」会话。
+   *
+   * `null` = 还没有预备会话；`''` = 预备会话（用自己的默认工作区）；
+   * 其它字符串 = 预备会话 + 本次指定的目录。
+   *
+   * 它**不落库**（侧边栏不会出现一条「未命名」），但草稿要留着——切到别的会话
+   * 再点「新会话」能接着写。首条消息发出、会话转正后清掉。
+   */
+  const [draftWorkspace, setDraftWorkspace] = useState<string | null>(null);
   const navigation = useNavigation();
   const requestedSession = typeof navigation?.pageParams.workSessionId === 'string' ? navigation.pageParams.workSessionId : undefined;
   const requestedSessionRef = useRef(requestedSession);
@@ -3866,6 +3885,11 @@ const CodeAgentPage: React.FC = () => {
   const asrBaseLenRef = useRef(0);
 
   const activeSession = sessions.find((s) => s.session_id === activeId) ?? null;
+  /**
+   * 草稿态的目标目录，直接供展示用：指定了目录就用它，用默认工作区（''）就回落到
+   * 配置里的默认目录。没有草稿时是空串——调用方据此保留"未选择工作区"的原义。
+   */
+  const draftDirectory = draftWorkspace === null ? '' : (draftWorkspace || defaultWorkspace || '');
   const snapshotRef = useRef<WorkbenchSnapshot>(initialSnapshot);
   snapshotRef.current = { activeId, input, rightTab, workflowView, previewTabs, activePreview, previewFullView, sessionView, sessionSort, workspaceTreeOpen, scroll: snapshotRef.current.scroll };
   const saveSnapshot = useCallback(() => {
@@ -4086,7 +4110,7 @@ const CodeAgentPage: React.FC = () => {
       const picked = await openDialog({
         directory: false,
         multiple: true,
-        defaultPath: activeSession?.working_directory ?? undefined,
+        defaultPath: activeSession?.working_directory || draftDirectory || undefined,
       });
       if (picked === null) return;
       const paths = Array.isArray(picked) ? picked : [picked];
@@ -4094,7 +4118,7 @@ const CodeAgentPage: React.FC = () => {
     } catch (e) {
       notifyError(t('mind_inspector.code_img_add_failed', { e: String(e) }));
     }
-  }, [activeSession, addFilePaths, t, notifyError]);
+  }, [activeSession, draftDirectory, addFilePaths, t, notifyError]);
 
   useEffect(() => {
     let disposed = false;
@@ -4207,6 +4231,29 @@ const CodeAgentPage: React.FC = () => {
     });
   }, [t]);
 
+  /**
+   * 输入框草稿按「视图」存：正式会话用 session_id 作键，预备会话用
+   * [`DRAFT_VIEW_KEY`]。切视图时先存当前、再装目标，输入框里的字就不会串到
+   * 别的会话去——预备会话的草稿也因此能一直留着。
+   */
+  const viewDraftsRef = useRef(new Map<string, ComposerDraft>());
+  /** 当前输入框归属的视图键；初始为空串（还没绑定任何会话）。 */
+  const viewKeyRef = useRef('');
+  /** 输入框当前值的镜像，供切换视图时同步读取（state 在回调闭包里可能过期）。 */
+  const composerDraftRef = useRef<ComposerDraft>({ text: input, images: [], refs: [] });
+  composerDraftRef.current = { text: input, images: draftImages, refs: draftRefs };
+
+  const switchComposerDraft = useCallback((to: string) => {
+    const from = viewKeyRef.current;
+    if (from === to) return;
+    viewDraftsRef.current.set(from, composerDraftRef.current);
+    const next = viewDraftsRef.current.get(to) ?? { text: '', images: [], refs: [] };
+    viewKeyRef.current = to;
+    setInput(next.text);
+    setDraftImages(next.images);
+    setDraftRefs(next.refs);
+  }, []);
+
   useEffect(() => {
     void (async () => {
       setDefaultWorkspace(await refreshDefaultWorkspace());
@@ -4225,6 +4272,8 @@ const CodeAgentPage: React.FC = () => {
         const restored = latest;
         setSessions(previous => previous.map(s => s.session_id === restored.session_id ? restored : s));
         setActiveId(latest.session_id);
+        // 快照里恢复出来的输入内容属于这个会话，绑定视图键后切走才能原样存回去
+        viewKeyRef.current = latest.session_id;
         setRunning(latest.status === 'running');
         setMessages(latest.messages ?? []);
         setPermission(latest.permission ?? 'workspace_write');
@@ -4249,6 +4298,8 @@ const CodeAgentPage: React.FC = () => {
     setSessions(previous => previous.some(item => item.session_id === detail.session_id)
       ? previous.map(item => item.session_id === detail.session_id ? detail : item) : [...previous, detail]);
     setActiveId(s.session_id);
+    // 输入框跟着视图走：先把预备会话（或上一个会话）的草稿存好，再装这个会话的
+    switchComposerDraft(s.session_id);
     setMessages(s.messages ?? []);
     setRunning(s.status === 'running');
     setThinking(false);
@@ -4263,7 +4314,7 @@ const CodeAgentPage: React.FC = () => {
     setReasoningLevel(s.reasoning_level ?? 'high');
     if (s.model_id) setModelName(s.model_id);
     return true;
-  }, [hydrateSession, notifyError]);
+  }, [hydrateSession, notifyError, switchComposerDraft]);
 
   useEffect(() => {
     if (!requestedSession) return;
@@ -4294,7 +4345,11 @@ const CodeAgentPage: React.FC = () => {
       });
       const list = await refreshSessions();
       const fresh = list.find((s) => s.session_id === session.session_id) || session;
-      switchSession(fresh);
+      // 必须 await：switchSession 内部要先读会话详情再落地 activeId/messages，
+      // 不等它的话，调用方（handleSend）随后写入的首条用户消息会被它的
+      // setMessages(空历史) 覆盖掉。
+      await switchSession(fresh);
+      setDraftWorkspace(null);
       setInput('');
       inputRef.current?.focus();
       return fresh;
@@ -4326,26 +4381,62 @@ const CodeAgentPage: React.FC = () => {
     return createSessionInWorkspace(dir);
   }, [createSessionInWorkspace, pickDirectory]);
 
-  /** 保证存在一个可用会话：已有则复用，无则按默认工作区新建。返回会话 id，取消/失败返回 null。 */
+  /**
+   * 进入预备会话：只把界面切到「待创建」空态，不调后端。
+   * 真正落库推迟到 [`ensureSession`]（用户提交第一条消息时）。
+   *
+   * 传 `dir` = 本次明确指定了工作区（下拉「选择工作区…」/ 工作区分组旁的 `+`）；
+   * 不传 = 沿用已有预备会话的目录，没有则用默认工作区。
+   */
+  const openDraftSession = useCallback((dir?: string) => {
+    if (creating) return;
+    // 作废进行中的会话切换，避免它稍后把视图又覆盖回旧会话
+    sessionSelection.current += 1;
+    // 输入框跟着视图走：把当前会话的草稿存好，装回预备会话上次写的草稿
+    switchComposerDraft(DRAFT_VIEW_KEY);
+    setDraftWorkspace(prev => dir ?? prev ?? '');
+    setActiveId(null);
+    setMessages([]);
+    setRunning(false);
+    setThinking(false);
+    setStreamingText('');
+    setThinkingText('');
+    setStats(null);
+    setQueue([]);
+    setPreviewTabs([]);
+    setActivePreview(null);
+    inputRef.current?.focus();
+  }, [creating, switchComposerDraft]);
+
+  /**
+   * 保证存在一个可用会话：已有则复用；预备会话则此时才真正创建会话；
+   * 都没有时按默认工作区新建。返回会话 id，取消/失败返回 null。
+   */
   const ensureSession = useCallback(async (): Promise<string | null> => {
     if (activeId) return activeId;
+    // 预备会话指定了具体目录：只在这个目录建，失败就停（不偷偷换去默认工作区）
+    if (draftWorkspace) {
+      const created = await createSessionInWorkspace(draftWorkspace);
+      return created?.session_id ?? null;
+    }
+    // 预备会话用默认工作区（''）或压根没有预备会话：沿用"默认目录 → 失败再让用户选"的旧路径
     const created = await createSessionByDefault();
     return created?.session_id ?? null;
-  }, [activeId, createSessionByDefault]);
+  }, [activeId, draftWorkspace, createSessionInWorkspace, createSessionByDefault]);
 
-  /** 「新会话」主点击：用默认工作区一键新建。 */
+  /** 「新会话」主点击：回到预备会话（没有就开一个），草稿一直都在。 */
   const handleCreate = useCallback(async () => {
     if (creating) return;
-    await createSessionByDefault();
-  }, [creating, createSessionByDefault]);
+    openDraftSession();
+  }, [creating, openDraftSession]);
 
-  /** 「新会话」下拉菜单：本次手动指定目录新建。 */
+  /** 「新会话」下拉菜单：本次手动指定目录，同样先进草稿。 */
   const handleCreateWithPick = useCallback(async () => {
     if (creating) return;
     const dir = await pickDirectory();
     if (!dir) return;
-    await createSessionInWorkspace(dir);
-  }, [creating, pickDirectory, createSessionInWorkspace]);
+    openDraftSession(dir);
+  }, [creating, pickDirectory, openDraftSession]);
 
   const handleDelete = useCallback(async (id: string, skipConfirm = false) => {
     const target = sessions.find((s) => s.session_id === id);
@@ -4434,16 +4525,16 @@ const CodeAgentPage: React.FC = () => {
       if (text) setQueue((q) => [...q, text]);
       return;
     }
-    // 空态首次发送：先保证有会话（无则弹目录选择新建），再继续发送
-    const sid = await ensureSession();
-    if (!sid) return;
-    // 无工作模型时无法路由：高亮模型下拉框引导去设置，不发送
+    // 无工作模型时无法路由：先判模型再建会话，否则会白留一个空会话在侧边栏
     const workModelId = await loadActiveModelId();
     if (!workModelId) {
       setModelHighlight(true);
       notifyError(t('mind_inspector.code_no_work_model'));
       return;
     }
+    // 空态首次发送：先保证有会话（预备会话在此转正），再继续发送
+    const sid = await ensureSession();
+    if (!sid) return;
     setBudgetStopped(false);
     setBudgetHint(false);
     setRunning(true);
@@ -4483,6 +4574,8 @@ const CodeAgentPage: React.FC = () => {
         images: images.length > 0 ? images : undefined,
         fileRefs: sentRefs.length > 0 ? sentRefs.map((r) => ({ path: r.path })) : undefined,
       });
+      // 预备会话已转正：草稿作废，否则再点「新会话」会把刚发出去的内容又填回来
+      viewDraftsRef.current.delete(DRAFT_VIEW_KEY);
       for (const d of sentDrafts) URL.revokeObjectURL(d.previewUrl);
     } catch (e) {
       setInput(text);
@@ -4765,6 +4858,12 @@ const CodeAgentPage: React.FC = () => {
         setStreamingText('');
         setBudgetStopped(false);
       });
+      await add('coding:companion_instruction', (p) => {
+        if (!isMine(p)) return;
+        const instruction = p as { content?: unknown; guided?: boolean };
+        if (typeof instruction.content !== 'string' || !instruction.content.trim()) return;
+        append({ role: 'user', content: instruction.content, guided: instruction.guided === true, timestamp: Date.now() });
+      });
       await add('coding:assistant_message', (p) => {
         if (!isMine(p)) return;
         setThinking(false);
@@ -5010,7 +5109,8 @@ const CodeAgentPage: React.FC = () => {
 
   /** 拉取工作目录文件列表（@-mention 菜单用，深度 4 覆盖常见嵌套）。 */
   const loadAtFiles = useCallback(async () => {
-    const cwd = activeSession?.working_directory;
+    // 草稿态还没有会话，但目录已经定了：@-mention 也应该能列出那个目录
+    const cwd = activeSession?.working_directory || draftDirectory;
     if (!cwd) {
       setAtFiles([]);
       return;
@@ -5033,7 +5133,7 @@ const CodeAgentPage: React.FC = () => {
     } catch {
       setAtFiles([]);
     }
-  }, [activeSession]);
+  }, [activeSession, draftDirectory]);
 
   const handleInputChange = useCallback((value: string) => {
     setInput(value);
@@ -5552,7 +5652,7 @@ const CodeAgentPage: React.FC = () => {
           <SessionSidebar sessions={searchSessionsData} activeId={activeId} unread={unreadSessions} waitingId={ask ? activeId : null}
             onSelect={switchSession} onContextMenu={(session, event) => setSessionMenu({ id: session.session_id, x: event.clientX, y: event.clientY })}
             onSearch={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }} workspaceName={workspaceDisplayName}
-            onNewProjectSession={path => void createSessionInWorkspace(path)} onRenameProject={startRenameWorkspace} onDeleteProject={path => { void confirmDialog(t('mind_inspector.code_delete_workspace_confirm', { name: workspaceDisplayName(path) }), { title: t('mind_inspector.code_delete_confirm_title'), kind: 'warning' }).then(confirmed => { if (confirmed) void deleteWorkspace(path); }); }} onHoverStart={cancelLeftPeekClose} onHoverEnd={() => { if (leftPeekAvailable) closeLeftPeekLater(); }} />
+            onNewProjectSession={path => openDraftSession(path)} onRenameProject={startRenameWorkspace} onDeleteProject={path => { void confirmDialog(t('mind_inspector.code_delete_workspace_confirm', { name: workspaceDisplayName(path) }), { title: t('mind_inspector.code_delete_confirm_title'), kind: 'warning' }).then(confirmed => { if (confirmed) void deleteWorkspace(path); }); }} onHoverStart={cancelLeftPeekClose} onHoverEnd={() => { if (leftPeekAvailable) closeLeftPeekLater(); }} />
 
         </div>
         {typeof document !== 'undefined' && createPortal(<>
@@ -5600,10 +5700,13 @@ const CodeAgentPage: React.FC = () => {
             <FolderOpen size={13} style={{ flexShrink: 0 }} />
             <span className="codex-topbar-context">
               <span className="codex-topbar-title">
-                {activeSession?.title || t('mind_inspector.code_untitled', { defaultValue: '未命名' })}
+                {activeSession?.title
+                  || (draftWorkspace !== null
+                    ? t('mind_inspector.code_new_session', { defaultValue: '新会话' })
+                    : t('mind_inspector.code_untitled', { defaultValue: '未命名' }))}
               </span>
-              <span className="codex-topbar-path" title={activeSession?.working_directory || defaultWorkspace}>
-                {activeSession?.working_directory || defaultWorkspace || t('mind_inspector.code_no_workspace')}
+              <span className="codex-topbar-path" title={activeSession?.working_directory || draftDirectory || defaultWorkspace}>
+                {activeSession?.working_directory || draftDirectory || defaultWorkspace || t('mind_inspector.code_no_workspace')}
               </span>
             </span>
           </div>
@@ -5708,6 +5811,14 @@ const CodeAgentPage: React.FC = () => {
                       <div className="codex-hero-title">
                         {t('mind_inspector.code_hero_title', { defaultValue: '你想让 Vivian & Nana 帮你做什么？' })}
                       </div>
+                      {/* 草稿态：会话还没落库，明确告诉用户"发出去才建"，避免以为点了没反应 */}
+                      {draftWorkspace !== null && (
+                        <div className="codex-hero-sub">
+                          {t('mind_inspector.code_draft_hint', { defaultValue: '发送第一条消息后才会创建这个会话' })}
+                          {' · '}
+                          {draftDirectory || defaultWorkspace || t('mind_inspector.code_no_workspace')}
+                        </div>
+                      )}
                     </div>
                     <div className="codex-composer-inner" style={{ width: '100%' }}>{composer}</div>
                     {quickStarts}
@@ -5912,7 +6023,7 @@ const CodeAgentPage: React.FC = () => {
                 flex 分配——对话区靠上面那条 `--codex-pinned-reserve` 留白让位。
                 整块显隐由顶栏「模式下拉」与「检查器开关」之间的那个按钮控制。 */}
             <PinnedSummary
-              workingDirectory={activeSession?.working_directory ?? ''}
+              workingDirectory={activeSession?.working_directory || draftDirectory}
               visible={shownPinned}
             />
           </div>
@@ -6009,7 +6120,7 @@ const CodeAgentPage: React.FC = () => {
                 </div>
                 <div className="codex-info-row">
                   <span className="codex-info-value" style={{ maxWidth: '100%', whiteSpace: 'normal' }}>
-                    {activeSession?.working_directory
+                    {(activeSession?.working_directory || draftDirectory)
                       || t('mind_inspector.code_no_workspace', { defaultValue: '未选择工作区' })}
                   </span>
                 </div>

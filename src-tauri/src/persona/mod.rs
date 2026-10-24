@@ -439,6 +439,23 @@ impl PersonaEngine {
         preferences
     }
 
+    /// Shared voice for short speaking paths that do not run the full chat pipeline.
+    pub fn dialogue_voice_prompt(&self, intimacy: f64, hour: u32) -> String {
+        self.build_style_prompt(intimacy, hour);
+        let lang = self.get_language();
+        let config = self.config_with_card_overlay();
+        [
+            crate::pipeline::prompt_modules::companion_dialogue_rules(&lang).to_string(),
+            crate::pipeline::prompt_modules::dialogue_tone_rules(&lang),
+            crate::pipeline::prompt_modules::companion_reply_language(&lang),
+            include_str!("../../prompts/framework/companion_contract.en.md").to_string(),
+            crate::pipeline::prompt_modules::creator_identity_rules().to_string(),
+            self.dialogue_card(),
+            prompt_render::render_style_preset_block(&config, &lang),
+            self.dialogue_preferences(),
+        ].into_iter().filter(|part| !part.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
+    }
+
     /// 人设配置修订号递增（所有 config 变更点调用，驱动渲染缓存失效）
     fn bump_config_revision(&self) {
         self.config_revision
@@ -764,5 +781,22 @@ impl Default for PersonaEngine {
                 character_block_cache: RwLock::new(None),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod speaking_voice_tests {
+    use super::*;
+    #[test]
+    fn short_speaking_voice_contains_identity_and_configured_preferences() {
+        for id in ["vivian", "nana"] {
+            let engine = PersonaEngine::new(id).unwrap();
+            let voice = engine.dialogue_voice_prompt(0.0, 14);
+            assert!(voice.contains(&engine.get_name()));
+            assert!(voice.contains("[COMPANION DIALOGUE]"));
+            assert!(voice.contains("[HUMAN_FEEL_RULES]"));
+            assert!(voice.contains("Speech Style"));
+            assert!(!voice.contains("[PERSONA_PROTOCOL]"));
+        }
     }
 }

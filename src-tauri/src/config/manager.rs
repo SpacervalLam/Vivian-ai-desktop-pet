@@ -22,6 +22,13 @@ pub struct AppConfig {
     pub ai: AiConfig,
     pub network: NetworkConfig,
     pub routing_matrix: HashMap<String, TaskRouteConfig>,
+    /// 模型档位配置：用户实际选择的粒度（对话 / 视觉 / 执行 / 工作 / 记忆 / 认知 / 判断 / 文本）。
+    ///
+    /// 解析顺序为「任务自己的 `routing_matrix` 条目 → 同档更通用的任务（`fallback` 链）
+    /// → 该任务所属档位 → 主 LLM API」。`routing_matrix` 因此退化为按任务覆盖，
+    /// 只有用户显式配了模型才会命中。
+    #[serde(default)]
+    pub routing_tiers: HashMap<String, TaskRouteConfig>,
     pub memory: MemoryConfig,
     pub speech_recognition: SpeechRecognitionConfig,
     #[serde(default)]
@@ -1154,10 +1161,9 @@ pub struct TaskRouteConfig {
 }
 
 impl TaskRouteConfig {
-    pub fn for_task(task: &str) -> Self {
-        if task == "persona_evolution" {
-            Self { temperature:Some(0.35), max_tokens:Some(6144), ..Self::default() }
-        } else { Self::default() }
+    /// 空白路由条目：没有任何模型信息，运行时视为"未配置"。
+    pub fn empty() -> Self {
+        Self::default()
     }
 }
 
@@ -1811,9 +1817,17 @@ impl Default for AppConfig {
             routing_matrix: {
                 let mut m = HashMap::new();
                 // 路由矩阵任务键预注册（配置留空，由用户填写）
-                // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时回退到主 LLM API
-                for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
-                    m.insert(spec.id.clone(), TaskRouteConfig::for_task(&spec.id));
+                // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时按档位回退
+                for spec in crate::providers::task_catalog::tasks().iter() {
+                    m.insert(spec.id.clone(), TaskRouteConfig::empty());
+                }
+                m
+            },
+            routing_tiers: {
+                let mut m = HashMap::new();
+                // 档位键预注册，同样留空；用户填了模型才会接管该档任务。
+                for spec in crate::providers::task_catalog::tiers().iter() {
+                    m.insert(spec.id.clone(), TaskRouteConfig::empty());
                 }
                 m
             },
@@ -1864,21 +1878,22 @@ pub struct ConfigManager {
     revision: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// 把任务目录里新增的任务补进已保存的配置。
+/// 把任务目录里新增的任务与档位补进已保存的配置。
 ///
-/// 老配置文件里没有新任务的键；不补的话，读取方（如生图路由）会拿到 None，
+/// 配置文件里没有新键；不补的话，读取方（如生图路由）会拿到 None，
 /// 表现成"功能存在但永远不可用"，而用户在界面上改了又因为对不上键而无效。
-/// 只补缺失项，绝不覆盖用户已填的值。
+/// 只补缺失项，绝不覆盖用户已填的值；目录里已经不存在的键一并清掉，避免
+/// 已删除任务残留在用量报告与连通性测试里。
 fn ensure_task_routes(cfg: &mut AppConfig) {
-    // Preserve an explicitly configured legacy diary-growth model when upgrading
-    // to the dedicated evolution agent. Never overwrite a new route already set.
-    if !cfg.routing_matrix.contains_key("persona_evolution") {
-        if let Some(legacy) = cfg.routing_matrix.get("diary_growth").filter(|route| !route.model.trim().is_empty()).cloned() {
-            cfg.routing_matrix.insert("persona_evolution".into(), legacy);
-        }
+    let tasks = crate::providers::task_catalog::tasks();
+    cfg.routing_matrix.retain(|key, _| tasks.iter().any(|spec| &spec.id == key));
+    for spec in tasks.iter() {
+        cfg.routing_matrix.entry(spec.id.clone()).or_insert_with(TaskRouteConfig::empty);
     }
-    for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
-        cfg.routing_matrix.entry(spec.id.clone()).or_insert_with(|| TaskRouteConfig::for_task(&spec.id));
+    let tiers = crate::providers::task_catalog::tiers();
+    cfg.routing_tiers.retain(|key, _| tiers.iter().any(|spec| &spec.id == key));
+    for spec in tiers.iter() {
+        cfg.routing_tiers.entry(spec.id.clone()).or_insert_with(TaskRouteConfig::empty);
     }
 }
 

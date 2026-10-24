@@ -58,16 +58,26 @@ pub fn set_app_handle(handle: AppHandle) {
 
 /// LLM 直调（经 ModelRouter 的 knowledge_acquisition 路由）；无路由 / 失败返回 None
 pub async fn llm_complete(system: &str, user: &str, temperature: Option<f64>) -> Option<String> {
+    complete_on_route("knowledge_acquisition", system, user, temperature, None).await
+}
+
+pub(super) async fn complete_on_route(
+    task: &str, system: &str, user: &str, temperature: Option<f64>, char_id: Option<&str>,
+) -> Option<String> {
     let handle = APP_HANDLE.read().clone()?;
     use tauri::Manager;
     let state = handle.state::<Arc<AppState>>();
     let router = state.model_router.read().clone()?;
 
+    let voice = char_id.and_then(crate::character_registry::get_brain)
+        .map(|brain| brain.persona.dialogue_voice_prompt(0.0, chrono::Timelike::hour(&chrono::Local::now())));
+    let system = if let Some(voice) = voice { format!("{voice}\n\n{system}") } else { system.to_string() };
     let messages = vec![
-        ChatMessage::system(system.to_string()),
+        ChatMessage::system(system),
         ChatMessage::user(user.to_string()),
     ];
-    let mut req = crate::providers::base::LLMRequest::new("knowledge_acquisition", messages);
+    let mut req = crate::providers::base::LLMRequest::new(task, messages);
+    if let Some(char_id) = char_id { req = req.with_character_id(char_id.to_string()); }
     if let Some(t) = temperature {
         req = req.with_temperature(t);
     }
@@ -337,7 +347,7 @@ pub async fn bootstrap_from_bangumi(char_id: &str, username: &str) -> Vec<String
 /// 为分享候选生成朋友式推荐文案（单条；失败回退到评估理由）
 pub async fn expression_for(char_id: &str, item: &ContentItem) -> String {
     let profile = InterestProfile::load(char_id);
-    let expressions = recommend::generate_expressions(&profile, std::slice::from_ref(item)).await;
+    let expressions = recommend::generate_expressions(char_id, &profile, std::slice::from_ref(item)).await;
     expressions
         .first()
         .cloned()
@@ -386,7 +396,7 @@ async fn build_views(
     picked: Vec<ContentItem>,
 ) -> Result<Vec<RecommendationView>, String> {
     let profile = InterestProfile::load(char_id);
-    let expressions = recommend::generate_expressions(&profile, &picked).await;
+    let expressions = recommend::generate_expressions(char_id, &profile, &picked).await;
 
     let mut store = ContentStore::load(char_id);
     let keys: Vec<String> = picked

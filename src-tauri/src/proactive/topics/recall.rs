@@ -78,11 +78,7 @@ impl MemoryRecall {
 
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
-        let sys = if system_prompt.trim().is_empty() {
-            crate::proactive::behavior::default_persona_prompt(lang, char_id)
-        } else {
-            system_prompt.to_string()
-        };
+        let sys = crate::proactive::behavior::speaking_voice(system_prompt, lang, char_id);
 
         let prompt = match lang_norm {
             "en" => format!(
@@ -111,7 +107,7 @@ impl MemoryRecall {
             ),
         };
         Some(vec![
-            ChatMessage::system(format!("{sys}\n{}\n{}", crate::pipeline::prompt_modules::human_feel_rules(lang_norm), crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm))),
+            ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm))),
             ChatMessage::user(prompt),
         ])
     }

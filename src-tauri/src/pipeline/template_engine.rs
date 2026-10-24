@@ -661,11 +661,8 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             .as_deref()
             .unwrap_or("")
             .to_string(),
-        "tone_injection" => parts
-            .tone_injection
-            .as_deref()
-            .unwrap_or("")
-            .to_string(),
+        // Retain old saved section IDs without reviving retired response scripts.
+        "tone_injection" => String::new(),
         "fast_perception_guidance" => parts
             .fast_perception_guidance
             .as_deref()

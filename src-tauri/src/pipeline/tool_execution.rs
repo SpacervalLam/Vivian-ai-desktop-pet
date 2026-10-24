@@ -321,7 +321,7 @@ pub(super) async fn run_companion_tools(
     messages.push(ChatMessage::system("Execution has stopped. Reply to the user in the current character's voice using the verified receipts and stop reason. You have no tools in this stage. Distinguish completed actions, failed actions, pending delegated work, and work awaiting permission. Do not claim the whole goal is complete merely because the loop ended. Do not retry operations or reveal tool protocol."));
     // Native protocol records are rendered as evidence so text-only chat models also work.
     encode_text_protocol_records(&mut messages);
-    let mut request = AIResponseGenerationRunnable::build_native_chat_request("chat", messages, vec![]);
+    let mut request = AIResponseGenerationRunnable::build_native_chat_request(crate::providers::base::TASK_COMPANION, messages, vec![]);
     let mut content = router.generate(request.clone()).await;
     if content.as_ref().is_ok_and(|text| text.contains("DSML") || !calls_from_text(text).is_empty()) {
         request.messages.push(ChatMessage::system("Your previous reply leaked tool protocol. Return only the caller's dialogue format, with no tool calls. All recorded operations have already executed and must not be repeated."));
@@ -433,7 +433,7 @@ mod tests {
             endpoint: config.ai.endpoint.clone().unwrap(), api_key: "local-test-key".into(),
             ..Default::default()
         });
-        config.routing_matrix.insert("chat".into(), crate::config::manager::TaskRouteConfig {
+        config.routing_matrix.insert(crate::providers::base::TASK_COMPANION.into(), crate::config::manager::TaskRouteConfig {
             provider_type: "chat_completions".into(), model: "test-chat-reply".into(),
             endpoint: config.ai.endpoint.clone().unwrap(), api_key: "local-test-key".into(), ..Default::default()
         });
@@ -476,7 +476,7 @@ mod tests {
         }
         assert_eq!(requests[3]["model"], primary_model);
         assert!(requests[2].get("tools").is_none_or(|tools| tools.as_array().is_some_and(|a| a.is_empty())));
-        assert!(requests[2].to_string().contains("TASK CONTRACT: chat"));
+        assert!(requests[2].to_string().contains(&format!("TASK CONTRACT: {}", crate::providers::base::TASK_COMPANION)));
         assert!(requests[0].to_string().contains("TASK CONTRACT: reasoning"));
         let final_request = requests[2].to_string();
         assert!(final_request.contains("PRIMARY_PERSONA_SENTINEL"));
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(messages[0].content, EXECUTOR_SYSTEM);
         assert_eq!(messages[1].content, "identify recording app");
         assert!(messages.iter().all(|m| m.role != "assistant"));
-        let request = execution_request("tool_execution", messages, vec![]);
+        let request = execution_request("reasoning", messages, vec![]);
         assert_eq!(request.include_framework_instructions, Some(false));
         assert!(request.json_schema.is_none());
         assert_eq!(request.usage_tag.as_deref(), Some("tool_execution"));

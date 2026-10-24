@@ -331,9 +331,23 @@ const ComposerEditor = React.forwardRef<ComposerEditorHandle, ComposerEditorProp
       onChange(md);
     }, [readMarkdown, syncPlaceholder, onChange]);
 
-    // 外部写入：value 与内部最近一次 emit 不一致 → 整篇重解析
+    /**
+     * 外部写入：value 与内部最近一次 emit 不一致 → 整篇重解析。
+     *
+     * 重建前必须先清掉容器里**不属于任何块**的残留节点：空块的高度是 0，
+     * 用户点进输入框时落点在容器层级，打出来的字会以裸文本节点挂在容器上，
+     * React 只管它自己渲染的块，这些节点它会一直留着。只换块不清它们，
+     * 切换视图（预备会话草稿的存取）后就会同一段字显示两遍。
+     */
     useEffect(() => {
       if (value === lastEmittedRef.current) return;
+      const root = rootRef.current;
+      if (root) {
+        for (const node of Array.from(root.childNodes)) {
+          const isBlock = node.nodeType === 1 && (node as HTMLElement).hasAttribute('data-block-id');
+          if (!isBlock) root.removeChild(node);
+        }
+      }
       const parsed = markdownToBlocks(value);
       blocksRef.current = parsed;
       setBlocks(parsed);

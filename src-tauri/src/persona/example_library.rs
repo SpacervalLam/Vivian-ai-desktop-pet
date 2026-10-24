@@ -7,6 +7,7 @@ pub const MAX_EDITS: usize = 4;
 pub const MAX_OVERRIDES: usize = 64;
 pub const AUDIT_WINDOW: usize = 24;
 pub const BASE_FILE: &str = "example_library.base.json";
+pub const FACTORY_FILE: &str = "example_library.factory.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceExample {
@@ -38,8 +39,8 @@ pub fn factory_examples(char_id: &str) -> Vec<VoiceExample> {
     serde_json::from_str(source).expect("valid factory example library")
 }
 
-/// The shipped corpus is versioned application content. Freeze its actual basis
-/// alongside the learned overrides so a backup does not depend on a newer build.
+/// Base arrays remain portable; a separate factory snapshot makes upgrades a
+/// three-way merge instead of overwriting local edits or pinning factory bugs.
 pub fn read_base_at(path: &std::path::Path) -> Result<Vec<VoiceExample>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("读取模仿语料基础库失败: {e}"))?;
     let entries: Vec<VoiceExample> =
@@ -63,28 +64,77 @@ pub fn save_base_at(path: &std::path::Path, entries: &[VoiceExample]) -> Result<
 }
 
 pub fn ensure_base(char_id: &str) -> Result<Vec<VoiceExample>, String> {
-    let path = crate::utils::path::get_character_data_dir(char_id)
-        .join("persona")
-        .join(BASE_FILE);
-    if path.exists() {
-        return read_base_at(&path);
-    }
-    let entries = factory_examples(char_id);
-    save_base_at(&path, &entries)?;
-    Ok(entries)
+    ensure_base_at(&crate::utils::path::get_character_data_dir(char_id).join("persona"), char_id)
 }
 
 pub fn base_examples(char_id: &str) -> Vec<VoiceExample> {
-    let path = crate::utils::path::get_character_data_dir(char_id)
-        .join("persona")
-        .join(BASE_FILE);
-    if path.exists() {
-        match read_base_at(&path) {
-            Ok(entries) => return entries,
-            Err(error) => tracing::warn!("[VoiceCorpus:{char_id}] {error}"),
+    match ensure_base(char_id) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!("[VoiceCorpus:{char_id}] {error}");
+            factory_examples(char_id)
         }
     }
-    factory_examples(char_id)
+}
+
+fn revision(example: &VoiceExample) -> String {
+    fn canonical(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(items) => items.into_iter().map(canonical).collect(),
+            serde_json::Value::Object(items) => {
+                let sorted: std::collections::BTreeMap<_, _> = items.into_iter().collect();
+                serde_json::Value::Object(sorted.into_iter().map(|(key, value)| (key, canonical(value))).collect())
+            }
+            other => other,
+        }
+    }
+    fingerprint(&canonical(serde_json::to_value(example).expect("serializable example")))
+}
+
+fn legacy_revisions(char_id: &str) -> BTreeSet<String> {
+    static KNOWN: once_cell::sync::Lazy<serde_json::Value> = once_cell::sync::Lazy::new(||
+        serde_json::from_str(include_str!("../../prompts/characters/example_revisions.json")).expect("factory revision index"));
+    KNOWN[char_id].as_object().into_iter().flat_map(|entries| entries.values())
+        .filter_map(serde_json::Value::as_array).flatten()
+        .filter_map(serde_json::Value::as_str).map(str::to_string).collect()
+}
+
+fn merge_factory(base: &[VoiceExample], previous: Option<&[VoiceExample]>, factory: &[VoiceExample], legacy: &BTreeSet<String>) -> Vec<VoiceExample> {
+    let mut merged = Vec::new();
+    for current in base {
+        let old = previous.and_then(|items| items.iter().find(|item| item.id == current.id));
+        let untouched = old.map(|item| revision(item) == revision(current))
+            .unwrap_or_else(|| previous.is_none() && legacy.contains(&revision(current)));
+        match factory.iter().find(|item| item.id == current.id) {
+            Some(new) if untouched => merged.push(new.clone()),
+            None if untouched => {}, // A retired factory item, not a local addition.
+            _ => merged.push(current.clone()),
+        }
+    }
+    for new in factory {
+        // A user deletion relative to a known factory snapshot stays deleted.
+        if !base.iter().any(|item| item.id == new.id)
+            && !previous.is_some_and(|items| items.iter().any(|item| item.id == new.id)) {
+            merged.push(new.clone());
+        }
+    }
+    merged
+}
+
+fn ensure_base_at(directory: &std::path::Path, char_id: &str) -> Result<Vec<VoiceExample>, String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let path = directory.join(BASE_FILE);
+    let snapshot = directory.join(FACTORY_FILE);
+    let factory = factory_examples(char_id);
+    let base = if path.exists() { read_base_at(&path)? } else { factory.clone() };
+    // A malformed version marker must never authorize replacing local entries.
+    let previous = if snapshot.exists() { Some(read_base_at(&snapshot)?) } else { None };
+    let merged = merge_factory(&base, previous.as_deref(), &factory, &legacy_revisions(char_id));
+    if !path.exists() || fingerprint(&base) != fingerprint(&merged) { save_base_at(&path, &merged)?; }
+    if previous.as_ref().is_none_or(|items| fingerprint(items) != fingerprint(&factory)) {
+        save_base_at(&snapshot, &factory)?;
+    }
+    Ok(merged)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,6 +343,53 @@ pub fn publish_edits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn factory_upgrade_preserves_local_edits_deletions_and_learned_overrides() {
+        let old = sample("factory");
+        let edited = sample("edited");
+        let retired = sample("retired");
+        let deleted = sample("deleted");
+        let custom = sample("custom");
+        let mut local = edited.clone(); local.response["text"] = "用户保留的独立表达".into();
+        let mut updated = old.clone(); updated.attention = "新版判断".into();
+        let added = sample("added");
+        let merged = merge_factory(&[old.clone(), local.clone(), retired.clone(), custom.clone()],
+            Some(&[old, edited.clone(), retired, deleted.clone()]),
+            &[updated.clone(), edited, deleted, added], &BTreeSet::new());
+        assert_eq!(merged.iter().find(|item| item.id == "factory").unwrap().attention, "新版判断");
+        assert_eq!(merged.iter().find(|item| item.id == "edited").unwrap().response, local.response);
+        assert!(merged.iter().any(|item| item.id == "custom"));
+        assert!(merged.iter().any(|item| item.id == "added"));
+        assert!(merged.iter().all(|item| !["retired", "deleted"].contains(&item.id.as_str())));
+        let override_entry = sample("factory");
+        let overrides = [ExampleOverride { edit: ExampleEdit { id:"factory".into(), reference:Some(fingerprint(&updated)),
+            example:Some(override_entry.clone()), reason:"学习后的表达".into() }, scope:"comfort".into(), understanding:None, updated_at:1.0 }];
+        assert_eq!(materialize(&merged, &overrides, &[]).iter().find(|item| item.id == "factory").unwrap().response, override_entry.response);
+    }
+
+    #[test]
+    fn legacy_upgrade_only_replaces_known_factory_revisions() {
+        let old = sample("known");
+        let mut latest = old.clone(); latest.response["intent"] = "short_reply".into();
+        let mut local = sample("customized"); local.attention = "本地修改".into();
+        let known = BTreeSet::from([revision(&old)]);
+        let merged = merge_factory(&[old, local.clone()], None, &[latest.clone(), sample("customized")], &known);
+        assert_eq!(merged[0].response, latest.response);
+        assert_eq!(merged[1].attention, local.attention);
+    }
+
+    #[test]
+    fn factory_snapshot_migration_is_idempotent_and_preserves_local_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = ensure_base_at(directory.path(), "vivian").unwrap();
+        let path = directory.path().join(BASE_FILE);
+        let before = std::fs::read(&path).unwrap();
+        ensure_base_at(directory.path(), "vivian").unwrap();
+        assert_eq!(before, std::fs::read(&path).unwrap());
+        let mut custom = base; custom[0].response["text"] = "本地保留的回复".into();
+        save_base_at(&path, &custom).unwrap();
+        assert_eq!(ensure_base_at(directory.path(), "vivian").unwrap()[0].response, custom[0].response);
+    }
     pub(super) fn sample(id: &str) -> VoiceExample {
         serde_json::from_value(
             serde_json::json!({"id":id,"scope":"comfort","cues":["不想讲"],

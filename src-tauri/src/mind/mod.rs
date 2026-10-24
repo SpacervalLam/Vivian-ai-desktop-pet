@@ -36,6 +36,7 @@ pub mod belief;
 pub mod belief_generator;
 pub mod belief_sources;
 pub mod current_activity;
+pub mod conversation;
 pub mod goal;
 pub mod goal_service;
 pub mod mind;

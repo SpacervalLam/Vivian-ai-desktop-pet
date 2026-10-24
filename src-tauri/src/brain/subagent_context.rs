@@ -44,19 +44,6 @@ pub enum SubagentTask {
 }
 
 impl SubagentTask {
-    /// 该任务类型的路由键（对应 ModelRouter 的 task_route 配置）
-    pub fn route_key(&self) -> &'static str {
-        match self {
-            SubagentTask::InnerMonologue => "inner_monologue",
-            SubagentTask::ProactiveMessage => "chat",
-            SubagentTask::MemoryConsolidation => "consolidation",
-            SubagentTask::QueryRewrite => "memory",
-            SubagentTask::StartupGreeting => "chat",
-            SubagentTask::SceneAnalysis => "vision_describe",
-            SubagentTask::EmotionClassification => "emotion_analysis",
-        }
-    }
-
     /// 该任务的最大历史轮次（从主对话中截取的轮数上限）
     ///
     /// 0 表示不传入任何主对话历史。
@@ -293,12 +280,6 @@ fn task_instruction(task: SubagentTask) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_task_routing() {
-        assert_eq!(SubagentTask::InnerMonologue.route_key(), "inner_monologue");
-        assert_eq!(SubagentTask::ProactiveMessage.route_key(), "chat");
-    }
 
     #[test]
     fn test_history_sandboxing() {

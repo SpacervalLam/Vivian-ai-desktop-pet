@@ -893,23 +893,40 @@ impl PsychologyManager {
         let (dominant, intensity) = state.emotion.dominant();
         let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
         let header = crate::pipeline::prompt_modules::section_heading("emotion_state", lang);
-        let valence = state.emotion.valence();
-        let activation = state.emotion.arousal();
 
         let mut lines = vec![header.to_string()];
+        // 心境用自然语言描述，不再吐 valence/activation 浮点和英文枚举名——
+        // 那些是存储层量纲，写进来既诱导模型复述机器读数，又把上下文语域带成报告体。
+        let (label, degree) = match lang {
+            "zh" => (
+                dominant.display_zh(),
+                match intensity {
+                    x if x >= 0.66 => "，挺明显的",
+                    x if x >= 0.33 => "，有一点",
+                    _ => "，淡淡的",
+                },
+            ),
+            "ja" => (
+                dominant.display_ja(),
+                match intensity {
+                    x if x >= 0.66 => "、はっきりと",
+                    x if x >= 0.33 => "、少し",
+                    _ => "、ほんのりと",
+                },
+            ),
+            _ => (
+                dominant.display_en(),
+                match intensity {
+                    x if x >= 0.66 => ", noticeably",
+                    x if x >= 0.33 => ", a little",
+                    _ => ", faintly",
+                },
+            ),
+        };
         lines.push(match lang {
-            "zh" => format!(
-                "[内部状态，不要复述] 效价 {valence:.2}，激活 {activation:.2}，主导 {} {intensity:.2}。它只提供轻微语气惯性，不是一段要演出来的剧情。",
-                dominant.as_str()
-            ),
-            "ja" => format!(
-                "[内部状態・復唱禁止] valence {valence:.2}、activation {activation:.2}、dominant {} {intensity:.2}。これはわずかな口調の慣性であり、演じる場面ではない。",
-                dominant.as_str()
-            ),
-            _ => format!(
-                "[Internal state; never repeat] valence {valence:.2}, activation {activation:.2}, dominant {} {intensity:.2}. This is a faint delivery bias, not a scene to perform.",
-                dominant.as_str()
-            ),
+            "zh" => format!("[内部状态，不要复述] 这会儿心境偏向{label}{degree}。它只提供轻微的语气惯性，不是一段要演出来的剧情。"),
+            "ja" => format!("[内部状態・復唱禁止] 今の気分は{label}{degree}寄り。これはわずかな口調の慣性であり、演じる場面ではない。"),
+            _ => format!("[Internal state; never repeat] Right now the mood leans {label}{degree}. This is a faint delivery bias, not a scene to perform."),
         });
         lines.push(
             match lang {

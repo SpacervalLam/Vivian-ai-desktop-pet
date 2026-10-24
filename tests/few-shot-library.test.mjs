@@ -19,7 +19,9 @@ for (const [index, entries] of libraries.entries()) {
   assert.equal(authored.length, fixture.cases.length);
   assert.equal(new Set(authored.map(e => e.response.text)).size, authored.length, 'do not pad the corpus with duplicate lines');
   for (const e of authored) {
-    assert.match(e.situation, /^虚构示例：/);
+    // 「虚构示例」标记随条目语种本地化：en 走 Fictional example:、ja 走 架空の例：。
+    // 2026-10-24 翻译 style-en/ja 的 situation 后，这条从单一中文前缀变成按语种选档。
+    assert.match(e.situation, e.id.startsWith("style-en-") ? /^Fictional example:/ : (e.id.startsWith("style-ja-") ? /^架空の例：/ : /^虚构示例：/));
     assert.ok(e.attention.trim() && e.user.trim());
     assert.ok(e.cues.length >= 2 && e.cues.every(c => [...c].length >= 2));
     assert.ok(e.cues.some(c => e.user.toLowerCase().includes(c.toLowerCase())), `${e.id}: canonical input needs a usable cue`);
@@ -59,6 +61,8 @@ const retriever = (source.slice(0, integrationStart) + source.slice(integrationE
   (_, file) => `include_str!(${JSON.stringify(abs(`src-tauri/${file}`))})`);
 assert.ok(!retriever.includes('include_str!("../../'), 'all source-relative includes must resolve');
 const followup = rustItem((await readFile('src-tauri/src/pipeline/message_context.rs', 'utf8')).replaceAll('\r\n', '\n'), 'pub fn is_short_followup');
+// 语种门用生产 normalize_lang，不在测试里重写一份分发逻辑。
+const normalize = rustItem((await readFile('src-tauri/src/pipeline/prompt_modules.rs', 'utf8')).replaceAll('\r\n', '\n'), 'pub fn normalize_lang');
 const cosine = rustItem((await readFile('src-tauri/src/memory/vector_search.rs', 'utf8')).replaceAll('\r\n', '\n'), 'pub fn cosine_similarity');
 const embeddingTrait = rustItem((await readFile('src-tauri/src/memory/embedding.rs', 'utf8')).replaceAll('\r\n', '\n'), 'pub trait MemoryEmbeddingProvider');
 const dir = await mkdtemp(path.join(tmpdir(), 'vivian-few-shot-'));
@@ -74,6 +78,8 @@ parking_lot="0.12"
 tracing="0.1"
 sha2="0.10"
 uuid={version="1",features=["v4"]}
+once_cell="1"
+tempfile="3"
 [[bin]]
 name="few-shot-library-contract"
 path="main.rs"
@@ -82,7 +88,8 @@ path="main.rs"
 #![allow(dead_code)]
 mod error { pub type VivianResult<T> = Result<T, std::io::Error>; }
 mod types {pub mod response {#[derive(serde::Deserialize)] pub struct ChatMessage {pub role:String,pub content:String}}}
-mod pipeline {pub mod message_context {${followup}}}
+mod pipeline {pub mod message_context {${followup}}
+ pub mod prompt_modules {${normalize}}}
 mod utils {
  pub mod path {
   pub fn get_user_data_dir()->std::path::PathBuf {std::env::var_os("VIVIAN_TEST_DATA_DIR").unwrap().into()}
@@ -112,6 +119,9 @@ fn main() {}
  #[derive(serde::Deserialize)] struct Case {id:String,input:String,history:Vec<types::response::ChatMessage>,paraphrases:Vec<String>,gated:bool}
  #[derive(serde::Deserialize)] struct Fixture {cases:Vec<Case>}
  fn cases()->Vec<Case> {serde_json::from_str::<Fixture>(include_str!(${JSON.stringify(abs(fixtureFile))})).unwrap().cases}
+ // 每条 fixture 用自己的界面语言检索：style-en-* 走 en、style-ja-* 走 ja，其余走
+ // zh——语种门（2026-10-24）按界面语言选档，跨语言示例不混检索。
+ fn case_lang(id:&str)->&'static str{if id.starts_with("style-en-"){"en"}else if id.starts_with("style-ja-"){"ja"}else{"zh"}}
  #[test] fn original_modern_corpus_remains_retrievable() {
   for (name,source) in [
    ("vivian",include_str!(${JSON.stringify(abs('src-tauri/prompts/characters/vivian/example_library.json'))})),
@@ -121,7 +131,7 @@ fn main() {}
    let r=production::ExampleRetriever::new(name,Arc::new(Offline));
    for e in entries.as_array().unwrap().iter().filter(|e|e["id"].as_str().unwrap().starts_with("net-modern-")) {
     for input in std::iter::once(e["user"].as_str().unwrap()).chain(e["cues"].as_array().unwrap().iter().map(|c|c.as_str().unwrap())) {
-     let out=r.retrieve(input,&[],None,&[]).unwrap_or_default();
+     let out=r.retrieve(input,&[],None,&[], "zh").unwrap_or_default();
      assert!(out.contains(&format!("Example {}\\n",e["id"].as_str().unwrap())),"{name}: {input}");
     }
    }
@@ -132,7 +142,7 @@ fn main() {}
   for name in ["vivian","nana"] {
    let r=production::ExampleRetriever::new(name,Arc::new(Offline));
    for c in cases() {for input in std::iter::once(&c.input).chain(c.paraphrases.iter()) {
-    let out=r.retrieve(input,&c.history,None,&[]).unwrap_or_default();count+=1;
+    let out=r.retrieve(input,&c.history,None,&[], case_lang(&c.id)).unwrap_or_default();count+=1;
     if !out.contains(&format!("Example {}\\n",c.id)) {failures.push(format!("{name}/{}: {input} -> {out}",c.id));}
     assert!(out.chars().count()<=1800);
     assert!(out.lines().filter(|l|l.starts_with("Example response:")).count()<=3);
@@ -145,7 +155,7 @@ fn main() {}
   for name in ["vivian","nana"] {let r=production::ExampleRetriever::new(name,Arc::new(Offline));
    for c in cases().into_iter().filter(|c|c.gated) {
     for history in [vec![],vec![types::response::ChatMessage{role:"assistant".into(),content:"我们正在谈论一片海。".into()}]] {
-     let out=r.retrieve(&c.input,&history,None,&[]).unwrap_or_default();
+     let out=r.retrieve(&c.input,&history,None,&[], case_lang(&c.id)).unwrap_or_default();
      assert!(!out.contains(&format!("Example {}\\n",c.id)),"{} leaked into an unrelated scene",c.id);
     }
    }
@@ -157,7 +167,7 @@ fn main() {}
    for c in cases() {
     let e=library.as_array().unwrap().iter().find(|e|e["id"].as_str()==Some(&c.id)).unwrap();
     let scope=e["scope"].as_str().unwrap().to_owned();
-    let out=r.retrieve(&c.input,&c.history,None,&[scope]).unwrap_or_default();
+    let out=r.retrieve(&c.input,&c.history,None,&[scope], case_lang(&c.id)).unwrap_or_default();
     assert!(!out.contains(&format!("Example {}\\n",c.id)));
    }
   }

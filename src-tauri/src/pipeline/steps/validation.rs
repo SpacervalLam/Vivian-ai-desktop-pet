@@ -24,8 +24,9 @@ fn evidence_json(evidence: &super::faithfulness::Evidence) -> String {
     serde_json::to_string(evidence).expect("evidence only contains JSON serializable strings")
 }
 
-/// 回复文本最大字符数（超过后在句边界截断）
-const MAX_RESPONSE_CHARS: usize = 500;
+/// Emergency display guard only. Normal explanations and requested deliverables
+/// must remain complete; conversational brevity is chosen during generation.
+const MAX_RESPONSE_CHARS: usize = 32_768;
 
 /// 截断时保留的最小字符数（避免截断到只剩几个字）
 const MIN_KEEP_CHARS: usize = 50;
@@ -159,7 +160,7 @@ impl ValidationRunnable {
     async fn check_evidence(router: &ModelRouter, evidence: &super::faithfulness::Evidence) -> Result<Value, String> {
         use super::faithfulness::{CHECK_PROMPT, schema, assess};
         use crate::providers::reasoning::{ReasoningPreference, ReasoningMode, ReasoningEffort};
-        let request = LLMRequest::new("memory", vec![
+        let request = LLMRequest::new("faithfulness", vec![
             ChatMessage::system(CHECK_PROMPT),
             ChatMessage::user(evidence_json(&evidence)),
         ])
@@ -379,6 +380,17 @@ mod tests {
     fn truncate_short_text_unchanged() {
         let text = "你好呀～";
         assert_eq!(ValidationRunnable::truncate_at_boundary(text, 500), text);
+    }
+
+    #[tokio::test]
+    async fn requested_explanations_are_not_cut_at_the_old_chat_limit() {
+        let text = "详细说明。".repeat(150);
+        let state = PipelineState { user_input:"详细解释这个问题".into(), text:text.clone(),
+            ai_response:Some(crate::types::response::AiResponse::new(text.clone())), ..Default::default() };
+        let output = ValidationRunnable::new().ainvoke(state.to_json(), None).await.unwrap();
+        let result = PipelineState::from_json(output);
+        assert_eq!(result.text, text);
+        assert_eq!(result.ai_response.unwrap().text, text);
     }
 
     #[test]

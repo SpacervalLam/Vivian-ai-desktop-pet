@@ -72,5 +72,7 @@ export function selectedDays(report: UsageReport, selection: UsageSelection | nu
 
 /** Names match the routing matrix. Purpose tags are a separate perspective. */
 export const routeLabelKeys: Record<string, string> = Object.fromEntries(
-  taskCatalog.map(({ id, labelKey }) => [id, labelKey]),
+  [...(taskCatalog as unknown as { tiers: { id: string; labelKey: string }[] }).tiers,
+   ...(taskCatalog as unknown as { tasks: { id: string; labelKey: string }[] }).tasks]
+    .map(({ id, labelKey }) => [id, labelKey]),
 );

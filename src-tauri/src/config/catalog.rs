@@ -237,8 +237,8 @@ pub fn build_catalog() -> Vec<SettingEntry> {
         },
         SettingEntry {
             key: "proactive.enable_social_urge_gating".into(),
-            label: "内心独白优化主动问候".into(),
-            description: "用内心独白的社交冲动信号门控问候时机，让主动问候在角色真的想说话时才触发".into(),
+            label: "由当前想法决定主动搭话".into(),
+            description: "结合真实语境决定安静、问候、续聊或分享；时间不强制发言或阻挡新意图，保留勿扰、并发保护和语义去重。需开启内心独白".into(),
             layer: SettingLayer::Advanced,
             group: "主动对话".into(),
             control: SettingControl::Boolean,

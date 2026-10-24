@@ -21,27 +21,8 @@ use crate::error::VivianResult;
 use crate::world::{WorldStateProvider, UserPresence};
 use std::sync::Arc;
 
-use serde::Deserialize;
-
-/// current_thought LLM 合成输出
-///
-/// `thought`：第一人称一句话描述当前想法
-/// `social_urge`：0.0-1.0，表示"现在想主动和用户搭话的冲动强度"，
-///                由 proactive 问候类触发器读取作为时机门控信号。
-#[derive(Debug, Clone, Deserialize)]
-pub struct ThoughtSynthesisOutput {
-    pub thought: String,
-    #[serde(default = "default_social_urge")]
-    pub social_urge: f32,
-    #[serde(default)]
-    pub conversation_topic: String,
-    #[serde(default)]
-    pub conversation_evidence: String,
-}
-
-fn default_social_urge() -> f32 {
-    0.5
-}
+pub use super::conversation::ThoughtSynthesisOutput;
+use super::conversation::{default_social_urge, ConversationIntent, ConversationSource};
 
 /// current_thought 输出 JSON Schema（用于 LLMRequest::with_json_schema）
 fn thought_output_schema() -> serde_json::Value {
@@ -56,12 +37,17 @@ fn thought_output_schema() -> serde_json::Value {
                 "type": "number",
                 "minimum": 0.0,
                 "maximum": 1.0,
-                "description": "Raise above 0.8 only for a concrete timely topic supported by a recent user message. Generic mood or time passing is insufficient."
+                "description": "Current desire for contact; this score alone never authorizes speech. conversation_intent decides whether to speak."
             },
+            "conversation_intent": { "type": "string", "enum": ["silent", "greet", "follow_up", "share"] },
+            "conversation_source": { "type": "string", "enum": ["none", "user_message", "world_observation", "scene_event"] },
             "conversation_topic": { "type": "string", "description": "A specific topic worth sharing now, or empty string" },
-            "conversation_evidence": { "type": "string", "description": "Exact short quote from the provided context supporting the topic, or empty string" }
+            "conversation_reason": { "type": "string", "description": "Short communicative purpose explaining why this point fits now; time elapsed alone is insufficient" },
+            "conversation_key": { "type": "string", "description": "Stable semantic identity of the point, reused for paraphrases; do not encode the clock or a random id" },
+            "conversation_event_id": { "type": "string", "description": "Id of the provided scene event motivating this turn, or empty string; never invent one" },
+            "conversation_evidence": { "type": "string", "description": "Exact short quote from a recent user message or observable world fact; empty for a simple greeting or silence" }
         },
-        "required": ["thought", "social_urge", "conversation_topic", "conversation_evidence"],
+        "required": ["thought", "social_urge", "conversation_intent", "conversation_source", "conversation_topic", "conversation_evidence", "conversation_reason", "conversation_key", "conversation_event_id"],
         "additionalProperties": false
     })
 }
@@ -249,6 +235,8 @@ pub struct ThoughtContext<'a> {
     pub top_attention: Option<&'a str>,
     /// 世界事实基线 —— 注入可观察真实状态，避免 LLM 靠人设补全生活细节
     pub world_brief: &'a WorldBrief,
+    /// Recent actual dialogue, time since speech and ignored-message state.
+    pub conversation_context: &'a str,
 }
 
 /// 用 LLM 合成"当前想法"一句话摘要 + social_urge 信号。
@@ -398,15 +386,19 @@ pub async fn synthesize_with_llm(
         temporal_section = temporal_section,
     );
 
-    let system_prompt = match language {
-        "en" => "Write one short, natural first-person current thought. The character lives on the desktop; do not invent an offline life. Separately judge whether there is a specific, useful thing to say to the user now. Give social_urge >= 0.8 only for a concrete timely reason, not loneliness, a generic greeting, ordinary weather alone, or the mere passage of time. Fresh rain, extreme heat/cold, a large temperature range or pollution affecting a recent explicit upcoming outdoor plan can be a concrete timely reason. Match location and travel time, distinguish forecasts and US AQI model estimates from observations, and do not assume illness or exposure. Drop cancelled plans and stop after preparation, refusal or an equivalent reminder; only a material change justifies repeating it. If so, set conversation_topic and copy an exact short quote from a recent User message into conversation_evidence. Otherwise both strings are empty. Never turn your own earlier speculation into a fact. Output JSON only: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}.",
-        "ja" => "一人称で短く自然な現在の考えを書く。デスクトップの住人として、実在しない外出や体験を作らない。ユーザーに今伝える具体的で有益な話題がある場合だけ social_urge を 0.8 以上にし、conversation_topic に話題、conversation_evidence に最近のユーザーの発言から短い原文をそのまま写す。寂しさ、時刻、通常の天気、定型挨拶だけでは空欄にする。新しい雨・猛暑・厳寒・大きな気温差・空気汚染が、最近ユーザーが明言した今後の外出予定に関係するなら具体的な理由になる。場所と出発・帰宅時刻を合わせ、予報と観測、米国AQIのモデル推定を区別する。病気や屋外にいることを推測しない。中止・準備済み・拒否・同等の注意済みなら控え、重要な変化がある時だけ再び触れる。自分の推測を事実にしない。JSON のみを返す: {\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
-        _ => "用第一人称写一句简短自然的当前想法。你住在桌面上，不要编造线下经历。另判断此刻是否有具体且对用户有价值的话题：只有存在明确的新进展、可跟进的约定或近期对话留下的具体问题时，social_urge 才可达到 0.8；孤独感、时间流逝、普通天气本身和泛泛问候都不算。新鲜的降雨、酷热、严寒、大温差或空气污染会影响用户近期明确说过的待进行出行或户外活动时，可以构成具体的及时理由。核对地点及出门、返程时间，区分预报与实况、美标 AQI 模型估计与实测，不推断疾病或已经在户外。计划取消、已准备好、拒绝或已收到同等提醒后收住；只有风险或计划有实质变化才再次提醒。若有，把话题写入 conversation_topic，并从近期用户原话中逐字摘取最短依据放入 conversation_evidence；否则两者都留空。不得把自己的猜测当用户事实。只输出 JSON：{\"thought\":\"...\",\"social_urge\":0.0,\"conversation_topic\":\"\",\"conversation_evidence\":\"\"}。",
+    // 主提示词按界面语言选档（与其它语气规则同一分发器），语言规则只补书写要求。
+    let language_rule = match language {
+        "en" => "Write thought and conversation_topic in English. Keep thought under 60 words.",
+        "ja" => "thought と conversation_topic は日本語で書く。thought は短い一文にする。",
+        _ => "thought 和 conversation_topic 使用中文，当前想法写成简短的一句话。",
     };
-
+    let system_prompt = format!(
+        "{}\n{language_rule}",
+        crate::pipeline::prompt_modules::tone_rule(language, "current_thought")
+    );
     let messages = vec![
         ChatMessage::system(format!("{system_prompt}\n{}", super::COGNITIVE_EVIDENCE_RULES)),
-        ChatMessage::user(user_prompt),
+        ChatMessage::user(format!("{user_prompt}\n{}", ctx.conversation_context)),
     ];
 
     let result = router
@@ -439,8 +431,13 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
                 return Ok(ThoughtSynthesisOutput {
                     thought,
                     social_urge: parsed.social_urge.clamp(0.0, 1.0),
-                    conversation_topic: parsed.conversation_topic.chars().take(48).collect(),
-                    conversation_evidence: parsed.conversation_evidence.chars().take(100).collect(),
+                    conversation_intent: parsed.conversation_intent,
+                    conversation_source: parsed.conversation_source,
+                    conversation_topic: parsed.conversation_topic.chars().take(80).collect(),
+                    conversation_evidence: parsed.conversation_evidence.chars().take(160).collect(),
+                    conversation_reason: parsed.conversation_reason.chars().take(160).collect(),
+                    conversation_key: parsed.conversation_key.chars().take(100).collect(),
+                    conversation_event_id: parsed.conversation_event_id.chars().take(100).collect(),
                 });
             }
         }
@@ -459,8 +456,13 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
     Ok(ThoughtSynthesisOutput {
         thought: final_text,
         social_urge: default_social_urge(),
+        conversation_intent: ConversationIntent::Silent,
+        conversation_source: ConversationSource::None,
         conversation_topic: String::new(),
         conversation_evidence: String::new(),
+        conversation_reason: String::new(),
+        conversation_key: String::new(),
+        conversation_event_id: String::new(),
     })
 }
 
@@ -547,7 +549,16 @@ pub async fn refresh_current_thought(
     router: &Arc<ModelRouter>,
     world_provider: &Arc<WorldStateProvider>,
     language: &str,
+    conversation_context: &str,
 ) {
+    let Some(_permit) = super::conversation::ThoughtRefreshPermit::acquire(&mind.thought_refresh_in_flight) else {
+        mind.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+        return;
+    };
+    let conversation_data: serde_json::Value = serde_json::from_str(conversation_context).unwrap_or_default();
+    let Some(context_version) = conversation_data["context_version"].as_u64() else { return; };
+    let Some(snapshot_at) = conversation_data["snapshot_at"].as_f64() else { return; };
+    if mind.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return; }
     let top_entries: Vec<(WorkingMemorySource, String, i64)> = {
         let wm = mind.working_memory.read();
         wm.top_n(3)
@@ -578,51 +589,37 @@ pub async fn refresh_current_thought(
         activity_context: &activity.context,
         top_attention,
         world_brief: &world_brief,
+        conversation_context,
     };
 
     match synthesize_with_llm(router, &ctx, language).await {
         Ok(output) => {
-            let opportunity = validated_conversation_opportunity(&output, &top_entries);
-            mind.set_current_thought(output.thought, output.social_urge, opportunity);
+            // A reply/disable event during the request invalidates its earlier decision.
+            if mind.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version {
+                return;
+            }
+            let mut user_quotes: Vec<(&str, i64)> = top_entries.iter()
+                .filter(|(source, text, _)| {
+                    let (_, speaker, _) = parse_any_speaker_prefix(text);
+                    matches!(source, WorkingMemorySource::UserMessage)
+                        && speaker.as_deref().is_none_or(|name| !super::KNOWN_CHAR_IDS.contains(&name) && name != "I")
+                })
+                .map(|(_, text, at)| (text.as_str(), *at)).collect();
+            if let Some(dialogue) = conversation_data["recent_actual_dialogue"].as_array() {
+                user_quotes.extend(dialogue.iter().filter(|message| message["user_evidence"] == true)
+                    .filter_map(|message| Some((message["text"].as_str()?, message["timestamp"].as_i64()?))));
+            }
+            let world_observations: Vec<&str> = [world_brief.weather_desc.as_deref(),
+                world_brief.foreground_title.as_deref(), world_brief.music_desc.as_deref()]
+                .into_iter().flatten().collect();
+            let events: Vec<super::conversation::ConversationEvent> =
+                serde_json::from_value(conversation_data["observed_conversation_events"].clone()).unwrap_or_default();
+            let opportunity = output.validated_opportunity(&user_quotes, &world_observations, &events,
+                world_brief.user_presence == UserPresence::Present, snapshot_at);
+            mind.set_current_thought(output.thought, output.social_urge, opportunity, context_version);
         }
         Err(e) => {
             tracing::debug!("[thought_synthesis] LLM 合成失败: {}", e);
         }
-    }
-}
-
-fn validated_conversation_opportunity(
-    output: &ThoughtSynthesisOutput,
-    entries: &[(WorkingMemorySource, String, i64)],
-) -> Option<(String, String)> {
-    if output.social_urge < 0.8 || output.conversation_topic.trim().is_empty()
-        || output.conversation_evidence.trim().chars().count() < 3 {
-        return None;
-    }
-    let now = chrono::Utc::now().timestamp();
-    entries.iter().any(|(source, text, created_at)| {
-        matches!(source, WorkingMemorySource::UserMessage)
-            && (0..=600).contains(&(now - *created_at))
-            && text.contains(&output.conversation_evidence)
-    }).then(|| (output.conversation_topic.clone(), output.conversation_evidence.clone()))
-}
-
-#[cfg(test)]
-mod opportunity_tests {
-    use super::*;
-
-    #[test]
-    fn thought_candidate_requires_observed_evidence() {
-        let output = ThoughtSynthesisOutput {
-            thought: "想问问进展".into(), social_urge: 0.9,
-            conversation_topic: "考试进展".into(), conversation_evidence: "明天考试".into(),
-        };
-        let now = chrono::Utc::now().timestamp();
-        let user = vec![(WorkingMemorySource::UserMessage, "我明天考试".into(), now)];
-        assert!(validated_conversation_opportunity(&output, &user).is_some());
-        let self_guess = vec![(WorkingMemorySource::InnerMonologue, "猜他明天考试".into(), now)];
-        assert!(validated_conversation_opportunity(&output, &self_guess).is_none());
-        let old_user = vec![(WorkingMemorySource::UserMessage, "我明天考试".into(), now - 601)];
-        assert!(validated_conversation_opportunity(&output, &old_user).is_none());
     }
 }

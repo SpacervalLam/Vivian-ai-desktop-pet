@@ -140,7 +140,6 @@ pub async fn polish_asr_text(
         crate::types::response::ChatMessage::user(&text),
     ];
     let request = crate::providers::base::LLMRequest::new("asr_polish", messages)
-        .with_temperature(0.3)
         .with_character_id(character.id.clone());
 
     match character.brain.router.generate(request).await {

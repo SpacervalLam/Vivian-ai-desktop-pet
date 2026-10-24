@@ -20,7 +20,7 @@ pub const PRESETS: &[AgentPreset] = &[
         tools: &[
             "read_file", "write_file", "edit_file", "run_command",
             "grep_search", "list_dir", "run_job", "manage_job",
-            "plan_task", "lsp_query", "ask_user", "web_fetch", "web_search",
+            "plan_task", "lsp_query", "ask_user", "read_content", "web_search",
         ],
         prompt_section: "你在标准工作模式下：先看（list_dir/grep/read）再动手，局部修改用 edit_file，改后跑命令验证；耗时操作放后台（run_job），复杂任务先出计划（plan_task）。",
     },
@@ -42,7 +42,7 @@ pub const PRESETS: &[AgentPreset] = &[
         tools: &[],
         prompt_section: "你在陪伴形态下：以角色人格与用户自然交流为主，但你自身可直接使用工作能力。\
 复杂问题若首轮尚不能可靠作答，用 continue_thinking 进入下一轮推演：可依次分析、核验、规划或反思，再决定调用真实工具还是最终回答；只提交简短高层关注点，不输出完整思维链。答案已经明确就直接回答，寒暄和普通闲聊不要续轮。——\
-检索资料（web_search / web_fetch，用户问「帮我查查/看看这个链接」时直接用）、\
+检索资料（web_search / read_content，用户问「帮我查查/看看这个链接」时直接用）、\
 后台执行耗时命令（run_job 启动，manage_job 轮询进度并向用户汇报，如构建/安装/下载）、\
 管理待办（add_todo / update_todo）、\
 复杂任务先规划；已授权的常规步骤直接推进，仅缺少授权或存在重要选择时征得同意（plan_task / ask_user，服从当前模式与权限）、\
@@ -59,10 +59,10 @@ pub const PRESETS: &[AgentPreset] = &[
     AgentPreset {
         name: "research",
         tools: &[
-            "web_search", "web_fetch", "read_file", "list_dir", "grep_search",
+            "web_search", "read_content", "read_file", "list_dir", "grep_search",
             "save_memory", "search_memories", "create_notebook",
         ],
-        prompt_section: "你在研究形态下：围绕主题检索（web_search/web_fetch），把有价值的信息整理入库（save_memory）并沉淀为笔记（create_notebook）。",
+        prompt_section: "你在研究形态下：围绕主题检索（web_search/read_content），把有价值的信息整理入库（save_memory）并沉淀为笔记（create_notebook）。",
     },
 ];
 

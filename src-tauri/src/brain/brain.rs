@@ -1259,9 +1259,7 @@ impl Brain {
         let mood = self.psychology.compute_mood();
         let user_language_name = language_code_to_name(&self.config.base.language);
 
-        let character_block = self.persona.get_character_block_tiered(
-            crate::persona::prompt_render::CharacterBlockTier::Compact,
-        );
+        let character_block = self.persona.dialogue_card();
         let style_block = self.persona.build_style_prompt(intimacy, hour);
         let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
             &self.persona.get_config(),
@@ -1346,9 +1344,7 @@ impl Brain {
         let mood = self.psychology.compute_mood();
         let user_language_name = language_code_to_name(&self.config.base.language);
 
-        let character_block = self.persona.get_character_block_tiered(
-            crate::persona::prompt_render::CharacterBlockTier::Compact,
-        );
+        let character_block = self.persona.dialogue_card();
         let style_block = self.persona.build_style_prompt(intimacy, hour);
         let style_preset_block = crate::persona::prompt_render::render_style_preset_block(
             &self.persona.get_config(),

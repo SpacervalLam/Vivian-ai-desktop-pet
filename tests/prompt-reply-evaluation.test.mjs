@@ -10,6 +10,7 @@ for (const payload of ['null', '[]', '{}', '{"text":1,"intent":"reply"}', respon
 }
 assert.ok(evaluate(response('继续聊', { intent: 'no_reply' }), json).violations.length);
 assert.deepEqual(evaluate(response('', { intent: 'no_reply' }), json).violations, []);
+assert.deepEqual(evaluate(response('', { intent: 'no_reply' }), { ...json, allow_silence:true, reply_min_chars:1, reply_required:['收到'] }).violations, []);
 assert.ok(evaluate(response(''), { ...json, reply_min_chars: 2 }).violations.length, 'JSON wrapper must not satisfy a spoken minimum');
 assert.deepEqual(evaluate(response('嗯', { private_note: '建议？' }), {
   ...json, reply_forbidden: ['建议'], reply_max_chars: 1, reply_max_questions: 0,

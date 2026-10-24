@@ -22,7 +22,7 @@ const normalize = text.slice(nlStart, nlEnd);
 
 // 切片 2：tone_rule + 全部包装函数（到 inner_monologue_rules 结束）
 const trStart = text.indexOf('pub fn tone_rule');
-const trEndMarker = 'pub fn inner_monologue_rules(lang: &str) -> &\'static str {\n    tone_rule(lang, "inner_monologue")\n}\n';
+const trEndMarker = 'pub fn weather_care_rules(lang: &str) -> &\'static str {\n    tone_rule(lang, "weather_care")\n}\n';
 const trEnd = text.indexOf(trEndMarker, trStart) + trEndMarker.length;
 if (trStart < 0 || trEnd < trEndMarker.length) throw new Error('tone_rule slice not found');
 let dispatchers = text.slice(trStart, trEnd);
@@ -60,6 +60,7 @@ mod dispatch {
         ("proactive_companionship", "[PROACTIVE COMPANIONSHIP]", "[PROACTIVE COMPANIONSHIP]", "[PROACTIVE COMPANIONSHIP]"),
         ("initiative", "Helpful initiative", "主动性与善后", "積極性"),
         ("inner_monologue", "[PRIVATE THOUGHT RECORD]", "[PRIVATE THOUGHT RECORD]", "[PRIVATE THOUGHT RECORD]"),
+        ("weather_care", "[WEATHER CARE]", "[WEATHER CARE]", "[WEATHER CARE]"),
     ];
 
     #[test]
@@ -90,9 +91,12 @@ mod dispatch {
         assert!(tone_rule("ja", "human_feel").contains("話し方"));
         assert!(tone_rule("zh", "conversation_rhythm").contains("对话节奏"));
         assert!(tone_rule("ja", "conversation_rhythm").contains("会話のリズム"));
-        // 工具标识符不翻译
-        assert!(tone_rule("zh", "companion_dialogue").contains("get_weather_forecast"));
-        assert!(tone_rule("ja", "companion_dialogue").contains("get_weather_forecast"));
+        // 工具标识符不翻译。天气关心 2026-10-24 从 companion_dialogue 拆成独立
+        // base（条件注入），工具名跟着搬走。
+        assert!(tone_rule("zh", "weather_care").contains("get_weather_forecast"));
+        assert!(tone_rule("ja", "weather_care").contains("get_weather_forecast"));
+        assert!(!tone_rule("zh", "companion_dialogue").contains("get_weather_forecast"),
+            "companion_dialogue 不再常驻携带天气指南");
         assert!(tone_rule("zh", "initiative").contains("delegate_to_work_agent"));
         // 未知 base 返回空串而不是英文兜底（调用方应只传已知 base）
         assert_eq!(tone_rule("zh", "nope"), "");
@@ -110,6 +114,7 @@ mod dispatch {
         assert_eq!(proactive_companionship_rules("zh"), tone_rule("zh", "proactive_companionship"));
         assert_eq!(initiative_rules("ja"), tone_rule("ja", "initiative"));
         assert_eq!(inner_monologue_rules("zh"), tone_rule("zh", "inner_monologue"));
+        assert_eq!(weather_care_rules("en"), tone_rule("en", "weather_care"));
     }
 }
 `);

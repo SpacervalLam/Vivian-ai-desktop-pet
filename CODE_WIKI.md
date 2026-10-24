@@ -641,16 +641,24 @@ pub struct MemoryItem {
 - **Ctrl+B 切换左侧边栏**：`CodeAgentPage` 内一个 window 级 `keydown` 监听，`Ctrl/Cmd+B` → `preventDefault()` + `setLeftCollapsed((v) => !v)`。四道守卫：`shiftKey/altKey` 直接 return、`e.isComposing`（部分中文输入法用 Ctrl+B 翻页）、`e.repeat`（长按不连翻，否则配合宽度过渡会抖成一团）；`preventDefault` 是必须的，否则浏览器会打开书签管理器。**刻意不做「正在输入」守卫**——语义对齐 VS Code：光标停在对话输入框里按 Ctrl+B 才是最自然的时机，静默忽略只会让人以为快捷键坏了；工作页里 Ctrl+B 本来也没有别的归属（就地编辑器只吃 Ctrl+Z / Ctrl+Y / Enter），而浏览器给 `contenteditable` 的默认「加粗」动作恰好被这次 `preventDefault` 挡掉——那件事本来就不该发生，它会把 `<b>` 塞进 DOM、破坏就地编辑的偏移换算。监听挂 window 不会污染别的页面：组件只在工作页挂载（`MindInspector.tsx` 的 `case 'code'`）。折叠按钮的 `title` / `aria-label` 追加 ` (Ctrl+B)`，否则快捷键无从发现（本工程为 Windows 目标，直接写 Ctrl+B，不做平台判定）
 - **置顶摘要的收放过渡**：与两侧边栏同一条曲线（320ms），同样「宽度归零 + 内层固定宽度裁切 + 不卸载」；**两轴同时**——横向宽度 0 ↔ 250，纵向由 `clip-path: inset()` 从上往下揭开 / 从下往上收掉（内层靠右对齐，动画期间内容不横向平移）；额外用 `visibility` 延迟切换让收起后退出 tab 序列。宽度不是固定值，而是按主工作区实测宽度动态算（先保对话区 `CHAT_MIN_W`=430，面板在 250~186 之间自适应）。四处让位（`padding-right` / `right`）必须与面板宽度过渡同曲线同步，否则收起期间正文与面板会互相错位。已用无头 Chrome 验证 46 项，覆盖滚动条在面板右侧、无分隔线、呼吸缝恒为 18px、四个让位元素在 1440/900/640/560 四个视口下都不被遮挡、三档主题基准内边距、真实鼠标点击聚焦后无描边 + 对照元素仍有描边、手账主题同样成立，以及纵向方向：底边内缩 0%↔100% 单调、顶边内缩恒为 0、内层未裁切左缘恒定。
 
-**「新会话」按钮（`handleCreate` / `createSessionByDefault`）**：主点击**不弹目录选择框**，直接建会话：
+**「预备会话」与「新会话」按钮（`openDraftSession` / `ensureSession` / `switchComposerDraft`）**：主点击**不弹目录选择框**，也**不落库**——只把界面切进「预备会话」（顶栏标题显示「新会话」，hero 下方一行说明会建到哪个目录），会话要等用户提交第一条消息时才真正 `coding_new_session` 创建。点开又没说话的入口不该在侧边栏留下一条条「未命名」。
 
-| 情形 | 行为 |
+预备会话是**单例且常驻**：切到别的会话后它不会被丢弃，再点「新会话」回到同一个预备会话，连输入到一半的草稿、附件、`@` 引用和工作目录一起回来；只有发送成功（会话转正）或用户点了别的动作才算结束。
+
+| 情形 | 创建时的行为 |
 |---|---|
 | 设置里配了默认工作区 | 建在该目录 |
 | 未配置默认工作区 | 建成**无工作区模式**会话（`workingDirectory: ''`） |
 | 配了默认工作区但目录已失效 | 退回目录选择框让用户重新指向（配置过期不静默降级成无沙箱会话） |
 
-按钮右侧的下拉箭头保留手动入口：「使用默认工作区」（未配置时文案变为「无工作区新建」）与「选择工作区…」。
-`ensureSession`（首次发送消息时若还没会话）走同一规则，不再有第二个隐藏的弹框触发点。
+按钮右侧的下拉箭头保留手动入口：「使用默认工作区」（未配置时文案变为「无工作区新建」）与「选择工作区…」——后者选完目录同样先进预备会话（只是把它的目标目录换成选的这个），第一条消息发出时才在那个目录建会话；指定目录创建失败就停，**不会偷偷换成默认工作区**。工作区分组标题旁的 `+`（`onNewProjectSession`）走同一条路径。
+
+预备会话的存在性由 `draftWorkspace` 表达：`null` 表还没有、`''` 表用默认工作区、其它字符串是本次指定的目录；**`switchSession` 不再清它**（切走只是离开视图，不是放弃草稿）。给展示用的派生值 `draftDirectory` 在 `''` 时回落到配置的默认目录，顶栏路径、右栏「工作目录」卡片、置顶摘要的环境信息（`PinnedSummary`）与 `@`-mention 文件列表都读它，否则预备会话会显示成「未选择工作区」，与顶栏自相矛盾。
+
+**输入框草稿按视图隔离（`switchComposerDraft`）**：`viewDraftsRef` 是一张 `视图键 → { text, images, refs }` 的表，正式会话用 `session_id` 作键、预备会话用 `DRAFT_VIEW_KEY`。切视图时先把当前视图的草稿存回去、再装目标视图的（没有就是空），所以预备会话的草稿不会跟着人跑到正式会话的输入框里，正式会话之间的输入也不再串台。`composerDraftRef` 是输入框当前值的三件套镜像（`input` / `draftImages` / `draftRefs`），切换在回调里同步读取，避免闭包里的 state 过期。发送成功后 `viewDraftsRef` 里预备会话那条要删掉，否则再点「新会话」会把刚发出去的内容又填回来。
+
+`ensureSession`（首次发送消息时若还没会话）走同一规则，不再有第二个隐藏的弹框触发点；`handleSend` 里**先判工作模型、再建会话**，模型没配好时不会白留一个空会话。
+`createSessionInWorkspace` 内部 **`await switchSession`**：后者要先读会话详情再落 `activeId` / `messages`，不等它的话调用方（`handleSend`）随后写入的首条用户消息会被空历史覆盖。
 默认工作区由设置项 `default_workspace` 提供（见 README「配置系统」），工作页监听 `config:saved` 即时生效。
 
 **工作区芯片（`WorkspaceDropdown`）**：会话顶栏的目录名不是纯文本，而是可点芯片（`+N` 徽标提示附加工作区数量），
@@ -831,6 +839,7 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 
 - **只有粘贴才解析，手打不做语法转换**：粘贴的文本经 `parseBlocks` 拆成块序列并走 `.codex-md-*` 类名渲染（与上方消息区同一套观感，输入框里看到的就是发出去的样子）；手打字符保持原样，敲 `# ` 不会自己变成标题。纯文本粘贴（解析结果只有单个 `p`）交回浏览器默认插入，不接管
 - **DOM 是打字期间的唯一真相**：块内容由 ref **只写一次**（`BlockNode` 的 `setRef` 打 `data-hydrated` 标记后不再触碰），之后编辑全交给浏览器，`onInput` 时读回 DOM → 序列化 → `onChange(md)`。若改用受控的 `dangerouslySetInnerHTML`，每次 render 都会重设内容——光标弹回开头、原生撤销栈失效。`value` 与内部最近一次 emit 的 `lastEmittedRef` 不一致才判定为「外部写入」并整篇重解析，这条判据是外部插入（斜杠命令 / @-mention）与内部编辑共存的关键
+- **外部写入前要清掉「不属于任何块」的顶层节点**：空块的高度是 0，点进输入框的落点常常在容器层级，打出来的字会以**裸文本节点**挂在容器上（`readMarkdown` 已专门兜底读它，并在元素缺 id 时补 `data-block-id`）。React 只管自己渲染的块，这些节点它永远不会清——只重建块的话，切换视图（预备会话草稿存取）后同一段字会显示两遍。所以外部写入分支里先按「有 `data-block-id` 的才留」清一遍 `childNodes` 再 `setBlocks`
 - **序列化双向对齐 `codeMarkdown`**：`inlineMdToHtml` / `inlineHtmlToMd` 的规则与 `renderInline` 严格同源（含「不解析 `_` 系」「`2**3` 按运算符处理」两条），块级各自处理列表嵌套缩进、表格单元格 `|` 转义、引用逐行加 `> `、code 块走 `textContent` 而非 innerHTML
 - **抹黑选中浮出格式卡**：监听 `selectionchange`，选区内锚点落在编辑器里才出卡（`portal` 到 body，`fixed` 定位，`onMouseDown` 阻止默认以免点击时选区丢失）。**主题变量不能只靠 `codex-theme`**——portal 逃出了 `.mind-main`，标记要由 MindInspector 镜像到 `<body>` 才拿得到（见上文「Portal 弹层的主题化」）。提供链接 / 加粗 / 斜体 + 块类型下拉（Body / H1-H3 / 有序 / 无序）。行内格式走 `document.execCommand`（已废弃但选区操作仍是最省事的路径）；切块类型**先 `readMarkdown()` 同步 DOM 现状再换标签**，否则会拿旧 `html` 覆盖用户刚敲的字
 - **Shift+Enter 换行走 `insertLineBreak`**：直接在根节点回车会让浏览器造出「没有块标记」的新元素，读回时只能按标签兜底；`insertLineBreak` 产生 `<br>`，序列化后是块内的 `\n`
@@ -974,7 +983,9 @@ PreProcessing → UserMemorySaving
 | [`compaction_reminder.rs`](src-tauri/src/pipeline/compaction_reminder.rs) | 压缩后提醒，从丢弃消息提取活跃工具名与最后话题 |
 | [`doom_loop.rs`](src-tauri/src/pipeline/doom_loop.rs) | 按工具名、参数和实际结果检测连续重复序列；新观察结果可打断误判，历史有界 |
 | [`react.rs`](src-tauri/src/pipeline/react.rs) | 主智能体续轮、私有执行器交接、实际回执回流、重复调用检测和收尾；纯 `continue_thinking` 保留完整人格，最多 4 轮 |
-| [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs) | 陪伴侧独立工具执行上下文，支持原生和文本调用；中性模型草稿不进入角色回复，宿主构造事实回执 |
+| [`tool_execution.rs`](src-tauri/src/pipeline/tool_execution.rs) | 陪伴侧独立工具执行上下文，支持原生和文本调用；中性模型草稿不进入角色回复，宿主构造事实回执；检索按渠道分工（`web_search` 通用事实 / `platform_search` 平台条目 / `browser_task_tab(platform+query)` 登录态站内搜索），登录态浏览器工具按名放行而非放开整个 Mcp 类别 |
+| [`request_intent.rs`](src-tauri/src/pipeline/request_intent.rs) | 请求升级前的语法闸门：整句都在拒绝（别/不用/先不…）或假设（如果/假如…）时不升级进执行器；按子句判定，只要还有一个活跃子句就仍按请求处理（`别查了，帮我关掉音乐`）。否定是封闭语法类，不再散落在多处词表里 |
+| [`retrieval_ledger.rs`](src-tauri/src/pipeline/retrieval_ledger.rs) | 检索来源台账：从真实回执（不经摘要截断）重建结构化来源（标题 / URL / 平台 / 时间），作为独立系统段注入表达阶段；**只陈述宿主可核对的机械事实**（每条查询几条、哪些渠道没跑起来），相关性判断留给读得到原文标题的表达阶段，不引入「哪些词是通用词」这类会按领域失效的词表；正文守卫做三件确定性的事——网址占位符（`[网址1]`）换成宿主来源、落在未检索域名上的 URL 视为编造并摘除（历史链接与已检索站点的链接放行）、引用了来源却没写原文标题时把标题补回去（让「近似名被冒认」在读者眼前显形） |
 | [`inline_tag_scanner.rs`](src-tauri/src/pipeline/inline_tag_scanner.rs) | 内联标签扫描器，流式剥离 `<e>/<m>` 标签驱动桌宠表情/动作 |
 
 **内联标签字母表（只认这两个）**：`<e name="…" dur="ms"/>` 表情、`<m name="…"/>` 动作。
@@ -1935,6 +1946,7 @@ scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
 | `subagent_tools.rs` | 子代理委派与控制（`spawn_subagent` 起后台 agent 循环，`Shell` + 需确认；`subagent_control` 查询/取消/延续/取报告，`Safe` + 恒放行；`subagent_report` 子任务回传报告，`Safe`） |
 | `workflow_tools.rs` | 多步编排（`run_workflow`：一次提交多步工具脚本 + `parallel:true` 步骤扇出并发，`Shell` + 需确认） |
 | `web_fetch_tool.rs` | `web_fetch` 读取 HTML、文本、Markdown、JSON、XML 与 PDF 文本，支持字符分页、find 和链接索引；结果只作不可信证据，动态/登录页面用浏览器桥，扫描 PDF 不自带 OCR |
+| `platform_search_tool.rs` | `platform_search` 平台内检索：复用 `discovery::sources` 的免登录适配器（B站 / 番组 / 微博 / V2EX / Reddit / X）按关键词返回真实条目标题、URL、作者与发布时间，与 `web_search` 并用补齐"视频 / 帖子 / 评测 / 经验帖"这类通用搜索搜不到的证据；单源失败记 `failures` 而不是当成"没有该内容"，`Web` 类别故执行器补档自动可见；小红书 / 抖音 / 知乎走 `browser_task_tab`（platform + query，登录态） |
 | `send_image_tool.rs` | 图片发送（`send_image`）：把本地图片发送到聊天界面，双通道路由（编程会话 → `push_agent_image`；聊天 → 镜像 `send_image_message` 管线 + `chat:assistant_image` + 横幅），与 `take_screenshot` 配合发截图；仅推前端不走网络，故为 `Safe` |
 | `send_chat_message_tool.rs` | 应用内私聊发送（`send_chat_message`）：将角色消息写入 `wechat` 渠道历史、更新会话渠道并通知前端；供明确要求“发消息/发微信”等语义使用，不对接外部微信 |
 | `show_widget_tool.rs` | 可视化组件（`show_widget`）：把 SVG 流程图/图表渲染为编程页内联卡片，约束系统内嵌 `description`，call 先做防御性校验（`looks_like_svg` + `contains_forbidden`）再经 `push_agent_widget` 推前端，`should_defer=true` |
@@ -2033,7 +2045,7 @@ pub struct CustomToolDef {
 | `wenxin.rs` | Wenxin | 百度 OAuth |
 | `spark.rs` | Spark | 讯飞 WebSocket |
 | `factory.rs` | — | Provider 工厂（`create_task_provider` 按任务构建 provider；`create_probe_provider` 构建 API 探测用"裸" provider） |
-| `router.rs` | — | `ModelRouter` 路由矩阵（15 个任务类型 + 按任务分组并发限制 + 路由回退 120 秒冷却，同 task_type 不重复发通知） |
+| `router.rs` | — | `ModelRouter` 两层路由：8 个模型档位（`routing_tiers`）+ 26 个任务契约（`routing_matrix` 覆盖）+ 按任务分组并发限制 + 路由回退 120 秒冷却 |
 | `schema.rs` | — | Provider schema |
 | `thinking_stripper.rs` | — | ` thinking` 标签流式过滤 |
 
@@ -2041,7 +2053,22 @@ pub struct CustomToolDef {
 
 **原生联网与引用**：OpenAI Responses 的 native web search 与 Gemini grounding 可与 function tools 共存；流式和非流式通过 [`web_citations.rs`](src-tauri/src/providers/web_citations.rs) 保留来源并合并进最终文本。搜索/工具调用不使用完整回复缓存；普通 Chat Completions 和未支持的协议走通用搜索工具，不盲填未知原生搜索字段。
 
-**工作智能体模型热切换**：`ModelRouter.reasoning_override` 沿用历史字段名，但现在只匹配独立的 `work_agent` 任务。`select_work_model` 构建的 provider 在工作任务上优先于路由矩阵；陪伴对话即使从 `chat` 升级为 `reasoning`，也不会被编程模型接管。`active_work_model` 持久化并在重启或保存配置后的 reload 中恢复覆盖。
+**两层路由（档位 → 任务）**：`src-tauri/prompts/routing/task_catalog.json` 是唯一真源，分 `tiers`（8 个用户可配的模型档位）与 `tasks`（26 条任务契约）。解析顺序固定为「任务自己的 `routing_matrix` 条目 → `fallback` 链上的邻居任务 → 该任务所属档位 → 主 LLM API」；档位只在任务级完全没配时介入，不作为额外兜底层叠加。
+
+| 档位 | 成员任务 | 选型诉求 |
+| --- | --- | --- |
+| `dialogue` | companion / pet_reaction / chat_partner | 只有本档允许 `spoken` |
+| `vision` | vision_describe | 必须多模态 |
+| `execution` | reasoning | 工具调用 + 长上下文 |
+| `work` | work_agent / work_memory | 独占档位与 `work` 并发组 |
+| `memory` | memory / consolidation / context_compress / query_rewrite | 结构化小输出 |
+| `cognition` | reflection / inner_monologue / diary / persona_evolution / knowledge_acquisition | 长文本、延迟不敏感 |
+| `judge` | simple_judge / intent_judge / emotion_analysis / environment_judge / bystander_judge / faithfulness | 高频、越便宜越好 |
+| `textops` | text_rewrite / translation / asr_polish | 低温忠实 |
+
+`image_gen` 是 `kind: "image"` 的非 LLM 任务，不参与档位继承，由 `network/image_gen.rs` 直读 `routing_matrix.image_gen` 自建 HTTP。任务契约还带代码级采样默认（`temperature` / `maxTokens`），仅在用户没填时生效；`apply_execution_budget` 对 `execution` / `work` 档补工作模型输出上限。
+
+**工作智能体模型热切换**：`ModelRouter.reasoning_override` 沿用历史字段名，但现在只匹配独立的 `work_agent` 任务。`select_work_model` 构建的 provider 在工作任务上优先于档位与路由矩阵；陪伴对话即使从 `companion` 升级为 `reasoning`（tool 循环），也不会被编程模型接管。`active_work_model` 持久化并在重启或保存配置后的 reload 中恢复覆盖。
 
 **工作智能体输出预算（`factory.rs::work_model_default_max_tokens`）**：编程智能体的 `max_tokens` 不要求用户配置——设置窗口工作模型表单已移除该字段，由后端按服务商分级给出默认（聊天主配置 `ai.max_tokens=2048` 对代码生成过小），避免超出各家输出上限被 400 拒绝：
 
@@ -2057,7 +2084,7 @@ pub struct CustomToolDef {
 | anthropic / claude | 64000 |
 | 未知（chat_completions/custom 等兜底） | 8192 |
 
-生效位置：`set_work_model_override`（热切换）与 `build_reasoning_override`（重启恢复）构建工作 provider 时统一 `cfg.max_tokens = Some(work_model_default_max_tokens(...))`；路由矩阵 `reasoning` 任务未显式配置 `max_tokens` 时同样套用（显式配置优先）。
+生效位置：`set_work_model_override`（热切换）与 `build_reasoning_override`（重启恢复）构建工作 provider 时统一 `cfg.max_tokens = Some(work_model_default_max_tokens(...))`；`router.rs::apply_execution_budget` 对 `execution` / `work` 档及其下属任务同样套用（显式配置优先）。
 
 **工作智能体请求省略 temperature（`ProviderBase::strip_temperature`）**：工作智能体（编程）provider 构建后统一 `set_omit_temperature(true)`，请求体按各厂商路径移除 `temperature` 字段——
 
@@ -2376,7 +2403,7 @@ body {
 
 设置 → 网络页签的「网络检测」按钮打开 `NetworkDiagnosisDialog`（`src/components/NetworkDiagnosisDialog.tsx`），调用 `diagnose_network` 命令。它取代了早期只对 `https://www.google.com` 发一次 GET 的「测试连接」——那种检测只能回答"通/不通"，无法区分是代理没开、DNS 被劫持，还是服务端本身异常。
 
-**检测目标**由 `resolve_service_endpoint` 解析：路由矩阵 `chat` 任务的 endpoint → `ai.endpoint` → `https://www.google.com` 兜底。即检测的就是**运行时真正会发请求的那个地址**。
+**检测目标**由 `resolve_service_endpoint` 解析：`companion` 任务的 endpoint → `ai.endpoint` → `https://www.google.com` 兜底。即检测的就是**运行时真正会发请求的那个地址**。
 
 **五项检测**并发执行（`tokio::join!`），每项独立给出 `pass` / `warn` / `fail` / `skip`：
 
@@ -2423,7 +2450,8 @@ body {
 | [`store.rs`](src-tauri/src/discovery/store.rs) | `ContentStore` 内容库存（上限 60，跨源去重） |
 | [`recommend.rs`](src-tauri/src/discovery/recommend.rs) | 推荐账本（`platform:id` 防重复） |
 | [`speculator.rs`](src-tauri/src/discovery/speculator.rs) | `InterestSpeculator` 探针投机（观察入库标题 → 猜测兴趣域） |
-| [`bilibili.rs`](src-tauri/src/discovery/bilibili.rs) | B 站匿名 WBI 客户端（加密参数 + 签名 + 5 分钟密钥缓存） |
+| [`bilibili.rs`](src-tauri/src/discovery/bilibili.rs) | B 站匿名 WBI 客户端（加密参数 + 签名 + 5 分钟密钥缓存）；另含字幕/热门评论/弹幕分段三个登录态或公开接口 |
+| [`danmaku.rs`](src-tauri/src/discovery/danmaku.rs) | 弹幕分段 protobuf 解析（只认 progress/content 两个字段）+ 按分钟聚合密度与代表句；零外部依赖，`tests/discovery-danmaku.test.mjs` 隔离验证 |
 | [`sources/mod.rs`](src-tauri/src/discovery/sources/mod.rs) | `SourceAdapter` trait + `ContentCandidate` 统一候选（platform+content_id 跨源去重键） |
 | [`sources/bangumi.rs`](src-tauri/src/discovery/sources/bangumi.rs) | Bangumi v0 API（搜索/榜单 + 公开收藏导入初始化画像，UA 必须可识别） |
 | [`sources/v2ex.rs`](src-tauri/src/discovery/sources/v2ex.rs) | V2EX 官方 API（hot/latest，限频严格每轮只取一次热门） |
@@ -2439,6 +2467,9 @@ body {
 搜索词生成（LLM 3-5 个 / 失败回退画像顶层兴趣）
    ↓
 各源并行取候选（搜索 + 热门/榜单），跨源 platform:id 去重 + 库存/推荐账本去重
+   ↓
+富化证据（B站：字幕 + 热门评论 + 弹幕密度；其余平台：正文 + 评论）——每轮上限 6 条，
+弹幕走公开接口，没配登录态时字幕/评论缺失但弹幕仍可作评估锚点
    ↓
 LLM 批量评估（score/reason/topic_group，只看画像匹配度，热门与否不影响）EVALUATE_BATCH_SIZE=12
    ↓

@@ -163,13 +163,13 @@ impl AIResponseGenerationRunnable {
             .unwrap_or(false)
     }
 
-    /// 从 config.metadata 中读取 task_type，默认 "chat"
+    /// 从 config.metadata 中读取 task_type，默认 `companion`
     fn task_type(config: &Option<RunnableConfig>) -> String {
         config
             .as_ref()
             .and_then(|c| c.metadata.get("task_type"))
             .and_then(|v| v.as_str())
-            .unwrap_or("chat")
+            .unwrap_or(crate::providers::base::TASK_COMPANION)
             .to_string()
     }
 
@@ -316,7 +316,7 @@ impl AIResponseGenerationRunnable {
         let companion = messages.iter().any(|m| m.role == "system" && m.content.contains("[COMPANION DIALOGUE]"));
         let mut req = LLMRequest::new(task_type, messages);
         if companion { req = req.without_framework_instructions(); }
-        if matches!(task_type, crate::providers::base::TASK_COMPANION | "chat") {
+        if task_type == crate::providers::base::TASK_COMPANION {
             req = req.with_json_schema(vivian_response_schema());
         }
         req
@@ -672,8 +672,12 @@ impl AIResponseGenerationRunnable {
         ]).with_character_id(char_id).with_usage_tag("contextual_intent")
             .without_framework_instructions().with_json_schema(json!({
                 "type":"object", "additionalProperties":false,
-                "properties":{"action":{"type":"boolean"},"continues_task":{"type":"boolean"},
-                    "needs_clarification":{"type":"boolean"},"task":{"type":"string"}},
+                "properties":{
+                    "action":{"type":"boolean","description":"true only when the human is authorizing a concrete operation this turn. Mutually exclusive with needs_clarification."},
+                    "continues_task":{"type":"boolean","description":"true only when the latest utterance refers to the tracked host task."},
+                    "needs_clarification":{"type":"boolean","description":"true when the operation or its target stays ambiguous. Mutually exclusive with action; when true, action is false and task is empty."},
+                    "task":{"type":"string","description":"Self-contained description of the authorized task when action is true; empty when action is false."}
+                },
                 "required":["action","continues_task","needs_clarification","task"]
             })).with_max_tokens(700).with_reasoning(false);
         let budget = Arc::new(crate::providers::base::RequestBudget::new(std::time::Duration::from_secs(8), 2));
@@ -683,8 +687,15 @@ impl AIResponseGenerationRunnable {
         let parsed = Self::extract_json(&response)
             .and_then(|value| serde_json::from_value::<crate::pipeline::task_continuity::ResolvedTurn>(value).ok())
             .ok_or_else(|| VivianError::Engine("会话意图解析未返回有效结构".into()))?;
-        if parsed.action && (parsed.needs_clarification || parsed.task.trim().is_empty()) {
-            return Err(VivianError::Engine("会话意图解析缺少明确的执行目标".into()));
+        // 模型给过 `action=true` + `needs_clarification=true`（"是操作请求但目标不明"），
+        // 这是语义上最自然的表达，旧实现把它当致命错误，整轮对话因此没有任何回复。
+        // 折成澄清是唯一安全的降级：宿主本来就只在 `action && !needs_clarification`
+        // 时才进执行侧，这里只是把这个既成事实写实。
+        let (action, clarification) = (parsed.action, parsed.needs_clarification);
+        let parsed = parsed.sanitized();
+        if (parsed.action, parsed.needs_clarification) != (action, clarification) {
+            tracing::info!("[ContextualIntent] 归一化矛盾输出: action={action}->{} needs_clarification={clarification}->{} \
+                (宿主只执行自足目标，其余折成澄清)", parsed.action, parsed.needs_clarification);
         }
         Ok(parsed)
     }
@@ -772,7 +783,7 @@ impl AIResponseGenerationRunnable {
     /// Decide before prompt budgeting, schema selection and the first model call.
     /// Explicit caller routes for background/work tasks remain authoritative.
     pub(crate) fn generation_task(state: &PipelineState, caller: &str) -> String {
-        if matches!(caller, "chat" | crate::providers::base::TASK_COMPANION)
+        if caller == crate::providers::base::TASK_COMPANION
             && Self::requests_execution(state)
         { "reasoning".into() } else { caller.into() }
     }
@@ -1222,6 +1233,51 @@ impl Runnable for AIResponseGenerationRunnable {
 }
 
 impl AIResponseGenerationRunnable {
+    /// Shared by production generation and offline request export; no replica prompt builder.
+    pub(crate) fn dialogue_messages(state: &PipelineState) -> Vec<ChatMessage> {
+        // Request-local role orchestration. Provider presets are disabled below so
+        // an old assistant framework cannot reappear behind the conversation card.
+        let companion = state.metadata.get("companion_prompt").cloned()
+            .and_then(|value| serde_json::from_value::<crate::pipeline::companion_prompt::CompanionPrompt>(value).ok());
+        let system_directive = state.metadata.get("system_directive").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        // <agent_status> 是工具坚持度读数（轮次/调用计数/重试策略）。对纯闲聊轮它是
+        // 纯噪音，而且作为 system 消息紧贴当前轮——最强的近因位置，机器语域会直接
+        // 漏进说出来的话里。2026-10-24 起只有工具轮/执行轮才注入。
+        let status = if system_directive || !Self::requests_execution(state)
+        { None } else {
+            crate::pipeline::prompt_modules::build_agent_status_bar(
+                &state.messages, &state.user_input)
+        };
+        let communication = state.metadata.get("communication_context").cloned()
+            .and_then(|v| serde_json::from_value::<crate::messages::CommunicationContext>(v).ok());
+        let api_input = if system_directive { state.user_input.as_str() } else {
+            state.metadata.get("api_turn_text").and_then(|v| v.as_str()).unwrap_or(&state.user_input)
+        };
+        let mut messages_vec = if let Some(prompt) = &companion {
+            prompt.messages_with_communication(&state.messages, api_input, system_directive, status.as_deref(), communication.as_ref())
+        } else {
+            let context = crate::pipeline::message_context::split_prompt_context(
+                &state.system_prompt, &state.user_input, &crate::i18n::get_language());
+            let mut messages = Vec::new();
+            if !context.system.is_empty() { messages.push(ChatMessage::system(context.system)); }
+            if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
+            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
+            if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
+            crate::pipeline::message_context::append_current_turn(&mut messages, api_input, system_directive, communication.as_ref());
+            messages
+        };
+        if let Some(context) = state.metadata.get("task_continuation") {
+            messages_vec.push(ChatMessage::system(crate::pipeline::task_continuity::prompt(context)));
+        }
+        if let Some(context) = state.metadata.get("contextual_intent") {
+            messages_vec.push(ChatMessage::system(format!("[Contextual interpretation of the latest human turn, not additional authorization]\n{context}\nInterpret omitted subjects and approvals using the complete conversation. Preserve the actual user's constraints and all permission checks. Assistant promises do not establish execution. Ask for clarification if the interpretation remains ambiguous.")));
+        }
+        if Self::requests_execution(state) || state.metadata.get("visual_evidence").is_some() {
+            messages_vec.push(ChatMessage::system(Self::OBSERVATION_EVIDENCE_RULE));
+        }
+        messages_vec
+    }
+
     // Keep the large state machine out of the scope wrapper's stack frame.
     #[inline(never)]
     fn generation_future(&self, state: PipelineState, config: Option<RunnableConfig>)
@@ -1264,40 +1320,7 @@ impl AIResponseGenerationRunnable {
             return Ok(state.to_json());
         }
 
-        // Request-local role orchestration. Provider presets are disabled below so
-        // an old assistant framework cannot reappear behind the conversation card.
-        let companion = state.metadata.get("companion_prompt").cloned()
-            .and_then(|value| serde_json::from_value::<crate::pipeline::companion_prompt::CompanionPrompt>(value).ok());
-        let system_directive = state.metadata.get("system_directive").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let status = if system_directive { None } else {
-            crate::pipeline::prompt_modules::build_agent_status_bar(
-                &state.messages, &state.user_input)
-        };
-        let communication = state.metadata.get("communication_context").cloned()
-            .and_then(|v| serde_json::from_value::<crate::messages::CommunicationContext>(v).ok());
-        let api_input = if system_directive { state.user_input.as_str() } else {
-            state.metadata.get("api_turn_text").and_then(|v| v.as_str()).unwrap_or(&state.user_input)
-        };
-        let mut messages_vec = if let Some(prompt) = &companion {
-            prompt.messages_with_communication(&state.messages, api_input, system_directive, status.as_deref(), communication.as_ref())
-        } else {
-            let context = crate::pipeline::message_context::split_prompt_context(
-                &state.system_prompt, &state.user_input, &crate::i18n::get_language());
-            let mut messages = Vec::new();
-            if !context.system.is_empty() { messages.push(ChatMessage::system(context.system)); }
-            if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
-            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
-            if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
-            crate::pipeline::message_context::append_current_turn(&mut messages, api_input, system_directive, communication.as_ref());
-            messages
-        };
-        if let Some(context) = state.metadata.get("task_continuation") {
-            messages_vec.push(ChatMessage::system(crate::pipeline::task_continuity::prompt(context)));
-        }
-        if let Some(context) = state.metadata.get("contextual_intent") {
-            messages_vec.push(ChatMessage::system(format!("[Contextual interpretation of the latest human turn, not additional authorization]\n{context}\nInterpret omitted subjects and approvals using the complete conversation. Preserve the actual user's constraints and all permission checks. Assistant promises do not establish execution. Ask for clarification if the interpretation remains ambiguous.")));
-        }
-        messages_vec.push(ChatMessage::system(Self::OBSERVATION_EVIDENCE_RULE));
+        let mut messages_vec = Self::dialogue_messages(&state);
         let task_request = Self::execution_user_request(&state);
         if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only)
             || state.metadata.get("contextual_intent").is_some_and(|context| context["action"] == false) {
@@ -1423,11 +1446,6 @@ impl AIResponseGenerationRunnable {
                     state.response_json = None;
 
                     if !all_results.is_empty() {
-                        if crate::pipeline::react::keeps_companion_persona(&state.current_channel)
-                            && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
-                            state.metadata["tool_execution_route"] = json!("reasoning");
-                            state.metadata["tool_reply_route"] = json!("chat");
-                        }
                         state.tool_call_executed = true;
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
@@ -1610,11 +1628,6 @@ impl AIResponseGenerationRunnable {
                         .await };
 
                     if !all_results.is_empty() {
-                        if crate::pipeline::react::keeps_companion_persona(&state.current_channel)
-                            && all_results.iter().any(|r| r.tool_name != "continue_thinking") {
-                            state.metadata["tool_execution_route"] = json!("reasoning");
-                            state.metadata["tool_reply_route"] = json!("chat");
-                        }
                         state.tool_call_executed = true;
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
@@ -1682,7 +1695,7 @@ impl AIResponseGenerationRunnable {
                 // Reuse the same role-separated conversation on fallback.
                 let fallback_messages = messages_vec.clone();
 
-                match Self::call_llm(&router, fallback_messages, "chat", false, &self.stream_emitter).await {
+                match Self::call_llm(&router, fallback_messages, crate::providers::base::TASK_COMPANION, false, &self.stream_emitter).await {
                     Ok(text) => {
                         state.response_text = text.clone();
                         state.response_json = Self::extract_json(&text);
@@ -2066,12 +2079,12 @@ mod tests {
         assert!(!AIResponseGenerationRunnable::requests_execution(&state("request", 0.1, "今天天气不错")));
         // 能力问句中的显式执行请求不能被 question 误分类挡住
         assert!(AIResponseGenerationRunnable::requests_execution(&state("question", 0.95, "帮我查一下这个是什么")));
-        assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.95, "你好呀")));
+        assert!(!AIResponseGenerationRunnable::requests_execution(&state(crate::providers::base::TASK_COMPANION, 0.95, "你好呀")));
         // 无语义结果且没有任务信号时不升级
         assert!(!AIResponseGenerationRunnable::requests_execution(&PipelineState::default()));
         for input in ["就是你现在的一些功能，比如给我换张壁纸", "我问你这张壁纸的内容是什么，你描述一下",
             "这还素？你说说这张是什么内容"] {
-            let mut request = state("chat", 0.99, input);
+            let mut request = state(crate::providers::base::TASK_COMPANION, 0.99, input);
             request.metadata["contextual_intent"] = json!({
                 "action": true, "continues_task": false,
                 "needs_clarification": false, "task": "Inspect the requested external state"
@@ -2080,7 +2093,7 @@ mod tests {
             assert_eq!(AIResponseGenerationRunnable::generation_task(&request, "companion"), "reasoning");
         }
         for input in ["不要给我换张壁纸", "别给我换壁纸", "如果给我换张壁纸会怎样", "这张壁纸挺好看"] {
-            assert!(!AIResponseGenerationRunnable::requests_execution(&state("chat", 0.99, input)), "{input}");
+            assert!(!AIResponseGenerationRunnable::requests_execution(&state(crate::providers::base::TASK_COMPANION, 0.99, input)), "{input}");
         }
     }
 
@@ -2295,7 +2308,7 @@ mod tests {
             cfg.ai.provider = "chat_completions".into(); cfg.ai.endpoint = Some(endpoint.clone());
             cfg.ai.api_key = Some("local-test-key".into()); cfg.ai.model = format!("main-{}", uuid::Uuid::new_v4());
             cfg.network.proxy_mode = "direct".into(); cfg.enable_routing_matrix = true;
-            for (task, model) in [("reasoning", "task-reasoner"), ("chat", "character-reply")] {
+            for (task, model) in [("reasoning", "task-reasoner"), (crate::providers::base::TASK_COMPANION, "character-reply")] {
                 cfg.routing_matrix.insert(task.into(), crate::config::manager::TaskRouteConfig {
                     provider_type:"chat_completions".into(), model:model.into(), endpoint:endpoint.clone(),
                     api_key:"local-test-key".into(), ..Default::default()
@@ -2646,12 +2659,12 @@ mod tests {
         assert!(native.wants_tools());
         assert_eq!(native.include_framework_instructions, Some(false));
         assert!(AIResponseGenerationRunnable::build_chat_request(crate::providers::base::TASK_COMPANION, messages).wants_json());
-        assert!(AIResponseGenerationRunnable::build_native_chat_request("chat", vec![ChatMessage::system("legacy")], vec![]).wants_json());
+        assert!(AIResponseGenerationRunnable::build_native_chat_request(crate::providers::base::TASK_COMPANION, vec![ChatMessage::system("legacy")], vec![]).wants_json());
     }
 
     #[test]
     fn private_and_perception_tasks_never_receive_the_speech_schema() {
-        for task in ["reasoning", "vision_describe", "reflection", "context_compress", "memory", "tool_execution"] {
+        for task in ["reasoning", "vision_describe", "reflection", "context_compress", "memory", "faithfulness"] {
             let request = AIResponseGenerationRunnable::build_chat_request(task, vec![ChatMessage::system("private protocol")]);
             assert!(!request.wants_json(), "{task} must retain its own output protocol");
             assert_eq!(request.task_type, task);
@@ -2801,5 +2814,28 @@ mod tests {
         state.user_input = "你好".to_string();
         let result = runnable.ainvoke(state.to_json(), None).await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod dialogue_delivery_tests {
+    use super::*;
+    #[test]
+    fn discovery_tools_do_not_turn_casual_talk_into_an_execution_prompt() {
+        let parts = crate::pipeline::prompt_modules::PromptParts { tools:Some("tool_search".into()),
+            enable_native_fc:true, ..Default::default() };
+        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, &[]);
+        let mut state = PipelineState { user_input:"你好呀".into(),
+            tool_definitions:vec![ToolDefinition {name:"tool_search".into(),description:"discover".into(),parameters:json!({})}],
+            ..Default::default() };
+        state.metadata["companion_prompt"] = json!(prompt);
+        let casual = AIResponseGenerationRunnable::dialogue_messages(&state);
+        assert!(!casual.iter().any(|message| message.content.contains("<agent_status>")));
+        assert!(!casual.iter().any(|message| message.content.contains(AIResponseGenerationRunnable::OBSERVATION_EVIDENCE_RULE)));
+        assert_eq!(casual.iter().filter(|message| message.role == "user").count(), 1);
+        state.user_input = "帮我换壁纸".into();
+        let operation = AIResponseGenerationRunnable::dialogue_messages(&state);
+        assert!(operation.iter().any(|message| message.content.contains("<agent_status>")));
+        assert!(operation.iter().any(|message| message.content.contains(AIResponseGenerationRunnable::OBSERVATION_EVIDENCE_RULE)));
     }
 }

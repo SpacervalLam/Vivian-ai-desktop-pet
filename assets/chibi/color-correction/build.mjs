@@ -8,9 +8,12 @@ const root=new URL('./',import.meta.url),base=new URL('../../../',import.meta.ur
 const vocabulary=JSON.parse(await readFile(new URL('src/chibi/animations.json',base),'utf8'));
 const additional=['wake','busy-in','busy-loop','cast','tend-out','tend','tired'];
 const targets=[
- {name:'walk-left',cols:4,rows:4,frames:14,preserve:[0,14,15],path:'walk/nana/nana-walk-left-sheet.webp'},
- {name:'walk-right',cols:4,rows:4,frames:14,preserve:[0,14,15],path:'walk/nana/nana-walk-right-sheet.webp'},
- ...['angry','think','smug'].map(name=>({name,cols:4,rows:3,frames:12,preserve:[0,11],path:`motion/nana/nana-${name}-sheet.webp`})),
+ // preserve 只保留**未使用的 cell**（cols*rows - frames 个）。把使用中的首尾帧也
+ // preserve 会让它们避开配色迁移，与中间帧断裂——think 的原稿首尾帧偏暗 14，
+ // 校正后帧间差直接越过连续性容差。未使用 cell 才是必须逐像素保留的对象。
+ {name:'walk-left',cols:4,rows:4,frames:14,preserve:[14,15],path:'walk/nana/nana-walk-left-sheet.webp'},
+ {name:'walk-right',cols:4,rows:4,frames:14,preserve:[14,15],path:'walk/nana/nana-walk-right-sheet.webp'},
+ ...['angry','think','smug'].map(name=>({name,cols:4,rows:3,frames:12,preserve:[],path:`motion/nana/nana-${name}-sheet.webp`})),
  ...additional.map(name=>{
   const spec=vocabulary.animations.find(s=>s.name===name);
   return {name,cols:spec.cols,rows:spec.rows,frames:spec.frames,preserve:Array.from({length:spec.cols*spec.rows-spec.frames},(_,i)=>i+spec.frames),path:`motion/nana/nana-${name}-sheet.webp`,toneMatch:true};

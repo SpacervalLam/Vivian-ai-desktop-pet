@@ -70,6 +70,7 @@ const creationContext = {
     return { session_id: 'manual-nana-task', char_id: args.charId };
   },
   refreshSessions: async () => [], switchSession: session => chosenSessions.push(session),
+  setDraftWorkspace: () => {},
   setInput: () => {}, inputRef: { current: null }, t: key => key,
   notifyError: message => assert.fail(message),
 };
@@ -80,3 +81,27 @@ assert.equal(creationRequests[1].args.charId, 'nana');
 assert.equal(creationRequests[1].args.workingDirectory, 'G:/work');
 assert.equal(chosenSessions[0].session_id, 'manual-nana-task');
 console.log('Manual office creation uses the active companion for callback ownership.');
+
+// Companion follow-ups appear in the active office history without echoing local optimistic messages.
+const instructionStart = office.indexOf("      await add('coding:companion_instruction',");
+const instructionEnd = office.indexOf("      await add(", instructionStart + 20);
+assert.ok(instructionStart >= 0 && instructionEnd > instructionStart);
+const instructionCode = (await transform(`(async () => {${office.slice(instructionStart, instructionEnd)}})()`, { loader: 'ts', format: 'cjs' })).code;
+const forwarded = [];
+let instructionHandler;
+const instructionContext = {
+  Date,
+  add: async (name, handler) => { assert.equal(name, 'coding:companion_instruction'); instructionHandler = handler; },
+  isMine: payload => payload?.session_id === 'owned-task',
+  append: message => forwarded.push(message),
+};
+vm.createContext(instructionContext);
+await vm.runInContext(instructionCode, instructionContext);
+instructionHandler({ session_id: 'other-task', content: '错误角色' });
+instructionHandler({ session_id: 'owned-task', content: ' ' });
+instructionHandler({ session_id: 'owned-task', content: '补充B站弹幕来源', guided: true });
+assert.equal(forwarded.length, 1);
+assert.equal(forwarded[0].role, 'user');
+assert.equal(forwarded[0].content, '补充B站弹幕来源');
+assert.equal(forwarded[0].guided, true);
+console.log('Companion instructions reach the correct office session and preserve the guidance marker.');

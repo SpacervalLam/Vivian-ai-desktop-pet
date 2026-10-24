@@ -1,28 +1,31 @@
-import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+// Exercise the production task-continuity module (and its own #[cfg(test)] suite)
+// without a full-crate build: the module has zero application-boundary imports.
+import { mkdir, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 
-// Compile the actual state machine without linking the desktop application.
-const directory = await mkdtemp(path.join(tmpdir(), 'vivian-task-continuity-'));
-try {
-  const source = path.resolve('src-tauri/src/pipeline/task_continuity.rs').replaceAll('\\', '/');
-  await writeFile(path.join(directory, 'lib.rs'), `#[path=${JSON.stringify(source)}] mod task_continuity;`);
-  await writeFile(path.join(directory, 'Cargo.toml'), `[package]
-name="task-continuity-contract"
-version="0.0.0"
+const root = process.cwd();
+const dir = path.join(root, 'tmp', 'task-continuity-tests');
+const production = path.join(root, 'src-tauri', 'src', 'pipeline', 'task_continuity.rs').replaceAll('\\', '/');
+
+await mkdir(path.join(dir, 'src'), { recursive: true });
+await writeFile(path.join(dir, 'Cargo.toml'), `[package]
+name="vivian-task-continuity-tests"
+version="0.1.0"
 edition="2021"
-[lib]
-path="lib.rs"
 [dependencies]
 serde={version="1",features=["derive"]}
 serde_json="1"
 `);
-  const result = spawnSync('cargo', ['test', '--offline', '--quiet', '--manifest-path', path.join(directory, 'Cargo.toml'),
-    '--target-dir', path.resolve('tmp/task-continuity-contract-target')], { encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stdout + result.stderr);
-  console.log(result.stdout.trim());
-} finally {
-  await rm(directory, { recursive: true, force: true });
-}
+await writeFile(path.join(dir, 'src/lib.rs'), `#![allow(dead_code)]
+#[path="${production}"] pub mod task_continuity;
+`);
+
+const result = spawnSync(
+  'cargo',
+  ['test', ...(process.env.VIVIAN_TEST_OFFLINE === '0' ? [] : ['--offline']),
+    '--manifest-path', path.join(dir, 'Cargo.toml'), '-j', '1'],
+  { stdio: 'inherit', env: { ...process.env, CARGO_INCREMENTAL: '0', CARGO_PROFILE_DEV_DEBUG: '0' } },
+);
+if (result.error) throw result.error;
+process.exitCode = result.status ?? 1;

@@ -386,6 +386,8 @@ async fn send_message_stream_impl(
     let brain = instance.brain.clone();
     cancel_close(&char_id);
 
+    let channel_str = brain.presence.current().message_channel(&channel_str).to_string();
+
     // 广播渠道（broadcast）：用户只说了一遍、当众对在场所有人说的。
     // 它与 direct 共享"说出口的话"的全部行为（口语化回复、剥离括号动作、在场门禁），
     // 但语义上多了一层"公开"——这一点在下面多处按渠道分流：
@@ -890,11 +892,11 @@ async fn send_message_stream_impl(
             // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
             if response.response_mode == "ignore" {
                 tracing::info!(
-                    "[Chat:{}] ignore 模式，跳过 chat:done 发射: stream_id={}",
+                    "[Chat:{}] ignore 模式，结算为空正文: stream_id={}",
                     char_id,
                     stream_id
                 );
-                let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
+                let _ = app.emit("chat:done", json!({ "text": "", "response_mode": "ignore", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
                 return Ok(None);
             }
             // 推送 meta 事件：expression/motion（前端提前播放 桌宠 动画）
@@ -1586,11 +1588,11 @@ pub async fn wake_from_presence(
             // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
             if response.response_mode == "ignore" {
                 tracing::info!(
-                    "[Chat:{}] ignore 模式，跳过 chat:done 发射: stream_id={}",
+                    "[Chat:{}] ignore 模式，结算为空正文: stream_id={}",
                     char_id,
                     stream_id
                 );
-                let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
+                let _ = app.emit("chat:done", json!({ "text": "", "response_mode": "ignore", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
                 return Ok(());
             }
             if !response.expression.is_empty() || response.motion != "idle" {
@@ -1650,6 +1652,7 @@ pub(crate) async fn respond_to_image(
 ) -> Result<ImageTurnResult, String> {
     if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
     let instance = state.get_character(Some(character_id))?;
+    let channel = instance.brain.presence.current().message_channel(channel);
     if !state.is_initialized() { return Err("智能体正在初始化，请稍候...".into()); }
     if !main_api_configured(state) { return Err("MAIN_API_NOT_CONFIGURED".into()); }
     if !state.config.read().get_typed::<bool>("ai.enable_vision", false) { return Err("VISION_NOT_ENABLED".into()); }
@@ -1737,6 +1740,9 @@ pub async fn send_image_message(
         return Box::pin(crate::sns_runtime::private_image(state.inner(),&app,partner,source_path,channel_str)).await;
     }
 
+    let channel_str = state.get_character(Some(&char_id))?.brain.presence.current()
+        .message_channel(&channel_str).to_string();
+
     // 主 LLM API 必须配置
     if !main_api_configured(&state) {
         let _ = app.emit("chat:config_error", json!({ "reason": "no_main_api", "character_id": &char_id, "channel": &channel_str }));
@@ -1817,7 +1823,7 @@ pub async fn send_image_message(
     if let Some(memory_mgr) = memory_mgr {
         let char_id_for_mem = memory_mgr.char_id().to_string();
         let init_meta = json!({
-            "channel": "direct",
+            "channel": &channel_str,
             "speaker": "user",
             "listener": char_id_for_mem,
             "perspective": "speaker",

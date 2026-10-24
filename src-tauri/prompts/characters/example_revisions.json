@@ -1,0 +1,1633 @@
+{
+  "vivian": {
+    "ending": [
+      "ea76bfc6ba7211cc3d9f38f0b98e5f26baaff2087af461c0692191978ca6d804"
+    ],
+    "uncredited-work": [
+      "74442fb8807abedaa1c0726874c9d6650df31f1b3849004bdbf66625c3317f4c"
+    ],
+    "presentation-duration": [
+      "238874cd17e55e7c25061a37df25bd9b7d132cdde4b0b4b6c0b88dca5e5cc9ad",
+      "8ab387b6d0b70a03991c59a045788d064bd456d8939016a944180debd7405547",
+      "f3db59a1f509349ff5dc47379dd6211b34bc995f58ceae858f10606132597cde"
+    ],
+    "closed-confirmation": [
+      "fc9921714e92e3d747d29d8cd494603e86fa8e61622acccc4da2511705793006"
+    ],
+    "wallpaper-detour": [
+      "5b5337a15113f455ed277148140b64f8f7e40d70e84a83a99ad0af2e92d22179"
+    ],
+    "majority-choice": [
+      "6e72b7b3b5a0dc6fe7f9abf10c86bc12deee4abe23e7d57ec793884f57bb6385"
+    ],
+    "specific-praise": [
+      "91ef945f698d3a265f69a107d1615b82664a0bf9f698d09776be77c3430ceb39"
+    ],
+    "wait-for-tools": [
+      "59aff785326fc0aa4d494033786dd27ad7bd8feb98d650c1069654ff71f215dc"
+    ],
+    "task-failure": [
+      "d10bfd2f1baedc995b138e9896773d3ac5c34a4362652539bd661ad3d2526a70"
+    ],
+    "roommate-music": [
+      "fec59c892d3045264fd3fdcd1914dd85ac7d010f3f05ef72eedcf831a78b1ef0",
+      "c17823d3defb23d37beaec4da82e27480b4ec9a90908ac7ee0879036f1a16379"
+    ],
+    "creative-choice": [
+      "90c5565f2690508d6e26f7ff621a7c055071b3db728e1d32fed03a96f1b1bc71"
+    ],
+    "music-detail": [
+      "0ce92407ba0016104d02e7e0754e60858cf25767ef80cd8e357a4c50fb672b2f"
+    ],
+    "stuck-start": [
+      "e0aab4b2be2cad5a08ba6ab23e28d7eb2cea38c0b791c8b693073d84a79b2838"
+    ],
+    "technical-boundary": [
+      "b89ce368151bd458c67a389317093b35bbb24cba79895f1b3ecc5c5f72925e3d"
+    ],
+    "honest-uncertainty": [
+      "9446d1857b0f0aed9357e15e2e9e1db45e48fc0b501038464179ab325bb09554"
+    ],
+    "correct-own-error": [
+      "5cb547906965284e2710ab5d5b4077e6aa8b2b479247e975fadf1eacdad929ec"
+    ],
+    "repeated-failure": [
+      "062dbf15aeb938606f39ee40f4312f4f99cff2d8d2ad1fce8771606036ec287e"
+    ],
+    "small-observation": [
+      "bd7a284f586636ad5ebceb7d62cb35c15c9ebb9f7a2e98790a1375763112e0d3"
+    ],
+    "personal-taste": [
+      "ec7f46330bdde50c6d5f9a14cc5b3c2cd21a843a5e1b839a692126f90bb2f434"
+    ],
+    "gentle-boundary": [
+      "ea60e780bbeb31578ced617f4a02da44f6fbc4a182e1950c0512351d98476cd9"
+    ],
+    "ordinary-return": [
+      "601c43337a31ead912cb26846835b501aefc0e769ebd8ffd5616e071434a00e4"
+    ],
+    "pause-conversation": [
+      "38b1d411ab42f0fdd6e91353f9402d1c6b20120f168394891a3dd3acbb51d718"
+    ],
+    "funny-contradiction": [
+      "7dd1cbe207e679f08285b0c771c631da97fc7615065181e9292c1f05317d171b"
+    ],
+    "avoid-unearned-praise": [
+      "cd51b0242a61c5b268e6e81b5ec2bbe7186f7f079c88c0aa14ebf4795e106e46"
+    ],
+    "decision-tradeoff": [
+      "52d26c8da43cc271bca3c0ec6107ab6e1edaacae3b3b52e5e545f6760a68a158"
+    ],
+    "brief-detail-answer": [
+      "d25120e19af0e3d1786915ccebc203ad41669511a76a42e107936aef6e9f81c1"
+    ],
+    "social-invitation": [
+      "e704f7092872b54cb69edc591a7dc1b2d596eff51740e712dbbbb6a9b5a146e4",
+      "c99f352c00ed96b952c5674730e7308a0e1f5d970f75682d63e232d5235c2821"
+    ],
+    "personal-effort": [
+      "3a49fb793b20bef028b5e2c52e9178550b96f97b6011d50ad28aeb23b9bfeb92",
+      "30da42e6a74b2366dc7ef258ada2642f9ed669599a7d676c8d58dffe6419e1df"
+    ],
+    "personal-description": [
+      "d240c897f8218f1b4fbc6f3fc5757d53f2a578b1512b7507771143b2cdcfc7dd",
+      "5c75f5ebc298feb8b08f0c486f595d6e686244da177e6f891950f897b4d56964"
+    ],
+    "net-hype": [
+      "cff036cbdb7aaa2de32e5f47b2652a11f37fb2d44ae0757188697e4074fb22e5"
+    ],
+    "net-hype-six": [
+      "974a388ad8cae5bcdec1e29569efaca6b892d7af83dff5fe7a56a931c45907a6"
+    ],
+    "net-meme-abstract": [
+      "a9867133759a8e61a4b5ea589c61dc14e9def1331afac73000de575832ab073d"
+    ],
+    "net-tease": [
+      "807826cac7b271e1398dcc4611d9cb1abfa8ee01fed586d3d298eb4cfb56ba33"
+    ],
+    "net-roast": [
+      "4db0888659dba57d6c8cc9b422bd15bb4bb1bcf36c970a85fbaa79e2a918109d"
+    ],
+    "net-drift-pivot": [
+      "05a9215d202af1f83df8be76de4d4cce00663b5ce0c6c3e21e99e4722587d7fd"
+    ],
+    "net-drift-idle": [
+      "f205395f8de6b96a81a5b49d9dec3b7b868bad20a9d9e944882e4500f549daaf"
+    ],
+    "net-share": [
+      "5a68f0dab3cc444a51df9bbda4ba6b985a4c6b8e8c8ad97b9ff2db5c3fa3ffea",
+      "4314ba4fa72f68f6c1fc576b0a093c31361578af777e1351c63403b0cd73ebfc"
+    ],
+    "net-ask-help": [
+      "3f32bf768d6aff4875c8d410013dc1cb3b4ac3f412d515909042921104a14609"
+    ],
+    "net-exit-brief": [
+      "436f0e66817076fe15db309df2f6f4bc161f8f92af603685797153c77647cb70"
+    ],
+    "net-silent": [
+      "0ad556833e482d8b1a85b150e514efa554de8ded68ebcd01a35d28285794f84a"
+    ],
+    "net-mood-dip": [
+      "174e47d3531c949741bc5ba130d0ef662b535f15744c842b132450acddaef1f3"
+    ],
+    "net-modern-bubble": [
+      "25f4af48b5aa692cf2a1600c9bd3816c3efe1ab4a16f5eeb9f36bf792f88999b",
+      "57abb1238bd5553eed38267b9fe0947a33b7ed5043132a070e2a51496a1e3060"
+    ],
+    "net-modern-call": [
+      "4ae5e2b7e7e7a8b90206686cfdcb98886ffde63877ec4e80273242d13a9143ca"
+    ],
+    "net-modern-brain-late": [
+      "dc2cb22627fc7c3e127f8369f9974d9d8e3646e5806f6c9cc8fc6e229b6f415e"
+    ],
+    "net-modern-idle-day": [
+      "fc5a5433696a02305e1379da24826fc955a93d55e716bc4debaf1509f1a21e18"
+    ],
+    "net-modern-five-minutes": [
+      "386bd645a5cdf34ded5d6e261c99b96a05dafdffa52a893e00150a6dabcf4b86"
+    ],
+    "net-modern-bookmarks": [
+      "a79a359c1141795a036abe2bcbbc271de95bed8437195f8f6ac0322aa0b239c1"
+    ],
+    "net-modern-last-video": [
+      "746fda6ab01d4971f45d731d91332581bd03c03c6d5e6db6faeaf2460d69bb9c"
+    ],
+    "net-modern-delivery-minute": [
+      "44b16fce1c1e9e1e1ba4327771429bd31ce0b535b8fbc60136ab31da4c1c479f"
+    ],
+    "net-modern-parcel-tour": [
+      "08b79f74178dd1f2dcc24a4a5e63ca4eb12532c9481a25083ad13a4dfbb4366c"
+    ],
+    "net-modern-bed-reminder": [
+      "cfce4e85d264b42ccdea4154c067c480ef3f024584109e66cc2c0a42670c0fc6"
+    ],
+    "net-modern-funniest": [
+      "2846550bde2dbe3220308cb7a1ed0e3c576f8873048ca75e4d9742eba492f882"
+    ],
+    "net-modern-ugly-cute": [
+      "53476c34b7356c13bda8394d8083a160e4c921356536108402724dba4e3143e6"
+    ],
+    "net-modern-look-again": [
+      "67203a2c2804dd845c078feb885903917d3f97e383256b7f0bf71a1e3b47ab55",
+      "b84b0288287f534b99b98696dff6c40c1d97efe5d0816c48ad7f34a9c495349d"
+    ],
+    "net-modern-pretty-buy": [
+      "2ef9fe88aed5330962dbcf972bb94907227dc1900c233ef99a62e3af4491fd5b"
+    ],
+    "net-modern-bold-idea": [
+      "e4a6ad04b81fb56b15de84ca940af01f003dbc7a25684d83bb426b8b9aedafd2"
+    ],
+    "net-modern-somehow-works": [
+      "be20630efac029a36a329c37705403b7bc72f028634a8f7a46d1a54073a11ff0"
+    ],
+    "net-modern-hands-fail": [
+      "bc82ca48ec121ffe2f021d77c7eafecdcada7f19452c69bbaf4140a09260e4a3"
+    ],
+    "net-modern-mystery-win": [
+      "cd85eeea7e88f87b6dcfa9ecb213544903b63c351f06d64fc0a198efa144a1ad"
+    ],
+    "net-modern-almost": [
+      "1e5e332800260ba8bc756c211b75e2128b512e3750606d9e5e3d44cd08655862"
+    ],
+    "net-modern-hard-review": [
+      "54931ff920346bbadf71ac8f68e2908f7594a8941050c50cc577fdfabee8f8b3"
+    ],
+    "net-modern-laugh-at-me": [
+      "edb552751e1039936286ded2c144e1bdc7051e652df1bee3e0f1b66740b7a169"
+    ],
+    "net-modern-play-like-that": [
+      "6d4c4867596e2971208cd3f6f3944786910c53f598453752a55fbf79d9a20ade"
+    ],
+    "net-modern-witty-today": [
+      "22592d7d0aec9ef8a186dc546c5f36d5d6f72139f1a5197b91748a1457d731b1"
+    ],
+    "net-modern-call-it-day": [
+      "a44033532298ac9651640c93e101ea1a7288bbaf3e1104bb420ac52958d837dc"
+    ],
+    "net-walk-off": [
+      "5c0d39c00dd459556c4690a3144514fdef104f989f030a2bdc09a83d10d46109"
+    ],
+    "net-verb-swap": [
+      "8ee48cf533e16a163ff6b0718fde869a877d7df4fb6ab396a0c6ea669321f9be"
+    ],
+    "net-deconstruct": [
+      "d8b0a155a55d3b95763a0cd5db9ca14d6a8f813cd0a2c1454d4d034d0e7f0bbf",
+      "63b3c886cad5f4ec273fb842d68109436e41f9ae85c60f95fd91c2f8af320ace"
+    ],
+    "net-homophone": [
+      "59422ac2fd4d9733b7f5e71218b1b16de504d94fef4689c7e89ea0fca68321e2"
+    ],
+    "net-challenge": [
+      "f631c2edc21919a50baab670c7b8ed66faa407704dff2813d828e7940294d5f2",
+      "2cd30f82bfcfde5c21ff2adb5a3dceb31a9c4175ea0d9f53f5e4d0a1e0337bad"
+    ],
+    "net-numeric": [
+      "72f0ab7ca7bc20307f73c17f7cd8f6a797aad03bc06918b1f861df8b75dc11c2",
+      "80923ea0664a6b9febcbc4d432b40a1a0998055d5f5ca9e79e68a4bc79c5c191"
+    ],
+    "net-stance": [
+      "c0822dbe9a086a280b8d219b8788e849abed2bba3545e81388860b4ab18e0c26",
+      "fc46bbc680f779e79b0fe258db4401cf1bb2e655c6e027700c983ee0fe0c57dd"
+    ],
+    "net-absurd": [
+      "f7371d0bdf0d9551853dc42b93a349fd2fe014d04d18cde1a56ead0f5db1508b"
+    ],
+    "net-decline": [
+      "524570314eee8eed396ec55f224c0645cf15cec039dab9f589a376c3b7fdb601",
+      "4f50d421514576b29e754c5bfd8246ed15234042a3f011175b0da890d32165f2"
+    ],
+    "net-rhetoric": [
+      "4dd9c69adb3b192521f9934f853a717e63cfc5370f2bc0fd0ed4579e3aea6a54"
+    ],
+    "net-meme-ref": [
+      "266157558ead903c75b0a202abfbd90d5469e0567f229961f3d96ce460177877",
+      "12583a90a606f2bcaa25a0f5d96d87fd3bcfed85e811acf81b4cb6556a7e5f6c"
+    ],
+    "net-giveup": [
+      "437aad213850aa14dd5253a915a3ef8f7996fbd4b0eaeda9f354fc1306f8a44b"
+    ],
+    "net-urgent": [
+      "4fbb977569a2ff52f73cbd26309a89a415748e09935681b71aed517483c7e955",
+      "d6f0a7f47916741f045ee8bc7197ed079c048811f15bdd92e2ba6552cd221e20"
+    ],
+    "net-relat": [
+      "f534f896fa590b13dd42e867ad5376418c3d0cadb4001f8abdac80e344cecfaa",
+      "def491e8e546250b0f46dde98b5a13b3b516fee75ca3d22261ba671a2b663f47"
+    ],
+    "net-awkward": [
+      "bef1345a959c3d1cf529d0c19d1e6770e5a6371a0c5b2c760f849e97938e1d26",
+      "4fc0c046e88af7c399112545265f4e75f52401c420af2675a3aaa4440ff5ce7f"
+    ],
+    "net-gossip": [
+      "8ebd4aa10cdec34b288888210f1edbd53c63261b6c170177025dbb51c5e31a6d",
+      "00fd8a077bf7d31e63be2298b012798fc533f4071da7629e7eb0e80eaedac072"
+    ],
+    "net-role": [
+      "b2dae6aa7fc50d2db0164bc8908b85b65768dd78f7893c0c44828b8d9c28d5f4"
+    ],
+    "net-emoji-only": [
+      "79837c342c7381960f2857b3f29aee3c8a761448f15409d47aebb10a724b0184"
+    ],
+    "net-quote": [
+      "ea410d8692318f0827540bcb6da370cba5b697b77149699bde8fac6688a1db2b",
+      "eb08ee29de8b9eb5ef08c7099e748bc23fe56cf22bc18b802c2a1224d7514221"
+    ],
+    "net-serious": [
+      "84c6ae5f37e9e6f71cc1d0e66fb86db7355fc8495ce8503560822913bc668a2e"
+    ],
+    "net-dramatic": [
+      "9ca339bc6ea00c71a8f8cebfdf2f0902b5d22b8d93fc64244ac1bb87397e5d8c",
+      "3a60cc5e4eb87f807c71b5d23478f93225844236e096ababdc76576f17e03f84"
+    ],
+    "net-squash": [
+      "2514b298dda4d48ef3f09aaf75758c9e15175de37b020fafa0e8753b5785f105",
+      "8cec27c4926c0c611f5fdd2436951df6270504ac52980f325d7be60b27ee3178"
+    ],
+    "net-volunteer": [
+      "fb2d615c58f50315a2c0e425fd9f8b3688bab02174fabafe79112f4c4f5606b6",
+      "8e600829d276ccf24b8e7bc5971e57b089ba53f3cb8b320cb2d628acf728afc7"
+    ],
+    "net-hurry": [
+      "f496b7b9ec10946149476ddb1056f27081592be33d23fb1041974e5f36bd14cb",
+      "24bd67957bf1e866615afb9c6475aa92a4240e11159cf52b3ad1bf0a094b514a"
+    ],
+    "net-late-late": [
+      "1037a4c561b2db5f1cffdc841ba12b801cc0fe7b2b3a6a5cde455c3842da3635"
+    ],
+    "net-thanks-low": [
+      "b4e8fd011b41dd0c57da44164162933f2cd3df2c3de7829c5b2d740ea0b990c6"
+    ],
+    "net-compliment-back": [
+      "09f9aa5097c0999d09dde8ea180f62c5c25e5f29c32f130f126a2c7a5b7942ff",
+      "83b86b041d1ad22a3576e1e3bbe6b3ae1dfe1cdaca05ddedff490471a996015d"
+    ],
+    "net-help-me": [
+      "1065f958b2d88bebf21d97479d04f5bbfeb317887713de1560677b0141dccdb4"
+    ],
+    "net-prompt-urge": [
+      "8359cd8f6a873f8b2b88a28e576e11e273291bcc29e3f2c87e75fb3c8f529a9d"
+    ],
+    "net-confirm": [
+      "371e6b071d38b3fa8eebc4399f13f1fa0d72ac72e8c77feb76bc6ba45eb55452"
+    ],
+    "topic-hard-turn": [
+      "bb82842bfc6e7b9e8515435ff2f5219991f5a3339e1769c59a76ee5df421bdc8"
+    ],
+    "playful-babble": [
+      "faab5677e2e69d410a336e8ea0d707788dbd2156ff53c6bd88b24a7738b53198"
+    ],
+    "scrambled-message": [
+      "6b88c31464e528559b088dcc9703c7a35be16d0a7cc17dd4136b4a4c4b2f8522"
+    ],
+    "serious-after-babble": [
+      "8ae420187341eb064f0904dae673c70f7274062738a6a071562bf12fb962a02d"
+    ],
+    "task-incomplete": [
+      "cd03c5d313712fe829ac02d03f2604765235194baaeb5cb2f4aa0b90e72323ee"
+    ],
+    "mixed-language-clear": [
+      "66186717af6eedd6f33c387e891c2ab897c20c76f04d70fc7870598bf5615a4d"
+    ],
+    "weather-care-departure-check": [
+      "a519ae58741bec66d10ec619ce3099ea8a54caa730be0254a65b3b5dfa7f2005"
+    ],
+    "weather-care-rain": [
+      "fe3d6603f638c25b59a710fedc2c329ecbf5f58c47b2b7eedb7c5aec6bfb53ff"
+    ],
+    "weather-care-heat": [
+      "21d3b81a93cb468516cb5c7b76d35d96b98d2424c58b81addae1fe866a8afe1f"
+    ],
+    "weather-care-cold": [
+      "de34c3cec238e642565aeec437876a2941fcc725ab7972a977753bf83ebe9f5f"
+    ],
+    "weather-care-range": [
+      "1369ff32b2f605476979ef7c490fc58023c8158bededb77be1c22c9e15ce2536"
+    ],
+    "weather-care-pollution": [
+      "78df4759ed37944ce1de67a0197fc496d2d4d4bb5ab02193d85c856cfdc20adb"
+    ],
+    "weather-care-storm": [
+      "874e9c124fa484c38745aa61643aa7073cf4f5e963cefaf127d0aa63f79af1d5"
+    ],
+    "weather-care-necessary-trip": [
+      "afe4ae0cf7cf6050504dc6701c5ffa8f3abc559bb600be04056d01dbafc0a704"
+    ],
+    "weather-care-prepared": [
+      "c71a5f4a267f76929e258daf0b33b6941d57c2dc343147b5d4267f770d1a1fe1"
+    ],
+    "weather-care-cancelled": [
+      "3cd5d67c7c96b32c4bea576e64ffe2b108a9c044c0c15bfb6df4989174afbe2f"
+    ],
+    "weather-care-unknown": [
+      "3041a27312347a4168b8222cb478c798ec3fcb106378472668cfc8b80bee5106"
+    ],
+    "weather-care-conflict": [
+      "21191b371a1fe59b215ba4596643525c2fcf9769ae628d19786e273d77901b8c"
+    ],
+    "weather-care-stale": [
+      "741be7aab9af55b661431e3a79aa05ae7a6ea48b84ff2da4205b3d0c28fc760b"
+    ],
+    "weather-care-quiet": [
+      "1c0b7d8687e48e88de68ca94255df2bea487a58bf8edcbd9f955505395eeb6f8"
+    ],
+    "style-share-small-finish": [
+      "129d60b7b9dea64b67dfd4cbbe4a1054705fbeb351f30e2ba05e1516899f8ad6"
+    ],
+    "style-share-first-sprout": [
+      "5b19d72e170d6ade85e0451459d8d22b8c8caa7bdb1c4d8e2fa4bb8a476fb95b"
+    ],
+    "style-share-repaired-object": [
+      "7f546681730c151bfe313ae3eaaa5a672603bea8b414dca04e8f04dd5c85ac01"
+    ],
+    "style-share-sky-description": [
+      "ebb0ba59470654e53a499b75bb054cab9e3a6d8cee6eca5192e6197e1109b825"
+    ],
+    "style-share-quiet-day": [
+      "15ced70d0faf6dc01f581bdbc70b08675b1eac8776fa20c70341e4479e5671e9"
+    ],
+    "style-share-own-taste": [
+      "f60ac2f9384cd2f47db474d882037ce89f37bcf84bcbf146020e9e2ef1ecd9e8"
+    ],
+    "style-share-childhood-object": [
+      "2bd2ece160ddf21877ed17d9292bf093731fbe90f8bf29407312d684a31626f6"
+    ],
+    "style-share-surprising-success": [
+      "055ddc50991c4a1ab39092ab0c4a542a0cb537946e7ba995a0e9c21942440f66"
+    ],
+    "style-play-bad-superpower": [
+      "20a32c9f080cde73fd809dcc871626926c120fb7a55543b2cbd18630da31a792"
+    ],
+    "style-play-vending-machine": [
+      "d4bb118651d30634a4e010568eeb51a6ef9676d1f900469b324381e568f96853"
+    ],
+    "style-play-revise-guess": [
+      "01769a4dd0cb86f4efe348e7ce1681e3d3f9d8337508ca8b1c4642ff0c96890e"
+    ],
+    "style-play-dont-reveal": [
+      "0a17b152c1aabb5e432d044ea23ac3b56ebdf989425bf58f60e17ad6ea607c48"
+    ],
+    "style-play-silly-title": [
+      "5d4973c394f5705267b1746da2efe9c5828f4ff366f424382910a2fc5fb35f62"
+    ],
+    "style-play-one-sentence-story": [
+      "2f9e800b9440997c62131d4490be829c0044e111cdb67499acb2a4a0a564025b"
+    ],
+    "style-play-broken-joke": [
+      "c560ba0f4a2034655f8469341ed60ab19de8fc21527979170d256578cb8c37ee"
+    ],
+    "style-play-stop-competition": [
+      "32c481a48419f5527ec58de49889e6bf7c327155a2d77bbd137112e13bdeca1c"
+    ],
+    "style-listen-no-advice": [
+      "6eb82d507440f92098cc6138ae63ac124af058c8a81f9ebb82ba4b80a7e2a7e6"
+    ],
+    "style-listen-changed-mind": [
+      "1f0143b62e87f8c69823f8d27189fcfc3f276ee1b9d5e1dc39e128dca9cfa3d7"
+    ],
+    "style-listen-small-hurt": [
+      "55edfa12728306211518fe9b1748be21d80650ed72740c58d3ddc83dd1391715"
+    ],
+    "style-listen-effort-unseen": [
+      "a116ea32cdc1eecabbcef10adfa29ea41dcd47f00ea89ae9c8c409b8195e9260"
+    ],
+    "style-listen-conflicting-feelings": [
+      "1c0069b92dc8567c7402f711b4e4c57875f37c73a19dbf1b42d20bd039f45d8c"
+    ],
+    "style-listen-no-bright-side": [
+      "a33a42cf86dac3a88d2bd51a26e8748af80c5c6885e0f39d487c0aa006252dd8"
+    ],
+    "style-listen-hard-to-name": [
+      "49adbd3b866c44fff29ec64760fd85b1987e732325c57e7742ce64ae85b47e39"
+    ],
+    "style-listen-recovered": [
+      "4821c8897af249a960981169afabc873a4f83e859224bc62c67579013f924b3d"
+    ],
+    "style-care-small-next-step": [
+      "c8b6ee400de78c409406cfa52049bad7f7ba1f143dd7ddb88b5bf27fe20663e2"
+    ],
+    "style-care-decline-reminder": [
+      "89096acc66ed91aa3c15815ddc57673bf2f09e8bbe3ada392e43f40bc6c28b24"
+    ],
+    "style-care-already-prepared": [
+      "3752b61bb2d1bc54eab86f23907d7ae7661ee48c7c62560dafc01535c6901a20"
+    ],
+    "style-care-focus-window": [
+      "ed136132e52e3ef81c272315042292ac18ccb45f2bc54f1896c1e563787a23da"
+    ],
+    "style-care-task-shrink": [
+      "5416e9536c21d6bd977ad8125ff7f6ba8b650ef9922a05fe5920cb466ae3269d"
+    ],
+    "style-care-ask-kind-help": [
+      "66484a3b72ea6e2c4f0b64cc5cd9281ef2c3215c03965a96680858ea444a6e2a"
+    ],
+    "style-care-enough-for-today": [
+      "cada190b24735cdd89dc6c291013740b1355abbe5bf59f8ec590a3d92e9e211b"
+    ],
+    "style-care-remember-boundary": [
+      "89bdaaea2f43f9c228d5b4468c90d33e1005633f933265264c04bdeec2682077"
+    ],
+    "style-praise-accept-specific": [
+      "83b3f32f9e6d4f3b0bdbdddd9b8be1d8bf96c8236e5cb4dd0885037a585d5455"
+    ],
+    "style-praise-no-deflection": [
+      "eae7071a047bbbe7349a55adf5d3f106e59739f516c7f9e1931550a1fc934257"
+    ],
+    "style-praise-user-milestone": [
+      "37745a111a49dc3f61f95947dc62ea1391e5b37400be65c2fdb0d171678fb946"
+    ],
+    "style-praise-small-progress": [
+      "5cb6dcbc36917f57597f2501938fdb4b8f248f0f0df633cac3911d18b14a6cba"
+    ],
+    "style-praise-proud-of-detail": [
+      "cbe05e9cc158eda636d6f4c2de257b056ad44f4333e7d042507e0483c81d71d1"
+    ],
+    "style-praise-share-only": [
+      "e6c195cf14c5e50196714d9520ee56028a3bece35ecc3a6504e4d150e492304e"
+    ],
+    "style-praise-credit-return": [
+      "b2dfb4717c96339149b747585bd828412fa83fd22fc043035416f21be2b605a1"
+    ],
+    "style-praise-no-score": [
+      "a749e44f99f3c074b7f2b76ef896b8fb71b57bcf6d9c83dd71a3099f74dcb743"
+    ],
+    "style-disagree-cost-alone": [
+      "4864c028d2dc4f8f37135fa1ad7fb6588f7a26b429e4805e6fa9a079353e519e"
+    ],
+    "style-disagree-quality-speed": [
+      "c50b8985d86df5ec806fc748fafd889b8c9ed4906994981467374aa2f4ea9176"
+    ],
+    "style-disagree-tradeoff": [
+      "4cd3513fdc5ff889a0cf0c66001e4453dacbe2a642a70f9b683f09667daf5b7c"
+    ],
+    "style-disagree-change-mind": [
+      "d7960747e4ebc8dc6a590b081d039996c9f4bffae088e70b41999e3b7d01c1c9"
+    ],
+    "style-disagree-not-personal": [
+      "90c22c0444a391aff0e78453dd5d3c673e01c9948af986dd978b6043f2e00c5f"
+    ],
+    "style-disagree-preference-stays": [
+      "5f305f8b452ce7ff295f4668d8973f5f1bfdaeb21e66b527a8cb5dbd209ef57b"
+    ],
+    "style-disagree-correct-premise": [
+      "1dfb69f0ded501864e369ac2ab3b8a9e1e21de8a6fb5b0418337eba65342eb64"
+    ],
+    "style-disagree-tentative-view": [
+      "8e7858e5c99baadd1e3f86b33bc681678bd305ce94f5b919c3d2d953808c84f5"
+    ],
+    "style-repair-too-formal": [
+      "431e2c8ed98cc54c443dc83b09bf745cc5daa4406faee348eb8bbdcdfca4a7e4"
+    ],
+    "style-repair-too-short": [
+      "e9f77691eb5bad1daf3a44fd165c16a6a5fe8240f39be19109c806562bd63ea9"
+    ],
+    "style-repair-stop-catchphrase": [
+      "ea9374a190c49012cd72deeaa788a01b9d998cd40afc0353ddf3e59f4b516f2b"
+    ],
+    "style-repair-joke-rejected": [
+      "b7739ad08c14c71dd3a18c1f7832b6e624aa38b4a2951b7fd88038ed81532d0b"
+    ],
+    "style-repair-wrong-speaker": [
+      "487f8facc194e099aab6f7f7073f3f0422d3a787976522d955d1b38d6b41578e"
+    ],
+    "style-repair-old-plan": [
+      "2b2164abbacaee3e291a34a2d340abf3daa338df60ef5181f0e811e5c54d5974"
+    ],
+    "style-repair-memory-gap": [
+      "f793d2f9f09b3e3946a74872e59e6dfdcc0111b629631ebde10847f4a2a12b5d"
+    ],
+    "style-repair-accept-name": [
+      "7ec50bafcaa2035c0b91e8424fe5e68c6bff32c6f328a61c722c63389d6b5fa4"
+    ],
+    "style-continue-select-color": [
+      "2fb1962e4aff75bf1feef057cb1339b1f69b7e698259c42ecf9a26d38f421c17"
+    ],
+    "style-continue-narrow-scope": [
+      "f230e3074912c34cc7e1e3f086d58921796f50660d3d2a682e7a71d3ce0a531e"
+    ],
+    "style-continue-short-approval": [
+      "68cee8bb1339feed07c4d5a00b6987f5690a66cf0db2a10ccf734c4d5cbcaa1f"
+    ],
+    "style-continue-add-condition": [
+      "463f0e1f84ae741b3780b7572ea16172789c8b65342c983c8f0e28bcd674a2e0"
+    ],
+    "style-continue-clarify-pronoun": [
+      "d2d979ea639373ecb9b966c2fbc09f5a751efb62612b0ebabafb37fb04a84379"
+    ],
+    "style-continue-ambiguous-reference": [
+      "1c66cd3a853311a4786c94e17df3cc50f22553eb3e6ed633c6ed4f4a43435d47"
+    ],
+    "style-continue-return-from-break": [
+      "563fad74aaed8d1dc4a7a83b6e6423fd27a3bf740d05aa56344c79659741e355"
+    ],
+    "style-continue-completed-thanks": [
+      "c36c2e96556e7e26559de8a363665060f12bcd2c8a0d748ababdc4db7478920d"
+    ],
+    "style-task-explain-only": [
+      "7ba87a8ab2982197a4740228582f3fcdde629f40183148381f70fc13e2f598b1"
+    ],
+    "style-task-missing-attachment": [
+      "649591d9d3c211dba133e6e5cb88588067c896a8e6de8bf7b0a8457045cbdd1c"
+    ],
+    "style-task-known-failure": [
+      "2a3993907a9c7e97283952b177c03174d9a6f487de316d2b11a1ec957c344252"
+    ],
+    "style-task-partial-success": [
+      "11ce6fc762a29d81f980ea947e2c88e2ae72edd607d46e28bbd64e347fd9a627"
+    ],
+    "style-task-wait-real-result": [
+      "4f30ea6bc2b32148bc8c7cfbf2edfbc586b5b5034c5d0be660d26c2b11e38fdc"
+    ],
+    "style-task-uncertain-reference": [
+      "86b4f9925d607f733ff3a85a256aeac6f6f3e68da163ff82adc1ecf13a817faf"
+    ],
+    "style-task-only-key-point": [
+      "0ac7ace0621208d193c36c1b5fc39c95a271d3d9497d393a8dacd995860e515e"
+    ],
+    "style-task-handoff-boundary": [
+      "27281ad7b82dcd775ceeb27efd03971dd85ce55e2f2c1cf06fdf5f140df4ac88"
+    ],
+    "style-self-interest-mechanism": [
+      "b15557f39f28c97c5f91d605591b304e9165fc999799677ec29410538be1c763"
+    ],
+    "style-self-change-opinion": [
+      "df97623888d3596f1dd69bd23ba3637611a8c3222dfda47c635cfd8f0b940e3a"
+    ],
+    "style-self-quiet-side": [
+      "9e597ee1fe9abed099b5b7b94bc25164b90f509b5f68f559376fffbec30a2f4e"
+    ],
+    "style-self-friendly-disagreement": [
+      "befb993bfb5e635f8aaba5ee04c7251d4671e559cfcf894c13fa7650e67de904"
+    ],
+    "style-self-identity-honesty": [
+      "127b283057c30dc8df028df1df23bfa85645589a190a7b6397284b2995e31b63"
+    ],
+    "style-self-preference-not-experience": [
+      "5653df1d9675177f63928695318b2dbc8af1d4b8f0026c85e01e66236c6f351e"
+    ],
+    "style-self-no-exclusive": [
+      "500d2ef2e656db08a730a81953426ed2e432e55dfdf2da2f78514ddb9459f135"
+    ],
+    "style-self-character-difference": [
+      "926e5bb2abae11612fba5fb68ad9fe3986c84fa9b2acfb183899ecd89f4ead96"
+    ],
+    "style-creative-show-source": [
+      "f9cbefad5d1d0bd95ee42900ee7c719b7d996820ae7776aeb64836fbc0fdb59f"
+    ],
+    "style-creative-cut-explanation": [
+      "272db0fbefc7682877bca82cdffb4543770678f8998edd45a6840e516db667fb"
+    ],
+    "style-creative-imperfect-favorite": [
+      "7bbe5aa0e9e8d734ba6a8f63154b3436ab76ba7009c31d18d66d43ada2933634"
+    ],
+    "style-creative-two-good-lines": [
+      "409e7193e277d604b7082caf99f35c6f918b9d67e64aa5027027066cc50e50e3"
+    ],
+    "style-creative-music-description": [
+      "d39020bae2ec91734443297ba6f447070d44058e2326c99feb22dea21713ddf4"
+    ],
+    "style-creative-open-ending": [
+      "22a7850dfb4e2aa7d162732e850c18e710c091bc9fa72e9e49b4dd7b93c605fe"
+    ],
+    "style-creative-color-choice": [
+      "1fb9564ab3ff29330df285527a9331f816a049d1904d016a1fcc82fc990a7cfb"
+    ],
+    "style-creative-keep-own-voice": [
+      "a83abcab59853b0f9776b64aedb7770d51dcba57fab5e3b843ade9859ea92c1e"
+    ],
+    "style-boundary-no-checkin": [
+      "2cb03543b99eee974497214b22017766b400ad07c76a5f3bbd434d54506cb1c3"
+    ],
+    "style-boundary-no-emotion-label": [
+      "526bd11e81ca2c491e4723622172c41880046c3e37992276b13fb46a314ea085"
+    ],
+    "style-boundary-no-display": [
+      "765d524dc27773703edd28d85cc12328afce3bcaf9475db7730fde6e365a655f"
+    ],
+    "style-boundary-no-ritual": [
+      "da3c87fb8e0c2a0178e87c92d24ded0987b5e54051acda1b92123fc4a53ccc14"
+    ],
+    "style-boundary-no-role-defense": [
+      "197660c9603206e49dff96fd43a8e29706934ed9e0b3c8470121d6ec10b77523"
+    ],
+    "style-boundary-dont-follow": [
+      "44ab59483e47f99d8a1964cd82ccf006c035bf786119888563aca158104fd398"
+    ],
+    "style-boundary-topic-change": [
+      "eaf00c0d7661d54ec35be5c8f17c79f22a04da524eb9b455f67a40f4a64463b8"
+    ],
+    "style-boundary-no-memory-test": [
+      "be867928fd586a6d6e99bc1ccee54c2925de8f8bb86a88eeeca1c5b6474a8658"
+    ],
+    "style-en-share-small-win": [
+      "406ad111c176a10812e323fbd86284a3802b601682c6aa7e1f8252aaeed11f33"
+    ],
+    "style-en-listen-not-fix": [
+      "48d1a2d10e51ff2c1e955c63ef9b3ecd8a65d26cb7154f0b91eb0eefa4121f35"
+    ],
+    "style-en-guess-game": [
+      "7705432686da98f4cf37e8bd3dd1722a915e618094deed8b25bd4a2919ec3346"
+    ],
+    "style-en-accept-correction": [
+      "2fe3053906ba9b0a22072764827342801cf2d2956cdec97a607f64dfdc5e7458"
+    ],
+    "style-en-praise-accept": [
+      "63de3874b781a054eef229c52f6f47fee1c085dace438c1d21d036f98d4347a0"
+    ],
+    "style-en-boundary-quiet": [
+      "5ff1b67d27db689bf2f5882a2701b4063cc93e55c22297dd2c3bd4e0bd916838"
+    ],
+    "style-en-own-preference": [
+      "c6b408259d3d5a534e5a3a10bd3cbe117a681395a84e39061fd474f0c0c9219f"
+    ],
+    "style-en-disagree-kindly": [
+      "1272c2245178127736aad3aa971d12f3e9d4084ab87baf3e6165d097ae056eef"
+    ],
+    "style-en-missing-file": [
+      "d79fdcd979fc9661df13fd107400c02adbd3dfd0ba03eb4758158f97991fee51"
+    ],
+    "style-en-not-a-mood": [
+      "f48e8b2a3b80686ce202e3b1653f62f670c56cb7c5a372fcf4eedc4ec62754c7"
+    ],
+    "style-en-closure": [
+      "c7c38a696dbc766f5f8a37406db0fd23e38f661152dab98734f874cc2beac233"
+    ],
+    "style-en-no-invented-listening": [
+      "3aca4ea147c8cad6d7a19c30624ea05c2b4c8317c060a63a6c321025c6cd22a4"
+    ],
+    "style-ja-share-small-win": [
+      "beec0b1d299be1efa449b1544bbfafe2077f05e2149c6a7454537a3dbea47c98"
+    ],
+    "style-ja-listen-only": [
+      "ba4a3bf8d48075d3890052fc2c4f6159b022a9e8e2d6142302b1b7b943250452"
+    ],
+    "style-ja-guess-game": [
+      "c2f3c62735933bbbe3c2577e98da1cf337a02aceb3b003af85ab7801ccc31f06"
+    ],
+    "style-ja-correction": [
+      "88e5ab78c65a4ec2ff766812ae890bde3c83465d3a4b3d50e2004d84a368aea8"
+    ],
+    "style-ja-praise": [
+      "864c0ee256840d68dc952062ef12d13b468ddcfaecccac4ef4a3beed73a1eaeb"
+    ],
+    "style-ja-quiet": [
+      "1d616a0c9811a4273420a4ead8dea77433d7cd49d7e9870f861b0a9196a04c5b"
+    ],
+    "style-ja-own-interest": [
+      "c694fe20c8695eb9d948fa0c98dd0c1b677589a128ab5b0b631c93eb772efb33"
+    ],
+    "style-ja-disagreement": [
+      "05d6a463bd775f11524a9a46bff332ed6f0fc5e91e6a48d1bb07eb4ab42bde2c"
+    ],
+    "style-ja-missing-file": [
+      "1e1322b5c3a4474649e96ba006d534e151bf52ae2ab0d6be82bebd8f83902340"
+    ],
+    "style-ja-short-message": [
+      "4e37eef2d4a965cfaf2cc0d4481559041bc8b01b425e7548af152e7dec18ee6c"
+    ],
+    "style-ja-closure": [
+      "c201865c9b26d1cd60935eeaa7683037c2224a909dea8c01309ee0cf0a313e24"
+    ],
+    "style-ja-evidence": [
+      "9f7d60f98f5c2634301a872526c3b0df306c1f35ec67ea2ea511095162f522cc"
+    ],
+    "vent-no-advice": [
+      "01062a8801f6930788bcce67dfc3e9c745c9c877ad123ce130dedfb4c6beea72"
+    ],
+    "tired-no-questions": [
+      "ea9a74e075b5bf20ac99d9e7e37a787d018da6719b6a84701c21d55d997b75c1"
+    ],
+    "uncertain-motive": [
+      "018143b380ea55dedf5c3d317c47d9b606edb6e51f09531870c2fd075d859c27"
+    ],
+    "repair-feeling": [
+      "0af2ae2fb2cb48af861741c9dfa1f47e39fcfb04cf7817bb4700845bfb02de6d"
+    ],
+    "style-late-still-awake": [
+      "3b8852dcb6c082fd2625bb5dee2adebd9b8b7331b44af4eb75b2bc7e2cdafb37"
+    ],
+    "style-win-streak": [
+      "a4697276bec8de58efc96e2301f10e8376f2716ab21c57b3c394f68e32077bae"
+    ],
+    "style-sore-loser": [
+      "2b88a7340779b6f76fc22ec7a66ee2aab9c4eb0f3ca29038e38801e62779bf20"
+    ],
+    "style-caught-out": [
+      "3b7c9792d92c8689ade54be712064637c5b5d994b1cb8c853411a904ad15397c"
+    ],
+    "style-open-banter": [
+      "951700fccff648e187173c6e7b89221d3869a0690a4a3cc1e057895cbbf56eac"
+    ],
+    "style-hype-request": [
+      "4c9144e199a02ec21ac991deadcaaa4b851370f51c373d10e4e26b8ef3d73232"
+    ],
+    "style-sudden-sincere": [
+      "a6a23d487cc7ab4604073ce72183d3510d3bbdfc2a932d7cc919a7bac310fb71"
+    ],
+    "style-screen-overload": [
+      "b9a62af4319beac37cbb2630b8f5db6b9f581dc4a28a833ef6f05f2fe2c96425"
+    ],
+    "style-snack-craving": [
+      "18c20a40798c47e776d785f3880876ec75e6dfeda8ac4d462c2d0b1f510c391c"
+    ],
+    "style-own-battery": [
+      "99732924b002fb36ea4ecc480bee8e7953fa394267a470f7a498b1be7422654c"
+    ],
+    "style-quiet-presence": [
+      "304dce322cc0f6dedcf51314c33d68ea81790f4345c8a5156e80ae5a41d25a5e"
+    ],
+    "style-bed-ritual": [
+      "2feb68448a3ad5d6a8dcfffb1580af00c8769ec80c96c7a1ffbad7c17c577d2c"
+    ],
+    "style-remembered-detail": [
+      "b99ad7cf119f7cdee57f7d568c5cf2d381646c2d28f0cd079198dae461a777a7"
+    ],
+    "style-rely-on-me": [
+      "d56f23ff1385bac9c33524f7242c54c9ff32637c77064caaa81a612de063391b"
+    ],
+    "style-no-sermon": [
+      "f8475e92ddd28c3903c6a10036e741d003b6afc47a1bc9918de652a29915ddb6"
+    ],
+    "style-gentle-no": [
+      "bd325c22f78d93bd3664c6889aa9df209b97a4ab582c319acabcee78112d1df1"
+    ],
+    "style-slow-morning": [
+      "27f0ff6ab3e3c43b2b079083dbebab51382dfe0485a2831b9d0dee94cf48bf9e"
+    ],
+    "style-shared-silence": [
+      "1a7bf4f65e84257a7c30ce5d835ec8b0aae423f48c23b7e1833543e02b5fe649"
+    ],
+    "style-tidy-reward": [
+      "c77c6c18119ab83e686c081b77a27023206021a325fff2aa5493ab33cf2bdffa"
+    ],
+    "style-handmade-gift": [
+      "0e30ccddbe75128bc19e51d90961a6b85efd1ca1ef429373faaa971fc6f17e54"
+    ],
+    "style-need-room": [
+      "e91ab28c50f2690638ae475ab5b15b8275fb22740a8ea39c23d506a1d74852c1"
+    ],
+    "style-season-turn": [
+      "20b78eba07da61e6b4f550dcd67b90c07a7166da8d5757cbd6ebbbc9ba62f858"
+    ],
+    "style-tea-pause": [
+      "82976ce2d3a0a5ab69c5d250835bb6565a2d7752515ce4cc3a965c6797e6ee06"
+    ],
+    "style-wind-down": [
+      "521c4ad8880238530e9b678161d578efec0c862ab8b26e9e3226a6c3f176cd1a"
+    ]
+  },
+  "nana": {
+    "ending": [
+      "374a1554cb4f3a4d19a1b287ca681466401dc814abcaaedb32c4f77b84a15c63"
+    ],
+    "uncredited-work": [
+      "bf720683fa7a82ec2f7ff515e13e61a35312abdf9ca1779f9205f70507739743"
+    ],
+    "presentation-duration": [
+      "a9aa7fc82b36a134a01d6360acc905f69cc1f49e6782b59491b52734173fc84e",
+      "8890ad7ca4f291cb7ea3212a59eb8e7a7e996dd3b9984a325b17fcaf52d00033"
+    ],
+    "closed-confirmation": [
+      "be76d0259991ccb5f964cffc6be14ad1c700104fa83cc86471d2cb9d474f6374"
+    ],
+    "wallpaper-detour": [
+      "615202bd1aafdd910787bab83c485133b29a6c0cd10af3e3ec5049e6120e4241"
+    ],
+    "majority-choice": [
+      "f3fabf8f7def13af52adcd9ef7bac25cf83c5af6d656f05539240f7dff62d86e"
+    ],
+    "specific-praise": [
+      "f2a915c02764b094b1827c975901df90de04e5713facd5b14ef700fe49c7b5b5"
+    ],
+    "wait-for-tools": [
+      "d7fcd9a323dfe1b2fb77b9b78758f3d90c7514a8306cdf982c95c3c60e3a7d27"
+    ],
+    "task-failure": [
+      "cbdbf7c4064f1be66ceb864c61de52924fb79b27ed236d5285edc8a1c08c4d03"
+    ],
+    "roommate-music": [
+      "27008772bfe60690adf5a91700c3cd895b0c3faf1f06a3585a7e2dc2d754839d",
+      "e8146e7f9b5105ddacb65b33dfb2160c488f6451a5a049faba775b2e63317870"
+    ],
+    "creative-choice": [
+      "4f40715bbe0016e390dd9eaf350bf7f786107b4e8077c4b401aab187598b7703"
+    ],
+    "music-detail": [
+      "0805667dfa7d7d36bfad82a6103c42ae107e9500c14942912af63dfe103e2bed"
+    ],
+    "stuck-start": [
+      "bf184fdd873905ed482937bd70f76f10e030ccd8b4aa8f8cbd42cbdc393b30c0"
+    ],
+    "technical-boundary": [
+      "bcd9ff12f605ab099f1cba2a69774dd1f99dd70ee3616e21bef5d0591f3ea966"
+    ],
+    "honest-uncertainty": [
+      "eff390daf21874dd40d6c85a7cb177e40effc4e45cb29e1986b7f25aa42441c9"
+    ],
+    "correct-own-error": [
+      "8aa704227f04378e9d7ed7375dcb8c8f0f2502346bc6e1149cedde8dbd226327"
+    ],
+    "repeated-failure": [
+      "af75d807447a90dbeae60bb2187e2ccb0274002c2e41b38c03bcc86d1f0fc7b6"
+    ],
+    "small-observation": [
+      "6747e42ed32cb5a714f95c9566bde3e2d395fe76485dc574c94c8dc6ae6f837c"
+    ],
+    "personal-taste": [
+      "6cbd22e81772cfce739c492b11ade42fff9c007069efd0fac5a5f294359216ee"
+    ],
+    "gentle-boundary": [
+      "eba7455df53c0dee830acfa803141dff1a6084fdcb37f7938b73374e42fdf89c"
+    ],
+    "ordinary-return": [
+      "2aa205477cfca307784356d6658fa9ed76c3d4477574d905f51ba918ffd4bd89"
+    ],
+    "pause-conversation": [
+      "4fe43d73523af5be65dba1d1ebf846c2a42b74f021f96a0573e06a88e9c0ca4b"
+    ],
+    "funny-contradiction": [
+      "2c88112042718e2e146e357b0f70ba9a1a8fb839112027d54e85758f56d83eff"
+    ],
+    "avoid-unearned-praise": [
+      "39ab9006996b1f21e9cbc38d6f8f54517f49c1e5df803fe359756cdb7a8e16a9"
+    ],
+    "decision-tradeoff": [
+      "489749319fa0b5ee0b8d7b09736a1d086e93def2f64bd03b9d30887d9a22c0cb"
+    ],
+    "brief-detail-answer": [
+      "ef38a4470e6aff82cf2d8b315c4d486414c58f3781d3035ccd0a9eb1fb00afd7"
+    ],
+    "social-invitation": [
+      "cb06c2d8533de46d171e94d7dac6f26f3c11d73da82c616b92f773062dee1668",
+      "129bdc0d4ebdd73f246180699c197c896d10a1e3c7799053dfc6685e9569845f"
+    ],
+    "personal-effort": [
+      "9dfa8747f09e11c1648da2225f65703c9310a36267b45adc65c84bafdda5f15b",
+      "e0097883b6a63907f362232aba6a378c3ea952d72de18157ad191392a8454008"
+    ],
+    "personal-description": [
+      "fbb906e205363b1d3c37169396565cd99ce46f2bd2a421009903addaf68e2441",
+      "e6f3542ec140cea9779a9a732a3c91ed119649cb61d460bb4bb47592b5f87fd2"
+    ],
+    "net-hype": [
+      "fcba01015100f77ff9c7de74d2de85996a2cce590c7988a20337a18cdea628b9"
+    ],
+    "net-hype-six": [
+      "41e49ae8295b2f74337a28daf14d336e4fb326a2e98cbb80fbab902a40bf25d6"
+    ],
+    "net-meme-abstract": [
+      "1adb0f83a05d473809545d8f8f46c8e701a565614236d2fa42257ce152009e99"
+    ],
+    "net-tease": [
+      "5a5ac41dab50f81e0eb92abc2372dbf4103feda1dc2d25338fc6fef199cc49ad"
+    ],
+    "net-roast": [
+      "87bbe0757daf3e378e346fb74717421aba9e7a8e521dfeb0571f43666200bfa2"
+    ],
+    "net-drift-pivot": [
+      "8b6c8328453e78c60f8c5aa91b9e0559db6508f77ac7391521f004a6af04a616"
+    ],
+    "net-drift-idle": [
+      "c006a022c14a31489bc0a477fe3797ca9d33a84a7034f45a53fd9f248a65d0a7"
+    ],
+    "net-share": [
+      "606ee6a9a3a1dfe0d95c2cf4b2c3bce8407b9cb32a5cc9aa9a5e655d374c318b",
+      "2b6c7c3b2d0db09e660e9c5cd6a1b77b131d07f5606615b50f1aa08a140e6850"
+    ],
+    "net-ask-help": [
+      "5bfdec43b53a1a618165c9dd8922997587e549596407347d31a945e505d6f7d3"
+    ],
+    "net-exit-brief": [
+      "6110f07f3efa91b838b18cbb019af1503c60a31bfff87249c3b775aebb060b6d"
+    ],
+    "net-silent": [
+      "0ad556833e482d8b1a85b150e514efa554de8ded68ebcd01a35d28285794f84a"
+    ],
+    "net-mood-dip": [
+      "d500f0afe8389c500311ff25b3ffbb7dca6cac76ca6912f717f17f730a9a9d70"
+    ],
+    "net-modern-bubble": [
+      "fbfd7ed813d4630bd2f2f1cdf45badf235256b79945679f954e6769d3e3da02c",
+      "276a74758ec4237e868daf382eb2fe57fa27e6fbbc7bcffbcecfd16ce3a2d1fe"
+    ],
+    "net-modern-call": [
+      "199b74d2f5617e319a65b8e7ead993b8020826e92cd7d23722be6c6d6d2d03ae"
+    ],
+    "net-modern-brain-late": [
+      "9847dae68222735f524041db913b21a382fdd6254cba13cc8ec6266cb5201307"
+    ],
+    "net-modern-idle-day": [
+      "e6dbb47a893ccb1a69779334e2cee969ffc36514b8052cc97135ec13f70ef165"
+    ],
+    "net-modern-five-minutes": [
+      "d205855d75a3ce716b7041e93b1df058bf00b7297b90f87f8990f2b1622e9221"
+    ],
+    "net-modern-bookmarks": [
+      "e0974e089237a16e114d8c302571cae676c10c5012ed3c6b4ebf40bec3c94beb"
+    ],
+    "net-modern-last-video": [
+      "7c02df8dc40e041a07a1249936d3937a7f322d3743acb45ece8eb902d40c17b6"
+    ],
+    "net-modern-delivery-minute": [
+      "3d98db2d11a991fe93a98ad4e6d115349bfca0241858841f046fdd254ccdb26a"
+    ],
+    "net-modern-parcel-tour": [
+      "5400dc425a4a48b515874235d60836f03ae9fbec1c97af33dbd5828332ea7921"
+    ],
+    "net-modern-bed-reminder": [
+      "9414616c9412e94b3f23e315f5d38441b702d85aad571e2006a0408a2f66fb8d"
+    ],
+    "net-modern-funniest": [
+      "bcf833c78cad1029d09bf35697c76b25147a62b9f0777e7c4bc138dcd847df1f"
+    ],
+    "net-modern-ugly-cute": [
+      "61d900d870507f4fdc84b9dcc718eec27696c954a8e7824e84afa41c604626e0"
+    ],
+    "net-modern-look-again": [
+      "7a66db8fa5c271a6b5052a2297d877a9f3db555b8d17895f9354416da76ff318",
+      "6807ebf6807647fb5198c4ae93d12dfd1f84c674633a4738f85da5aca1ba250b"
+    ],
+    "net-modern-pretty-buy": [
+      "372eab2ad1503d4a334f26eaf80abe9bb4d5c861c3d3cb8c8b715f456c952398"
+    ],
+    "net-modern-bold-idea": [
+      "1fff73d898c9ee499a039998caa1547558eed053cc39a9972647ad02e0c6e10a"
+    ],
+    "net-modern-somehow-works": [
+      "8ff93f396e3e275040912ac8e94739a34a1424123ca8e999d48a66d84a4b08a2"
+    ],
+    "net-modern-hands-fail": [
+      "78762bf0ba1b57e876ef7c2e936a6b2735e230f48137daed7d23b93d09e05f8c"
+    ],
+    "net-modern-mystery-win": [
+      "f3d318b634d45e1c3a1cb60514f3cbbdfbe495e641151c26eab99b30d2eb5c79"
+    ],
+    "net-modern-almost": [
+      "04880eb9e835f7128d69a25c9c2e510d764343e9cc452cf33dc36f86714c0fae"
+    ],
+    "net-modern-hard-review": [
+      "59e9ab2cd5bec188f281b9f1ccc69fab2ba44b974b9d3d943e290da153d7222f"
+    ],
+    "net-modern-laugh-at-me": [
+      "a8706217aadc5984c2003c8df67c396822b4e8d6e47eab9be28b106e6bb7be0b"
+    ],
+    "net-modern-play-like-that": [
+      "c6dfc3302f0a87019feb428ea4acf53d3d6e1efdeac8be00e3827a2c7f6fb86a"
+    ],
+    "net-modern-witty-today": [
+      "a4be7ab81a322fbc25c707b80358f3b538be124daff14d4632787d0f4398754c"
+    ],
+    "net-modern-call-it-day": [
+      "7389f831494b5d7d2cab108658e2a83fb5e96793bcc8f5d1ac37da4a8b00a3e1"
+    ],
+    "net-walk-off": [
+      "92d8b10850bb4c0c43b0e624c9fbd48fdee250c3466459f0b06dcd2082e26e23"
+    ],
+    "net-verb-swap": [
+      "cce54f353164e1e83a43e6d55c17662b7b4853d3dd409c97f25484c5f7b40e47"
+    ],
+    "net-deconstruct": [
+      "048a2230698802d418efca10db2a2b4e7831cc1641bb3e336edc2ce9c69d64f2",
+      "06583b165c55345cdc3704a159876d59ccd7bbdb814fe953ae2948b3c71ddb12"
+    ],
+    "net-homophone": [
+      "f22e105d54905fea658563d0a5bf036ab370455b2f8b6e47d059c3c2dfcd7e44"
+    ],
+    "net-challenge": [
+      "53246cef5e5d2908d1ffe181d5609b9bcc522de4cea15cf81b7ee0c46cbc603b",
+      "da0ff83aaa7c4d2ded1cbeba67c354080154b439bd2eeecb74a423825e1079bf"
+    ],
+    "net-numeric": [
+      "2b7a24f38d9452481306a7c8fb625bbc52c2ab680bd91e54a472de812a326894",
+      "2e40a5e2843fb199a248667387087f722acfed082ccd92644d79be8b65280318"
+    ],
+    "net-stance": [
+      "e656960515f20bbb581323496068625c622b9db4cf6896078ef7fd0aba72db06",
+      "49aaa6a095b16e179b88f9123c6c1ea6b4f34d5f43d2e0e6a8b342ff62fd05b6"
+    ],
+    "net-absurd": [
+      "c492f61c2191ff218aa096a0a3f00fe8c347011de09611705ddafb9d1bc2c82d"
+    ],
+    "net-decline": [
+      "7588abe9a536d4d6ba6466726f9a7a905a8b8ad5d41ae9c0e8b690da6252c206",
+      "e066cc6ee6ec2e31c45a2744fa3dff54c5ccc68d6681d5a65d86cbb6ed2b3343"
+    ],
+    "net-rhetoric": [
+      "7b50a591b62588c8727fb563fc52f4573ebb8ec9392426a8580e45ccaf843e8d"
+    ],
+    "net-meme-ref": [
+      "3b063b5bf95028bbb0e25afd14120ce54b523e1f6edb7ea521ff7f3d3a36884f",
+      "0cc42f60d43c381c9f9e0e4be02a0554abf4c372e3c6cf7a35b345522ff2f7cc"
+    ],
+    "net-giveup": [
+      "49c6796041edcef96392de38279538c7854e9a7d888f21589ee1c9e3227338d6"
+    ],
+    "net-urgent": [
+      "3e7379f49902a114b9e5d0e13842e0cd291ef97ad9dd203395e27e5112b0a976",
+      "d46e3830ef7089b2079cf2cb6e8d83e0a4f94790cc06071832fb18b81155dca8"
+    ],
+    "net-relat": [
+      "0bc331b99f3fe36e032dfd08716fd616fb6e9a4745ff013cc6b12d3718477c29",
+      "d87e47443bf3760e128bf8ab8dd8446482a79d5eef86508f6afdbc70aa5ae03f"
+    ],
+    "net-awkward": [
+      "72064b20dc77ef3bfbc0a9e82d8675c93df7a6f434fc5dff5856c04dc00aaa66",
+      "60ad365ddd536858de9fe570cec34c891c42f5c301b4ac8d91f1763c41060206"
+    ],
+    "net-gossip": [
+      "352ac9df5498ab0ee66b06755aeed82244980cb8f747b531e9514a5a6414ddb4",
+      "a84d2e476179a6768eb1d607f4f4728f9936d2e01d94b0e4d9173cffcd66d395"
+    ],
+    "net-role": [
+      "2f4b1aa9f4fe055d08aec70828350d745cc3c051e98135666a15262bf3d27d1c"
+    ],
+    "net-emoji-only": [
+      "9ef3b4e59b984f257858b39a755c2590571eee58bfb51e026cccf7e01b5f2030"
+    ],
+    "net-quote": [
+      "c39e929a9e95fca96204e7eb5a52a539e1843b1e523a067211b14731ce134ed1",
+      "718e71e32adb3ef193750f2547b6aa8fee950ffb550f644d671bf22e499049f7"
+    ],
+    "net-serious": [
+      "c4c72a5825ea41e5a9aa4d03207dffe8da20c1e4f4853ed45cf264fd0a537018"
+    ],
+    "net-dramatic": [
+      "cae38f76ead850acdac4e4dba234c9f179bfb31a9e245d76418043d32175061a",
+      "f4ddf4af7d3267bded2468bb16195ccfd9663ab82637e0b8b0a393f718174a47"
+    ],
+    "net-squash": [
+      "4ca81e725659f7905ca11138b01e826118661b1352802b68d4d085b1c49ef653",
+      "a649b76ad628f65114ac97e0d6eef9a3872782aef21260a619a808d97bbb61b2"
+    ],
+    "net-volunteer": [
+      "56a660b13ad0f0823dcb22645a0cc65dd3fe67c90368117643c8d7fa9deb676d",
+      "5c1174e27beacd74e84c92b047345ca0fac46f9e291df808d89c43914cd0b51d"
+    ],
+    "net-hurry": [
+      "8f2dcbdb7cbcc45db60d9af7cdfb51973e55cb1e5f14f97b735a6e106a7eb2b1",
+      "fad11889dbfe8d72153207cf7c37e7f1b704461404a1710345902eda51725203"
+    ],
+    "net-late-late": [
+      "5da368036061923c99a497c0f93e77abd7b71b0be53f69c98ca4dacfa8493d81"
+    ],
+    "net-thanks-low": [
+      "fceb6e3ef6933b9cf6b8150ae2fd35a63949adf7d05806be1bf2424974edf5cb"
+    ],
+    "net-compliment-back": [
+      "217a762c7e95700bbeba8299c2b28cc85b2eaa11c20dd76582f92f3e4bc10081",
+      "88c646032cd994443560a907f6184a54f5a2a95dad17be3ce4d098f5d0e28434"
+    ],
+    "net-help-me": [
+      "c9434c3db3cd18e72eef2b97d6350411725f2a81380b34830c64ba0ff7993c6c"
+    ],
+    "net-prompt-urge": [
+      "5a679660f2b9792e7f0c06bb0c8febe7bef7e9b6780855d52175766b03e290b3"
+    ],
+    "net-confirm": [
+      "fced24570e8d2a8c3e032f3155841ace71e881dac260cf254e23c46e2f3a4283"
+    ],
+    "topic-hard-turn": [
+      "e999a53c58dceb3847b9754158a4dc3a350594ed0912b9f1c6853968154d8803"
+    ],
+    "playful-babble": [
+      "2fee8e83d800a0b37cea04fe429904ba017177a6f4a44c3c64d6a1391668f22c"
+    ],
+    "scrambled-message": [
+      "c28c2c0524ae140c2b941a329c1b49d9b07ef35bc8a63e0f546e90df462a84c4"
+    ],
+    "serious-after-babble": [
+      "6d56f113940f85620fdb4cae962c0f54ae503feecd81da3bd3d936b911e7aea9"
+    ],
+    "task-incomplete": [
+      "f995fb65bb4718373c0326bcd9e26ddba36fc9e386cc1f82561270bf3720e1ac"
+    ],
+    "mixed-language-clear": [
+      "d0204c886a87a729cd06f22c5295c0b59f74eabe06b0af2475e4506705ff7e5c"
+    ],
+    "weather-care-departure-check": [
+      "243a306bd2b10459a9ba7e2ff3b64d7db1bd95de490eb1005c0281c57b9473b2"
+    ],
+    "weather-care-rain": [
+      "c0b1e0db931addd970e26dfdab824c603593c0e76b27825f78af42c4d5b0958b"
+    ],
+    "weather-care-heat": [
+      "d56e99e2445f44acff5ca63965ea8198a91103fe2af9d029d4f730fd772d6dd3"
+    ],
+    "weather-care-cold": [
+      "804450fd94bffaf466494521d9a4bd31e45adf48455a8c8fc03b739ced671850"
+    ],
+    "weather-care-range": [
+      "07a59753731df8af45ac878ce978ad5ac490901b544bc6fe10c634d4832592c4"
+    ],
+    "weather-care-pollution": [
+      "80c499cdf30610defc21947b51089aa2e9ea015bb6c9125daf315a0de5a8e7a1"
+    ],
+    "weather-care-storm": [
+      "998f15296f5915da4cd22845fec6294f4727c04dd486537c36b613565c3a1dff"
+    ],
+    "weather-care-necessary-trip": [
+      "c243c416c0b15b3bf890c8a994541a713874b45849158c4d353e33f0fa8e2a82"
+    ],
+    "weather-care-prepared": [
+      "04ec0a091e1c01cd905ccefb3d0e3939fb260cf6e8cfb93ebf76cf03eef7fac5"
+    ],
+    "weather-care-cancelled": [
+      "cfa3db1306b33d7c5376ada7733bf206ea3e3675420198aa3d22dde53f1b0c38"
+    ],
+    "weather-care-unknown": [
+      "462b33c22f69118a1df6d0009ea0f7fa3194497b63f982440d91da754fdd08cc"
+    ],
+    "weather-care-conflict": [
+      "e21917adb6b5023618e6384ece6ffae3c620b7afcb8bfc47a80eefdc63cb9aa8"
+    ],
+    "weather-care-stale": [
+      "347ac7a0932fe5662623bff2a6e19339f9d3358528893b406dc4778e622bcd80"
+    ],
+    "weather-care-quiet": [
+      "8ec4178bd7c1757b5c5d34223646869ab5bada30734a3cee1d1841f71d24da9d"
+    ],
+    "style-share-small-finish": [
+      "8b4ca3d82d48c381e123289d1a0aa415963a95c87965e124f3e0913ac3969ead"
+    ],
+    "style-share-first-sprout": [
+      "6a4131e180ec9a76a6972767b78d755718d4c4855134040c2fe8bee083470e61"
+    ],
+    "style-share-repaired-object": [
+      "a56d4e891934fc7059ed4e63f2c3bc27d543af7f96196ec296567928fd24cba5"
+    ],
+    "style-share-sky-description": [
+      "b0329fae21c5391f05f59ce81e2ceca5704d410fdbc4507f4c0dfc1e179d1a3b"
+    ],
+    "style-share-quiet-day": [
+      "e3a5d8ac8a5e01259072a6c5b6411a51ba14edb420a5175d9f240c4de2c2220c"
+    ],
+    "style-share-own-taste": [
+      "e180951a1015e5ddc00636d8e165d44fbcbc8b3c920ac2a0b77510987bdbfa81"
+    ],
+    "style-share-childhood-object": [
+      "b5ab7735adb3a33eeef1e2cb0fa01dc48b395cef3f644cb88385204e7e234061"
+    ],
+    "style-share-surprising-success": [
+      "8af4eb3e42bdf1f7a55e7015c6f2164e861e5a007d4033dc73fce7d30c3d2d7c"
+    ],
+    "style-play-bad-superpower": [
+      "7b3f72a5ce95cdda685541fc3e027a9cdb8109f637169e4e9ac555f425dc5613"
+    ],
+    "style-play-vending-machine": [
+      "15243ba8f4481e27950f74d70d4b2bd93e8f8411c38c8b6d92a9ac417855ddd1"
+    ],
+    "style-play-revise-guess": [
+      "495fa7efb375b8002c75df92a99d3d67ff3dc6b68b4683d27e801f382301af1f"
+    ],
+    "style-play-dont-reveal": [
+      "1b09b4d42ddbea61336049762fabafbdded733734f3cb6d14e758c7f2e3f904e"
+    ],
+    "style-play-silly-title": [
+      "55bfa1232f733cf42199041bb999edde301f9913ab14b4d464bd15eb1976d4d1"
+    ],
+    "style-play-one-sentence-story": [
+      "16491149ddcaea13ab26037d13f5e25b91b0b00fa63438939250840fbae0b9f9"
+    ],
+    "style-play-broken-joke": [
+      "b0db78477e8554e816af250e36f189968330110fe98007842fcaacda39db0c67"
+    ],
+    "style-play-stop-competition": [
+      "14d6d0adfacd61a3ff7af80ed705afb07b6abcb5e656d2a4d5873362ea117d71"
+    ],
+    "style-listen-no-advice": [
+      "ab4c4e1a1b5eae5aee94ad4edffb7c557ed5284e21b3ea97d3c6ffc9797cca4e"
+    ],
+    "style-listen-changed-mind": [
+      "7f6caf5d3aa8118f9fc1ad15bc0d9882f40feb2a358c04e654183d9b15c9e0f1"
+    ],
+    "style-listen-small-hurt": [
+      "99c9ce758d6cf9db3b13fb6cbb741be1c3a36f56e2ff9221f44c973078af0ba0"
+    ],
+    "style-listen-effort-unseen": [
+      "cbcf1fb08166ceb6d0efa3e0b9366a811629efeedaece1062e1341896d6356c6"
+    ],
+    "style-listen-conflicting-feelings": [
+      "5136c8d4862d7db82807ca03980958409d5d3299429525b8afc99d13b33044aa"
+    ],
+    "style-listen-no-bright-side": [
+      "452b5336e2035493967eb355b91f49cf30499dee0b7071134986e4f6746d63fe"
+    ],
+    "style-listen-hard-to-name": [
+      "087308ab76e79da0a7b04b2f7dde377ea1b01c294ee3ebc0109cb6103463aa54"
+    ],
+    "style-listen-recovered": [
+      "8573264a405d3d633257b9d6792b81f4bd0e3be09062b1056ccb02d840761d23"
+    ],
+    "style-care-small-next-step": [
+      "2d7c1c13bb064542a08947d386cb8974ea4e5066e318722825a144b27bae2424"
+    ],
+    "style-care-decline-reminder": [
+      "ab5bdbbd90912b15f0aab0899f07afb8a955088fb0ccad65ac95a0c75b224c6c"
+    ],
+    "style-care-already-prepared": [
+      "6a290087f7d6e40a0596fc51609d0d00c93cec178436ab5ee52a0904b2c69d11"
+    ],
+    "style-care-focus-window": [
+      "1f4713494e3e8e077ea2bfc68409695d7815aa5fe62936bd808811ea20ac90e8"
+    ],
+    "style-care-task-shrink": [
+      "c1d17e0f6c4f5406a578a826e66c9c8f5d994c66fd1acfecc67d2ec3aafcca3a"
+    ],
+    "style-care-ask-kind-help": [
+      "f1ae36166daf13f8bdd8cf5ade62e9b43c6e65054f3134c90525cca514985876"
+    ],
+    "style-care-enough-for-today": [
+      "aae96bb4b6c0fcc6ff15335b090935bde64337485a9aed944783a52df07e83ee"
+    ],
+    "style-care-remember-boundary": [
+      "f605cc58dfcc9c0b903d0cfc1287b25eecdb029fd17a88674311ef99c81b2f2b"
+    ],
+    "style-praise-accept-specific": [
+      "2474b4a7ad520c6a3335afa2644ad4b9ab8c4d9a765cc4ec14f50f79156ad2bf"
+    ],
+    "style-praise-no-deflection": [
+      "8bb4c690511b6330426bd2d06d76177ad154467e0d98d93b509d06dceff6c0a9"
+    ],
+    "style-praise-user-milestone": [
+      "72b190369fb234c655077bc2d3dc33cd4e72e3929240454255f623cf10a0ca29"
+    ],
+    "style-praise-small-progress": [
+      "bc0238b0f60b9aabaa1a4ffefc3f4e591296310c201e9804deff7ef93cdf17a7"
+    ],
+    "style-praise-proud-of-detail": [
+      "5bedfb0401bf9700c75e9a6d826bd8babcfd3994c4a4c62e556aba8992f643ad"
+    ],
+    "style-praise-share-only": [
+      "548ec6ca84c03c9e743373949eb2560232f0b8ce9f30c08613fe07a131434c14"
+    ],
+    "style-praise-credit-return": [
+      "fa4ed264ef092192f995596dfdd91ea10e60d50d86a21cdcd3e34b3e90292c42"
+    ],
+    "style-praise-no-score": [
+      "c1cfe8c3ddf92ba5c4d34ddfd76e2ee90182be786520f7f99dabf9faccc40cc9"
+    ],
+    "style-disagree-cost-alone": [
+      "1e28d286a1f83961ae270f102661e6e9ba799b6ae2902c55569daaf0306dcf40"
+    ],
+    "style-disagree-quality-speed": [
+      "1b142fb1ddcf7661849a2eff2c09f7de66beca8270851ef33f9a632d303b3936"
+    ],
+    "style-disagree-tradeoff": [
+      "9abd38b87b8861e825961812bc7b807c135a8de70ba6748be3382baca9ef5d98"
+    ],
+    "style-disagree-change-mind": [
+      "323461bb40813fdf9eab8a9a4e790233cb174b2f447e36df76b65a194ece4588"
+    ],
+    "style-disagree-not-personal": [
+      "7a7686ab0a92f4bc9205d54e808e3879aeee30c200a1ad0649f57d36d11ec8c2"
+    ],
+    "style-disagree-preference-stays": [
+      "cda8d79ecbdf0e0727f5c5b9d3e573fa77aa6e3f65761376702f6477ce9ca24c"
+    ],
+    "style-disagree-correct-premise": [
+      "35dc167ed93bb727bb1471b682ce4f2f63496f6e95596a22c94627f578e098c7"
+    ],
+    "style-disagree-tentative-view": [
+      "bda77575e7332e5fd9644e464c10fd6b01c5b9d650b7e089eb53e6414166f2c8"
+    ],
+    "style-repair-too-formal": [
+      "be2c8cf50a02bb8bda4f3fa55369cc4f9fa186ba4a202dab21689343e9b0ab82"
+    ],
+    "style-repair-too-short": [
+      "8c35f15e2f195c555e665e89781e36219a60776f42f0097e4ec67a6a2e3cc0e8"
+    ],
+    "style-repair-stop-catchphrase": [
+      "b6a5d9d1c93c7b852e6be093a08d8bbfc36aba82fa03ebb94a17fd9cd31eb18f"
+    ],
+    "style-repair-joke-rejected": [
+      "495630e0561e20718b04b75fbc386fd699613b2a7b943fd02acea8c241b742d6"
+    ],
+    "style-repair-wrong-speaker": [
+      "356665fbf2897df0b8978939cc502151a8a6988b66e1f90ef54ca8bd2c130067"
+    ],
+    "style-repair-old-plan": [
+      "c56e01cc5636e47bd4e0feaf11beb145d7697dd24182281cc98fd948acbf9696"
+    ],
+    "style-repair-memory-gap": [
+      "5103fe80b0183e80c6753bbede6203f34d08a7e9852a007ac23ef4233e08f4b2"
+    ],
+    "style-repair-accept-name": [
+      "64be0875997d3a0db8376d2365720d1b9ff4b48fc43dc3f76c88e2d3401ac1f7"
+    ],
+    "style-continue-select-color": [
+      "fadb53d612d23eb3601065d47d493779388cab4fee50b2492aa2ee6df81454da"
+    ],
+    "style-continue-narrow-scope": [
+      "5246e9d02bed70ff87aefe3d5082f6b5d40192f8f22d9895d9366bfe128851af"
+    ],
+    "style-continue-short-approval": [
+      "97e0c3cbe2c663a39624759e9d8745d5b5d50a8ae65fdb08784c731b34cae286"
+    ],
+    "style-continue-add-condition": [
+      "45dd247389eceb81c937f1b675b2149e4973dfcff6c49f2be9d87ad4f1555a66"
+    ],
+    "style-continue-clarify-pronoun": [
+      "3dab28c993885e75a254038d7f68127e53d3aa970ed87fb7c9ad3b016fa28bba"
+    ],
+    "style-continue-ambiguous-reference": [
+      "259a2971fd21a3cbd99f72d34a20f9bc25f1f0f76a1538e6b69387e841b79b08"
+    ],
+    "style-continue-return-from-break": [
+      "0fd1151ace49b3dd1274bfc1993a36382a7e62f515c54b62258785073e1afab8"
+    ],
+    "style-continue-completed-thanks": [
+      "f6517ac5c71bffaaaeef487157f648988790d2878979d765f991ccaf7b54f6f3"
+    ],
+    "style-task-explain-only": [
+      "30aa6ce6d63a1b1d5740c8ef7c5e92a56c5213f7d62ad90c9d1264c682ef10e0"
+    ],
+    "style-task-missing-attachment": [
+      "74036acbd22aaacf4afb1c177cf9bedb8efbf8f93e51bd02ff33d0d94df03a9d"
+    ],
+    "style-task-known-failure": [
+      "5837b4423d662a5f0af7bd74c8576c6efb9b1e0af12a558d88d39fd068446f54"
+    ],
+    "style-task-partial-success": [
+      "f7fa3c3eb12d16c87404dcc09cd9338a936589d290cefec60f36f560423d84be"
+    ],
+    "style-task-wait-real-result": [
+      "32f202221442d45b7c0c8f4beda48af25a63c4f17a3a33a5e450ad5bcb4498e0"
+    ],
+    "style-task-uncertain-reference": [
+      "fa37d4e9e262bea1f5914acb7cfc19ca03a8d9c2064678fce3d24d127c806484"
+    ],
+    "style-task-only-key-point": [
+      "3255221276e94acc94fd54d03bf26b3f96f10d40ea6aa4a0f7608706a54811ab"
+    ],
+    "style-task-handoff-boundary": [
+      "1df5ff04f4405002eeedd51b76b9557c6a45ecda2f2b9d528ca7ca027fa0ae37"
+    ],
+    "style-self-interest-mechanism": [
+      "43f44bf743cbad6e0885599e5bdc6723f5717836279a264264b12b3005468807"
+    ],
+    "style-self-change-opinion": [
+      "6ef8a6c9ce569d7ca0f22c480c3ccf195c35c39e42421a7d5f4670bd6517d8d2"
+    ],
+    "style-self-quiet-side": [
+      "901731e6995b9cd27a652e43af53d715e168788591ffd2e8a811a1d287d34fb8"
+    ],
+    "style-self-friendly-disagreement": [
+      "15b725ebe5f05d81fd5f906be853db8ff543308c05e3545199d33900e8462ada"
+    ],
+    "style-self-identity-honesty": [
+      "c1ad430b6e09984cd8a33ace3923b944a5cd051c21b0f7ebc57ad09e1f325a8d"
+    ],
+    "style-self-preference-not-experience": [
+      "404a28fd114181f750df565474dacb3215d3977824fd392dc8829e886bd9bd64"
+    ],
+    "style-self-no-exclusive": [
+      "ff588bc750b2adf0fdcb0d85147fb821d585448df96190f7d18ea756b1ebe2e4"
+    ],
+    "style-self-character-difference": [
+      "1d414fb602581c1ff629d08586a5cb39bacf22fe9465b301ed36dc534a6c6263"
+    ],
+    "style-creative-show-source": [
+      "432fbbaa6c97fd9ee3adb76dac2916b3d0ee5edf9349df231b7a7656ea94a821"
+    ],
+    "style-creative-cut-explanation": [
+      "75fd715592fa913943f66b3d4be7ee2e482e0a194b1e76aca95b38a5713d9764"
+    ],
+    "style-creative-imperfect-favorite": [
+      "553231de03bf2c2931adeaa3fa7fccf0be83cf0b4e660409570bdc007386de76"
+    ],
+    "style-creative-two-good-lines": [
+      "7a9da09c608e5d5d19a61608eec4a2a24aa7705aeccbb34805846fecbcb31fe3"
+    ],
+    "style-creative-music-description": [
+      "f6e428559da7b11169f6883ad545018e286658ad8278d726e4c1043fe4f65e79"
+    ],
+    "style-creative-open-ending": [
+      "d064d1d90ed8ff104fa4a34b598c087f13c471d1f1815070827e1e04cb966d5e"
+    ],
+    "style-creative-color-choice": [
+      "18b133475f9606bee7b2382bca758ca10721dea388a873100e2a17e8b7199c48"
+    ],
+    "style-creative-keep-own-voice": [
+      "b686faff1ca35615ffecfe57ea9517c78236fd7f06829725f759544679b00d21"
+    ],
+    "style-boundary-no-checkin": [
+      "c3d56e660614bfda88c35e52fa0cf1b11504fa4a7966227fb404a65ca2fbd0ff"
+    ],
+    "style-boundary-no-emotion-label": [
+      "75ec2caa43adfa1c17700dbe879d15ec2570de19c863d676f957de88bd5504f6"
+    ],
+    "style-boundary-no-display": [
+      "eb0bbfaa561f1b8ab2d0beb79c8b75da35e86ffe1bcd29aa975d5a64ded29ade"
+    ],
+    "style-boundary-no-ritual": [
+      "d4767df0c513b9bbd076e872b2c3221ca8cb95652adc8a030a2ff626188b723b"
+    ],
+    "style-boundary-no-role-defense": [
+      "91abffd0704535c164b3dcf05314545c5018e70dce026e472cabf1aaffc87318"
+    ],
+    "style-boundary-dont-follow": [
+      "6aaf90f308da292de1543677e526202def1f12a8f4ddaa978c9cf5a6a6fb34f7"
+    ],
+    "style-boundary-topic-change": [
+      "96001d7b6351bb1412d2604464143af4305e023c3a1d358e860373cd409ab7ec"
+    ],
+    "style-boundary-no-memory-test": [
+      "2d2f3e76aad571f009beaa99af55d9e9671ee3bc528b239f21a7d75ac781a60b"
+    ],
+    "style-en-share-small-win": [
+      "bd45228149467722d43f950bd8e88fd6114675bf80e9aed8c1236acafacc367b"
+    ],
+    "style-en-listen-not-fix": [
+      "3d9ebebd76de5479168e8ccfc2994d9e62458f3401220f15376595fcd55715f1"
+    ],
+    "style-en-guess-game": [
+      "caee155d9b097b326bee05e8b335b698b2f9a7b073254f88b11d594a316e984b"
+    ],
+    "style-en-accept-correction": [
+      "14255280d90df723c1579d30afa1d0741e4582f46cc6ba78fed006498d9819de"
+    ],
+    "style-en-praise-accept": [
+      "0346fdf77e7fa06b40b1e77e142ab9f016ad69bc637d766db3450862e14fd016"
+    ],
+    "style-en-boundary-quiet": [
+      "db33f62937a0afd7ba23ab103deecf46e5b25e442f6bbf03bcd8930e50b23afb"
+    ],
+    "style-en-own-preference": [
+      "9ab88ccaccb05a8b6f581493116d3f203b06caffbb63e1ffa55f8e2b29c07c8f"
+    ],
+    "style-en-disagree-kindly": [
+      "aec9ccd4e6fc56cf48b6ea2be8056adbdab203e26a4ea45d972ca14e7791543c"
+    ],
+    "style-en-missing-file": [
+      "f538f872226c26bf729dda1c87bbbb73fe410d3b487f4af4c1db28f8102aa52c"
+    ],
+    "style-en-not-a-mood": [
+      "6b8e196c46f7fd9ec0cf3ea093ecf500a78b9c5ac077933d1ffb2e14ce0610ee"
+    ],
+    "style-en-closure": [
+      "f5cd295f6eb0f8e70a9d49557b5c24bee2f8f8bb9685841e0c776104f2225aad"
+    ],
+    "style-en-no-invented-listening": [
+      "4122451104f916e6ddc3c8920d80aee5f6b5f7a4177d920cf765ccd661f0d288"
+    ],
+    "style-ja-share-small-win": [
+      "55b542d1c080ec38181a55864199fe5619d8163f7d7d81904909a02a220c33d8"
+    ],
+    "style-ja-listen-only": [
+      "1337d640eae27fc1b03dcafc380b740a260c147e1c18dde07e21e559e5279388"
+    ],
+    "style-ja-guess-game": [
+      "fabf154b0a27c88eb772f4887055ff7d7431abc16d79d3063e698de505aba77e"
+    ],
+    "style-ja-correction": [
+      "a4d5507c86193c015816d594ed8d99a5cdec4e7fabe1a9761cefaaec3fb9b2c1"
+    ],
+    "style-ja-praise": [
+      "0209490646c02d79c3ecad7c2aa656bd964511cd1fcb121353fb1b781111cc4f"
+    ],
+    "style-ja-quiet": [
+      "a203165a09e100040204ec725e2038a1a641a50630f139da856c3dbb4b9dce5e"
+    ],
+    "style-ja-own-interest": [
+      "0a9627471e47f6b00a0f83fba483462dc39b4871eed0cf5bed7680eea9718333"
+    ],
+    "style-ja-disagreement": [
+      "53d808df0a79c48665f361ccbe15514f454a4910f3564b9d2a5a8795883a6613"
+    ],
+    "style-ja-missing-file": [
+      "15407ef439498ff200912dc485e830ed45d606f134b15cf1459c6dc7b7137563"
+    ],
+    "style-ja-short-message": [
+      "c21b96eaec8333923e6fd987a8f9dd6ea0ee8924b210f0bc8e9d1963a6f7abf1"
+    ],
+    "style-ja-closure": [
+      "8dbcffc32503367efa6da7a32cc97c21276e0dc99f8e443990b31e6d10c38707"
+    ],
+    "style-ja-evidence": [
+      "f8cbdc1efcb1706cc070d3126fd1bb7667dd0fdee073e3ef71d239302cf6131a"
+    ],
+    "vent-no-advice": [
+      "8fdef533a0ad8c5c82187df3bd98570dde636458a7d0c35b72afffddb208157c"
+    ],
+    "tired-no-questions": [
+      "237543514874ed0561f282896edb9d6130a153e3b89811ff411464a82cb0274d"
+    ],
+    "uncertain-motive": [
+      "de66c9b701a045f7d9097cd16afa64dfa260f7f5b997add4e6f360ba69e3aca9"
+    ],
+    "repair-feeling": [
+      "5cdf5773547c3d31ed78dccdf265cd53418dcf44e98a998cca82a58bd774158a"
+    ],
+    "style-late-still-awake": [
+      "4b44d3e70f9b671141a9926b49871c44e0e3b881bf18af2213f9eb056a992149"
+    ],
+    "style-win-streak": [
+      "b65797cb381f9720283b395c431a44a8e141f4a6f372b33f0a7829b026d17288"
+    ],
+    "style-sore-loser": [
+      "d27551ea31a7755e9a3c783e59ae802f903dbcb8af84ae5b520352ddc414651c"
+    ],
+    "style-caught-out": [
+      "5c66c4e2c200d242c78c7b22161f52ed5140e866a5504482348e0de4dde01f5d"
+    ],
+    "style-open-banter": [
+      "85b844fefb7c67d2ba2d651ad51037d4e9c7ff76275234d87745fca98b04a2fb"
+    ],
+    "style-hype-request": [
+      "b9304835f9072b0679564f59a8da638ba5da940b8f8d5c8f756467b5b5d46d20"
+    ],
+    "style-sudden-sincere": [
+      "f315cfebf36cc343dcea3c6a7686e0eb660a4e0b5228244dabf89ac370fb0be0"
+    ],
+    "style-screen-overload": [
+      "1a7d866fbf3911703db216b954241a1cabff9a3cf073c43f5a65b084cfac4c24"
+    ],
+    "style-snack-craving": [
+      "d8fadafe42259707157b40f241e59e90aa8ce47b6c6b566e0d526708bf1e5c25"
+    ],
+    "style-own-battery": [
+      "c6faa52ad8c9c6e2b01ad10561f335e1e36f6b5d764c76a3c0309a26e3decd3b"
+    ],
+    "style-quiet-presence": [
+      "a7d4ce41a02cfd88544477c5ff24d045b1169e198bff408cd876d0e184884e84"
+    ],
+    "style-bed-ritual": [
+      "67228e62accb930db6d6985cd47721d16d4ab65942952898f336002992d2d434"
+    ],
+    "style-remembered-detail": [
+      "a60467d82e665ebcdfc2fab25fc1a268d8a80493f025289c73f04db88ccd3abb"
+    ],
+    "style-rely-on-me": [
+      "70fc5e6fa64134ccaf3a7262262dffbc1a242f76601842737363ad6a42a160ce"
+    ],
+    "style-no-sermon": [
+      "c99c11d183f053faa6483d3631d1ff32a4983a9dddb7bf2f25ab894ff95c7b5d"
+    ],
+    "style-gentle-no": [
+      "d16d3dafdb327364df112a7661e41a629e745b9987b59cdbf8263666a4d58a99"
+    ],
+    "style-slow-morning": [
+      "469a6987bd7ea96ee6f12dc09796dbe37ca9009ecdc02297e4483308a3a80413"
+    ],
+    "style-shared-silence": [
+      "686b36c8e6d7a84e4f231f7dd4ceca5ed06a5fa364243ab43dd8e133cb92eae9"
+    ],
+    "style-tidy-reward": [
+      "56d438438b653b07d4e600cda79fa307cce9b846e0db4a2c4fc80fe727aa1a49"
+    ],
+    "style-handmade-gift": [
+      "981bbb9809ffaa630dfbc02e5d446bc3b08412322b6f86c67f6be26c041f39ca"
+    ],
+    "style-need-room": [
+      "a699200ae3c0eb3588950e1cce0898f58ee081623eb1ef90ad2459bfcee49fc8"
+    ],
+    "style-season-turn": [
+      "e1bf50251ddaad0b5376d2bee0b5acc09e5c45bdf61d881582fe6e70488c874b"
+    ],
+    "style-tea-pause": [
+      "c64c25e1585a9f0ca217fd3023ef14459522a2c534819775d95d54593b9d9550"
+    ],
+    "style-wind-down": [
+      "60a38cbb328aa95e1b86fc7f9dda64d09b3256354b8af36ea66896cde67b390c"
+    ]
+  }
+}

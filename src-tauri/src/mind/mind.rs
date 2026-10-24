@@ -19,6 +19,7 @@ use crate::psychology::PsychologyManager;
 use super::attention::Attention;
 use super::belief::{BeliefStore, SharedBeliefStore};
 use super::current_activity::CurrentActivityTracker;
+use super::conversation::{ConversationOpportunities, ConversationOpportunity};
 use super::goal::{GoalStore, SharedGoalStore};
 use super::user_goals::UserGoalLedger;
 use super::working_memory::WorkingMemory;
@@ -41,14 +42,6 @@ pub struct ThoughtSnapshot {
     pub timestamp: i64,
     /// 当时的 current_thought 内容
     pub text: String,
-}
-
-/// 当前想法顺手提出的搭话候选；仅在内存中保留，不属于长期记忆。
-#[derive(Debug, Clone)]
-pub struct ConversationOpportunity {
-    pub topic: String,
-    pub evidence: String,
-    pub generated_at: f64,
 }
 
 /// 角色认知聚合句柄
@@ -82,12 +75,13 @@ pub struct Mind {
     /// LLM 合成的"社交冲动"信号（0.0-1.0）
     ///
     /// 由 current_thought 的 LLM 调用顺便产出，表示角色"现在想主动和用户搭话"的强度。
-    /// proactive 问候类触发器读取此值作为时机门控：urge 低时推迟问候，urge 高时正常触发。
+    /// 仅保留状态展示；主动搭话由结构化 conversation_intent 决定。
     /// 默认 0.5（中性），LLM 失败时保持上次值。
     pub social_urge: Arc<RwLock<f32>>,
     pub thought_generated_at: Arc<RwLock<f64>>,
-    pub conversation_opportunity: Arc<RwLock<Option<ConversationOpportunity>>>,
-    pub last_spoken_topic: Arc<RwLock<Option<String>>>,
+    pub conversation_opportunities: Arc<RwLock<ConversationOpportunities>>,
+    pub thought_context_version: std::sync::atomic::AtomicU64,
+    pub thought_refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// current_thought 累积缓冲区（内心 OS 提示词注入用）
     ///
     /// 每次 `set_current_thought` 写入新值前，把即将被覆盖的旧值连同时间戳推入。
@@ -158,8 +152,9 @@ impl Mind {
             current_thought: Arc::new(RwLock::new(None)),
             social_urge: Arc::new(RwLock::new(0.5)),
             thought_generated_at: Arc::new(RwLock::new(0.0)),
-            conversation_opportunity: Arc::new(RwLock::new(None)),
-            last_spoken_topic: Arc::new(RwLock::new(None)),
+            conversation_opportunities: Arc::new(RwLock::new(ConversationOpportunities::default())),
+            thought_context_version: std::sync::atomic::AtomicU64::new(0),
+            thought_refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
             thought_refresh_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_dir: mind_dir,
@@ -319,10 +314,8 @@ impl Mind {
             let mut wm = self.working_memory.write();
             wm.clear();
         }
-        {
-            let mut thought = self.current_thought.write();
-            *thought = None;
-        }
+        self.clear_current_thought();
+        *self.conversation_opportunities.write() = ConversationOpportunities::default();
         {
             let mut acc = self.accumulated_thoughts.write();
             acc.clear();
@@ -339,10 +332,11 @@ impl Mind {
 
     /// 清空"当前想法"缓存（功能禁用时调用，不推入累积缓冲区）
     pub fn clear_current_thought(&self) {
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self.current_thought.write() = None;
         *self.social_urge.write() = 0.5;
         *self.thought_generated_at.write() = 0.0;
-        *self.conversation_opportunity.write() = None;
+        self.conversation_opportunities.write().replace(None);
     }
 
     /// 写入 LLM 合成的"当前想法" + social_urge 信号
@@ -350,7 +344,10 @@ impl Mind {
     /// 副作用：写入前把即将被覆盖的旧值（如非空）连同时间戳推入
     /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
     /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
-    pub fn set_current_thought(&self, thought: String, social_urge: f32, opportunity: Option<(String, String)>) {
+    pub fn set_current_thought(&self, thought: String, social_urge: f32,
+        opportunity: Option<ConversationOpportunity>, context_version: u64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return; }
         {
             let mut cur = self.current_thought.write();
             if let Some(prev) = cur.take() {
@@ -362,27 +359,30 @@ impl Mind {
         }
         *self.social_urge.write() = social_urge.clamp(0.0, 1.0);
         *self.thought_generated_at.write() = chrono::Utc::now().timestamp() as f64;
-        *self.conversation_opportunity.write() = opportunity.map(|(topic, evidence)| ConversationOpportunity {
-            topic,
-            evidence,
-            generated_at: chrono::Utc::now().timestamp() as f64,
-        });
+        opportunities.replace(opportunity);
     }
 
     pub fn fresh_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
-        let candidate = self.conversation_opportunity.read().clone()?;
-        if now - candidate.generated_at > 120.0 || now < candidate.generated_at - 5.0
-            || candidate.topic.trim().is_empty() || candidate.evidence.trim().is_empty()
-            || self.last_spoken_topic.read().as_deref() == Some(candidate.topic.as_str()) {
-            return None;
-        }
-        Some(candidate)
+        self.conversation_opportunities.read().fresh(now)
     }
 
-    pub fn mark_opportunity_spoken(&self) {
-        if let Some(candidate) = self.conversation_opportunity.write().take() {
-            *self.last_spoken_topic.write() = Some(candidate.topic);
+    pub fn take_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
+        self.conversation_opportunities.write().take(now)
+    }
+
+    pub fn restore_conversation_after_failure(&self, candidate: ConversationOpportunity, context_version: u64) {
+        let mut opportunities=self.conversation_opportunities.write();
+        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst)==context_version {
+            opportunities.restore_after_failure(candidate);
         }
+    }
+
+    pub fn record_opportunity_generated(&self, candidate: ConversationOpportunity, text: &str, now: f64) {
+        self.conversation_opportunities.write().record_prepared(candidate, text, now);
+    }
+
+    pub fn record_opportunity_delivered(&self, text: &str, now: f64) {
+        self.conversation_opportunities.write().record_delivered(text, now);
     }
 
     /// 读取 social_urge 信号（0.0-1.0）
@@ -442,8 +442,15 @@ impl Mind {
 
     /// 请求重新合成当前想法（事件驱动触发，下次 SelfUpdate 阶段消费）
     pub fn request_thought_refresh(&self) {
+        self.invalidate_conversation_opportunity();
         self.thought_refresh_requested
             .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// New input invalidates an earlier proposal without scheduling an extra request.
+    pub fn invalidate_conversation_opportunity(&self) {
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.conversation_opportunities.write().replace(None);
     }
 
     /// 消费刷新请求标志位（返回是否有待处理的刷新请求）

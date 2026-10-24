@@ -70,11 +70,12 @@ let selectedId = 'current', selectedMessages = ['current history'], rows = [];
 const pending = new Map(), failures = [];
 const selectionContext = {
   useCallback: callback => callback, sessionSelection: { current: 0 },
+  switchComposerDraft: () => {},
   invoke: async (_, { sessionId }) => new Promise((resolve, reject) => pending.set(sessionId, { resolve, reject })),
   setSessions: updater => { rows = updater(rows); }, setActiveId: id => { selectedId = id; },
   setMessages: messages => { selectedMessages = messages; }, notifyError: error => failures.push(error),
 };
-for (const name of ['setRunning', 'setThinking', 'setStreamingText', 'setThinkingText', 'setStats', 'setQueue', 'setPreviewTabs', 'setActivePreview', 'setPermission', 'setReasoningLevel', 'setModelName']) selectionContext[name] = () => {};
+for (const name of ['setRunning', 'setThinking', 'setStreamingText', 'setThinkingText', 'setStats', 'setQueue', 'setPreviewTabs', 'setActivePreview', 'setPermission', 'setReasoningLevel', 'setModelName', 'setDraftWorkspace']) selectionContext[name] = () => {};
 vm.createContext(selectionContext); vm.runInContext(selectionCode, selectionContext);
 const old = selectionContext.switchSession({ session_id: 'old', history_loaded: false, messages: [] });
 assert.equal(selectedId, 'current');

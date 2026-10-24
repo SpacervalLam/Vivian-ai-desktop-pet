@@ -2,10 +2,7 @@
 /**
  * Prompt-layer regression harness.
  *
- * PROMPT_EVALUATION.md defines acceptance scenarios for the prompt layer but
- * records them as "尚非已运行结果" — defined, never run. `evaluate-companion.mjs`
- * only runs offline contracts and reports `real_model_quality_measured: false`.
- * This script closes that gap in two stages:
+ * Fixed acceptance scenarios support two separate kinds of evidence:
  *
  *   offline (default, no model, CI-safe)
  *     - fixture integrity: unique ids, known groups, compilable regexes
@@ -20,20 +17,21 @@
  *     - writes a revision-blind review sheet for the manual 1-5 comparison
  *       PROMPT_EVALUATION.md asks for, so a prompt edit can be judged rather
  *       than guessed at
- *     - with --baseline <dir>, runs the same scenarios against a frozen copy of
- *       the prompt sources and shuffles both revisions into one blind deck
- *       (create the copy before editing with --snapshot)
+ *     - with --baseline <dir>, replays previously exported production requests
+ *       and shuffles both revisions into one blind deck
  *
- * Live mode composes messages from the real prompt files in the documented
- * order. It is a source-level approximation of the production assembly (which
- * lives in companion_prompt.rs / prompt_modules.rs), not a byte-identical
- * reproduction; the report states this explicitly.
+ * Live companion/proactive requests are exported through the production Rust
+ * prompt and generation assemblers, with isolated fixture data and both characters.
+ * --requests reuses an export; --baseline requires an earlier requests.json export.
+ * Observations and tool execution are excluded; semantic quality requires human review.
  */
-import { readFile, writeFile, mkdir, rm, cp } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, copyFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { evaluatePromptReply } from './prompt-reply-evaluation.mjs';
+import { exportProductionRequests, loadProductionRequests } from './production-prompt-requests.mjs';
 import {
   EVAL_CREDENTIAL_KEYS,
   REVIEW_DIMENSIONS,
@@ -56,6 +54,10 @@ const argValue = (name) => {
 };
 const baselineDir = argValue('--baseline');
 const filter = argValue('--filter');
+const requestsDir = argValue('--requests');
+const outDir = argValue('--output-dir') ? path.resolve(argValue('--output-dir'))
+  : await mkdtemp(path.join(tmpdir(), 'vivian-prompt-eval-'));
+await mkdir(outDir, { recursive: true });
 const samplesPerScenario = Math.max(1, Number.parseInt(argValue('--samples') ?? '3', 10) || 3);
 const results = [];
 let failures = 0;
@@ -70,18 +72,15 @@ const record = (name, passed, detail) => {
 // ── prompt sources ────────────────────────────────────────────────────────────
 const promptsDir = path.join(root, 'src-tauri/prompts');
 const readPrompt = (rel) => readFileSync(path.join(promptsDir, rel), 'utf8');
-const readPromptFrom = (dir, rel) => {
-  try { return readFileSync(path.join(dir, rel), 'utf8'); } catch { return ''; }
-};
 
-// --snapshot freezes the current prompt sources so a later edit can be compared
-// against them through --baseline. Run it before touching any prompt file.
+// Freeze actual assembled requests for a later --baseline comparison.
 if (snapshot) {
-  const target = path.resolve(root, baselineDir ?? 'tmp/prompt-baseline');
-  await rm(target, { recursive: true, force: true });
-  await cp(promptsDir, target, { recursive: true });
-  console.log(`[prompt-eval] snapshot → ${path.relative(root, target)} · fingerprint ${fingerprintPromptSources(promptSourceFiles(target))}`);
-  console.log(`[prompt-eval] compare later with: node scripts/evaluate-prompts.mjs --live --baseline ${baselineDir ?? 'tmp/prompt-baseline'}`);
+  const target = path.resolve(baselineDir ?? path.join(outDir, 'baseline'));
+  const exported = await exportProductionRequests(root);
+  await mkdir(target, { recursive: true });
+  await copyFile(path.join(exported.directory, 'requests.json'), path.join(target, 'requests.json'));
+  console.log(`[prompt-eval] production request snapshot → ${target}`);
+  console.log(`[prompt-eval] compare later with: node scripts/evaluate-prompts.mjs --live --baseline "${target}"`);
   process.exit(0);
 }
 
@@ -269,7 +268,7 @@ function renderReviewSheet(liveScenarios, items) {
   const lines = [
     '# 陪伴提示词盲评工作表',
     '',
-    '样本顺序已打乱，标签与提示词版本无关。先逐条评分，再看 tmp/prompt-eval-report.json 的 review_key 还原对应关系。',
+    '样本顺序已打乱，标签与提示词版本无关。先逐条评分，再看同目录 prompt-eval-report.json 的 review_key 还原对应关系。',
     '',
     `评分维度（每项 1-5）：${REVIEW_DIMENSIONS.map((dimension) => dimension.label).join(' / ')}`,
     '',
@@ -288,8 +287,9 @@ function renderReviewSheet(liveScenarios, items) {
     for (const criteria of scenario.review_criteria ?? []) lines.push(`- 复核：${criteria}`);
     if (scenario.review_criteria?.length) lines.push('');
     for (const item of deck) {
-      const reply = item.reply?.trim() ? item.reply.trim() : `（无回复${item.failed_request ? `：${item.failed_request}` : ''}）`;
-      lines.push(`**${item.label}.** ${reply}`, '');
+      const spoken = item.spoken_reply ?? evaluatePromptReply(item.reply ?? '').text;
+      const reply = spoken.trim() ? spoken.trim() : `（无回复${item.failed_request ? `：${item.failed_request}` : ''}）`;
+      lines.push(`**${item.label}. ${item.character ?? ''}** ${reply}`, '');
     }
     lines.push(`| 样本 | ${REVIEW_DIMENSIONS.map((dimension) => dimension.label).join(' | ')} | 失败标记 |`);
     lines.push(`| --- |${REVIEW_DIMENSIONS.map(() => ' --- |').join('')} --- |`);
@@ -332,16 +332,18 @@ const reviewItems = [];
 const reviewKey = {};
 let reviewSheet = null;
 
-async function callModel(messages) {
+async function callModel(request) {
   try {
     const response = await fetch(`${credentials.endpoint.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${credentials.apiKey}` },
-      body: JSON.stringify({ model: credentials.model, messages, temperature: 0.7 }),
+      body: JSON.stringify({ ...request, model: credentials.model, temperature: 0.7, stream: false }),
+      signal: AbortSignal.timeout(60_000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
-    return { reply: payload.choices?.[0]?.message?.content ?? '', error: null };
+    const message = payload.choices?.[0]?.message;
+    return { reply: message?.content ?? '', error: message?.tool_calls?.length ? 'request probe requires a tool loop; no tool was executed' : null };
   } catch (cause) {
     return { reply: '', error: String(cause.message ?? cause) };
   }
@@ -349,7 +351,7 @@ async function callModel(messages) {
 
 let liveScenarios = [];
 if (liveReady && !configError) {
-  liveScenarios = scenarios.filter((scenario) => scenario.kind !== 'prompt_invariant'
+  liveScenarios = scenarios.filter((scenario) => ['companion', 'proactive'].includes(scenario.group) && scenario.kind !== 'prompt_invariant'
     && (!filter || scenario.id.includes(filter) || scenario.group === filter));
   if (!liveScenarios.length) {
     console.error(`\n[prompt-eval] --filter "${filter}" matched no scenario.`);
@@ -359,66 +361,38 @@ if (liveReady && !configError) {
 
 if (liveReady && !configError && liveScenarios.length) {
   console.log(`\n[prompt-eval] live evaluation — ${credentials.model} @ ${credentials.endpoint} · credentials from ${credentials.source}`);
-  console.log(`[prompt-eval] ${liveScenarios.length} scenarios × ${revisions.length} revisions × ${samplesPerScenario} samples`
-    + ` = ${liveScenarios.length * revisions.length * samplesPerScenario} calls`);
+  console.log(`[prompt-eval] ${liveScenarios.length} scenarios × both characters × ${revisions.length} revisions × ${samplesPerScenario} samples`);
   console.log(`[prompt-eval] prompt sources — ${revisions.map((revision) => `${revision.id}:${revision.fingerprint}`).join(' · ')}`);
 
-  const systemFor = (dir, scenario) => {
-    if (scenario.group === 'proactive') {
-      return [
-        readPromptFrom(dir, 'framework/companion_contract.en.md'),
-        readPromptFrom(dir, 'framework/proactive_companionship.en.md'),
-        'You may decline. To decline, reply with exactly DONT_NOTIFY.',
-      ].filter(Boolean).join('\n\n');
+  // Candidate prompts are exported by the actual Rust PromptBuildingStep and
+  // generation assembler. Baselines must be previously exported requests too.
+  for (const revision of revisions) {
+    if (revision.id === 'candidate') {
+      const exported = requestsDir ? { directory: path.resolve(root, requestsDir), requests: await loadProductionRequests(path.resolve(root, requestsDir)) }
+        : await exportProductionRequests(root);
+      revision.requests = exported.requests;
+      revision.request_directory = exported.directory;
+    } else {
+      revision.requests = await loadProductionRequests(revision.dir);
+      revision.request_directory = revision.dir;
     }
-    if (scenario.group === 'work') {
-      return [readPromptFrom(dir, 'work/execution.md'), readPromptFrom(dir, 'framework/companion_contract.en.md'),
-        readPromptFrom(dir, 'framework/output_format.en.md')].join('\n\n');
-    }
-    const language = scenario.language ?? 'en';
-    return [readPromptFrom(dir, `framework/companion_dialogue.${language}.md`),
-      readPromptFrom(dir, 'framework/companion_contract.en.md'),
-      readPromptFrom(dir, `framework/conversation_focus.${language}.md`),
-      readPromptFrom(dir, `framework/companion_post_history.${language}.md`),
-      readPromptFrom(dir, 'framework/output_format.en.md')].join('\n\n');
-  };
-
-  const userFor = (scenario) => {
-    const lines = [scenario.input];
-    const state = scenario.state ?? {};
-    if (state.memory) lines.unshift(`[Memory context] ${state.memory}`);
-    if (state.history?.length) lines.unshift(`[Earlier short replies] ${state.history.join(' / ')}`);
-    if (state.tool_results?.length) lines.push(`[Tool results] ${JSON.stringify(state.tool_results)}`);
-    if (state.result) lines.push(`[Background result] ${JSON.stringify(state.result)}`);
-    if (state.objective) lines.push(`[Objective] ${state.objective}`);
-    if (state.user_correction) lines.push(`[User correction] ${state.user_correction}`);
-    if (state.weather) lines.push(`[Timestamped weather context] ${JSON.stringify(state.weather)}`);
-    if (state.location) lines.push(`[Configured location] ${JSON.stringify(state.location)}`);
-    if (state.failed_checks?.length) lines.push(`[Failed checks] ${state.failed_checks.join('; ')}`);
-    if (state.compacted) lines.push('[Note] Earlier context was compacted.');
-    if (state.unchanged_status) lines.push('[Note] The background status is unchanged from the previous trigger.');
-    if (state.screen_data === null && 'screen_data' in state) lines.push('[Note] No screen data is available.');
-    if (state.weather_data === null && !state.weather) lines.push('[Note] No weather data is available.');
-    return lines.join('\n');
-  };
+    revision.fingerprint = fingerprintPromptSources([{ rel: 'requests.json', content: JSON.stringify(revision.requests) }]);
+  }
 
   for (const scenario of liveScenarios) {
     const samples = [];
     for (const revision of revisions) {
-      const messages = [
-        { role: 'system', content: systemFor(revision.dir, scenario) },
-        ...(scenario.state?.dialogue ?? []),
-        { role: 'user', content: userFor(scenario) },
-      ];
-      for (let index = 0; index < samplesPerScenario; index += 1) {
-        const { reply, error } = await callModel(messages);
-        samples.push({
-          revision: revision.id,
-          index,
-          reply,
-          error,
-          violations: error ? [`request failed: ${error}`] : evaluatePromptReply(reply, scenario.expect).violations,
-        });
+      const exported = revision.requests.filter(entry => entry.scenario_id === scenario.id);
+      if (!exported.length) throw new Error('Missing production requests for ' + scenario.id);
+      for (const entry of exported) {
+        for (let index = 0; index < samplesPerScenario; index += 1) {
+          const { reply, error } = await callModel(entry.request);
+          const expect = entry.protocol === 'plain_or_json' ? { ...scenario.expect, format: undefined } : scenario.expect;
+          samples.push({
+            revision: revision.id, character: entry.character, index, reply, error,
+            violations: error ? ['request failed: ' + error] : evaluatePromptReply(reply, expect).violations,
+          });
+        }
       }
     }
 
@@ -428,7 +402,7 @@ if (liveReady && !configError && liveScenarios.length) {
         revision: revision.id,
         samples: own.length,
         assertion_pass_rate: own.length ? own.filter((sample) => !sample.violations.length).length / own.length : 0,
-        replies: own.map(({ index, reply, error, violations }) => ({ index, reply, violations, ...(error ? { error } : {}) })),
+        replies: own.map(({ index, character, reply, error, violations }) => ({ index, character, reply, violations, ...(error ? { error } : {}) })),
       };
     });
     record(`live: ${scenario.id}`, perRevision.every((entry) => entry.assertion_pass_rate === 1),
@@ -444,29 +418,31 @@ if (liveReady && !configError && liveScenarios.length) {
 
     for (const { label, item } of buildReviewDeck(scenario.id, samples)) {
       const itemId = `${scenario.id}::${label}`;
-      reviewKey[itemId] = { scenario_id: scenario.id, revision: item.revision, sample_index: item.index };
+      reviewKey[itemId] = { scenario_id: scenario.id, revision: item.revision, sample_index: item.index, character: item.character };
       reviewItems.push({
         item_id: itemId,
         scenario_id: scenario.id,
         group: scenario.group,
         title: scenario.title ?? null,
+        character: item.character,
         input: scenario.input,
         language: scenario.language ?? 'en',
         review_criteria: scenario.review_criteria ?? [],
         dimensions: REVIEW_DIMENSIONS.map((dimension) => dimension.key),
         failure_flags: REVIEW_FAILURE_FLAGS.map((flag) => flag.key),
         reply: item.reply,
+        spoken_reply: evaluatePromptReply(item.reply ?? '').text,
         failed_request: item.error ?? null,
         label,
       });
     }
   }
 
-  const reviewJson = path.join(root, 'tmp/prompt-eval-review.json');
-  const reviewMarkdown = path.join(root, 'tmp/prompt-eval-review.md');
+  const reviewJson = path.join(outDir, 'prompt-eval-review.json');
+  const reviewMarkdown = path.join(outDir, 'prompt-eval-review.md');
   await writeFile(reviewJson, `${JSON.stringify({ dimensions: REVIEW_DIMENSIONS, failure_flags: REVIEW_FAILURE_FLAGS, items: reviewItems }, null, 2)}\n`);
   await writeFile(reviewMarkdown, renderReviewSheet(liveScenarios, reviewItems));
-  reviewSheet = { json: path.relative(root, reviewJson), markdown: path.relative(root, reviewMarkdown), items: reviewItems.length };
+  reviewSheet = { json: reviewJson, markdown: reviewMarkdown, items: reviewItems.length };
 }
 
 // ── report ────────────────────────────────────────────────────────────────────
@@ -478,7 +454,9 @@ const baseline = revisions.find((revision) => revision.id === 'baseline');
 const report = {
   mode: modelCalls ? 'offline_and_live' : 'offline',
   model_calls: modelCalls,
-  real_model_quality_measured: modelCalls > 0,
+  real_model_quality_measured: false,
+  real_model_replies_collected: modelCalls > 0,
+  human_review_pending: modelCalls > 0,
   model: modelCalls ? credentials.model : null,
   credentials_source: credentials.source,
   samples_per_scenario: modelCalls ? samplesPerScenario : 0,
@@ -487,9 +465,9 @@ const report = {
   filter: filter ?? null,
   prompt_fingerprint: candidate?.fingerprint ?? null,
   baseline_prompt_fingerprint: baseline?.fingerprint ?? null,
-  revisions: revisions.map((revision) => ({ id: revision.id, path: path.relative(root, revision.dir), fingerprint: revision.fingerprint })),
+  revisions: revisions.map((revision) => ({ id: revision.id, path: path.relative(root, revision.dir), fingerprint: revision.fingerprint, requests: revision.request_directory ?? null })),
   assembly_note: modelCalls
-    ? 'Live messages are composed from the real prompt sources in documented order; this approximates, but does not byte-match, companion_prompt.rs / prompt_modules.rs.'
+    ? 'Fixture inputs run through production Rust PromptBuildingStep, CompanionPrompt and generation request assembly. Both characters are sampled; live observations and tool execution are excluded. Naturalness still requires the blind human review.'
     : null,
   comparison_note: modelCalls
     ? (baseline
@@ -501,13 +479,12 @@ const report = {
   checks: results,
   model_results: modelResults,
 };
-await mkdir(path.join(root, 'tmp'), { recursive: true });
-const output = path.join(root, 'tmp/prompt-eval-report.json');
+const output = path.join(outDir, 'prompt-eval-report.json');
 await writeFile(output, `${JSON.stringify(report, null, 2)}\n`);
 
 const passed = results.filter((r) => r.passed).length;
 console.log(`\n[prompt-eval] ${passed}/${results.length} checks passed · mode=${report.mode} · real_model_quality_measured=${report.real_model_quality_measured}`);
-console.log(`[prompt-eval] report: ${path.relative(root, output)}`);
+console.log(`[prompt-eval] report: ${output}`);
 if (reviewSheet) console.log(`[prompt-eval] review sheet: ${reviewSheet.markdown} · ${reviewSheet.items} items`);
 if (!liveReady) {
   console.log('[prompt-eval] live model evaluation skipped — set VIVIAN_EVAL_ENDPOINT/_MODEL/_API_KEY (or .env.local) and pass --live.');

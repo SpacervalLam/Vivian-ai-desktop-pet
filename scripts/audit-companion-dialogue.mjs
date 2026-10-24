@@ -1,7 +1,8 @@
 // Offline diagnostics: run production UI handlers and the production truncator.
 // No model calls, personal histories or application settings are read.
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,9 @@ import { transformSync } from 'esbuild';
 import { evaluatePromptReply } from './prompt-reply-evaluation.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const outDir = path.join(root, 'tmp', 'companion-dialogue-audit');
+const outputArg = process.argv.indexOf('--output-dir');
+const outDir = outputArg >= 0 ? path.resolve(process.argv[outputArg + 1])
+  : await mkdtemp(path.join(tmpdir(), 'vivian-companion-dialogue-audit-'));
 await mkdir(outDir, { recursive: true });
 const read = name => readFile(path.join(root, name), 'utf8');
 const source = (await read('src/components/ChatWindow.tsx')).replaceAll('\r\n', '\n');
@@ -24,11 +27,14 @@ function handler(name) {
 }
 const chunkCode = handler('Chunk');
 const doneCode = handler('Done');
-function uiProbe(chunks, finalText) {
+const settlementCode = transformSync((await read('src/utils/chatStreamSettlement.ts')).replace('export function', 'function'), { loader: 'ts' }).code;
+function uiProbe(chunks, finalText, channel = 'wechat') {
   let messages = [], previews = {}, id = 0;
   const ref = current => ({ current });
   const context = {
-    groupStreamCharMapRef: ref(new Map()), groupStreamBuffersRef: ref(new Map()),
+    companionParagraphId: (_stream, message) => message,
+    groupStreamCharMapRef: ref(new Map(channel === 'wechat_group' ? [['probe', 'vivian']] : [])),
+    groupStreamBuffersRef: ref(new Map()), groupStreamSegmentIdsRef: ref(new Map()),
     groupStreamActiveIdRef: ref(new Map()), privateCharIdRef: ref('vivian'),
     streamBuffersRef: ref(new Map([['probe', '']])), streamSegmentIdsRef: ref(new Map()),
     streamActiveIdRef: ref(new Map()), typingDelayTimerRef: ref(null), typingSafetyTimerRef: ref(null),
@@ -37,12 +43,14 @@ function uiProbe(chunks, finalText) {
     hasVisibleChatText: text => Boolean(text.trim()), parseSticker: () => undefined,
     stripActions: text => text, nextId: () => String(++id), setPrivateTyping: () => {},
     setMessages: update => { messages = update(messages); },
+    setGroupMessages: update => { messages = update(messages); }, setGroupStreaming: () => {},
     setLastPreviews: update => { previews = update(previews); },
     invoke: async () => {}, window: { setTimeout: () => 1, clearTimeout: () => {} },
   };
   vm.createContext(context);
+  vm.runInContext(settlementCode, context);
   vm.runInContext(chunkCode, context);
-  const event = text => ({ payload: { text, stream_id: 'probe', character_id: 'vivian', channel: 'wechat' } });
+  const event = text => ({ payload: { text, stream_id: 'probe', character_id: 'vivian', channel } });
   for (const chunk of chunks) context.handler(event(chunk));
   const beforeDone = messages.length;
   vm.runInContext(doneCode, context);
@@ -58,7 +66,7 @@ const start = validation.indexOf('    fn truncate_at_boundary(');
 const end = validation.indexOf('\n    }', start) + '\n    }'.length;
 assert.ok(start >= 0 && end > start, 'production truncation function moved');
 const min = validation.match(/const MIN_KEEP_CHARS: usize = (\d+);/);
-const max = validation.match(/const MAX_RESPONSE_CHARS: usize = (\d+);/);
+const max = validation.match(/const MAX_RESPONSE_CHARS: usize = ([\d_]+);/);
 assert.ok(min && max);
 const rust = path.join(outDir, 'truncation.rs');
 const executable = path.join(outDir, process.platform === 'win32' ? 'truncation.exe' : 'truncation');
@@ -90,7 +98,12 @@ const report = {
   note: 'UI refs and display helpers are fixtures; production event handler bodies and truncation function execute unchanged.',
   short_reply: uiProbe(['嗯，先歇会儿。'], '嗯，先歇会儿。'),
   changed_final: uiProbe(['原始台词。'], '最终修订后的台词。'),
+  corrected_paragraphs: uiProbe(['旧的第一段。\n旧的第二段。'], '修正后的唯一一段。'),
+  silence_after_chunks: uiProbe(['不应保留。\n还有半句'], ''),
   final_without_chunks: uiProbe([], '只在最终事件出现的台词。'),
+  group_corrected: uiProbe(['旧的第一段。\n旧的第二段。'], '群聊最终回复。', 'wechat_group'),
+  group_silence: uiProbe(['不应保留。\n'], '', 'wechat_group'),
+  group_final_only: uiProbe([], '群聊最终事件。', 'wechat_group'),
   long_reply: { original_chars: [...'详细说明。'.repeat(150)].length,
     truncated_chars: [...truncated.stdout].length, ...uiProbe(['详细说明。'.repeat(150)], truncated.stdout) },
   example_libraries: libraries,
@@ -123,7 +136,8 @@ fn main() {
  for character in ["vivian", "nana"] {
   let r = ExampleRetriever::new(character, default_embedding());
   for (case, input) in &cases {
-   let content = r.retrieve(input, &[], None, &[]).unwrap_or_default();
+   let lang = if case.ends_with("_en") { "en" } else if case.ends_with("_ja") { "ja" } else { "zh" };
+   let content = r.retrieve(input, &[], None, &[], lang).unwrap_or_default();
    let ids: Vec<_> = content.lines().filter_map(|line| line.strip_prefix("Example ").filter(|s| !s.starts_with("response:"))).collect();
    out.push(serde_json::json!({"character":character,"case":case,"input":input,"ids":ids,"chars":content.chars().count()}));
   }
@@ -132,11 +146,17 @@ fn main() {
 }
 `);
   const probe = spawnSync('cargo', ['run', '--offline', '--quiet', '--manifest-path',
-    path.join(harness, 'Cargo.toml'), '--bin', 'naturalness_probe'], { encoding: 'utf8' });
+    path.join(harness, 'Cargo.toml'), '--bin', 'naturalness_probe'], { encoding: 'utf8',
+      env: { ...process.env, VIVIAN_TEST_DATA_DIR: path.join(outDir, 'retrieval-data') } });
   assert.equal(probe.status, 0, probe.stderr);
   report.retrieval = JSON.parse(probe.stdout);
 }
 const output = path.join(outDir, 'report.json');
+for (const [name, result] of Object.entries(report)) {
+  if (result && typeof result.shown_matches_final === 'boolean') {
+    assert.equal(result.shown_matches_final, true, `${name}: shown text must equal the authoritative final reply`);
+  }
+}
 await writeFile(output, JSON.stringify(report, null, 2) + '\n');
 for (const [name, result] of Object.entries(report)) {
   if (result && typeof result === 'object') {

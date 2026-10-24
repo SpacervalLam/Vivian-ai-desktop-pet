@@ -1,7 +1,8 @@
 // Compile the production example_retriever (with its own unit tests) without the desktop runtime.
 // Verifies the offline lexical-fallback channel: paraphrase recovery, literal priority,
 // single-fallback cap, thin-input rejection, continuation threshold, score band.
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,13 @@ const start = source.indexOf('pub fn is_short_followup');
 const end = source.indexOf('\n}\n', start) + 3;
 if (start < 0 || end < 3) throw new Error('is_short_followup slice not found');
 const followup = source.slice(start, end);
+const promptSource = (await readFile(path.join(root, 'src-tauri/src/pipeline/prompt_modules.rs'), 'utf8')).replaceAll('\r\n', '\n');
+const normalizeStart = promptSource.indexOf('pub fn normalize_lang');
+const normalizeEnd = promptSource.indexOf('\n}\n', normalizeStart) + 3;
+if (normalizeStart < 0 || normalizeEnd < 3) throw new Error('normalize_lang slice not found');
+const normalize = promptSource.slice(normalizeStart, normalizeEnd);
+const isolatedData = await mkdtemp(path.join(tmpdir(), 'vivian-voice-corpus-'));
+
 
 await writeFile(path.join(dir, 'Cargo.toml'), `[package]
 name="vivian-example-retriever-tests"
@@ -30,6 +38,11 @@ serde={version="1",features=["derive"]}
 serde_json="1"
 parking_lot="0.12"
 tracing="0.1"
+once_cell="1"
+sha2="0.10"
+uuid={version="1",features=["v4"]}
+tempfile="3"
+windows={version="0.61",features=["Win32_Storage_FileSystem"]}
 `);
 
 await writeFile(path.join(dir, 'src', 'lib.rs'), `#![allow(dead_code)]
@@ -43,6 +56,8 @@ pub mod memory {
         pub type VivianResult<T> = Result<T, String>;
         pub trait MemoryEmbeddingProvider: Send + Sync {
             fn dimension(&self) -> usize;
+            fn model_id(&self) -> &str { "fixture" }
+            fn index_identity(&self) -> String { self.model_id().into() }
             fn embed(&self, text: &str) -> VivianResult<Vec<f32>>;
             fn embed_batch(&self, texts: &[String]) -> VivianResult<Vec<Vec<f32>>> {
                 texts.iter().map(|t| self.embed(t)).collect()
@@ -72,6 +87,7 @@ pub mod error { pub type VivianResult<T> = Result<T, String>; }
 // exercises the real CompanionPrompt; it is skipped below because a stub here
 // could only test the stub. Full-crate cargo test covers it.
 pub mod pipeline { pub mod prompt_modules {
+${normalize}
     #[derive(Default)]
     pub struct PromptParts {
         pub char_id: String,
@@ -98,13 +114,27 @@ pub mod companion_prompt {
 pub mod message_context {
 ${followup}
 }}
+pub mod utils {
+    #[path="${rustPath(path.join(root, 'src-tauri/src/utils/fs.rs'))}"] pub mod fs;
+    pub mod path {
+        pub fn get_user_data_dir() -> std::path::PathBuf {
+            std::env::var_os("VIVIAN_TEST_DATA_DIR").expect("isolated test data").into()
+        }
+        pub fn get_character_data_dir(id: &str) -> std::path::PathBuf { get_user_data_dir().join("characters").join(id) }
+    }
+}
+pub mod emotion {
+    #[path="${rustPath(path.join(root, 'src-tauri/src/emotion/corpus_cache.rs'))}"] pub mod corpus_cache;
+}
+#[path="${rustPath(path.join(persona, 'example_library.rs'))}"] pub mod example_library;
+#[path="${rustPath(path.join(persona, 'embedding_snapshot.rs'))}"] mod embedding_snapshot;
 #[path="${rustPath(path.join(persona, 'example_retriever.rs'))}"] pub mod example_retriever;
 `);
 
-const result = spawnSync('cargo', ['test', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml'), '-j', '1', '--',
+const result = spawnSync('cargo', ['test', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml'), '--lib', '-j', '1', '--',
   '--test-threads=1', '--skip', 'modern_net_examples_reach_companion_prompt_without_remote_embeddings'], {
   cwd: root, stdio: 'inherit',
-  env: { ...process.env, CARGO_INCREMENTAL: '0', CARGO_PROFILE_DEV_DEBUG: '0' },
+  env: { ...process.env, VIVIAN_TEST_DATA_DIR: isolatedData, CARGO_INCREMENTAL: '0', CARGO_PROFILE_DEV_DEBUG: '0' },
 });
 if (result.error) throw result.error;
 process.exitCode = result.status ?? 1;

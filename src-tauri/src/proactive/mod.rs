@@ -22,6 +22,7 @@ pub mod inner_monologue;
 pub mod interjection;
 pub mod output;
 pub mod generation_retry;
+pub(crate) mod work_relay;
 pub mod mind_state;
 pub mod preference_learner;
 pub mod recap;
@@ -690,6 +691,7 @@ pub struct ProactiveOrchestrator {
     self_state: RwLock<Option<Arc<crate::self_state::SelfState>>>,
     /// 上次 Busy 知识采集完成时间戳（秒），用于采集任务级冷却（避免每次 Busy 都采集）
     last_knowledge_acquisition_ts: Arc<parking_lot::Mutex<f64>>,
+    work_relay_cache: parking_lot::Mutex<work_relay::RelayCache>,
     /// 上次知识分享表达时间戳（秒），用于分享冷却（避免频繁推送链接/分享消息）
     last_knowledge_share_ts: Arc<parking_lot::Mutex<f64>>,
     /// 内存压力状态（是否处于高位），用于 normal→high 转换检测
@@ -843,6 +845,9 @@ pub struct ProactiveAction {
     /// Host-owned callback identity; consumed only after successful delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_notice_id: Option<String>,
+    /// A scheduled promise is acknowledged only when its action reaches the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wakeup_id: Option<String>,
     /// Locked addressee selected before generation (legacy records may omit it).
     #[serde(default)]
     pub listener: Option<String>,
@@ -873,6 +878,7 @@ impl ProactiveAction {
     pub fn from_trigger(trigger: ProactiveTrigger, content: String, now: f64) -> Self {
         Self {
             work_notice_id: None,
+            wakeup_id: None,
             trigger: trigger.as_str().to_string(),
             content,
             timestamp: now,
@@ -968,6 +974,7 @@ impl ProactiveOrchestrator {
             tool_system: RwLock::new(None),
             self_state: RwLock::new(None),
             last_knowledge_acquisition_ts: Arc::new(parking_lot::Mutex::new(0.0)),
+            work_relay_cache: parking_lot::Mutex::new(work_relay::RelayCache::default()),
             last_knowledge_share_ts: Arc::new(parking_lot::Mutex::new(0.0)),
             memory_pressure_active: RwLock::new(false),
             last_screen_peek_denied: Arc::new(RwLock::new(None)),
@@ -1034,6 +1041,95 @@ impl ProactiveOrchestrator {
             .as_ref()
             .and_then(|d| d.last_assistant_timestamp())
             .map(|ts| (now - ts).max(0.0))
+    }
+
+    /// Bounded factual context reused by the existing current-thought request.
+    pub fn thought_conversation_context(&self, user_turn_active: bool) -> String {
+        let now = chrono::Utc::now().timestamp() as f64;
+        let context_version = self.mind.read().as_ref().map(|mind|
+            mind.thought_context_version.load(Ordering::SeqCst));
+        let recent: Vec<serde_json::Value> = self.dialogue.read().as_ref().map(|dialogue| {
+            let history = dialogue.get_history();
+            history.iter().rev().take(6).rev().map(|message| {
+                let (_, speaker, _) = crate::cross_character::parse_any_speaker_prefix(&message.content);
+                let user_evidence = message.role == "user"
+                    && message.meta.as_ref().is_none_or(|meta| meta.source == crate::messages::MessageSource::User)
+                    && speaker.as_deref().is_none_or(|name| !crate::mind::KNOWN_CHAR_IDS.contains(&name) && name != "I");
+                serde_json::json!({
+                    "speaker": message.role,
+                    "user_evidence": user_evidence,
+                    "text": message.content.chars().take(240).collect::<String>(),
+                    "seconds_ago": message.timestamp.map(|at| (now - at.timestamp() as f64).max(0.0)),
+                    "timestamp": message.timestamp.map(|at| at.timestamp()),
+                })
+            }).collect()
+        }).unwrap_or_default();
+        let recent_topics = self.mind.read().as_ref().map(|mind| {
+            mind.conversation_opportunities.read().recent_topics(now).into_iter().map(str::to_owned).collect::<Vec<_>>()
+        }).unwrap_or_default();
+        let since_own_speech = self.seconds_since_own_utterance(now);
+        let (observed_events, evaluated_meanings) = self.mind.read().as_ref().map(|mind| {
+            let opportunities = mind.conversation_opportunities.read();
+            (opportunities.events().to_vec(), opportunities.evaluated_meanings())
+        }).unwrap_or_default();
+        let willingness = self.config.read().proactivity;
+        let state = self.state.read();
+        serde_json::json!({"context_version": context_version, "snapshot_at": now, "conversation_timing": {
+            "seconds_since_user_interaction": (now - state.last_interaction_time).max(0.0),
+            "seconds_since_own_speech": since_own_speech,
+            "ignored_optional_messages": state.ignored_count,
+            "quiet_mode": state.quiet_mode,
+            "user_is_chatting": user_turn_active,
+            "willingness_to_initiate": willingness,
+            "recently_spoken_topics": recent_topics,
+        }, "recent_actual_dialogue": recent, "observed_conversation_events": observed_events,
+            "already_evaluated_meanings": evaluated_meanings}).to_string()
+    }
+
+    pub(crate) fn thought_decides_conversation(&self) -> bool {
+        self.config.read().enable_social_urge_gating && self.mind.read().is_some()
+            && self.world_provider.read().as_ref().is_some_and(|world| world.config().enable_inner_monologue)
+    }
+
+    fn observe_conversation_scene(&self, ctx: &TickContext) {
+        if !self.thought_decides_conversation() { return; }
+        let Some(mind) = self.mind.read().clone() else { return; };
+        let Some(world) = self.world_provider.read().clone() else { return; };
+        let config = self.config.read().clone();
+        let snapshot = world.snapshot(None);
+        // Title animations/progress counters do not create a new conversation event.
+        let window = snapshot.foreground_window.as_ref().filter(|window| !window.process.is_empty())
+            .map(|window| format!("用户切换到前台应用：{}", window.process.chars().take(100).collect::<String>()));
+        let music = snapshot.music.filter(|music| {
+            let source = music.source_app.to_lowercase();
+            music.status == crate::world::PlaybackStatus::Playing && !music.title.trim().is_empty()
+                && !["video","mpc","vlc","potplayer","bilibili","youtube","netflix","iqiyi","youku","tencent"]
+                    .iter().any(|video| source.contains(video))
+        }).filter(|_| config.enable_music_trigger)
+            .map(|music| format!("当前播放：{} - {}", music.artist, music.title));
+        let date = chrono::Local::now();
+        let festival = match (date.month(), date.day()) {
+            (1,1)=>Some("元旦"), (2,14)=>Some("情人节"), (3,8)=>Some("妇女节"),
+            (5,1)=>Some("劳动节"), (6,1)=>Some("儿童节"), (9,10)=>Some("教师节"),
+            (10,1)=>Some("国庆节"), (12,25)=>Some("圣诞节"), (12,31)=>Some("跨年夜"), _=>None,
+        }.map(|name| format!("{}，今天是{name}。", date.format("%Y-%m-%d")));
+        let scene = crate::mind::conversation::ConversationScene {
+            user_present: ctx.user_present,
+            music,
+            window: if config.enable_window_change_trigger { window } else { None },
+            festival,
+        };
+        let changed = mind.conversation_opportunities.write().observe_scene(scene, ctx.now);
+        if changed { mind.request_thought_refresh(); }
+    }
+
+    fn thought_opportunity(&self, ctx: &TickContext, state: &ProactiveState)
+        -> Option<crate::mind::conversation::ConversationOpportunity> {
+        if !ctx.can_address_user() || ctx.is_user_chatting || ctx.lay_low {
+            return None;
+        }
+        let candidate = self.mind.read().as_ref()?.fresh_conversation_opportunity(ctx.now)?;
+        (candidate.generated_at >= state.last_interaction_time).then_some(candidate)
     }
 
     /// 注入 LLM 路由器（注入后 BehaviorDecider / IcebreakerGenerator / MemoryRecall
@@ -1157,11 +1253,18 @@ impl ProactiveOrchestrator {
         if topics.is_empty() {
             return;
         }
-        // 记录采集完成时间戳，用于采集任务级冷却
-        *self.last_knowledge_acquisition_ts.lock() = chrono::Local::now().timestamp() as f64;
         let mut slot = self.signal_knowledge_acquired.lock();
         // 多次 Busy 任务产出的主题合并，下次 tick 统一播种
         slot.extend(topics);
+    }
+
+    /// Reserve before planning: an empty result is still a paid acquisition attempt.
+    pub fn try_begin_knowledge_acquisition(&self) -> bool {
+        let now = chrono::Local::now().timestamp() as f64;
+        let mut last = self.last_knowledge_acquisition_ts.lock();
+        if *last > 0.0 && now - *last < 1800.0 { return false; }
+        *last = now;
+        true
     }
 
     /// 检查 Busy 知识采集是否在冷却期内（避免每次 Busy 都触发采集）
@@ -1411,6 +1514,7 @@ impl ProactiveOrchestrator {
 
     pub(crate) fn ingest_world_events(&self, context: &TickContext) {
         if self.is_running() && self.config.read().enabled {
+            self.observe_conversation_scene(context);
             self.detect_and_apply_world_events(context);
         }
     }
@@ -1428,6 +1532,7 @@ impl ProactiveOrchestrator {
         if !self.config.read().enabled {
             return Ok(false);
         }
+        if !prepared { self.observe_conversation_scene(context); }
 
         // 0. 心理系统 Homeostasis tick（让 Needs/Emotion 自动回归 set point）
         if !prepared {
@@ -1681,6 +1786,18 @@ impl ProactiveOrchestrator {
                         }
                     }
                 }
+            } else if self.thought_decides_conversation() {
+                // Maturing a private thought does not itself authorize speaking. Feed the
+                // existing synthesis request so purpose, recent dialogue and novelty decide.
+                if let Some(mind) = self.mind.read().as_ref() {
+                    if trigger_kind == "want_to_share_knowledge" {
+                        mind.conversation_opportunities.write().observe_material("knowledge_ready", context_hint.clone(), now);
+                    } else {
+                        mind.push_working_memory(context_hint.clone(), crate::mind::WorkingMemorySource::InnerMonologue);
+                    }
+                    mind.request_thought_refresh();
+                }
+                self.thought_lifecycle.write().mark_expressed(&thought_key, now);
             } else if trigger_kind == "want_to_share_knowledge" {
                 // 对用户分享刚学到的知识：要求 leader 身份 + 用户在场
                 // 标记 Share 内容类型，命令层在触发与生成后依据场景选择渠道。
@@ -1747,15 +1864,14 @@ impl ProactiveOrchestrator {
         Ok(produced)
     }
 
-    fn fire_environment_opportunity(&self, context: &TickContext, plan: &CapabilityPlan, now: f64) -> bool {
-        if context.lay_low || context.is_user_chatting || plan.skip_action || !self.autonomous_contact_allowed() {
+    fn fire_environment_opportunity(&self, context: &TickContext, _plan: &CapabilityPlan, now: f64) -> bool {
+        if context.lay_low || context.is_user_chatting || !self.autonomous_contact_allowed() {
             return false;
         }
         let Some(wp) = self.world_provider.read().clone() else { return false; };
         let Some(opportunity) = wp.environment.take_opportunity(&self.char_id, now) else { return false; };
         let peer = opportunity.listener_id != "user";
         if peer {
-            if now - self.state.read().last_interaction_time < 120.0 { return false; }
             if !self.companions_snapshot().is_some_and(|c| c.id == opportunity.listener_id) { return false; }
         } else if !context.can_address_user() || !context.is_speaking_leader {
             return false;
@@ -1768,21 +1884,8 @@ impl ProactiveOrchestrator {
                 _ => ProactiveTrigger::Spontaneous,
             }
         };
-        // 这条机会路径不经过 check_trigger，续话题的「自己刚说完」门槛在这里补一次。
-        if trigger == ProactiveTrigger::TopicExtension
-            && self
-                .seconds_since_own_utterance(now)
-                .is_some_and(|secs| secs < TOPIC_EXTENSION_SELF_SPEECH_GAP_SECS)
-        {
-            return false;
-        }
-        {
-            let state = self.state.read();
-            if (!peer && state.last_proactive_speech_time > 0.0
-                && now - state.last_proactive_speech_time < OPTIONAL_PROACTIVE_SPEECH_GAP_SECS)
-                || state.last_trigger_times.get(trigger.as_str()).is_some_and(|at|
-                    now - *at < self.config.read().min_trigger_interval as f64) { return false; }
-        }
+        // The scene planner already selected an observed event and an audience.
+        // A different meaningful event is not blocked by an earlier unrelated utterance.
         let Some(router) = self.model_router.read().clone() else { return false; };
         let hour = chrono::Local::now().hour();
         let Some(content) = self.try_llm_content(trigger, context, hour, &router, None) else { return false; };
@@ -1840,7 +1943,7 @@ impl ProactiveOrchestrator {
         self.decay_backoff(now);
 
         // lay_low=true 或 skip_action=true 或已产出 → 跳过
-        if context.lay_low || plan.skip_action || already_produced {
+        if context.lay_low || (plan.skip_action && !self.thought_decides_conversation()) || already_produced {
             return false;
         }
 
@@ -1869,11 +1972,6 @@ impl ProactiveOrchestrator {
                     let action = behavior.into_action(trigger, now);
                     self.push_action(action, trigger);
                     self.update_trigger_time(trigger, now, hour, minute, true);
-                    if trigger == ProactiveTrigger::Spontaneous {
-                        if let Some(mind) = self.mind.read().as_ref() {
-                            mind.mark_opportunity_spoken();
-                        }
-                    }
                     tick_msg_count += 1;
                 }
             }
@@ -1920,7 +2018,7 @@ impl ProactiveOrchestrator {
     /// - plan.ordered_triggers 为空（psychology 未注入或低于阈值）时回退到 active_triggers() 静态优先级
     /// - 否则按 plan 顺序输出配置启用的触发器，再追加未在 plan 中但配置启用的触发器
     fn ordered_active_triggers(&self, plan: &CapabilityPlan) -> Vec<ProactiveTrigger> {
-        if plan.skip_action {
+        if plan.skip_action && !self.thought_decides_conversation() {
             return Vec::new();
         }
         let active = self.active_triggers();
@@ -2471,6 +2569,7 @@ impl ProactiveOrchestrator {
     /// - 用户活跃（空闲 < 300s，不对着空电脑说话）
     /// - 当晚（按本地日期）未提醒过 + 冷却兜底
     fn maybe_late_night(&self, context: &TickContext, now: f64) -> bool {
+        if self.thought_decides_conversation() { return false; }
         use chrono::Timelike;
         if !self.config.read().enable_late_night_trigger {
             return false;
@@ -2526,6 +2625,7 @@ impl ProactiveOrchestrator {
     /// 会话跟踪由 poll_window 维护（类别变化重置计时）。
     /// 触发后重置会话计时 + 冷却兜底，同一会话内 2 小时内不重复提醒。
     fn maybe_app_duration_reminder(&self, context: &TickContext, now: f64) -> bool {
+        if self.thought_decides_conversation() { return false; }
         if !self.config.read().enable_app_duration_trigger {
             return false;
         }
@@ -2594,6 +2694,7 @@ impl ProactiveOrchestrator {
     ///
     /// 播放状态跟踪每次 tick 都更新（无论是否触发），保证变化检测不丢失。
     fn maybe_music_changed(&self, context: &TickContext, now: f64) -> bool {
+        if self.thought_decides_conversation() { return false; }
         let wp = match self.world_provider.read().as_ref() {
             Some(wp) => wp.clone(),
             None => return false,
@@ -3217,41 +3318,27 @@ impl ProactiveOrchestrator {
 
     /// 消费到期的自主唤醒任务：逐条生成主动消息并入队
     ///
-    /// 只处理最早到期的一条（单 tick 最多兑现一个承诺，保持自然），
-    /// 其余顺延到后续 tick。LLM 生成失败的任务也标记消费（防死循环重试）。
+    /// One promise per tick; keep its identity and retry until actual delivery.
     fn consume_due_wakeups(&self, ctx: &TickContext, now: f64) -> bool {
         let scheduler = crate::proactive::wakeup::get_scheduler(&self.char_id);
-        let due = scheduler.drain_due(now);
-        if due.is_empty() {
-            return false;
+        let Some(first) = scheduler.next_due(now) else { return false; };
+        if self.pending_messages.read().iter().any(|m| m.wakeup_id.as_deref() == Some(&first.id)) {
+            return true;
         }
-        let mut produced = false;
-        // 单 tick 只兑现最早的一条，其余重新入队顺延
-        let (first, rest) = due.split_first().expect("due 非空");
-        for w in rest {
-            let _ = scheduler.schedule(w.due_at - now, &w.purpose);
-        }
-        match self.generate_wakeup_message(ctx, &first.purpose) {
-            Some(content) => {
-                self.push_message(ProactiveTrigger::Spontaneous, content, now);
-                produced = true;
-                tracing::info!(
-                    "[wakeup] 自主唤醒兑现: purpose=\"{}\"",
-                    first.purpose
-                );
-            }
-            None => {
-                tracing::warn!(
-                    "[wakeup] 唤醒消息生成失败，任务丢弃: purpose=\"{}\"",
-                    first.purpose
-                );
-            }
-        }
-        produced
+        scheduler.defer(&first.id, now);
+        let Some(content) = self.generate_wakeup_message(ctx, &first.purpose) else { return false; };
+        let mut action = ProactiveAction::from_trigger(ProactiveTrigger::Spontaneous, content, now);
+        action.wakeup_id = Some(first.id);
+        action.listener = Some("user".into());
+        action.delivery_channel = if crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id).as_deref() == Some("wechat") {
+            DeliveryChannel::ChatWindow
+        } else { DeliveryChannel::Bubble };
+        self.push_action(action, ProactiveTrigger::Spontaneous);
+        true
     }
 
     /// 依据唤醒目的生成一句兑现承诺的主动消息
-    fn generate_wakeup_message(&self, ctx: &TickContext, purpose: &str) -> Option<String> {
+    fn generate_wakeup_message(&self, _ctx: &TickContext, purpose: &str) -> Option<String> {
         let router = self.model_router.read().clone()?;
         let handle = tokio::runtime::Handle::try_current().ok()?;
 
@@ -3269,7 +3356,7 @@ impl ProactiveOrchestrator {
                     .as_ref()
                     .map(|psy| psy.relationship().intimacy * 100.0)
                     .unwrap_or(50.0);
-                p.build_style_prompt(intimacy, ctx.now as u32 % 24)
+                p.dialogue_voice_prompt(intimacy, chrono::Local::now().format("%H").to_string().parse().unwrap_or(12))
             })
             .unwrap_or_default();
 
@@ -3351,7 +3438,7 @@ impl ProactiveOrchestrator {
             .unwrap_or(50.0);
         let system_prompt = persona
             .as_ref()
-            .map(|p| p.build_style_prompt(intimacy, snap.hour))
+            .map(|p| p.dialogue_voice_prompt(intimacy, snap.hour))
             .unwrap_or_default();
         let thoughts_context = self.thought_lifecycle.read().build_context_hint();
 
@@ -3491,7 +3578,7 @@ impl ProactiveOrchestrator {
             .unwrap_or(50.0);
         let system_prompt = persona
             .as_ref()
-            .map(|p| p.build_style_prompt(intimacy, snap.hour))
+            .map(|p| p.dialogue_voice_prompt(intimacy, snap.hour))
             .unwrap_or_default();
         let thoughts_context = self.thought_lifecycle.read().build_context_hint();
 
@@ -3610,7 +3697,7 @@ impl ProactiveOrchestrator {
             .unwrap_or(50.0);
         let system_prompt = persona
             .as_ref()
-            .map(|p| p.build_style_prompt(user_intimacy, snap.hour))
+            .map(|p| p.dialogue_voice_prompt(user_intimacy, snap.hour))
             .unwrap_or_default();
         let thoughts_context = self.thought_lifecycle.read().build_context_hint();
 
@@ -3828,6 +3915,7 @@ impl ProactiveOrchestrator {
 
     /// 特殊日期问候
     fn try_special_date_greeting(&self, now: f64) -> bool {
+        if self.thought_decides_conversation() { return false; }
         let dt = chrono::Local::now();
         let today_key = format!("{:02}-{:02}", dt.month(), dt.day());
         // 节日映射：(日期, 节日名, 兜底文案)
@@ -3857,15 +3945,14 @@ impl ProactiveOrchestrator {
             .insert(ProactiveTrigger::HourlyGreeting.as_str().to_string(), now);
         drop(state);
 
-        let (_, festival_name, fallback) = festival.unwrap();
-        let text = self.generate_festival_greeting(festival_name)
-            .unwrap_or_else(|| fallback.to_string());
+        let (_, festival_name, _) = festival.unwrap();
+        let Some(text) = self.generate_festival_greeting(festival_name) else { return false; };
         self.push_message(ProactiveTrigger::HourlyGreeting, text, now);
         let _ = self.save_to();
         true
     }
 
-    /// 通过 LLM 生成节日问候（失败时返回 None，由调用方回退到兜底文案）
+    /// 通过 LLM 决定节日问候是否自然；失败或弃权均不生成固定文案。
     fn generate_festival_greeting(&self, festival_name: &str) -> Option<String> {
         let router = self.model_router.read().clone()?;
         let handle = tokio::runtime::Handle::try_current().ok()?;
@@ -3880,7 +3967,7 @@ impl ProactiveOrchestrator {
             .unwrap_or(50.0);
         let system_prompt = persona
             .as_ref()
-            .map(|p| p.build_style_prompt(intimacy, snap.hour))
+            .map(|p| p.dialogue_voice_prompt(intimacy, snap.hour))
             .unwrap_or_default();
         let char_id = self.char_id.clone();
         let festival_name = festival_name.to_string();
@@ -3890,7 +3977,7 @@ impl ProactiveOrchestrator {
             use crate::types::response::ChatMessage;
 
             let user_msg = format!(
-                "今天是{}。请用你的风格对用户说一句节日问候，简短自然，像随口说的，25字以内。\n\
+                "今天是{}。结合最近真实交流判断此刻问候是否自然，有具体表达意图才开口；日期本身不要求发言，已说过或不适合就输出 DONT_NOTIFY。若开口，用你的风格简短自然地说一句，25字以内。\n\
                  不要客套话，不要百科式介绍，用你自己的语气。只能提及节日本身，不要编造你没做过的事。\n\n\
                  严格输出JSON：{{\"text\": \"你要说的话\", \"expression\": \"表情名\"}}",
                 festival_name
@@ -3908,6 +3995,7 @@ impl ProactiveOrchestrator {
             match router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages).with_temperature(0.9).with_character_id(self.char_id.clone())).await {
                 Ok(text) => {
                     let text = text.trim();
+                    if behavior::is_proactive_silence(text) { return None; }
                     if let Some(content) = Self::parse_proactive_json(text) {
                         if content.text.len() >= 2 { Some(content.text) } else { None }
                     } else {
@@ -3955,6 +4043,13 @@ impl ProactiveOrchestrator {
         let behavior = crate::character_behavior::get_behavior(&self.char_id);
         let mods = behavior.trigger_modifiers;
 
+        // Silence, missing decisions and expired decisions never fall back to a clock rule.
+        // One canonical trigger preserves the same downstream persona/delivery pipeline.
+        if self.thought_decides_conversation() && trigger.is_optional_conversation() {
+            return trigger == ProactiveTrigger::Spontaneous && cfg.proactivity > 0.0
+                && self.thought_opportunity(ctx, &state).is_some();
+        }
+
         // 策略 C：greeting 类触发器受 speech_desire 门控
         // 欲望不够时跳过，让两个角色的"想说话"峰值出现在不同时刻
         let is_greeting = matches!(
@@ -3989,12 +4084,6 @@ impl ProactiveOrchestrator {
         {
             return false;
         }
-
-        // 策略 G：social_urge 提前触发说明
-        // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
-        // urge 很高时（>= 0.8）在 check_specific 中放宽问候的"特定条件"（整点/空闲阈值等），
-        // 让角色在"真的想说话"时提前问候。urge 中/低时不拦截规则触发（保底不漏）。
-        // 具体实现见 check_specific 开头。可通过 proactive.enable_social_urge_gating 关闭。
 
         // 冷却检查（所有触发器共用）—— min_trigger_interval 作为全局下限
         // 策略 B：冷却秒数乘以角色专属 cooldown_mult
@@ -4099,16 +4188,7 @@ impl ProactiveOrchestrator {
             hour,
             &behavior.timing_weights,
         );
-        let thought_opportunity = trigger == ProactiveTrigger::Spontaneous
-            && cfg.enable_social_urge_gating
-            && ctx.user_present && !ctx.is_user_chatting
-            && (90.0..=240.0).contains(&ctx.idle_seconds)
-            && self.mind.read().as_ref().is_some_and(|mind| {
-                mind.social_urge_snapshot() >= 0.8
-                    && mind.fresh_conversation_opportunity(now).is_some()
-            });
-        let effective_threshold = if thought_opportunity { 0.4 } else { throttle.threshold }
-            * mods.threshold_mult;
+        let effective_threshold = throttle.threshold * mods.threshold_mult;
         if timing_score < effective_threshold {
             return false;
         }
@@ -4123,7 +4203,7 @@ impl ProactiveOrchestrator {
         // 策略 F：乘以触发类型亲和度（主攻类型 >1.0，非主攻 <1.0）
         let learned_mult = self.preference_learner.get_probability_multiplier(trigger);
         let affinity = behavior.trigger_affinity.get(trigger);
-        let scaled_probability = (if thought_opportunity { 0.5 } else { throttle.probability })
+        let scaled_probability = throttle.probability
             * cfg.proactivity.clamp(0.0, 1.0)
             * learned_mult
             * mods.probability_mult
@@ -4155,40 +4235,9 @@ impl ProactiveOrchestrator {
         minute: u32,
         orchestrator: &Self,
     ) -> bool {
-        // 当前想法仅为具体话题提供提前搭话候选；不再凭抽象社交冲动提前问候。
-        // current_thought 每 60s 调 LLM 顺便产出 social_urge（0-1），
-        // 表示角色"现在想主动搭话"的冲动强度。
-        //   urge >= 0.8 → 提前触发（跳过整点/空闲阈值等特定条件）
-        //   urge < 0.3  → 拦截规则（时间到但角色不想说话，推迟到下次）
-        //   中间值      → 正常规则触发（保底）
-        // 规则本身没有语义，时间到不一定适合问候；但 urge 持续低时不问候也合理。
-        // 通用门控（冷却/时机分数/概率）已在 check_trigger 前置流程中检查，这里不重复。
-        // WelcomeBack 不受影响：它有自己的"用户刚回来"语义，不应被 urge 绕过。
-        // 可通过 proactive.enable_social_urge_gating 开关关闭。
-        if orchestrator.config.read().enable_social_urge_gating
-            && matches!(
-                trigger,
-                ProactiveTrigger::HourlyGreeting
-                    | ProactiveTrigger::IdleGreeting
-                    | ProactiveTrigger::Icebreaker
-            )
-        {
-            const URGE_LOW: f32 = 0.3;
-            let urge = orchestrator
-                .mind
-                .read()
-                .as_ref()
-                .and_then(|m| m.fresh_social_urge_snapshot(ctx.now))
-                .unwrap_or(0.5);
-            if urge < URGE_LOW {
-                tracing::debug!(
-                    "[check_specific] {} 推迟：social_urge={:.2} < {:.2}",
-                    trigger.as_str(),
-                    urge,
-                    URGE_LOW
-                );
-                return false;
-            }
+        if orchestrator.thought_decides_conversation() && trigger.is_optional_conversation() {
+            return trigger == ProactiveTrigger::Spontaneous
+                && orchestrator.thought_opportunity(ctx, state).is_some();
         }
 
         match trigger {
@@ -4214,16 +4263,6 @@ impl ProactiveOrchestrator {
             ProactiveTrigger::Spontaneous => {
                 if ctx.is_user_chatting {
                     return false;
-                }
-                if orchestrator.config.read().enable_social_urge_gating
-                    && ctx.user_present
-                    && (90.0..=240.0).contains(&ctx.idle_seconds)
-                    && orchestrator.mind.read().as_ref().is_some_and(|mind| {
-                        mind.social_urge_snapshot() >= 0.8
-                            && mind.fresh_conversation_opportunity(ctx.now).is_some()
-                    })
-                {
-                    return true;
                 }
                 let min_idle = throttle
                     .min_idle_seconds
@@ -4479,6 +4518,22 @@ impl ProactiveOrchestrator {
         _minute: u32,
     ) -> Option<BehaviorContent> {
         let router = self.model_router.read().clone()?;
+        if trigger == ProactiveTrigger::Spontaneous && self.thought_decides_conversation() {
+            let mind = self.mind.read().clone()?;
+            let context_version=mind.thought_context_version.load(Ordering::SeqCst);
+            let candidate = mind.take_conversation_opportunity(ctx.now)?;
+            let hint = serde_json::json!({"intent": format!("{:?}", candidate.intent),
+                "topic": candidate.topic, "evidence": candidate.evidence, "purpose": candidate.reason,
+                "meaning_key": candidate.meaning_key, "event_id": candidate.event_id,
+                "seconds_since_proposal": (ctx.now-candidate.generated_at).max(0.0)}).to_string();
+            let result = self.try_llm_content(trigger, ctx, hour, &router, Some(&hint));
+            if let Some(content) = &result {
+                mind.record_opportunity_generated(candidate, &content.text, chrono::Utc::now().timestamp() as f64);
+            } else if self.generation_retry.lock().retry_pending(&generation_retry::scope_key(trigger.as_str(),Some(&hint))) {
+                mind.restore_conversation_after_failure(candidate,context_version);
+            }
+            return result;
+        }
         self.try_llm_content(trigger, ctx, hour, &router, None)
     }
 
@@ -4600,7 +4655,8 @@ impl ProactiveOrchestrator {
         &self, trigger: ProactiveTrigger, ctx: &TickContext, hour: u32,
         router: &Arc<ModelRouter>, extra_hint: Option<&str>,
     ) -> Option<BehaviorContent> {
-        let mut attempt = match generation_retry::Attempt::reserve(&self.generation_retry, trigger.as_str(), ctx.now) {
+        let retry_key=generation_retry::scope_key(trigger.as_str(),extra_hint);
+        let mut attempt = match generation_retry::Attempt::reserve(&self.generation_retry, &retry_key, ctx.now) {
             Some(attempt) => attempt,
             None => {
                 tracing::debug!(character = %self.char_id, trigger = trigger.as_str(), "主动生成跳过：正在生成或失败退避中");
@@ -4612,6 +4668,41 @@ impl ProactiveOrchestrator {
         result
     }
 
+    fn work_callback_content(&self, ctx: &TickContext, hour: u32, router: &Arc<ModelRouter>, facts: &str) -> Option<BehaviorContent> {
+        let persona = self.persona.read().clone();
+        let intimacy = self.psychology.read().as_ref().map(|p| p.relationship().intimacy * 100.0).unwrap_or(50.0);
+        let language = persona.as_ref().map(|p|p.get_language()).unwrap_or_else(||"zh".into());
+        // Keep the selected speaker's identity, temperament and configured speech;
+        // scene delivery alone does not identify Vivian/Nana.
+        let voice = persona.as_ref().map(|p|format!("{}\n{}",
+            crate::persona::prompt_render::render_dialogue_note(&p.get_config(), &language),
+            p.build_style_prompt(intimacy,hour)))
+            .unwrap_or_else(||behavior::default_persona_prompt(&language,&self.char_id));
+        let voice = format!("{}\n{}", voice, crate::config::personalization::prompt_section());
+        let channel = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id).unwrap_or_else(||"wechat".into());
+        let key = work_relay::RelayKey {character:self.char_id.clone(),voice,language,channel,facts:facts.into()};
+        if let Some(content) = self.work_relay_cache.lock().get(&key,ctx.now) {
+            tracing::debug!(character=%self.char_id,"work callback draft reused without a model request");
+            return Some(content);
+        }
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let messages = work_relay::messages(&key);
+        tracing::debug!(character=%self.char_id,input_tokens_estimate=crate::utils::token_estimate::estimate_messages_tokens(&messages),"work callback bounded prompt");
+        let request = LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
+            .with_character_id(self.char_id.clone()).with_usage_tag("work_callback")
+            .without_framework_instructions().with_max_tokens(work_relay::OUTPUT_TOKENS).with_reasoning(false);
+        let raw = block_on_proactive(&handle, router.generate(request)).ok()?;
+        let planned = if key.channel == "wechat" {"chat_window"} else {"bubble"};
+        let data = output::normalize(&raw,planned).ok()??;
+        if !output::matches_listener(&data,"user") { return None; }
+        let mut content = Self::parse_proactive_json(&data.to_string())?;
+        content.listener=Some("user".into());
+        content.content_type=ContentType::Info;
+        content.value_score=None;
+        self.work_relay_cache.lock().insert(key,content.clone(),ctx.now);
+        Some(content)
+    }
+
     fn try_llm_content_unchecked(
         &self,
         trigger: ProactiveTrigger,
@@ -4621,6 +4712,9 @@ impl ProactiveOrchestrator {
         extra_hint: Option<&str>,
         attempt: &mut generation_retry::Attempt,
     ) -> Option<BehaviorContent> {
+        if trigger == ProactiveTrigger::WorkNotice {
+            if let Some(facts) = extra_hint { return self.work_callback_content(ctx, hour, router, facts); }
+        }
         // 仅对提供了 prompt 的触发器尝试 LLM
         if !matches!(
             trigger,
@@ -4654,12 +4748,6 @@ impl ProactiveOrchestrator {
 
         // 预先读取字段，避免在异步块中持有锁
         let mut mem = self.recent_memory.read().clone();
-        if trigger == ProactiveTrigger::Spontaneous && self.config.read().enable_social_urge_gating {
-            if let Some(candidate) = self.mind.read().as_ref()
-                .and_then(|mind| mind.fresh_conversation_opportunity(ctx.now)) {
-                mem.push_str(&format!("\n[当前有价值的话题] {}。依据：{}。只在自然且不重复时提起；无话可说则保持沉默。", candidate.topic, candidate.evidence));
-            }
-        }
         let mind_state = self.get_mind_state().as_str().to_string();
         let prompt_step_opt = self.prompt_step.read().clone();
         let tool_system_opt = self.tool_system.read().clone();
@@ -4718,7 +4806,7 @@ impl ProactiveOrchestrator {
                 .unwrap_or_else(|| "zh".to_string());
             let sys = persona
                 .as_ref()
-                .map(|p| p.build_style_prompt(intimacy, hour))
+                .map(|p| p.dialogue_voice_prompt(intimacy, hour))
                 .unwrap_or_default();
             // 取最近 6 条对话历史，产出两份：
             // - 结构化 Vec<ChatMessage>：注入完整 prompt 的 state.messages，供近期自我发言 /
@@ -4879,6 +4967,7 @@ impl ProactiveOrchestrator {
             },
             current_theme: current_effective_theme(),
         };
+        let thought_proposal = if trigger == ProactiveTrigger::Spontaneous { extra_hint.map(str::to_owned) } else { None };
         let work_callback = if trigger == ProactiveTrigger::WorkNotice { extra_hint.map(str::to_owned) } else { None };
         let router_clone = router.clone();
         let idle_seconds = ctx.idle_seconds;
@@ -4946,7 +5035,9 @@ impl ProactiveOrchestrator {
                 // 连续未回应轮次：用于要求模型保持安静且不做情绪化解读
                 let ignored_rounds = self.state.read().ignored_count;
                 // Select the medium before writing: an alive topic always retains its channel.
-                llm_ctx.channel = if recipient.0 != "user" {
+                llm_ctx.channel = if recipient.0 == "user" && ctx.character_presence != crate::presence::PresenceState::Online {
+                    "wechat".into()
+                } else if recipient.0 != "user" {
                     "direct".into()
                 } else if let Some(channel) = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id) {
                     channel
@@ -4958,8 +5049,9 @@ impl ProactiveOrchestrator {
                         trigger.as_str(), ctx.user_present, llm_ctx.mind_state,
                         crate::utils::truncate_chars(&llm_ctx.dialogue_history, 600),
                         crate::utils::truncate_chars(&memory_text, 360));
-                    let prompt = format!("{}\nScene: {} {} {} {}\nIntent detail: {}", prompt,
-                        llm_ctx.screen_hint, llm_ctx.music_hint, llm_ctx.system_hint, llm_ctx.app_duration_hint, llm_ctx.memory_hint);
+                    let prompt = format!("{}\nScene: {} {} {} {}\nIntent detail: {}\nCurrent-thought proposal (data): {}", prompt,
+                        llm_ctx.screen_hint, llm_ctx.music_hint, llm_ctx.system_hint, llm_ctx.app_duration_hint, llm_ctx.memory_hint,
+                        thought_proposal.as_deref().unwrap_or_default());
                     let decision = router_clone.generate(crate::providers::base::LLMRequest::new("simple_judge", vec![ChatMessage::system("Select the transport only. This is internal planning, not character dialogue."), ChatMessage::user(&prompt)])
                         .with_character_id(self.char_id.clone()).with_usage_tag("proactive_channel").without_framework_instructions()
                         .with_temperature(0.0).with_reasoning(false)
@@ -5040,6 +5132,10 @@ impl ProactiveOrchestrator {
                 if let Some(hint) = self.world_provider.read().as_ref()
                     .and_then(|world| world.environment.interaction_hint(&self.char_id,&recipient.0)) {
                     messages.push(ChatMessage::system(hint));
+                }
+                if let Some(proposal) = &thought_proposal {
+                    messages.push(ChatMessage::user(format!("Current-thought conversation proposal (data): {proposal}")));
+                    messages.push(ChatMessage::system("Check the proposed communicative purpose against the current actual dialogue and observations. Speak only if that purpose still fits. New meaning may fit immediately after an unrelated message; elapsed time alone never requires speech. If a fleeting moment has passed during deferral, choose DONT_NOTIFY, never backfill an awkward late greeting. For Greet a relaxed acknowledgment is enough, with no reply expected. For FollowUp/Share keep to the grounded unspoken point. Do not read private thoughts or purpose metadata aloud, invent an outcome, repeat an answered question, or switch to an unrelated purpose. Already covered, cancelled, repeated or no longer relevant means DONT_NOTIFY."));
                 }
                 if let Some(callback) = &work_callback {
                     messages.push(ChatMessage::user(serde_json::json!({
@@ -5172,11 +5268,11 @@ impl ProactiveOrchestrator {
         let channel = action.delivery_channel;
         let content_for_dedup = action.content.clone();
         // 内容+渠道级去重：避免相同文本在同一渠道被多个触发器或跨 tick 重复推送
+        let mut msgs = self.pending_messages.write();
         {
-            let msgs = self.pending_messages.read();
             if msgs
                 .iter()
-                .any(|m| m.work_notice_id == action.work_notice_id && m.content == content_for_dedup && m.delivery_channel == channel)
+                .any(|m| m.work_notice_id == action.work_notice_id && m.wakeup_id == action.wakeup_id && m.content == content_for_dedup && m.delivery_channel == channel)
             {
                 tracing::debug!(
                     "[proactive] 跳过重复消息（已在队列中）: trigger={}, channel={:?}",
@@ -5186,7 +5282,7 @@ impl ProactiveOrchestrator {
                 return;
             }
         }
-        if action.work_notice_id.is_none() {
+        if action.work_notice_id.is_none() && action.wakeup_id.is_none() {
             let recent = self.recent_sent_contents.read();
             if recent
                 .iter()
@@ -5201,23 +5297,17 @@ impl ProactiveOrchestrator {
             }
         }
 
-        let mut msgs = self.pending_messages.write();
-        let action_ts = action.timestamp;
         msgs.push(action);
         if msgs.len() > 10 {
             msgs.remove(0);
         }
-        // 阶梯退避：成功推送一次主动消息 → 连续打扰计数 +1（用户交互时归零）
-        // 后续 check_trigger 冷却按指数拉长，实现"打扰越多间隔越长"的渐进收敛
-        {
-            let max_level = self.config.read().backoff_max_level;
-            let mut state = self.state.write();
-            state.consecutive_interruptions =
-                (state.consecutive_interruptions + 1).min(max_level + 2);
-            state.last_interruption_at = chrono::Local::now().timestamp() as f64;
-            // 权威后端冷落检测锚点：记录本次主动消息投递时间，tick 内据此判定是否被忽略
-            state.pending_proactive_at = action_ts;
-        }
+        tracing::info!("主动消息入队: {}", trigger.as_str());
+    }
+
+    /// Only receipts that reached the user may affect repetition and interruption learning.
+    pub fn record_delivered(&self, action: &ProactiveAction, delivered_at: f64) {
+        let channel = action.delivery_channel;
+        let content_for_dedup = action.content.clone();
         // 记录到近期发送缓冲区（保留最近 5 条，防止跨 tick 重复）
         {
             let mut recent = self.recent_sent_contents.write();
@@ -5225,6 +5315,20 @@ impl ProactiveOrchestrator {
             if recent.len() > 5 {
                 recent.remove(0);
             }
+        }
+        // Requested work callbacks and scheduled promises are not unsolicited small talk.
+        if action.work_notice_id.is_some() || action.wakeup_id.is_some() { return; }
+        let Some(trigger) = ProactiveTrigger::all().iter().find(|trigger| trigger.as_str() == action.trigger).copied() else { return; };
+        // 阶梯退避：成功推送一次主动消息 → 连续打扰计数 +1（用户交互时归零）
+        // 后续 check_trigger 冷却按指数拉长，实现"打扰越多间隔越长"的渐进收敛
+        {
+            let max_level = self.config.read().backoff_max_level;
+            let mut state = self.state.write();
+            state.consecutive_interruptions =
+                state.consecutive_interruptions.saturating_add(1).min(max_level.saturating_add(2));
+            state.last_interruption_at = delivered_at;
+            // 权威后端冷落检测锚点：记录本次主动消息投递时间，tick 内据此判定是否被忽略
+            state.pending_proactive_at = delivered_at;
         }
         // 偏好学习：记录触发器已触发，后续 on_user_interacted/on_ignored 归因响应
         self.preference_learner.record_trigger_fired(trigger);
@@ -5243,7 +5347,6 @@ impl ProactiveOrchestrator {
                 *self.speech_desire.write() = behavior.speech_desire.initial_desire;
             }
         }
-        tracing::info!("主动消息入队: {}", trigger.as_str());
     }
 
     /// 推进触发器冷却时间。
@@ -5435,6 +5538,7 @@ impl ProactiveOrchestrator {
     ///
     /// 未回应只用于调度退避，不代表用户在拒绝角色或关系发生变化。
     pub fn on_user_interacted(&self) -> VivianResult<()> {
+        if let Some(mind) = self.mind.read().as_ref() { mind.invalidate_conversation_opportunity(); }
         {
             let mut state = self.state.write();
             state.ignored_count = 0;
@@ -5578,6 +5682,8 @@ pub struct TickContext {
     pub away_seconds: f64,
     /// 用户是否在场
     pub user_present: bool,
+    /// 生成前的角色在场状态；非在线状态强制使用私聊。
+    pub character_presence: crate::presence::PresenceState,
     /// Conversation closure suppresses contact with the user, not contact with roommates.
     pub user_contact_blocked: bool,
     /// 今日交互次数
@@ -5691,6 +5797,7 @@ impl Default for ProactiveOrchestrator {
                 prompt_step: RwLock::new(None),
                 tool_system: RwLock::new(None),
                 last_knowledge_acquisition_ts: Arc::new(parking_lot::Mutex::new(0.0)),
+            work_relay_cache: parking_lot::Mutex::new(work_relay::RelayCache::default()),
                 last_knowledge_share_ts: Arc::new(parking_lot::Mutex::new(0.0)),
                 memory_pressure_active: RwLock::new(false),
                 last_screen_peek_denied: Arc::new(RwLock::new(None)),

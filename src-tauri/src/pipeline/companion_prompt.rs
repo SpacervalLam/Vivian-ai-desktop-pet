@@ -50,7 +50,12 @@ impl CompanionPrompt {
         use Position::*;
         use SectionLayer::*;
         let mut prompt = Self::default();
+        let has_tools = parts.tools.as_deref().is_some_and(|t| !t.trim().is_empty());
         prompt.push("dialogue", companion_dialogue_rules(&parts.language), Framework, Main, 0);
+        // 语气块：chat_style / human_feel / focus / rhythm / banned_phrases 五合一。
+        // 2026-10-24 之前主链路只推 companion_dialogue，「短回复/沉默/禁客服腔」
+        // 这些规则到不了桌宠主对话（只在 legacy 预览与 proactive 路径生效）。
+        prompt.push("tone", dialogue_tone_rules(&parts.language), Framework, Main, 0);
         prompt.push("character", parts.character_block.clone().unwrap_or_default(), Character, Main, 0);
         prompt.push("style_preset", parts.style_preset_block.clone().unwrap_or_default(), Character, Main, 0);
         prompt.push("explicit_preferences", parts.style_block.clone().unwrap_or_default(), Character, Main, 0);
@@ -59,6 +64,9 @@ impl CompanionPrompt {
             prompt.push("stickers", crate::stickers::prompt(&parts.char_id, &parts.channel, &parts.user_input, history), Generation, Main, 1);
         }
         prompt.push("safety", include_str!("../../prompts/framework/companion_contract.en.md"), Framework, Main, 0);
+        if parts.operation_context {
+            prompt.push("operation_contract", include_str!("../../prompts/framework/companion_operations.en.md"), Framework, Main, 0);
+        }
         prompt.push("creator_identity", creator_identity_rules(), Framework, Main, 0);
         if let Some(context) = crate::game_companion::prompt_context() {
             prompt.push("game_companion_guide", crate::game_companion::GAME_GUIDE, Generation, Main, 0);
@@ -75,9 +83,11 @@ impl CompanionPrompt {
             prompt.push("channel_guide", build_channel_style_guide(&parts.channel), Generation, Main, 0);
         }
         prompt.push("inline_tags", parts.inline_tag_section.clone().unwrap_or_default(), Generation, Main, 0);
-        if !proactive && !parts.has_native_schema && (!parts.enable_native_fc || parts.tools.as_deref().map_or(true, str::is_empty)) {
+        if !proactive && !parts.has_native_schema && (!parts.enable_native_fc || !has_tools) {
             prompt.push("output_format", output_format(), Framework, Main, 0);
-        } else if !proactive && parts.has_native_schema && (!parts.enable_native_fc || parts.tools.as_deref().map_or(true, str::is_empty)) {
+            // 工具轮才教工具 JSON：闲聊轮看到工具调用示范只会强化机器语域。
+            if parts.operation_context && has_tools { prompt.push("output_format_tools", output_format_tools(), Framework, Main, 0); }
+        } else if !proactive && parts.has_native_schema && (!parts.enable_native_fc || !has_tools) {
             prompt.push("output_format", "Return a JSON object in the runtime schema. `text` is only this character's spoken reply; `intent` is reply, short_reply or no_reply. For silence use empty text and no_reply. Optional fields are metadata, never spoken.", Framework, Main, 0);
         }
 
@@ -112,6 +122,7 @@ impl CompanionPrompt {
         prompt.push("mind", parts.mind_section.clone().unwrap_or_default(), Mind, Context, 2);
         prompt.push("working_memory", parts.working_memory_section.clone().unwrap_or_default(), Mind, Context, 2);
         prompt.push("self_state", parts.self_state_section.clone().unwrap_or_default(), Mind, Context, 1);
+        prompt.push("recent_self_utterances", parts.recent_self_utterances.clone().unwrap_or_default(), Generation, PostHistory, 1);
         prompt.push("environment", build_context_block(&parts.environment_context.clone().unwrap_or_else(EnvironmentContext::now), &parts.language), World, Context, 2);
         prompt.push("current_desktop", parts.environment_context.as_ref().and_then(|env| env.desktop_state.clone()).unwrap_or_default(), World, Context, 0);
         for (id, value) in [
@@ -129,7 +140,7 @@ impl CompanionPrompt {
 
         // Capability guides remain system instructions, separate from evidence and speech.
         prompt.push("skills", parts.skill_section.clone().unwrap_or_default(), Generation, Main, 2);
-        if parts.tools.as_deref().is_some_and(|tools| !tools.trim().is_empty()) {
+        if parts.operation_context && has_tools {
             prompt.push("tool_dispatch", crate::brain::agent_presets::prompt_section_of("companion"), Generation, Main, 0);
         }
         if parts.tools.as_deref().is_some_and(|tools| !tools.trim().is_empty()) {
@@ -143,13 +154,19 @@ impl CompanionPrompt {
         if !parts.presence_state.is_empty() {
             prompt.push("presence_guide", build_presence_guide(&parts.presence_state), Generation, Main, 1);
         }
+        // 天气关心是指南不是每轮规则：只有真有天气数据、或用户这话在问天气/出行
+        // 时才注入。2026-10-24 从 companion_dialogue 拆出前，它占主语气文件近一半
+        // 篇幅，每轮都在教模型把背景天气当话题。
+        if weather_care_relevant(parts, history) {
+            prompt.push("weather_care", weather_care_rules(&parts.language), Generation, Main, 0);
+        }
         // Automated intent/emotion labels still route retrieval/tools upstream. They no
         // longer prescribe a response script to the speaking character. Real state wins.
-        let has_tools = parts.tools.as_deref().is_some_and(|t| !t.trim().is_empty());
         prompt.push("scene_continuity", parts.interaction_guidance_section.clone().unwrap_or_default(), World, PostHistory, 1);
         prompt.push("character_note", parts.character_note_section.clone().unwrap_or_default(), Character, PostHistory, 0);
         prompt.push("post_history", if proactive || parts.enable_native_fc || !has_tools { companion_post_history_rules(&parts.language).to_string() }
             else { format!("{}\n{}", companion_post_history_rules(&parts.language), JSON_PROTOCOL) }, Generation, PostHistory, 0);
+        prompt.push("reply_language", companion_reply_language(&parts.language), Generation, PostHistory, 0);
 
         if let Some(evidence) = visual_evidence.filter(|s| !s.trim().is_empty()) {
             // Priority 0 protects the full report from optional-context budget pruning.
@@ -229,6 +246,25 @@ impl CompanionPrompt {
     }
 }
 
+/// 天气关心指南的注入门控：有天气观测/降水，或用户这句话在问天气与出行。
+///
+/// 与 game_companion 指南同类——能力指南按场景注入，不是每轮都塞的常驻规则。
+fn weather_care_relevant(parts: &PromptParts, history: &[ChatMessage]) -> bool {
+    let input = parts.user_input.to_lowercase();
+    const CUES: &[&str] = &[
+        "天气", "下雨", "降雨", "雨雪", "下雪", "气温", "多少度", "高温", "降温",
+        "暴雨", "台风", "空气质量", "花粉", "紫外线", "出门", "通勤", "伞", "防晒",
+        "weather", "rain", "snow", "umbrella", "forecast", "temperature", "commut",
+        "天気", "雨", "傘", "気温", "予報", "出かける",
+    ];
+    let mentions_weather = |text: &str| CUES.iter().any(|cue| text.contains(cue));
+    if mentions_weather(&input) { return true; }
+    let followup = message_context::is_short_followup(&input)
+        || (input.chars().count() <= 12 && ["那", "明天", "后天", "今晚", "tomorrow", "明日"].iter().any(|cue| input.starts_with(cue)));
+    followup && history.iter().rev().filter(|message| message.role == "user")
+        .take(1).any(|message| mentions_weather(&message.content.to_lowercase()))
+}
+
 /// Preserve whole retrieved or authored examples, including their scenario boundaries.
 fn select_examples(text: &str, input: &str, history: &[ChatMessage]) -> Vec<String> {
     let blocks = example_blocks(text);
@@ -245,7 +281,7 @@ fn select_examples(text: &str, input: &str, history: &[ChatMessage]) -> Vec<Stri
         // Match the fictional scene/user input, not the answer's catchphrases or tool claims.
         let scenario = block.lines().filter(|line| {
             let line = line.trim().to_lowercase();
-            line.starts_with("example ") || line.starts_with("**example ") || line.starts_with("context:")
+            (line.starts_with("example ") && !line.starts_with("example response:")) || line.starts_with("**example ") || line.starts_with("context:")
                 || line.starts_with("fictional context") || line.starts_with("user:") || line.starts_with("fictional user:")
         }).collect::<Vec<_>>().join("\n");
         let terms = example_terms(&scenario);
@@ -274,7 +310,7 @@ fn example_blocks(text: &str) -> Vec<String> {
     let mut current = Vec::new();
     let mut started = false;
     for line in text.lines() {
-        if line.starts_with("Example ") || line.starts_with("**Example ") {
+        if (line.starts_with("Example ") && !line.starts_with("Example response:")) || line.starts_with("**Example ") {
             if started { blocks.push(current.join("\n")); current.clear(); }
             started = true;
         }
@@ -288,6 +324,20 @@ fn example_blocks(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn examples_keep_the_response_with_its_scene_and_use_explicit_reply_language() {
+        let examples = "Example first\nFictional user: user1\nExample response: answer1\n\nExample second\nFictional user: user2\nExample response: answer2";
+        let blocks = select_examples(examples, "user1", &[]);
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0].contains("user1") && blocks[0].contains("answer1"));
+        assert!(blocks[1].contains("user2") && blocks[1].contains("answer2"));
+        for (language, name) in [("zh", "Chinese"), ("en", "English"), ("ja", "Japanese")] {
+            let prompt = CompanionPrompt::build(&PromptParts { language: language.into(), ..Default::default() }, &[]);
+            assert!(prompt.messages(&[], "current", false, None).last().unwrap().content
+                .contains(&format!("Use {name} for spoken text")));
+        }
+    }
 
     #[test]
     fn pet_actions_survive_budget_pressure_as_system_evidence() {
@@ -373,12 +423,78 @@ mod tests {
         assert!(messages.iter().any(|m| m.content == "startup_event"));
     }
     #[test]
+    fn tone_rules_reach_the_main_dialogue_prompt() {
+        // 2026-10-24：chat_style / human_feel / focus / rhythm / banned_phrases 之前
+        // 只进 legacy PromptBuilder 与 proactive 路径，桌宠主对话收不到——「短回复/
+        // 沉默/禁客服腔」这些规矩因此从未在主线生效。现在作为常驻 tone 块注入。
+        let prompt = CompanionPrompt::build(&PromptParts::default(), &[]);
+        let rendered = prompt.render();
+        assert!(rendered.contains("[CHAT_STYLE_RULES]"), "MOSTLY_SHORT/SILENCE_OK 等必须抵达主对话");
+        assert!(rendered.contains("[HUMAN_FEEL_RULES]"));
+        assert!(rendered.contains("[RHYTHM_RULES]"));
+        assert!(rendered.contains("[BANNED_PHRASES]"));
+        let tone = prompt.blocks.iter().find(|b| b.id == "tone").expect("tone block present");
+        assert_eq!(tone.position, Position::Main);
+        assert_eq!(tone.priority, 0, "语气规则永不进预算裁剪候选");
+        // 三语分发：ja 界面拿到日文语气块，不是英文兜底。
+        let ja = CompanionPrompt::build(&PromptParts { language: "ja".into(), ..Default::default() }, &[]).render();
+        assert!(ja.contains("[CHAT_STYLE_RULES]") && ja.contains("チャットスタイル"), "ja 走日文档");
+    }
+
+    #[test]
+    fn weather_care_is_conditional_not_a_resident_rule() {
+        // 天气关心从 companion_dialogue 拆出后按场景注入：没有天气数据、用户也没
+        // 提天气/出行时不占位——它过去占主语气文件近一半篇幅。
+        let plain = CompanionPrompt::build(&PromptParts::default(), &[]);
+        assert!(plain.blocks.iter().all(|b| b.id != "weather_care"), "闲聊轮不带天气指南");
+        let asked = CompanionPrompt::build(&PromptParts {
+            user_input: "明天出门要带伞吗".into(), ..Default::default() }, &[]);
+        assert!(asked.blocks.iter().any(|b| b.id == "weather_care"), "问到天气/出行时注入");
+        let observed = CompanionPrompt::build(&PromptParts {
+            environment_context: Some(crate::pipeline::prompt_modules::EnvironmentContext {
+                weather: Some("小雨 23℃".into()), ..Default::default() }),
+            ..Default::default() }, &[]);
+        assert!(observed.blocks.iter().all(|b| b.id != "weather_care"), "后台天气本身不构成本轮话题");
+        let followup = CompanionPrompt::build(&PromptParts { user_input:"那明天呢".into(), ..Default::default() },
+            &[ChatMessage::user("今天会下雨吗")]);
+        assert!(followup.blocks.iter().any(|block| block.id == "weather_care"));
+        let new_topic = CompanionPrompt::build(&PromptParts { user_input:"猫为什么像液体".into(), ..Default::default() },
+            &[ChatMessage::user("今天会下雨吗")]);
+        assert!(new_topic.blocks.iter().all(|block| block.id != "weather_care"));
+    }
+
+    #[test]
+    fn casual_dialogue_keeps_discovery_without_operation_scripts_and_receives_recent_voice() {
+        let parts = PromptParts { tools:Some("tool_search".into()), recent_self_utterances:Some("recent_voice_reference".into()),
+            enable_native_fc:true, ..Default::default() };
+        let prompt = CompanionPrompt::build(&parts, &[]);
+        assert!(prompt.blocks.iter().all(|block| block.id != "tool_dispatch" && block.id != "operation_contract"));
+        assert!(prompt.messages(&[], "你好", false, None).iter().any(|message| message.content.contains("recent_voice_reference")));
+        let operation = CompanionPrompt::build(&PromptParts { operation_context:true, ..parts }, &[]);
+        assert!(operation.blocks.iter().any(|block| block.id == "operation_contract"));
+        assert!(operation.blocks.iter().any(|block| block.id == "tool_dispatch"));
+    }
+
+    #[test]
+    fn tool_json_examples_only_ride_along_on_tool_turns() {
+        // 工具调用 JSON 示范从 output_format 拆出：闲聊轮看到它们只会强化机器语域。
+        let chat = CompanionPrompt::build(&PromptParts::default(), &[]);
+        assert!(chat.render().contains("[OUTPUT_FIELDS]"));
+        assert!(!chat.render().contains("Multi-step tool chaining"), "闲聊轮不教工具链式调用");
+        let tools = CompanionPrompt::build(&PromptParts {
+            tools: Some("open_application".into()), operation_context:true, ..Default::default() }, &[]);
+        assert!(tools.render().contains("Multi-step tool chaining"), "工具轮才带工具示例");
+    }
+
+    #[test]
     fn automated_response_scripts_do_not_overrule_current_dialogue() {
+        // 自动化标签（快速语义引导等）在上游路由检索/工具，但不作为台词脚本
+        // 进入说出来的话。场景台词注入（ToneInjector）同样不进主对话 prompt——
+        // 2026-10-24 把那套「算了但被丢弃」的热路径废功整体清掉了。
         let parts = PromptParts { fast_perception_guidance: Some("scripted_insult".into()),
-            tone_injection: Some("compulsory_reaction".into()), ..Default::default() };
+            ..Default::default() };
         let rendered = CompanionPrompt::build(&parts, &[]).render();
         assert!(!rendered.contains("scripted_insult"));
-        assert!(!rendered.contains("compulsory_reaction"));
         assert!(rendered.contains("SAFETY_RULES"));
     }
 
@@ -426,7 +542,7 @@ mod tests {
         assert_eq!(prompt.render(), restored.render());
         assert_eq!(prompt.contents(Position::Example).len(), 3);
         let messages = restored.messages(&[], "hello", false, None);
-        let request = crate::pipeline::steps::generation::AIResponseGenerationRunnable::build_chat_request("chat", messages);
+        let request = crate::pipeline::steps::generation::AIResponseGenerationRunnable::build_chat_request(crate::providers::base::TASK_COMPANION, messages);
         assert_eq!(request.include_framework_instructions, Some(false));
         assert!(request.messages.iter().any(|m| m.content.contains("## Output Format")));
         assert!(!request.messages.last().unwrap().content.contains("[ACTIVE RESPONSE PROTOCOL]"));
@@ -498,7 +614,7 @@ mod tests {
                 let mut history = vec![ChatMessage::assistant(greeting)];
                 history.extend(old_history.iter().cloned());
                 let parts = PromptParts { character_block: Some(card.clone()), language: "zh".into(), char_id: id.into(),
-                    user_input: input.to_string(), examples_block: retriever.retrieve(input, &history, None, &[])
+                    user_input: input.to_string(), examples_block: retriever.retrieve(input, &history, None, &[], "zh")
                         .or_else(|| crate::persona::prompt_render::render_dialogue_seed_examples(&config, &[])),
                     has_native_schema: true, ..Default::default() };
                 let prompt = CompanionPrompt::build(&parts, &history);

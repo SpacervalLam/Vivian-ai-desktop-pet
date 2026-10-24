@@ -259,14 +259,14 @@ mod tests {
 
     #[test]
     fn removes_nested_and_speech_credentials_but_keeps_routes() {
-        let mut data = json!({"routing_matrix":{"chat":{"model":"test", "api_key":"secret", "api_secret":"secret"}},
+        let mut data = json!({"routing_matrix":{"companion":{"model":"test", "api_key":"secret", "api_secret":"secret"}},
             "provider_cache":{"x":{"api_key":"secret"}}, "azure_key":"secret", "translation_api_key":"secret",
             "doubao_access_token":"secret", "headers":{"Authorization":"Bearer secret", "X-API-Key":"secret"},
             "env":{"OPENAI_API_KEY":"secret"}, "max_tokens":123});
         clear_secrets(&mut data);
         assert!(!data.to_string().contains(":\"secret\""));
         assert!(!data.to_string().contains("Bearer secret"));
-        assert_eq!(data["routing_matrix"]["chat"]["model"], "test");
+        assert_eq!(data["routing_matrix"]["companion"]["model"], "test");
         assert_eq!(data["max_tokens"], 123);
     }
 

@@ -15,11 +15,13 @@ struct ControlledEmbedding {
     started: Arc<tokio::sync::Notify>,
     release: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
     remote: bool,
+    cache_identity: String,
 }
 
 impl MemoryEmbeddingProvider for ControlledEmbedding {
     fn dimension(&self) -> usize { 256 }
     fn model_id(&self) -> &str { "local-routing-test" }
+    fn index_identity(&self) -> String { self.cache_identity.clone() }
     fn is_remote(&self) -> bool { self.remote }
     fn embed(&self, text: &str) -> crate::error::VivianResult<Vec<f32>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
@@ -44,6 +46,7 @@ fn controlled_provider(remote: bool) -> (Arc<ControlledEmbedding>, std::sync::mp
         gate_next: AtomicBool::new(false), timed_out: AtomicBool::new(false),
         calls: AtomicUsize::new(0), delay_ms: AtomicUsize::new(0),
         started: Arc::new(tokio::sync::Notify::new()), release: parking_lot::Mutex::new(receiver), remote,
+        cache_identity: "local-routing-test".into(),
     }), release)
 }
 
@@ -80,7 +83,10 @@ async fn sync_embedding_does_not_block_peer_and_assessments_survive_merge() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn prompt_preparation_overlaps_context_and_finalizes_with_current_results() {
-    let (provider, release) = controlled_provider(true);
+    let (mut provider, release) = controlled_provider(true);
+    // This scheduling test needs a cold corpus. Reusing another run's disk
+    // cache bypasses embed() and leaves the peer waiting for a signal forever.
+    Arc::get_mut(&mut provider).unwrap().cache_identity = format!("routing-cold-{}", uuid::Uuid::new_v4());
     provider.gate_next.store(true, Ordering::SeqCst);
     let started = provider.started.clone();
     let context = RunnableLambda::new(|input| input).with_async(move |input| {
@@ -149,7 +155,7 @@ async fn retrieved_examples_are_dynamic_and_absent_without_relevant_scene() {
 fn tone_matching_reuses_the_query_vector_without_embedding_it_again() {
     let (provider, _) = controlled_provider(true);
     let injector = crate::persona::ToneInjector::with_embedding("vivian", provider.clone());
-    injector.preload();
+    injector.preload_scene_vectors_for_test();
     provider.calls.store(0, Ordering::Relaxed);
     let text = "xxq724F2";
     let embedding = HashingMemoryEmbedding::new(256).embed(text).unwrap();

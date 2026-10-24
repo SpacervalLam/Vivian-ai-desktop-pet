@@ -263,31 +263,57 @@ impl TimeStampedMemory {
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(&crate::i18n::get_language());
         let prompt = match lang_norm {
             "en" => format!(
-                "Compress the following conversation into a concise summary (within 150 words), preserving key facts, entity names mentioned by the user, emotions, and important events.\n\
-                 Requirements:\n\
-                 1. Third-person narration, naturally resolving pronouns (e.g., replace 'he' with the specific person's name)\n\
-                 2. Preserve temporal order (what happened first, what happened later)\n\
-                 3. Do not add explanations or comments; output only the summary content\n\n\
-                 Conversation:\n{conversation}\n\n\
-                 Summary:"
+                // 语域：角色自己回忆这次聊天的口吻（"last time we..."），不是第三人称报告体。
+                // 这段回顾作为 system 消息贴在对话历史最前面，报告体会把模型的输出
+                // 注册带成档案文书——2026-10-24 改。
+                "Write a short recap of the following conversation (within 150 words) in the first person, as the companion character naturally recalling it: 'last time we...'. Preserve key facts, entity names mentioned by the user, emotions and important events.
+\
+                 Requirements://n//
+                 1. First-person plural recall, naturally resolving pronouns (e.g., replace 'he' with the specific person's name)
+\
+                 2. Preserve temporal order (what happened first, what happened later)
+\
+                 3. Conversational register — not a report, log or third-person narration; no explanations or comments; output only the recap
+
+\
+                 Conversation://n{conversation}//n//n//
+                 Recap:"
             ),
             "ja" => format!(
-                "以下の会話を簡潔な要約に圧縮してください（150文字以内）。重要な事実、ユーザーが言及したエンティティ名、感情、重要なイベントを保持すること。\n\
-                 要件：\n\
-                 1. 三人称で述べ、代名詞を自然に解消する（例：「彼」を具体的な名前に置き換える）\n\
-                 2. 時系列を保持する（先に何が起きたか、後に何が起きたか）\n\
-                 3. 説明やコメントを追加せず、要約内容のみを出力する\n\n\
-                 会話内容:\n{conversation}\n\n\
-                 要約:"
+                "以下の会話を、キャラクターが自分で思い出すような一人称の短い振り返りにしてください（150文字以内）。「この前言ってた……」のような口調。重要な事実、ユーザーが言及したエンティティ名、感情、重要なイベントを保持すること。
+\
+                 要件：
+\
+                 1. 一人称の振り返り。代名詞は自然に解消する（例：「彼」を具体的な名前に置き換える）
+\
+                 2. 時系列を保持する（先に何が起きたか、後に何が起きたか）
+\
+                 3. 報告書・ログ・三人称叙述ではなく、会話の口調。説明やコメントは追加せず、振り返りの内容のみを出力する
+
+\
+                 会話内容:
+{conversation}
+
+\
+                 振り返り:"
             ),
             _ => format!(
-                "请将以下对话压缩为一段简洁的摘要（150字以内），保留关键事实、用户提到的实体名、情绪和重要事件。\n\
-                 要求：\n\
-                 1. 第三人称陈述，自然消解代词（如'他'替换为具体人名）\n\
-                 2. 保留时序（先发生了什么，后发生了什么）\n\
-                 3. 不要添加解释或评论，只输出摘要内容\n\n\
-                 对话内容:\n{conversation}\n\n\
-                 摘要:"
+                "把以下对话写成一段简洁的回顾（150字以内），用角色自己回忆的口吻（「我们上次说到……」），保留关键事实、用户提到的实体名、情绪和重要事件。
+\
+                 要求：
+\
+                 1. 第一人称回顾，自然消解代词（如'他'替换为具体人名）
+\
+                 2. 保留时序（先发生了什么，后发生了什么）
+\
+                 3. 会话语调——不是报告、日志或第三人称陈述；不要添加解释或评论，只输出回顾内容
+
+\
+                 对话内容:
+{conversation}
+
+\
+                 回顾:"
             ),
         };
 
@@ -325,11 +351,11 @@ impl TimeStampedMemory {
         let chars: Vec<char> = joined.chars().collect();
         if chars.len() > 200 {
             format!(
-                "Conversation Summary: {}...",
+                "之前聊到：{}……",
                 chars.into_iter().take(200).collect::<String>()
             )
         } else {
-            format!("Conversation Summary: {}", joined)
+            format!("之前聊到：{}", joined)
         }
     }
 

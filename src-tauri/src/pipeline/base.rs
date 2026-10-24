@@ -45,12 +45,12 @@ impl RunnableConfig {
         self.tags.iter().any(|t| t == "stream")
     }
 
-    /// 读取 metadata 中的 task_type，默认 "chat"
+    /// 读取 metadata 中的 task_type，默认 `companion`
     pub fn task_type(&self) -> String {
         self.metadata
             .get("task_type")
             .and_then(|v| v.as_str())
-            .unwrap_or("chat")
+            .unwrap_or(crate::providers::base::TASK_COMPANION)
             .to_string()
     }
 

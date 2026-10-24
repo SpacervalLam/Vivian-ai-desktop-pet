@@ -56,6 +56,15 @@ pub enum ProactiveTrigger {
 }
 
 impl ProactiveTrigger {
+    /// Everyday conversation is proposed by current_thought when that mode is enabled.
+    /// Arrival and routine-care cues are judged with the same context; explicit actions
+    /// and promised work callbacks retain their own delivery paths.
+    pub fn is_optional_conversation(self) -> bool {
+        matches!(self, Self::HourlyGreeting | Self::IdleGreeting | Self::Icebreaker
+            | Self::WindowTrigger | Self::TopicExtension | Self::MemoryRecall
+            | Self::Spontaneous | Self::MoodDriven | Self::WelcomeBack | Self::HealthReminder)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ProactiveTrigger::HourlyGreeting => "hourly_greeting",

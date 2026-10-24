@@ -724,6 +724,20 @@ pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String])
     render_dialogue_seed_examples_for_contact(config, learned, false)
 }
 
+/// Foreign-language turns must not fall back to the Chinese seed dialogue.
+pub fn render_dialogue_seed_examples_localized(config: &PersonaConfig, learned: &[String], first_contact: bool, lang: &str) -> Option<String> {
+    let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+    if lang == "zh" { return render_dialogue_seed_examples_for_contact(config, learned, first_contact); }
+    if first_contact { return None; }
+    let prefix = format!("style-{lang}-");
+    let char_id = config.identity.name.to_lowercase();
+    let examples: Vec<_> = super::example_library::factory_examples(&char_id).into_iter()
+        .filter(|entry| entry.id.starts_with(&prefix) && !learned.contains(&entry.scope))
+        .take(2).map(|entry| format!("Example {}\nContext: {}\nFictional user: {}\nExample response: {}",
+            entry.id, entry.situation, entry.user, entry.response)).collect();
+    (!examples.is_empty()).then(|| examples.join("\n\n"))
+}
+
 pub fn render_dialogue_seed_examples_for_contact(config: &PersonaConfig, learned: &[String], first_contact: bool) -> Option<String> {
     let source = default_section_for(&config.identity.name, CharacterSection::Examples);
     let offsets: Vec<_> = source.match_indices("**Example ").map(|(offset, _)| offset).collect();

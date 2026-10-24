@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 // The acceptance scenarios in src-tauri/prompts/PROMPT_EVALUATION.md were defined
 // but never run. scripts/evaluate-prompts.mjs makes them executable; this test
 // keeps the offline half of that harness enforced in CI.
-const run = spawnSync(process.execPath, ['scripts/evaluate-prompts.mjs'], { encoding: 'utf8' });
+const output = mkdtempSync(path.join(tmpdir(), 'vivian-prompt-report-test-'));
+const run = spawnSync(process.execPath, ['scripts/evaluate-prompts.mjs', '--output-dir', output], { encoding: 'utf8' });
 assert.equal(run.status, 0, `prompt harness must pass offline:\n${run.stdout}\n${run.stderr}`);
 
-const reportPath = 'tmp/prompt-eval-report.json';
+const reportPath = path.join(output, 'prompt-eval-report.json');
 assert.ok(existsSync(reportPath), 'prompt harness must write its report');
 const report = JSON.parse(readFileSync(reportPath, 'utf8'));
 

@@ -328,7 +328,9 @@ impl CognitiveTickRunner {
                 let refresh_requested = brain.mind.thought_refresh_requested();
                 let mut last_thought = self.last_thought_at.lock();
                 let thought_dt = now - *last_thought;
-                if should_refresh_thought(thought_dt, refresh_requested, context.user_present) {
+                if should_refresh_thought(thought_dt, refresh_requested, context.user_present)
+                    && !context.is_user_chatting
+                    && !brain.mind.thought_refresh_in_flight.load(std::sync::atomic::Ordering::SeqCst) {
                     *last_thought = now;
                     drop(last_thought);
                     // Only consume after admission. A rapid second user event remains pending.
@@ -337,9 +339,10 @@ impl CognitiveTickRunner {
                     let router = Arc::clone(&brain.router);
                     let world_provider = Arc::clone(&brain.world_provider);
                     let lang = lang_code_from_config(&brain.config);
+                    let conversation_context = brain.proactive.thought_conversation_context(context.is_user_chatting);
                     tauri::async_runtime::spawn(async move {
                         crate::mind::thought_synthesis::refresh_current_thought(
-                            &mind, &router, &world_provider, &lang,
+                            &mind, &router, &world_provider, &lang, &conversation_context,
                         )
                         .await;
                     });
@@ -557,7 +560,7 @@ impl CognitiveTickRunner {
 
 /// Keep thoughts fresh for meaningful events without paying for an unchanged scene each minute.
 fn should_refresh_thought(elapsed: f64, requested: bool, user_present: bool) -> bool {
-    elapsed >= if requested { 90.0 } else if user_present { 900.0 } else { 3600.0 }
+    (requested && user_present) || elapsed >= if user_present { 900.0 } else { 3600.0 }
 }
 
 #[cfg(test)]
@@ -565,10 +568,10 @@ mod thought_refresh_tests {
     use super::should_refresh_thought;
 
     #[test]
-    fn unchanged_scene_waits_while_new_events_refresh_after_a_short_cooldown() {
+    fn unchanged_scene_waits_but_a_new_event_does_not_wait_for_a_clock_slot() {
         assert!(!should_refresh_thought(60.0, false, true));
-        assert!(!should_refresh_thought(89.0, true, true));
-        assert!(should_refresh_thought(90.0, true, true));
+        assert!(should_refresh_thought(1.0, true, true));
+        assert!(should_refresh_thought(89.0, true, true));
         assert!(should_refresh_thought(900.0, false, true));
         assert!(!should_refresh_thought(900.0, false, false));
         assert!(should_refresh_thought(3600.0, false, false));

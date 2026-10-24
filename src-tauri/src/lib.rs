@@ -1060,9 +1060,10 @@ pub fn run() {
                                         let router = instance.brain.router.clone();
                                         let world_provider = instance.brain.world_provider.clone();
                                         let lang = lang_code.to_string();
+                                        let conversation_context = instance.brain.proactive.thought_conversation_context(false);
                                         tauri::async_runtime::spawn(async move {
                                             crate::mind::thought_synthesis::refresh_current_thought(
-                                                &mind, &router, &world_provider, &lang,
+                                                &mind, &router, &world_provider, &lang, &conversation_context,
                                             ).await;
                                         });
                                     }

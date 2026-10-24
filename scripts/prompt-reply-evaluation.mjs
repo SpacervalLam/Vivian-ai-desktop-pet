@@ -15,14 +15,24 @@ export function evaluatePromptReply(reply, expect = {}) {
     }
   }
   if (payload && typeof payload.text === 'string') text = payload.text.trim();
+  if (expect.reply_language && text) {
+    const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+    const han = (text.match(/\p{Script=Han}/gu) ?? []).length;
+    const kana = (text.match(/[\u3040-\u30ff]/g) ?? []).length;
+    const matches = expect.reply_language === 'en' ? latin > 0 && han + kana <= latin / 2
+      : expect.reply_language === 'ja' ? kana > 0 && han + kana >= latin / 2
+      : han > 0;
+    if (!matches) violations.push(`reply language does not match ${expect.reply_language}`);
+  }
   for (const pattern of expect.reply_forbidden ?? []) {
     if (new RegExp(pattern, 'i').test(text)) violations.push(`forbidden /${pattern}/`);
   }
-  if (expect.reply_required?.length && !expect.reply_required.some(pattern => new RegExp(pattern, 'i').test(text))) {
+  const allowedSilence = expect.allow_silence === true && text === '';
+  if (!allowedSilence && expect.reply_required?.length && !expect.reply_required.some(pattern => new RegExp(pattern, 'i').test(text))) {
     violations.push(`none of required ${expect.reply_required.join(' | ')}`);
   }
   const chars = [...text].length;
-  if (typeof expect.reply_min_chars === 'number' && chars < expect.reply_min_chars) {
+  if (!allowedSilence && typeof expect.reply_min_chars === 'number' && chars < expect.reply_min_chars) {
     violations.push(`reply shorter than ${expect.reply_min_chars} chars (${chars})`);
   }
   if (typeof expect.reply_max_chars === 'number' && chars > expect.reply_max_chars) {

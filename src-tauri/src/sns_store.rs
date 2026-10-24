@@ -64,6 +64,29 @@ pub fn group_id(channel: &str) -> Option<&str> {
 pub fn is_group(channel: &str) -> bool {
     channel == "wechat_group" || group_id(channel).is_some()
 }
+/// 读人格提示词里的出厂版本标记（`<!-- persona-version: N -->`）。没有标记视为 0。
+///
+/// 标记只在开头几行找：它是给同步逻辑看的行首元信息，不是人设内容。
+pub fn persona_version(persona: &str) -> u32 {
+    const MARKER: &str = "persona-version:";
+    persona
+        .lines()
+        .take(8)
+        .find_map(|line| {
+            // 只认 HTML 注释里的标记：正文里出现同样的词不算版本声明。
+            let (head, rest) = line.split_once(MARKER)?;
+            if !head.contains("<!--") {
+                return None;
+            }
+            rest.trim_end_matches("-->")
+                .split_whitespace()
+                .next()?
+                .trim_matches(|c: char| !c.is_ascii_digit())
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
+}
 pub fn now() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -136,6 +159,30 @@ impl SnsStore {
             )
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+    /// 出厂人设随编译期提示词迭代，而 `seed` 只跑一次，老装机需要按版本单向升级。
+    ///
+    /// 只在库里版本**低于**编译期版本时覆写：上游更新优先，版本相同或更高时原样
+    /// 保留，这样用户在「编辑好友」里改过的人设不会被开机同步吃掉。返回是否覆写。
+    pub fn sync_persona(&self, id: &str, persona: &str) -> Result<bool, String> {
+        let mut profile = match self.contact(id) {
+            Ok(profile) => profile,
+            Err(_) => return Ok(false),
+        };
+        if persona_version(&profile.persona) >= persona_version(persona) {
+            return Ok(false);
+        }
+        profile.persona = persona.to_string();
+        self.open()?
+            .execute(
+                "INSERT INTO contacts(id,profile) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET profile=excluded.profile",
+                params![
+                    profile.id,
+                    serde_json::to_string(&profile).map_err(|e| e.to_string())?
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     }
     pub fn contacts(&self) -> Result<Vec<Contact>, String> {
         let conn = self.open()?;

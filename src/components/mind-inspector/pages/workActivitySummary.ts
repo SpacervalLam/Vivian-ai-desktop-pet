@@ -13,7 +13,7 @@ export function workActivitySummary(messages: Activity[], t: Translate): string 
       if (value && typeof value === 'object' && !Array.isArray(value)) args = value as Record<string, unknown>;
     } catch { /* Older records may not contain structured arguments. */ }
     const kind = /search|grep/.test(name) ? 'search'
-      : /web_fetch|browse|browser/.test(name) ? 'browse'
+      : /read_content|web_fetch|browse|browser/.test(name) ? 'browse'
       : /read_file|list_dir|list_files/.test(name) ? 'read'
       : /write_file|edit_file|patch/.test(name) ? 'edit'
       : /command|terminal|shell/.test(name) ? 'run'

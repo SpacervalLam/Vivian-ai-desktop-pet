@@ -339,9 +339,7 @@ impl EnvironmentAgent {
         };
         let roles = participants(state);
         let user_available = idle <= config.proactive.away_threshold_seconds as f64;
-        let chatting = state.session_coordinator.any_user_turn_active()
-            || (crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
-                && idle < 90.0);
+        let chatting = state.session_coordinator.any_user_turn_active();
         let snap = state.world_provider.snapshot(None);
         // Each model invocation sees one role's permitted material, not a mix of private stores.
         let focus_id = {
@@ -361,6 +359,9 @@ impl EnvironmentAgent {
         let Some(focus) = focus else { return; };
         let evidence: Vec<_> = scene_evidence(&focus_id,Some(&focus.brain.memory),now)
             .into_iter().filter(|source| source.shareable).collect();
+        // Reserve before consuming the observation signature. Lock contention is deferral,
+        // not a terminal evaluation of an event that was never sent to a model.
+        let Ok(permit) = self.planning.clone().try_lock_owned() else { return; };
         let (events, user_turns, current_intent, epoch, input_revision) = {
             let mut inputs = self.input.drain();
             inputs.sort_by_key(|input| input.revision);
@@ -415,9 +416,6 @@ impl EnvironmentAgent {
                 obs.epoch,
                 obs.processed_input_revision,
             )
-        };
-        let Ok(permit) = self.planning.clone().try_lock_owned() else {
-            return;
         };
         let router = {
             let characters = state.characters.read();
@@ -478,9 +476,7 @@ impl EnvironmentAgent {
             let cfg = state.config.read().get_all();
             let current_idle = crate::utils::get_system_idle_seconds();
             let current_roles = participants(&state);
-            let currently_chatting = state.session_coordinator.any_user_turn_active()
-                || (crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
-                    && current_idle.is_none_or(|idle| idle < 90.0));
+            let currently_chatting = state.session_coordinator.any_user_turn_active();
             let permitted = !state.session_coordinator.any_user_turn_active()
                 && cfg.proactive.enabled
                 && crate::companion_runtime::quiet_reason(&state).is_none()
@@ -509,7 +505,7 @@ impl EnvironmentAgent {
                         if let Some(listener) = obs.policy.pending_listener() {
                             if let Some(mut hint) = suggestion.grounded(&focus_id,listener,&evidence,
                                 chrono::Utc::now().timestamp() as f64) {
-                                hint.expires_at = obs.policy.pending_deadline().unwrap_or(hint.expires_at);
+                                hint.expires_at = hint.expires_at.min(obs.policy.pending_deadline().unwrap_or(hint.expires_at));
                                 agent.hints.lock().insert(priority.revision(),hint);
                             }
                         }

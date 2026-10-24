@@ -17,7 +17,7 @@ pub fn delivery_hint(goal: &str, observations: &[Observation<'_>]) -> Option<Str
     if observations.iter().any(|o| o.success && o.has_pixels) {
         return Some("[系统提示] 你已读取参考图的实际像素，但还没有通过 send_image 向用户展示。先展示已核对的候选图，附来源页和仍有疑问的部分；用户要求确认后继续时，在此等待确认。不要用脚本文件或文字设定代替图片交付。".into());
     }
-    Some("[系统提示] 当前阶段要求先给用户看参考图，但多次工具调用后还没有读取或展示实际图片。脚本写入成功、命令退出码 0、HTTP 200 都不代表取得图片；零张下载、挑战页和超时仍是证据缺口。回到已有搜索结果，优先读取覆盖多个目标的合集、作者页或素材仓库；用 web_fetch 的 images[] 获取候选地址，再 web_fetch 图片 URL 看图、send_image(artifact.image_path) 展示并附出处。必要时补充定向 web_search。单站抓取失败后换来源，不继续调试同一站的 UA/接口/脚本；权限拒绝不可绕过。能确认多少先展示多少并说明缺口；若确实无法取图，如实报告。用户确认前不要进入后续制作。".into())
+    Some("[系统提示] 当前阶段要求先给用户看参考图，但多次工具调用后还没有读取或展示实际图片。脚本写入成功、命令退出码 0、HTTP 200 都不代表取得图片；零张下载、挑战页和超时仍是证据缺口。回到已有搜索结果，优先读取覆盖多个目标的合集、作者页或素材仓库；用 read_content 的 images[] 获取候选地址，再 read_content 图片 URL 看图、send_image(artifact.image_path) 展示并附出处。必要时补充定向 web_search。单站抓取失败后换来源，不继续调试同一站的 UA/接口/脚本；权限拒绝不可绕过。能确认多少先展示多少并说明缺口；若确实无法取图，如实报告。用户确认前不要进入后续制作。".into())
 }
 
 #[cfg(test)]
@@ -31,8 +31,8 @@ mod tests {
     fn successful_scraping_scripts_do_not_reset_missing_images() {
         // Replay the failure pattern: search -> text without images -> shell
         // failures interleaved with successful writes and empty downloads.
-        let calls = vec![observation("web_search", true), observation("web_fetch", false),
-            observation("web_fetch", true), observation("run_command", false),
+        let calls = vec![observation("web_search", true), observation("read_content", false),
+            observation("read_content", true), observation("run_command", false),
             observation("run_command", true), observation("write_file", true),
             observation("run_command", true), observation("run_command", true)];
         let hint = delivery_hint(GOAL, &calls).unwrap();
@@ -41,7 +41,7 @@ mod tests {
     #[test]
     fn viewed_is_not_presented_and_failed_send_is_not_delivery() {
         let mut calls: Vec<_> = (0..8).map(|_| observation("run_command", true)).collect();
-        calls.push(Observation { tool: "web_fetch", success: true, has_pixels: true });
+        calls.push(Observation { tool: "read_content", success: true, has_pixels: true });
         assert!(delivery_hint(GOAL, &calls).unwrap().contains("已读取参考图"));
         calls.push(observation("send_image", false));
         assert!(delivery_hint(GOAL, &calls).is_some());

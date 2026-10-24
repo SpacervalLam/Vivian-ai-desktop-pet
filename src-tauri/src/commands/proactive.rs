@@ -15,11 +15,19 @@ use crate::state::AppState;
 use crate::types::response::ChatMessage;
 use crate::tools::builtin::send_chat_message_tool::deliver_chat_message;
 
-fn retain_topic_channel(char_id: &str, messages: &mut Vec<crate::proactive::ProactiveAction>) {
+fn retain_topic_channel(char_id: &str, presence: crate::presence::PresenceState, messages: &mut Vec<crate::proactive::ProactiveAction>) {
     use crate::proactive::DeliveryChannel;
+    // Presence overrides an existing direct topic, including messages queued before a transition.
+    if presence != crate::presence::PresenceState::Online {
+        for action in messages.iter_mut().filter(|a| a.listener.as_deref().is_none_or(|listener| listener == "user")) {
+            action.delivery_channel = DeliveryChannel::ChatWindow;
+        }
+        crate::conversation::CONVERSATION_MANAGER.set_user_channel(char_id, "wechat");
+    }
     let mut channel = crate::conversation::CONVERSATION_MANAGER.user_channel(char_id)
         .map(|c| if c == "wechat" { DeliveryChannel::ChatWindow } else { DeliveryChannel::Bubble });
     messages.retain(|a| {
+        if a.wakeup_id.as_deref().is_some_and(|id| !crate::proactive::wakeup::get_scheduler(char_id).is_due(id, chrono::Utc::now().timestamp() as f64)) { return false; }
         let expected = channel.get_or_insert(a.delivery_channel);
         // A user may have changed channels while generation was in flight. Drop stale prose;
         // never deliver it in a different medium or switch the user's current topic back.
@@ -567,6 +575,7 @@ async fn proactive_tick_inner(
         // One absence boundary leaves an actionable interval for idle greetings.
         user_present: system_idle_seconds <= brain.config.proactive.away_threshold_seconds as f64,
         user_contact_blocked: false,
+        character_presence: brain.presence.current(),
         interaction_count_today: context
             .get("interaction_count_today")
             .and_then(|v| v.as_u64())
@@ -600,14 +609,9 @@ async fn proactive_tick_inner(
         // SelfState 防打扰决策：quiet_mode/今日主动次数上限/被忽略接近阈值/Rest/Offline 任一成立则跳过主动消息
         lay_low: brain.self_state.snapshot().should_lay_low()
             || state.world_provider.environment.contact_suppressed(chrono::Local::now().timestamp() as f64),
-        // 用户是否正在与任意角色活跃对话：抑制打断性主动消息
-        // 判定标准：会话 Active 且用户最近 90s 内有真实活跃（系统级空闲 < 90s）。
-        // 之前仅判断 is_any_user_session_active()，但会话 Active 状态会持续到超时关闭（默认 30 分钟），
-        // 导致用户只是发了一条消息就离开后，长达 30 分钟内 CrossCharacterReply 被误判为"用户正在聊天"而跳过，
-        // 两个角色之间的跨角色交流几乎不发生。
-        is_user_chatting: state.session_coordinator.any_user_turn_active()
-            || (crate::conversation::CONVERSATION_MANAGER.is_any_user_session_active()
-                && system_idle_seconds < 90.0),
+        // Only a foreground user turn is busy. An open session or recent keyboard input
+        // is context for semantic timing, not a 90-second/30-minute conversation lock.
+        is_user_chatting: state.session_coordinator.any_user_turn_active(),
         is_speaking_leader: false,
         // 心智观察器注意力：窗口层现算，页签/会话取自前端上报。
         // 保守缺省——查不到就当作"用户看不见"，宁可多提醒一次。
@@ -643,7 +647,7 @@ async fn proactive_tick_inner(
     // 冷却时长 = CROSS_ROLE_COOLDOWN_SECS × 动态 reluctance。
     // 动态调整：近 10 分钟发言比例 > 0.5（说得多）时 reluctance 上浮，让对方有更多机会接话；
     // 比例 < 0.5（说得少）时 reluctance 下调，让自己更容易开口。
-    if !callback_due {
+    if !callback_due && !brain.proactive.thought_decides_conversation() {
         let now_ts = chrono::Local::now().timestamp() as f64;
         let last_spoken = LAST_SPOKEN.read();
         let behavior = crate::character_behavior::get_behavior(&char_id);
@@ -1291,12 +1295,12 @@ async fn proactive_tick_inner(
     // 主动行为按 delivery_channel 派发到对应渠道
     // - Bubble：写入 dialogue channel="proactive"（桌宠气泡路径，被 wechat 过滤排除）
     // - ChatWindow：写入 dialogue channel="wechat" + emit chat:assistant_message（前端 ChatWindow 立即追加气泡）
-    // Keep the medium selected before generation.
+    // Keep the planned medium unless the character has gone non-online.
     // Share 类强制 value_score 门槛，未达标跳过发送（待分享池后续阶段实现）
 
     user_messages.retain(deliverable_proactive_action);
-    retain_topic_channel(&char_id, &mut user_messages);
-    // Delivery verifies the topic channel; it never rewrites the chosen transport.
+    retain_topic_channel(&char_id, brain.presence.current(), &mut user_messages);
+    // Non-online presence takes priority over a previously selected spoken topic.
 
     // Text messages do not compete with speech playback. Defer only spoken bubbles.
     if state.playback_gate.is_playing() {
@@ -1354,8 +1358,13 @@ async fn proactive_tick_inner(
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
             brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
         }
+        brain.proactive.record_delivered(action, spoken_at);
+        if action.trigger == "spontaneous" { brain.mind.record_opportunity_delivered(&action.content, spoken_at); }
         if let Some(notice_id) = &action.work_notice_id {
             crate::brain::work_notices::global().acknowledge_alert(notice_id);
+        }
+        if let Some(wakeup_id) = &action.wakeup_id {
+            crate::proactive::wakeup::get_scheduler(&char_id).acknowledge(wakeup_id);
         }
     }
 
@@ -1624,7 +1633,7 @@ pub async fn drain_proactive_messages(
         .filter(|message| message.trigger == "cross_character_reply").cloned().collect();
     messages.retain(|message| message.trigger != "cross_character_reply");
     deliver_cross_character_messages(&app, &state, &brain.char_id, cross_messages).await;
-    retain_topic_channel(&brain.char_id, &mut messages);
+    retain_topic_channel(&brain.char_id, brain.presence.current(), &mut messages);
     // Alternate drain must have exactly the same realtime/private-history delivery contract.
     let mut delivered_sessions = Vec::new();
     let spoken_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
@@ -1639,8 +1648,13 @@ pub async fn drain_proactive_messages(
             m.meta = Some(MessageMeta::new(MessageSource::Assistant).with_channel("proactive"));
             brain.dialogue.add_message_with_metadata(m, json!({ "session_id": session_id, "speaker": brain.char_id, "listener": "user" }));
         }
+        brain.proactive.record_delivered(action, spoken_at);
+        if action.trigger == "spontaneous" { brain.mind.record_opportunity_delivered(&action.content, spoken_at); }
         if let Some(notice_id) = &action.work_notice_id {
             crate::brain::work_notices::global().acknowledge_alert(notice_id);
+        }
+        if let Some(wakeup_id) = &action.wakeup_id {
+            crate::proactive::wakeup::get_scheduler(&brain.char_id).acknowledge(wakeup_id);
         }
     }
 
@@ -1846,6 +1860,22 @@ mod topic_transport_tests {
     }
 
     #[test]
+    fn non_online_presence_reroutes_queued_bubbles() {
+        for presence in [crate::presence::PresenceState::Busy, crate::presence::PresenceState::Rest, crate::presence::PresenceState::Offline] {
+            let id = format!("presence-channel-{}", presence.as_str());
+            let manager = &crate::conversation::CONVERSATION_MANAGER;
+            manager.force_new_session("user", &id, "same topic");
+            manager.set_user_channel(&id, "direct");
+            let mut actions = vec![ProactiveAction::from_trigger(ProactiveTrigger::Spontaneous, "hello".into(), 0.0)];
+            retain_topic_channel(&id, presence, &mut actions);
+            assert_eq!(actions.len(), 1);
+            assert_eq!(actions[0].delivery_channel, DeliveryChannel::ChatWindow);
+            assert_eq!(manager.user_channel(&id).as_deref(), Some("wechat"));
+            manager.close_pair_with_reason("user", &id, crate::conversation::CloseReason::Natural);
+        }
+    }
+
+    #[test]
     fn queued_text_cannot_switch_a_spoken_topic() {
         let id = "channel-queue-test";
         let manager = &crate::conversation::CONVERSATION_MANAGER;
@@ -1855,12 +1885,12 @@ mod topic_transport_tests {
         let mut text = spoken.clone();
         text.delivery_channel = DeliveryChannel::ChatWindow;
         let mut actions = vec![text.clone(), spoken];
-        retain_topic_channel(id, &mut actions);
+        retain_topic_channel(id, crate::presence::PresenceState::Online, &mut actions);
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].delivery_channel, DeliveryChannel::Bubble);
         manager.close_pair_with_reason("user", id, crate::conversation::CloseReason::Natural);
         let mut new_topic = vec![text];
-        retain_topic_channel(id, &mut new_topic);
+        retain_topic_channel(id, crate::presence::PresenceState::Online, &mut new_topic);
         assert_eq!(new_topic.len(), 1);
     }
 }

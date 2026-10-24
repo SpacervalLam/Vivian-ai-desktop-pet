@@ -12,6 +12,18 @@ struct Entry {
     failures: u32,
     next_attempt: f64,
 }
+pub fn scope_key(trigger: &str, hint: Option<&str>) -> String {
+    if trigger == "spontaneous" {
+        if let Some(proposal) = hint.and_then(|hint| serde_json::from_str::<serde_json::Value>(hint).ok()) {
+            return format!("{trigger}:{}", serde_json::json!({"meaning_key":proposal["meaning_key"],
+                "evidence":proposal["evidence"],"event_id":proposal["event_id"]}));
+        }
+    }
+    trigger.to_owned()
+}
+impl RetryGate {
+    pub fn retry_pending(&self, key: &str) -> bool { self.entries.contains_key(key) }
+}
 pub struct Attempt {
     gate: Arc<Mutex<RetryGate>>,
     key: String,
@@ -22,6 +34,7 @@ pub struct Attempt {
 impl Attempt {
     pub fn reserve(gate: &Arc<Mutex<RetryGate>>, key: &str, now: f64) -> Option<Self> {
         let mut state = gate.lock();
+        state.entries.retain(|_, entry| entry.busy || entry.next_attempt >= now - 3600.0);
         let entry = state.entries.entry(key.into()).or_default();
         if entry.busy || now < entry.next_attempt {
             return None;
@@ -70,5 +83,19 @@ mod tests {
         drop(successful);
         assert!(Attempt::reserve(&gate, "idle", 193.0).is_some());
         assert!(Attempt::reserve(&gate, "welcome_back", 191.0).is_some());
+    }
+    #[test]
+    fn failure_of_one_meaning_does_not_delay_a_different_meaning() {
+        let gate = Arc::new(Mutex::new(RetryGate::default()));
+        drop(Attempt::reserve(&gate, "spontaneous:point_a", 100.0).unwrap());
+        assert!(Attempt::reserve(&gate, "spontaneous:point_a", 101.0).is_none());
+        assert!(Attempt::reserve(&gate, "spontaneous:point_b", 101.0).is_some());
+    }
+    #[test]
+    fn semantic_retry_identity_ignores_elapsed_time_and_reworded_topic() {
+        let first=r#"{"meaning_key":"exam_card","evidence":"明天考试","event_id":"","seconds_since_proposal":0,"topic":"准考证"}"#;
+        let later=r#"{"meaning_key":"exam_card","evidence":"明天考试","event_id":"","seconds_since_proposal":60,"topic":"带好准考证"}"#;
+        assert_eq!(scope_key("spontaneous",Some(first)),scope_key("spontaneous",Some(later)));
+        assert_ne!(scope_key("spontaneous",Some(first)),scope_key("spontaneous",Some(&later.replace("exam_card","exam_route"))));
     }
 }

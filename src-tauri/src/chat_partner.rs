@@ -32,6 +32,11 @@ use crate::state::AppState;
 /// 聊天专属角色的展示名。三语言界面统一用这一个值（i18n `partner_name_deepseek`
 /// 同值），seed 与开机改名同步都以它为准。
 pub const DEEPSEEK_NAME: &str = "ディープシークちゃん";
+/// deepseek 的人设提示词（编译期嵌入）。
+///
+/// 顶部带 `persona-version` 标记：改完这份提示词必须把版本号加一，
+/// 老装机才会在启动时单向同步过去（详见 `sns_store::sync_persona`）。
+pub const DEEPSEEK_PERSONA: &str = include_str!("../prompts/chat_partners/deepseek_chan.md");
 use crate::types::response::ChatMessage;
 
 /// 内存近期消息上限；模型上下文另按渠道从持久历史分页读取。
@@ -100,18 +105,17 @@ impl ChatPartner {
     ) -> Result<crate::providers::ModelRouter, String> {
         let mut config = state.config.read().get_all();
         let model = self.profile.read().model.clone();
-        let route = if let Some(mut value) = model {
+        if let Some(mut value) = model {
             if value.get("api_key").is_none() {
                 value["api_key"] = json!("");
             }
             if value.get("provider_type").is_none() {
                 value["provider_type"] = json!("openai");
             }
-            serde_json::from_value(value).map_err(|e| format!("好友模型配置无效: {e}"))?
-        } else {
-            crate::config::manager::TaskRouteConfig::default()
-        };
-        config.routing_matrix.insert(MODEL_ROUTE.into(), route);
+            let route = serde_json::from_value(value)
+                .map_err(|e| format!("好友模型配置无效: {e}"))?;
+            config.routing_matrix.insert(MODEL_ROUTE.into(), route);
+        }
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         serde_json::to_string(&config)
             .unwrap_or_default()
@@ -409,13 +413,21 @@ pub fn init() -> Result<(), String> {
     store.seed(&crate::sns_store::Contact {
         id: "deepseek".into(),
         name: DEEPSEEK_NAME.into(),
-        persona: include_str!("../prompts/chat_partners/deepseek_chan.md").into(),
+        persona: DEEPSEEK_PERSONA.into(),
         model: None,
         avatar: "/icons/charaters/deepseek.webp".into(),
     })?;
     // seed 带 contacts_seeded 标记、只跑一次；展示名后来统一过，
     // 老装机里的旧名要靠这里幂等同步过去（名字以外字段一律不动）。
     store.rename_contact("deepseek", DEEPSEEK_NAME)?;
+    // 人设同理按版本标记单向升级：编译期版本更高才覆写库里那份。
+    // 提示词改完必须把 md 顶部的 persona-version 加一，否则老装机收不到。
+    if store.sync_persona("deepseek", DEEPSEEK_PERSONA)? {
+        tracing::info!(
+            "[ChatPartner] deepseek 人设已同步到版本 {}",
+            crate::sns_store::persona_version(DEEPSEEK_PERSONA)
+        );
+    }
     for profile in store.contacts()? {
         register(profile);
     }

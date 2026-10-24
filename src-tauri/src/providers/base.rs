@@ -221,8 +221,6 @@ pub const TASK_COMPANION: &str = "companion";
 /// Complex workspace execution. Work-model overrides apply only to this task;
 /// companion speech and read-only reasoning plans keep their own routes.
 pub const TASK_WORK_AGENT: &str = "work_agent";
-/// Legacy isolated executor route. Desktop-pet execution uses reasoning; replies use chat.
-pub const TASK_TOOL_EXECUTION: &str = "tool_execution";
 
 /// 不包含 `previous_response_id`:Vivian 已有完整记忆架构(MemoryManager +
 /// TimeStampedMemory + ConsolidationPipeline),Brain 每轮传完整 messages,

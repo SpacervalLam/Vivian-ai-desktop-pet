@@ -58,7 +58,7 @@ use crate::pipeline::steps::query_rewrite::QueryRewriteStep;
 use crate::pipeline::steps::fast_semantic_step::FastSemanticStep;
 use crate::pipeline::steps::reflection::ReflectionRunnable;
 use crate::pipeline::steps::web_context::WebContextRunnable;
-use crate::providers::base::{LLMRequest, ProviderCallOptions};
+use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::types::response::{AiResponse, ChatMessage};
 
@@ -1011,8 +1011,8 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
 
     /// 执行流水线并构造 AiResponse。
     ///
-    /// 包含：stream 配置 → 8 维情绪向量转温度覆盖 → 调用 advisor_chain →
-    /// 清除温度覆盖 → 反序列化 PipelineState → 构造 AiResponse（含兜底）→
+    /// 包含：stream 配置 → 调用 advisor_chain →
+    /// 反序列化 PipelineState → 构造 AiResponse（含兜底）→
     /// 记录推理轨迹。
     async fn execute_pipeline_and_build_response(
         &self,
@@ -1025,20 +1025,9 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         if stream { config.tags.push("stream".into()); }
         let config = Some(config);
 
-        // 8 维情绪向量 → temperature 覆盖：让 LLM 输出温度随当前情绪变化
-        let emotion_state = self.psychology.emotion();
-        let trust = self.psychology.relationship().trust;
-        let temp = emotion_state.to_8d_vector(trust).to_temperature_default();
-        let result = self
-            .router
-            .scope_call_options(
-                ProviderCallOptions {
-                    temperature: Some(temp),
-                    ..ProviderCallOptions::default()
-                },
-                self.advisor_chain.ainvoke(state.to_json(), config),
-            )
-            .await?;
+        // Mood already reaches the dialogue as a bounded delivery hint. It must
+        // not silently replace configured sampling or change nested tool calls.
+        let result = self.advisor_chain.ainvoke(state.to_json(), config).await?;
 
         let final_state = PipelineState::from_json(result);
 

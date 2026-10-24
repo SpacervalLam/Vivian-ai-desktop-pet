@@ -25,10 +25,14 @@ pub struct ScheduledWakeup {
     pub purpose: String,
     /// 创建时间戳
     pub created_at: f64,
+    #[serde(default)]
+    pub retry_after: f64,
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 /// 单角色的唤醒队列（内存 + JSON 持久化）
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct WakeupData {
     #[serde(default)]
     items: Vec<ScheduledWakeup>,
@@ -69,6 +73,7 @@ impl WakeupScheduler {
     /// 返回任务 id。同 purpose 的未到期重复注册会被去重（刷新到期时间）。
     pub fn schedule(&self, in_seconds: f64, purpose: &str) -> VivianResult<String> {
         const MAX_HORIZON_SECS: f64 = 48.0 * 3600.0;
+        if !in_seconds.is_finite() { return Err(VivianError::Other("唤醒时间必须为有限数值".into())); }
         let in_seconds = in_seconds.clamp(60.0, MAX_HORIZON_SECS);
         let purpose = purpose.trim();
         if purpose.is_empty() {
@@ -76,45 +81,63 @@ impl WakeupScheduler {
         }
         let now = crate::memory::types::current_timestamp();
         let mut data = self.data.write();
+        let previous = data.clone();
         // 去重：同 purpose 未到期的任务刷新到期时间，避免堆积
         if let Some(existing) = data
             .items
             .iter_mut()
-            .find(|w| w.purpose == purpose && w.due_at > now)
+            .find(|w| w.purpose == purpose)
         {
             existing.due_at = now + in_seconds;
+            existing.retry_after = 0.0;
+            existing.attempts = 0;
             let id = existing.id.clone();
-            drop(data);
-            self.persist()?;
+            if let Err(error) = self.persist_data(&data) { *data = previous; return Err(error); }
             return Ok(id);
         }
-        data.next_seq += 1;
+        if data.items.len() >= 32 { return Err(VivianError::Other("待兑现的唤醒任务已达32条，请先完成已有安排".into())); }
+        data.next_seq = data.next_seq.saturating_add(1);
         let id = format!("wakeup-{}-{}", self.char_id, data.next_seq);
         data.items.push(ScheduledWakeup {
             id: id.clone(),
             due_at: now + in_seconds,
             purpose: purpose.to_string(),
             created_at: now,
+            retry_after: 0.0,
+            attempts: 0,
         });
-        drop(data);
-        self.persist()?;
+        if let Err(error) = self.persist_data(&data) { *data = previous; return Err(error); }
         Ok(id)
     }
 
-    /// 取出到期的唤醒任务（并从队列移除）
-    pub fn drain_due(&self, now: f64) -> Vec<ScheduledWakeup> {
+    /// Observe the earliest eligible promise without consuming it before delivery.
+    pub fn next_due(&self, now: f64) -> Option<ScheduledWakeup> {
+        self.data.read().items.iter().filter(|w| w.due_at <= now && w.retry_after <= now)
+            .min_by(|a,b| a.due_at.total_cmp(&b.due_at)).cloned()
+    }
+
+    pub fn contains(&self, id: &str) -> bool {
+        self.data.read().items.iter().any(|w| w.id == id)
+    }
+
+    pub fn is_due(&self, id: &str, now: f64) -> bool {
+        self.data.read().items.iter().any(|w| w.id == id && w.due_at <= now)
+    }
+
+    /// Failed generation or deferred delivery must not spin once every tick.
+    pub fn defer(&self, id: &str, now: f64) {
         let mut data = self.data.write();
-        let (due, pending): (Vec<_>, Vec<_>) = data
-            .items
-            .drain(..)
-            .partition(|w| w.due_at <= now);
-        data.items = pending;
-        if !due.is_empty() {
-            if let Err(e) = self.persist() {
-                tracing::warn!("[WakeupScheduler] 持久化失败: {e}");
-            }
+        if let Some(item) = data.items.iter_mut().find(|w| w.id == id) {
+            item.attempts = item.attempts.saturating_add(1);
+            item.retry_after = now + (60.0 * 2_f64.powi(item.attempts.min(6) as i32 - 1)).min(1800.0);
+            if let Err(e) = self.persist_data(&data) { tracing::warn!("[WakeupScheduler] 持久化失败: {e}"); }
         }
-        due
+    }
+
+    pub fn acknowledge(&self, id: &str) {
+        let mut data = self.data.write();
+        data.items.retain(|w| w.id != id);
+        if let Err(e) = self.persist_data(&data) { tracing::warn!("[WakeupScheduler] 持久化失败: {e}"); }
     }
 
     /// 待处理任务数（UI/调试用）
@@ -124,14 +147,15 @@ impl WakeupScheduler {
 
     /// 清空全部唤醒
     pub fn clear(&self) {
-        self.data.write().items.clear();
-        let _ = self.persist();
+        let mut data = self.data.write();
+        data.items.clear();
+        let _ = self.persist_data(&data);
     }
 
-    fn persist(&self) -> VivianResult<()> {
-        let json = serde_json::to_string(&*self.data.read())
+    fn persist_data(&self, data: &WakeupData) -> VivianResult<()> {
+        let json = serde_json::to_string(data)
             .map_err(|e| VivianError::Memory(format!("序列化唤醒队列失败: {e}")))?;
-        std::fs::write(&self.path, json)
+        crate::utils::fs::atomic_write(&self.path, json.as_bytes())
             .map_err(|e| VivianError::Memory(format!("写入唤醒队列失败: {e}")))
     }
 }
@@ -142,4 +166,57 @@ pub fn get_scheduler(char_id: &str) -> Arc<WakeupScheduler> {
     map.entry(char_id.to_string())
         .or_insert_with(|| Arc::new(WakeupScheduler::new(char_id)))
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn scheduler() -> WakeupScheduler {
+        WakeupScheduler { char_id:"test".into(), path:std::env::temp_dir().join(format!("vivian-wakeup-{}.json", uuid::Uuid::new_v4())), data:RwLock::new(WakeupData::default()) }
+    }
+    #[test]
+    fn due_promises_keep_identity_until_delivery_and_back_off_without_starving_others() {
+        let scheduler = scheduler();
+        let now = crate::memory::types::current_timestamp();
+        let first = scheduler.schedule(60.0, "看看用户").unwrap();
+        let second = scheduler.schedule(120.0, "分享发现").unwrap();
+        assert_eq!(scheduler.next_due(now+121.0).unwrap().id, first);
+        assert_eq!(scheduler.pending_count(), 2);
+        scheduler.defer(&first, now+121.0);
+        assert_eq!(scheduler.next_due(now+121.0).unwrap().id, second);
+        scheduler.acknowledge(&second);
+        assert!(scheduler.contains(&first));
+        assert!(scheduler.next_due(now+150.0).is_none());
+        assert_eq!(scheduler.next_due(now+182.0).unwrap().id, first);
+        let saved: WakeupData = serde_json::from_slice(&std::fs::read(&scheduler.path).unwrap()).unwrap();
+        assert_eq!(saved.items.len(),1);
+        assert_eq!(saved.items[0].id,first);
+        assert_eq!(saved.items[0].attempts,1);
+        scheduler.clear();
+        assert_eq!(scheduler.pending_count(),0);
+        let _ = std::fs::remove_file(&scheduler.path);
+    }
+    #[test]
+    fn scheduling_deduplicates_pending_promises_and_rejects_invalid_times() {
+        let scheduler = scheduler();
+        let id = scheduler.schedule(60.0,"回来看看").unwrap();
+        assert_eq!(scheduler.schedule(180.0,"回来看看").unwrap(),id);
+        assert_eq!(scheduler.pending_count(),1);
+        assert!(scheduler.schedule(f64::NAN,"invalid").is_err());
+        assert!(scheduler.schedule(f64::INFINITY,"invalid").is_err());
+        assert!(scheduler.schedule(60.0," ").is_err());
+        let _ = std::fs::remove_file(&scheduler.path);
+    }
+
+    #[test]
+    fn failed_persistence_does_not_leave_an_unacknowledged_schedule_in_memory() {
+        let mut scheduler = scheduler();
+        // An ordinary file cannot be used as the schedule's parent directory.
+        std::fs::write(&scheduler.path,b"blocked").unwrap();
+        let blocker = scheduler.path.clone();
+        scheduler.path = blocker.join("wakeups.json");
+        assert!(scheduler.schedule(60.0,"should not run").is_err());
+        assert_eq!(scheduler.pending_count(),0);
+        let _ = std::fs::remove_file(blocker);
+    }
 }

@@ -86,7 +86,7 @@ impl TriggerPreferenceLearner {
         learner
     }
 
-    /// 记录触发器已触发（在 push_message 时调用）
+    /// 记录触发器已实际投递（在 record_delivered 时调用）
     pub fn record_trigger_fired(&self, trigger: ProactiveTrigger) {
         let key = trigger.as_str().to_string();
         let now = current_timestamp();

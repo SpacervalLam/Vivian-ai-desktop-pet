@@ -236,7 +236,7 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
     let max_rounds = req.max_rounds.clamp(1, SUBAGENT_MAX_ROUNDS);
     // 子 agent 内发起的工具调用看到的是自己所在深度
     let child_depth = req.depth + 1;
-    let tool_ctx = ToolUseContext {
+    let mut tool_ctx = ToolUseContext {
         session_id: req.parent_session_id.clone(),
         char_id: req.char_id.clone(),
         working_directory: req.working_directory.clone(),
@@ -244,6 +244,8 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
         agent_kind: "work".to_string(),
         subagent_depth: child_depth,
         allowed_tools: Some(req.tools.clone()),
+        content_reader_ready: crate::tools::content_visibility::has_direct_source(&req.task)
+            || req.context.as_deref().is_some_and(crate::tools::content_visibility::has_direct_source),
         ..Default::default()
     }
     // 附加工作区随子 agent 一起下传：子任务与父会话拥有同样的可访问范围，
@@ -329,6 +331,7 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
         }
         rounds += 1;
         definitions = definitions_for(tool_system, &req.tools);
+        definitions.retain(|d| d.name != crate::tools::content_visibility::READER || tool_ctx.content_reader_ready);
         definitions.retain(|d| d.name != work_contract::RETURN_TOOL);
         definitions.push(crate::brain::coding_agent::task_return_definition());
 
@@ -462,6 +465,9 @@ async fn run_subagent_inner(router: &ModelRouter, tool_system: &ToolSystem, app:
             .await;
             tool_calls_total += 1;
             let succeeded = work_contract::execution_succeeded(result.success, result.data.as_ref());
+            if crate::tools::content_visibility::search_has_sources(&call.name, succeeded, result.data.as_ref()) {
+                tool_ctx.content_reader_ready = true;
+            }
             receipts.push(Evidence { tool_call_id: call.id.clone(), tool: call.name.clone(), success: succeeded });
             // 子智能体改的文件也要记到父会话上：委托出去的改动正是模型最容易
             // 汇报不全的部分，而写工具执行成功的这一刻宿主是确切知道的。

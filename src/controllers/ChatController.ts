@@ -100,7 +100,12 @@ class ChatControllerClass {
     // Backend-owned image turns share the same bubble, expression and TTS stream lifecycle.
     this.unlisteners.push(await listen<{ stream_id: string; character_id?: string; channel?: string; source?: string }>('chat:start', event => {
       const { stream_id: id, character_id: characterId, channel, source } = event.payload;
-      if (source !== 'image' || !id || characterId !== getCharacterId() || this.sessions.has(id)) return;
+      const existing = this.sessions.get(id);
+      if (existing) {
+        if (channel) existing.channel = channel;
+        return;
+      }
+      if (source !== 'image' || !id || characterId !== getCharacterId()) return;
       this.sessions.set(id, {
         id, characterId, channel: channel ?? 'wechat', text: '', streamParser: new StreamController(),
         resolve: () => {}, reject: () => {}, instantReactLayer2Fired: false, bubbleStarted: false,
@@ -224,14 +229,20 @@ class ChatControllerClass {
         sticker?: AiResponse['sticker'];
         user_emotion?: string;
         stream_id?: string;
-      }>('chat:done', (event) => {
+      }>('chat:done', async (event) => {
         const sid = event.payload.stream_id ?? '';
         const session = this.sessions.get(sid);
         if (!session) return;
-        const finalText = event.payload.text || session.text;
+        const finalText = event.payload.text ?? session.text;
+        // Empty final text is intentional silence, never a request to replay chunks.
+        const corrected = finalText !== session.text && !!session.text;
+        if (corrected) {
+          await TtsStreamQueue.stop();
+          if (this.sessions.get(sid) !== session) return;
+        }
         TtsStreamQueue.beginStream(sid, session.characterId);
         if (session.presentation) TtsStreamQueue.setPresentation(session.presentation);
-        if (!session.text.trim() && finalText.trim()) {
+        if ((!session.text.trim() || corrected) && finalText.trim()) {
           TtsStreamQueue.setPresentation({ expression: event.payload.expression ?? session.presentation?.expression ?? '', motion: event.payload.motion ?? session.presentation?.motion ?? '' });
           TtsStreamQueue.feed(finalText);
         }
@@ -341,7 +352,11 @@ class ChatControllerClass {
    */
   async sendMessage(message: string, characterId?: string, channel?: string, whisper?: boolean, fileMetadata?: Record<string, unknown>): Promise<AiResponse> {
     const targetCharId = characterId ?? getCharacterId() ?? undefined;
-    const ch = channel ?? 'wechat';
+    let ch = channel ?? 'wechat';
+    if (ch === 'direct') {
+      const presence = await invoke<{ state: string }>('get_presence_state', { characterId: targetCharId });
+      if (['busy', 'rest', 'offline'].includes(presence.state)) ch = 'wechat';
+    }
     // 添加用户消息到历史
     const userMsg: ChatMessage = {
       role: 'user',
@@ -511,7 +526,7 @@ class ChatControllerClass {
     this.clearWatchdog(sid);
     this.sessions.delete(sid);
     void emit('chat:waiting-ended', { stream_id: sid, character_id: session.characterId });
-    BubbleController.startAutoClose(3000);
+    BubbleController.closeAll();
     this.handlers.onResponseReceived?.(
       { text: '', motion: 'idle', expression: '', emotion_score: 0 },
       sid,

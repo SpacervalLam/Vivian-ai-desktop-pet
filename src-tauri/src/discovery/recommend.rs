@@ -100,21 +100,15 @@ fn effective_score(item: &ContentItem, recent_topics: &[String]) -> f64 {
 }
 
 /// LLM 生成朋友式推荐文案（批量，一次调用）
-/// 返回与输入一一对应的 expression；LLM 失败或个别条目解析失败时回退到评估 reason。
-pub async fn generate_expressions(profile: &InterestProfile, items: &[ContentItem]) -> Vec<String> {
+/// 返回与输入一一对应的 expression；失败时只展示已有标题，不泄露内部评估理由。
+pub async fn generate_expressions(char_id: &str, profile: &InterestProfile, items: &[ContentItem]) -> Vec<String> {
     if items.is_empty() {
         return Vec::new();
     }
 
     let fallback: Vec<String> = items
         .iter()
-        .map(|i| {
-            if i.reason.is_empty() {
-                format!("「{}」，感觉你会感兴趣", i.title)
-            } else {
-                i.reason.clone()
-            }
-        })
+        .map(|i| format!("看到这个：{}", i.title))
         .collect();
 
     let system =
@@ -145,7 +139,7 @@ pub async fn generate_expressions(profile: &InterestProfile, items: &[ContentIte
 
     let user = format!(
         "{}\n\n## 要求\n\
-1. 每条 expression 50-150 字中文口语，像朋友随口安利\n\
+1. 每条 expression 一两句简短中文口语，像朋友随口安利，不追问\n\
 2. 必须引用至少一个具体内容细节（标题关键词、作者特点、独特切入角度），不要说空话\n\
 3. 避免：算法套话、信息密度、高质量、深度好文、值得一看、强烈推荐\n\
 4. 每条开头措辞必须不同，禁止重复同一句式\n\
@@ -157,7 +151,7 @@ pub async fn generate_expressions(profile: &InterestProfile, items: &[ContentIte
         serde_json::to_string(&content_items).unwrap_or_default(),
     );
 
-    let Some(content) = super::llm_complete(system, &user, Some(0.9)).await else {
+    let Some(content) = super::complete_on_route("companion", system, &user, Some(0.7), Some(char_id)).await else {
         return fallback;
     };
     let Some(value) = super::parse_json_tolerant(&content) else {

@@ -10,7 +10,6 @@ pub const CORE_TOOLS: &[&str] = &[
     "list_dir",
     "read_spilled_result",
     "web_search",
-    "web_fetch",
     "tool_list",
     "tool_search",
     "work_ask_user",
@@ -31,7 +30,7 @@ pub fn parallel_read(name: &str) -> bool {
             | "glob"
             | "list_dir"
             | "web_search"
-            | "web_fetch"
+            | "read_content"
             | "read_spilled_result"
             | "read_image"
     )

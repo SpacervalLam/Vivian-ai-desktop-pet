@@ -22,7 +22,7 @@ pub fn build_conversation_recap(tsm: &TimeStampedMemory) -> Option<ChatMessage> 
     // 避免重复：如果摘要内容和最近的消息高度重叠，跳过注入
     // （TimeStampedMemory 的 recent_summary 基于被压缩的旧消息，理论上不会与当前窗口重叠）
     Some(ChatMessage::system(format!(
-        "[CONVERSATION RECAP]\n{}\n[END RECAP]\n\n注意：以上是此前对话的摘要。你的近期对话历史紧随其后。请自然延续话题，不要重复摘要中的内容。",
+        "[CONVERSATION RECAP]\n{}\n[END RECAP]\n\n注意：以上是你自己对此前对话的回顾，口吻与你平时说话一致。近期对话历史紧随其后。自然延续话题，不要逐条复诵回顾内容。",
         summary_text.trim()
     )))
 }

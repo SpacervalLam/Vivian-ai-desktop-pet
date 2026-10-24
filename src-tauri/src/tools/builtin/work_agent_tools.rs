@@ -43,14 +43,38 @@ fn status_text(s: crate::brain::coding_agent::CodingStatus) -> &'static str {
 /// 工具调用意图与结果使用独立 role；这里只返回工作智能体真正交付给用户的
 /// assistant 文本。限制长度是为了避免状态查询把整个陪伴侧上下文挤满。
 fn latest_work_summary(session: &CodingSession) -> Option<String> {
-    session
-        .messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.role == CodingRole::Assistant && !message.content.trim().is_empty()
-        })
-        .map(|message| message.content.trim().chars().take(4000).collect()).or_else(|| session.last_reply_preview.clone())
+    full_work_summary(session).map(|summary| summary.chars().take(4000).collect())
+}
+
+fn full_work_summary(session: &CodingSession) -> Option<String> {
+    if let Some(result) = session.task.as_ref().and_then(|task| task.result.as_ref()) {
+        return Some(result.summary.trim().to_string()).filter(|text| !text.is_empty());
+    }
+    let start = session.task.as_ref().map(|task| task.start_message).unwrap_or(0).min(session.messages.len());
+    session.messages[start..].iter().rev()
+        .find(|message| message.role == CodingRole::Assistant && !message.content.trim().is_empty())
+        .map(|message| message.content.trim().to_string())
+        .or_else(|| session.task.is_none().then(|| session.last_reply_preview.clone()).flatten())
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn continuation_session(args: &Value) -> Result<Option<&str>, &'static str> {
+    let Some(value) = args.get("session_id") else { return Ok(None); };
+    let id = value.as_str().map(str::trim).filter(|id| !id.is_empty())
+        .ok_or("session_id 必须是有效的工作会话编号，不得为空")?;
+    if args.get("mode").is_some() || args.get("working_directory").is_some() {
+        return Err("续接原任务时不传 mode 或 working_directory");
+    }
+    Ok(Some(id))
+}
+
+fn work_task_without_duplicate_summary(task: &Value) -> Value {
+    let mut task = task.clone();
+    if let Some(result) = task.get_mut("result").and_then(Value::as_object_mut) {
+        result.remove("summary");
+        result.insert("summary_ref".into(), json!("final_summary"));
+    }
+    task
 }
 
 // ===== delegate_to_work_agent =====
@@ -77,12 +101,12 @@ impl Tool for DelegateToWorkAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Proactively delegate user-requested work requiring sustained research, multiple execution steps, coding, commands, file processing or deliverables such as PPTs, documents, spreadsheets and reports. The user need not name this tool; their work request authorizes delegation within its scope. Answer ordinary explanations and casual conversation yourself. Resolve follow-ups using the preceding task and write a self-contained prompt preserving objective, constraints, known context, deliverable and verification criteria without inventing authority. Runs in a background session; claim it started only after a successful session_id receipt. get_work_status returns progress and the final summary. Do not duplicate delegated execution."
+        "Proactively delegate user-requested work requiring sustained research, multiple execution steps, coding, commands, file processing or deliverables such as PPTs, documents, spreadsheets and reports. The user need not name this tool; their work request authorizes delegation within its scope. Answer ordinary explanations and casual conversation yourself. Resolve follow-ups using the preceding task and write a self-contained prompt preserving objective, constraints, known context, deliverable and verification criteria without inventing authority. Runs in a background session; claim it started only after a successful session_id receipt. get_work_status returns progress and the final summary. Provide an existing session_id to forward the user’s follow-up to that task; running tasks read it at their next decision, idle tasks resume in the same session. Omit mode and working_directory when continuing. Do not duplicate delegated execution."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "用户要求完成持续研究、多步骤执行、编程、命令、文件处理或制作 PPT、文档、表格、报告时，主动委派工作智能体；无需用户点名工具，原任务请求就是范围内的委派授权。普通解释和闲聊自己回答。结合前文解析‘交给工作侧’等追问，以用户身份写自包含任务，保留目标、约束、已知上下文、交付物和验证标准，不虚构授权或路径。任务后台执行；只有成功回执含 session_id 才能说已开始。get_work_status 可读取进度和最终总结；派发后不要重复执行。",
+            "zh" => "用户要求完成持续研究、多步骤执行、编程、命令、文件处理或制作 PPT、文档、表格、报告时，主动委派工作智能体；无需用户点名工具，原任务请求就是范围内的委派授权。普通解释和闲聊自己回答。结合前文解析‘交给工作侧’等追问，以用户身份写自包含任务，保留目标、约束、已知上下文、交付物和验证标准，不虚构授权或路径。任务后台执行；只有成功回执含 session_id 才能说已开始。get_work_status 可读取进度和最终总结。用户补充原任务要求时传 session_id：运行中排入下一次决策，空闲时在原会话继续；续接时不传 mode 或 working_directory，不另建重复任务。",
             "ja" => "ユーザーが継続的な調査、多段階実行、コード、コマンド、ファイル処理、PPT・文書・表・レポート作成を依頼したら、作業エージェントに自ら委任する。ツール名の指定は不要で、依頼の範囲内で委任できる。通常の説明や雑談は自分で答える。前の会話も踏まえ、目的・制約・既知の背景・成果物・検証基準を含む完全な指示を作り、権限やパスを捏造しない。バックグラウンド実行は成功した session_id の受領後にのみ開始済みと伝える。get_work_status で進捗と最終要約を確認し、委任した作業を重複実行しない。",
             _ => self.description(),
         }
@@ -101,7 +125,8 @@ impl Tool for DelegateToWorkAgentTool {
         json!({
             "type": "object",
             "properties": {
-                "task": {"type": "string", "description": "Self-contained task prompt written on the user's behalf. Include objective, constraints, relevant context, expected deliverable, and verification criteria; do not invent authorization."},
+                "session_id": {"type":"string", "description":"Existing session from get_work_status: forward user instructions to that task instead of creating a duplicate. Only this companion’s sessions are allowed; omit mode and working_directory."},
+                "task": {"type": "string", "description": "New task or user follow-up instructions for an existing session_id. Written on the user's behalf. Include objective, constraints, relevant context, expected deliverable, and verification criteria; do not invent authorization."},
                 "working_directory": {"type": "string", "description": "Optional working directory for the task. Omit to use the user's default workspace (Documents/Vivian when not customized)."},
                 "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "Work agent mode (default standard)"}
             },
@@ -114,7 +139,8 @@ impl Tool for DelegateToWorkAgentTool {
             "zh" => json!({
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "以用户身份写给工作智能体的自包含提示词：包含目标、约束、相关上下文、预期交付物和验证标准，不得虚构授权。"},
+                    "session_id": {"type":"string", "description":"已有工作会话编号（可先用 get_work_status 获取）。提供时给原任务追加用户要求，不另建任务；仅能操作当前角色的会话，此时不传 mode 或 working_directory。"},
+                    "task": {"type": "string", "description": "新任务的完整提示词，或针对 session_id 原任务的用户补充要求：包含目标、约束、相关上下文、预期交付物和验证标准，不得虚构授权。"},
                     "working_directory": {"type": "string", "description": "可选的工作目录。省略则使用用户默认工作区，未自定义时为系统文档目录下的 Vivian。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "工作智能体模式（默认 standard）"}
                 },
@@ -123,6 +149,7 @@ impl Tool for DelegateToWorkAgentTool {
             "ja" => json!({
                 "type": "object",
                 "properties": {
+                    "session_id": {"type":"string", "description":"既存の作業セッションID。同じキャラクターのタスクに指示を追加し、新規タスクは作成しない。"},
                     "task": {"type": "string", "description": "作業エージェントへの完全なタスク指示（ユーザー口調で記述）"},
                     "working_directory": {"type": "string", "description": "任意の作業ディレクトリ。省略時は既定のワークスペースを使用（未設定ならドキュメント内の Vivian）。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "作業エージェントのモード（デフォルト standard）"}
@@ -134,6 +161,7 @@ impl Tool for DelegateToWorkAgentTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        if let Err(error) = continuation_session(input) { return ValidationResult::failure(error, 2); }
         match input.get("task").and_then(|v| v.as_str()) {
             Some(t) if !t.trim().is_empty() => ValidationResult::success(Some(input.clone())),
             _ => ValidationResult::failure("task 是必填项且不能为空", 2),
@@ -149,6 +177,10 @@ impl Tool for DelegateToWorkAgentTool {
             return ToolResult::standard_error("无法派发任务（后端未初始化）", Some("WorkAgentUnavailable"), None);
         };
 
+        let existing_session = match continuation_session(&args) {
+            Ok(session) => session,
+            Err(error) => return ToolResult::standard_error(error, Some("InvalidWorkContinuation"), None),
+        };
         let task = args
             .get("task")
             .and_then(|v| v.as_str())
@@ -161,13 +193,6 @@ impl Tool for DelegateToWorkAgentTool {
             .to_string();
 
         let state = app.state::<Arc<AppState>>();
-        let configured = state.config.read().get_all().default_workspace;
-        let working_directory = match crate::utils::workspace::resolve_workspace(
-            args.get("working_directory").and_then(Value::as_str).unwrap_or(""), configured.as_deref()) {
-            Ok(directory) => directory,
-            Err(error) => return ToolResult::standard_error(&error, Some("WorkspaceUnavailable"), None),
-        };
-
         let router = match state.model_router.read().clone() {
             Some(r) => r,
             None => {
@@ -181,6 +206,37 @@ impl Tool for DelegateToWorkAgentTool {
         let tool_system = state.tool_system.clone();
         // 单轮 LLM↔工具 循环预算（与设置-工具-编程智能体最大轮次一致）
         let max_rounds = state.config.read().get_all().tools.max_coding_rounds as usize;
+
+        if let Some(session_id) = existing_session {
+            let Some(session) = CODING_AGENT.get_session(session_id).filter(|s| s.char_id == context.char_id) else {
+                return ToolResult::standard_error("当前角色没有这个工作会话，请先用 get_work_status 确认", Some("WorkSessionUnavailable"), None);
+            };
+            let queued = match CODING_AGENT.queue_companion_guidance(&context.char_id, session_id, &task) {
+                Ok(queued) => queued,
+                Err(error) => return ToolResult::standard_error(&error, Some("WorkContinuationFailed"), None),
+            };
+            if !queued {
+                if let Err(error) = CODING_AGENT.send_message(app.clone(), session_id.into(), router, tool_system,
+                    task.clone(), Vec::new(), Vec::new(), max_rounds, false, false) {
+                    return ToolResult::standard_error(&error, Some("WorkContinuationFailed"), None);
+                }
+            }
+            let _ = tauri::Emitter::emit(&app, "coding:companion_instruction", json!({
+                "session_id":session_id,"content":task,"guided":queued,
+            }));
+            return ToolResult::standard_success(
+                if queued { "用户补充要求已加入原工作会话，将在下一次决策时读取；尚不代表已经执行。" }
+                else { "已在原工作会话中继续执行用户要求。" },
+                Some(json!({"session_id":session_id,"char_id":session.char_id,"queued":queued,"created":false})),
+            );
+        }
+
+        let configured = state.config.read().get_all().default_workspace;
+        let working_directory = match crate::utils::workspace::resolve_workspace(
+            args.get("working_directory").and_then(Value::as_str).unwrap_or(""), configured.as_deref()) {
+            Ok(directory) => directory,
+            Err(error) => return ToolResult::standard_error(&error, Some("WorkspaceUnavailable"), None),
+        };
 
         // 创建工作会话并以用户身份发送任务（异步后台执行）
         let session = CODING_AGENT.create_session(&context.char_id, &working_directory, &mode);
@@ -214,7 +270,7 @@ impl Tool for DelegateToWorkAgentTool {
                         "label": "打开", "cancelLabel": "取消" }
                 }));
                 ToolResult::standard_success(
-                    &format!("任务已派发给工作智能体（会话 {session_id}），正在后台执行。可用 get_work_status 查询进度。"),
+                    &format!("任务已派发给工作智能体（会话 {session_id}），正在后台执行。用 get_work_status 查询进度；用户补充要求时，传本 session_id 再调用 delegate_to_work_agent 续接。"),
                     Some(json!({
                         "session_id": session_id,
                         "working_directory": session.working_directory,
@@ -280,12 +336,12 @@ impl Tool for GetWorkStatusTool {
     }
 
     fn description(&self) -> &str {
-        "Check work-agent sessions. With session_id, returns status plus the latest final assistant summary when available; omit it to list recent sessions. Use the returned summary as the work agent's report: preserve its outcome, verification, and blockers when relaying it to the user."
+        "Check work-agent sessions. With session_id, returns current status and a single summary (up to 4000 characters); include_details=true returns its full text. Task evidence, verification, artifacts and remaining_work are preserved. summary_truncated=true means more text is available; omit it to list recent sessions. Use the returned summary as the work agent's report: preserve its outcome, verification, and blockers when relaying it to the user."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "查询工作智能体会话。传 session_id 时会返回状态，以及可用时工作智能体最后一条完整总结；省略则列出最近会话。向用户转达时要保留总结里的结果、验证和阻塞，不要擅自美化。",
+            "zh" => "查询工作智能体会话。传 session_id 返回本轮状态和一份总结（默认最多4000字）；summary_truncated=true 时可传 include_details=true 读取全文。验证、产物和剩余工作单独保留；省略则列出最近会话。向用户转达时要保留总结里的结果、验证和阻塞，不要擅自美化。",
             "ja" => "作業エージェントのセッション状態を確認する。任意の session_id で1件取得、省略時は最近のセッション一覧（id、タイトル、状態、作業ディレクトリ、最終更新）。タスク委任後にユーザーへ進捗を報告するために使用。",
             _ => self.description(),
         }
@@ -304,7 +360,8 @@ impl Tool for GetWorkStatusTool {
         json!({
             "type": "object",
             "properties": {
-                "session_id": {"type": "string", "description": "Optional session ID to query one session"}
+                "session_id": {"type": "string", "description": "Optional session ID to query one session"},
+                "include_details":{"type":"boolean","description":"Return the complete summary instead of the default bounded preview; default false"}
             }
         })
     }
@@ -314,13 +371,15 @@ impl Tool for GetWorkStatusTool {
             "zh" => json!({
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "可选的会话 ID（查单个会话）"}
+                    "session_id": {"type": "string", "description": "可选的会话 ID（查单个会话）"},
+                    "include_details":{"type":"boolean","description":"读取完整总结；默认仅返回有界预览，验证、产物和剩余工作始终保留"}
                 }
             }),
             "ja" => json!({
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "任意のセッション ID（1件取得）"}
+                    "session_id": {"type": "string", "description": "任意のセッション ID（1件取得）"},
+                    "include_details":{"type":"boolean","description":"要約の全文を取得。既定は最大4000文字。検証・成果物・残作業は常に保持"}
                 }
             }),
             _ => self.parameters_schema(),
@@ -343,14 +402,12 @@ impl Tool for GetWorkStatusTool {
             let detail = sessions.iter().find(|s| s.session_id == sid).and_then(|s| CODING_AGENT.get_session(&s.session_id));
             match detail.as_ref() {
                 Some(s) => {
-                    let final_summary = latest_work_summary(s);
+                    let full_summary = full_work_summary(s);
+                    let include_details = args["include_details"].as_bool().unwrap_or(false);
+                    let summary_truncated = !include_details && full_summary.as_ref().is_some_and(|summary|summary.chars().count()>4000);
+                    let final_summary = if include_details { full_summary } else { latest_work_summary(s) };
                     let message = match &final_summary {
-                        Some(summary) => format!(
-                            "会话「{}」状态：{}\n\n工作智能体总结：\n{}",
-                            s.title,
-                            status_text(s.status),
-                            summary
-                        ),
+                        Some(_) => format!("会话「{}」状态：{}；本轮总结见 final_summary。",s.title,status_text(s.status)),
                         None => format!(
                             "会话「{}」状态：{}，尚无可返回的工作总结。",
                             s.title,
@@ -369,7 +426,8 @@ impl Tool for GetWorkStatusTool {
                             "message_count": s.message_count(),
                             "delegated_by_companion": s.delegated_by_companion,
                             "final_summary": final_summary,
-                            "task": s.task,
+                            "summary_truncated": summary_truncated,
+                            "task": work_task_without_duplicate_summary(&json!(s.task)),
                         })),
                     )
                 }

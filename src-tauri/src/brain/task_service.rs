@@ -541,7 +541,7 @@ impl TaskService {
              不要输出 JSON 之外的任何文字。",
         );
         let user = ChatMessage::user(task_text);
-        let req = LLMRequest::new(crate::providers::base::TASK_TOOL_EXECUTION, vec![system, user])
+        let req = LLMRequest::new("reasoning", vec![system, user])
             .with_character_id(char_id.to_string());
         let resp = match router.generate(req).await {
             Ok(t) => t,

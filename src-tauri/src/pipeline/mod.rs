@@ -36,6 +36,8 @@ pub(crate) mod task_continuity;
 pub mod steps;
 pub mod template_engine;
 pub mod topic_injection;
+#[cfg(test)]
+mod prompt_eval;
 
 // 基础组件
 pub use base::{

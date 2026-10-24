@@ -181,7 +181,7 @@ impl Advisor for LoggingAdvisor {
         let task_type = config
             .as_ref()
             .map(|c| c.task_type())
-            .unwrap_or_else(|| "chat".to_string());
+            .unwrap_or_else(|| crate::providers::base::TASK_COMPANION.to_string());
 
         tracing::info!(
             advisor = %self.name,
@@ -283,7 +283,7 @@ impl Advisor for RateLimitAdvisor {
         let task = config
             .as_ref()
             .map(|c| c.task_type())
-            .unwrap_or_else(|| "chat".to_string());
+            .unwrap_or_else(|| crate::providers::base::TASK_COMPANION.to_string());
         let provider = self.provider_for(&task);
         // 1 token = 1 次调用；非阻塞 acquire，限流时直接返回错误
         if !self.registry.acquire(&provider, 1) {
@@ -362,7 +362,7 @@ impl Advisor for Re2Advisor {
         let task = config
             .as_ref()
             .map(|c| c.task_type())
-            .unwrap_or_else(|| "chat".to_string());
+            .unwrap_or_else(|| crate::providers::base::TASK_COMPANION.to_string());
         let enabled = self.enabled_tasks.read().iter().any(|t| t == &task);
         if !enabled {
             return next.invoke(req, config).await;
@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn re2_advisor_skips_chat_task() {
+    async fn re2_advisor_skips_dialogue_task() {
         let advisor = Re2Advisor::new();
         let captured = Arc::new(RwLock::new(Value::Null));
         let captured_clone = captured.clone();
@@ -616,7 +616,7 @@ mod tests {
             response: serde_json::json!({ "text": "ok" }),
         };
         let mut config = RunnableConfig::default();
-        config.metadata = serde_json::json!({ "task_type": "chat" });
+        config.metadata = serde_json::json!({ "task_type": crate::providers::base::TASK_COMPANION });
         let req = serde_json::json!({ "user_input": "你好" });
         advisor.around_invoke(req, Some(config), &next).await.unwrap();
         let passed = captured.read().clone();

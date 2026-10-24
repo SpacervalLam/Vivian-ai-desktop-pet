@@ -124,9 +124,8 @@ pub struct ScenePolicy {
     events: VecDeque<SceneEvent>,
     seen: HashMap<String, f64>,
     pending: Option<Opportunity>,
-    last_plan: Option<f64>,
-    last_user_opportunity: Option<f64>,
-    last_peer_opportunity: Option<f64>,
+    last_plan_events: Vec<String>,
+    turn_active: bool,
     user_turns: VecDeque<UserTurn>,
     turn_sequence: u64,
     intent: Option<IntentAssessment>,
@@ -251,11 +250,11 @@ impl ScenePolicy {
         participants: &[Participant],
         user_available: bool,
         user_chatting: bool,
-        now: f64,
+        _now: f64,
     ) {
+        self.turn_active = user_chatting;
         if self.pending.as_ref().is_some_and(|p| {
-            (user_chatting && p.not_before <= now)
-                || !participants.iter().any(|r| {
+            !participants.iter().any(|r| {
                     r.id == p.speaker_id
                         && r.available
                         && (p.listener_id != "user" || r.can_address_user)
@@ -271,7 +270,6 @@ impl ScenePolicy {
     }
     pub fn observe(&mut self, event: SceneEvent) {
         self.events.retain(|e| event.at - e.at < 1800.0);
-        self.seen.retain(|_, at| event.at - *at < 3600.0);
         if self.seen.contains_key(&event.id) {
             return;
         }
@@ -280,6 +278,11 @@ impl ScenePolicy {
             self.pending = None;
         }
         self.seen.insert(event.id.clone(), event.at);
+        if self.seen.len() > 512 {
+            if let Some(oldest) = self.seen.iter().min_by(|a,b| a.1.total_cmp(b.1)).map(|(id,_)| id.clone()) {
+                self.seen.remove(&oldest);
+            }
+        }
         self.events.push_back(event);
         while self.events.len() > 16 {
             self.events.pop_front();
@@ -300,25 +303,15 @@ impl ScenePolicy {
 
     /// Single shared budget across all character windows, including failures and abstentions.
     pub fn begin_plan(&mut self, now: f64, participants: &[Participant]) -> bool {
-        if self.events(now).is_empty()
+        let event_ids: Vec<String> = self.events(now).iter().map(|event| event.id.clone()).collect();
+        if event_ids.is_empty()
             || !participants.iter().any(|p| p.available)
             || self.pending.as_ref().is_some_and(|p| p.expires_at > now)
-            || self.last_plan.is_some_and(|last| {
-                now - last
-                    < if self
-                        .events
-                        .iter()
-                        .any(|e| e.stimulus == Stimulus::UserDialogue && now - e.at < 90.0)
-                    {
-                        15.0
-                    } else {
-                        90.0
-                    }
-            })
+            || self.last_plan_events == event_ids
         {
             return false;
         }
-        self.last_plan = Some(now);
+        self.last_plan_events = event_ids;
         true
     }
 
@@ -370,20 +363,11 @@ impl ScenePolicy {
         let listener_id = match selection.audience.as_str() {
             "user"
                 if user_available
-                    && (!user_chatting || selection.delay_seconds > 0)
-                    && speaker.can_address_user
-                    && self
-                        .last_user_opportunity
-                        .is_none_or(|at| now - at >= 900.0) =>
+                    && speaker.can_address_user =>
             {
                 "user".to_owned()
             }
-            "roommate"
-                if (!user_chatting || selection.delay_seconds > 0)
-                    && speaker.seconds_since_user_interaction >= 120.0
-                    && self
-                        .last_peer_opportunity
-                        .is_none_or(|at| now - at >= 300.0) =>
+            "roommate" =>
             {
                 let Some(peer) = participants
                     .iter()
@@ -403,19 +387,18 @@ impl ScenePolicy {
             stimulus: event.stimulus,
             created_at: now,
             not_before: now + selection.delay_seconds as f64,
-            expires_at: now + selection.delay_seconds as f64 + 120.0,
+            // Input, departure, superseding activity and settings changes invalidate it.
+            // A busy listener must not cause an otherwise relevant event to time out.
+            expires_at: f64::MAX,
         };
-        if opportunity.listener_id == "user" {
-            self.last_user_opportunity = Some(now);
-        } else {
-            self.last_peer_opportunity = Some(now);
-        }
+        self.turn_active = user_chatting;
         self.events.retain(|e| e.id != opportunity.event_id);
         self.pending = Some(opportunity);
         true
     }
 
     pub fn nominated_user_speaker(&self, now: f64) -> Option<String> {
+        if self.turn_active { return None; }
         self.pending
             .as_ref()
             .filter(|p| p.not_before <= now && p.expires_at > now && p.listener_id == "user")
@@ -423,6 +406,7 @@ impl ScenePolicy {
     }
 
     pub fn take(&mut self, id: &str, now: f64) -> Option<Opportunity> {
+        if self.turn_active { return None; }
         if self.pending.as_ref().is_some_and(|p| p.expires_at <= now) {
             self.pending = None;
         }
@@ -513,7 +497,9 @@ mod tests {
         made_up.event_id = "invented".into();
         assert!(!policy().accept(made_up, &roles(), true, false, 1000.0));
         assert!(!policy().accept(selection("nana", "user"), &roles(), false, false, 1000.0));
-        assert!(!policy().accept(selection("nana", "roommate"), &roles(), true, true, 1000.0));
+        let mut busy = policy();
+        assert!(busy.accept(selection("nana", "roommate"), &roles(), true, true, 1000.0));
+        assert!(busy.take("nana", 1001.0).is_none());
         let mut disabled = roles();
         disabled[1].available = false;
         assert!(!policy().accept(selection("nana", "user"), &disabled, true, false, 1000.0));
@@ -540,7 +526,7 @@ mod tests {
         assert_eq!(op.listener_id, "vivian");
         let mut p = policy();
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
-        assert!(p.take("nana", 1120.0).is_none());
+        assert!(p.take("nana", 1800.0).is_some());
     }
     #[test]
     fn new_owned_activity_retires_a_delayed_older_beat_without_losing_other_roles_events() {
@@ -600,6 +586,8 @@ mod tests {
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
         p.reconcile(&roles(), true, true, 1001.0);
         assert!(p.nominated_user_speaker(1001.0).is_none());
+        p.reconcile(&roles(), true, false, 1002.0);
+        assert_eq!(p.nominated_user_speaker(1002.0).as_deref(), Some("nana"));
         let mut p = policy();
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
         p.invalidate();
@@ -742,6 +730,7 @@ mod tests {
         p.reconcile(&roles(), true, true, 1001.0);
         assert!(p.nominated_user_speaker(1119.0).is_none());
         assert!(p.take("nana", 1119.0).is_none());
+        p.reconcile(&roles(), true, false, 1120.0);
         assert_eq!(p.nominated_user_speaker(1120.0).as_deref(), Some("nana"));
         assert!(p.take("nana", 1120.0).is_some());
 
@@ -789,10 +778,37 @@ mod tests {
         assert_eq!(p.recent_user_turns(1008.0).len(), 4);
         assert!(p.begin_plan(1008.0, &roles()));
         assert!(!p.begin_plan(1022.0, &roles()));
+        assert!(!p.begin_plan(1023.0, &roles()));
+        p.record_user_turn("vivian", "另一件新事情", "嗯", 1023.0);
         assert!(p.begin_plan(1023.0, &roles()));
         let ids: Vec<_> = p.events(1023.0).iter().map(|e| e.id.clone()).collect();
         p.finish_evaluation(&ids);
         assert!(!p.begin_plan(1040.0, &roles()));
-        assert!(p.recent_user_turns(1607.0).is_empty());
+        assert!(p.recent_user_turns(1624.0).is_empty());
+    }
+
+    #[test]
+    fn a_second_real_event_is_not_blocked_by_the_previous_speechs_clock() {
+        let mut p=policy();assert!(p.accept(selection("nana","user"),&roles(),true,false,1000.0));
+        assert!(p.take("nana",1001.0).is_some());
+        p.observe(SceneEvent{id:"new_risk".into(),stimulus:Stimulus::WorldChanged,
+            fact:"A new material observation".into(),owner:None,at:1002.0});
+        assert!(p.begin_plan(1002.0,&roles()));
+        let mut next=selection("nana","user");next.event_id="new_risk".into();
+        assert!(p.accept(next,&roles(),true,false,1002.0));assert!(p.take("nana",1003.0).is_some());
+    }
+
+    #[test]
+    fn busy_turns_defer_instead_of_expiring_or_consuming_the_opportunity() {
+        let mut p=policy();assert!(p.accept(selection("nana","user"),&roles(),true,true,1000.0));
+        p.reconcile(&roles(),true,true,1800.0);assert!(p.take("nana",1800.0).is_none());
+        p.reconcile(&roles(),true,false,1801.0);assert!(p.take("nana",1801.0).is_some());
+    }
+
+    #[test]
+    fn time_does_not_make_a_handled_event_new_again() {
+        let mut p=policy();p.finish_evaluation(&["rain".into()]);
+        p.observe(SceneEvent{id:"rain".into(),stimulus:Stimulus::WorldChanged,fact:"same rain".into(),owner:None,at:10000.0});
+        assert!(!p.begin_plan(10000.0,&roles()));
     }
 }
