@@ -664,10 +664,22 @@ impl AIResponseGenerationRunnable {
             "role": message.role, "content": message.content,
             "tool_calls": message.tool_calls, "tool_call_id": message.tool_call_id,
         })).collect();
+        let mut participants = state.metadata["communication_context"]["participants"].as_array().cloned().unwrap_or_else(|| crate::character_registry::list_character_ids().into_iter().map(|id| {
+            let name = crate::character_registry::get_brain(&id)
+                .map(|brain| brain.persona.get_config().identity.name).unwrap_or_else(|| id.clone());
+            json!({"id":id,"name":name})
+        }).collect::<Vec<_>>());
+        if !participants.iter().any(|p| p["id"] == char_id) { participants.push(json!({"id":char_id,"name":char_id})); }
+        participants.sort_by(|a,b| a["id"].as_str().cmp(&b["id"].as_str()));
+        let mut actor_ids = participants.iter().map(|p| p["id"].clone()).collect::<Vec<_>>();
+        actor_ids.push(Value::Null);
         let evidence = json!({"conversation": conversation, "latest_human_utterance": state.user_input,
-            "host_task": tracked_task});
+            "host_task": tracked_task, "current_character_id":char_id,
+            "channel":state.current_channel, "communication_context":state.metadata.get("communication_context"),
+            "participants":participants});
         let request = LLMRequest::new("simple_judge", vec![
-            ChatMessage::system(crate::pipeline::task_continuity::RESOLVE_SYSTEM),
+            ChatMessage::system(format!("{}\n{}", crate::pipeline::task_continuity::RESOLVE_SYSTEM,
+                crate::pipeline::task_continuity::ASSIGNMENT_SYSTEM)),
             ChatMessage::user(evidence.to_string()),
         ]).with_character_id(char_id).with_usage_tag("contextual_intent")
             .without_framework_instructions().with_json_schema(json!({
@@ -676,9 +688,10 @@ impl AIResponseGenerationRunnable {
                     "action":{"type":"boolean","description":"true only when the human is authorizing a concrete operation this turn. Mutually exclusive with needs_clarification."},
                     "continues_task":{"type":"boolean","description":"true only when the latest utterance refers to the tracked host task."},
                     "needs_clarification":{"type":"boolean","description":"true when the operation or its target stays ambiguous. Mutually exclusive with action; when true, action is false and task is empty."},
-                    "task":{"type":"string","description":"Self-contained description of the authorized task when action is true; empty when action is false."}
+                    "task":{"type":"string","description":"Only the operation assigned to the current character, not another participant's work; empty when action is false."},
+                    "execution_actor":{"type":["string","null"],"enum":actor_ids,"description":"Canonical participant ID semantically assigned to perform the operation; null if there is no operation or assignment is unresolved."}
                 },
-                "required":["action","continues_task","needs_clarification","task"]
+                "required":["action","continues_task","needs_clarification","task","execution_actor"]
             })).with_max_tokens(700).with_reasoning(false);
         let budget = Arc::new(crate::providers::base::RequestBudget::new(std::time::Duration::from_secs(8), 2));
         let response = tokio::time::timeout_at(budget.deadline(), router.scope_call_options(
@@ -692,7 +705,10 @@ impl AIResponseGenerationRunnable {
         // 折成澄清是唯一安全的降级：宿主本来就只在 `action && !needs_clarification`
         // 时才进执行侧，这里只是把这个既成事实写实。
         let (action, clarification) = (parsed.action, parsed.needs_clarification);
-        let parsed = parsed.sanitized();
+        let parsed = parsed.for_actor(&state.current_channel, char_id);
+        tracing::debug!(character = char_id, channel = %state.current_channel,
+            execution_actor = ?parsed.execution_actor, action = parsed.action,
+            "[ContextualIntent] execution assignment");
         if (parsed.action, parsed.needs_clarification) != (action, clarification) {
             tracing::info!("[ContextualIntent] 归一化矛盾输出: action={action}->{} needs_clarification={clarification}->{} \
                 (宿主只执行自足目标，其余折成澄清)", parsed.action, parsed.needs_clarification);
@@ -1326,7 +1342,11 @@ impl AIResponseGenerationRunnable {
             || state.metadata.get("contextual_intent").is_some_and(|context| context["action"] == false) {
             // Ambiguity and terminal tasks are reply-only turns. Even a hallucinated
             // text-protocol call must never reach either native or text execution.
-            let reply_instruction = if state.metadata["contextual_intent"]["needs_clarification"] == true {
+            let reply_instruction = if state.current_channel == "broadcast"
+                && state.metadata["contextual_intent"]["execution_actor"].as_str()
+                    .is_some_and(|actor| state.metadata["communication_context"]["current_character"].as_str() != Some(actor)) {
+                "You heard a public broadcast assigning an operation to another character. You are a listener, not its executor. Do not take over, ask the user to authorize you, speak for the assigned character, or claim their tool outcomes as your own. A brief natural reaction or silence is enough; do not output tool calls."
+            } else if state.metadata["contextual_intent"]["needs_clarification"] == true {
                 "The full conversation leaves the requested operation or target ambiguous. Ask one concise clarification. Do not perform operations, promise execution, or output tool calls."
             } else if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) {
                 "This turn is reply-only. Clarify the unresolved selection or acknowledge the task state. Do not perform operations, promise execution, or output tool calls."
@@ -1992,6 +2012,7 @@ mod tests {
             let supplied = serde_json::from_str::<Value>(body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap()).unwrap();
             assert_eq!(supplied["conversation"], expected_history, "do not truncate to the last exchange");
             assert_eq!(supplied["latest_human_utterance"], "那你挑");
+            assert_eq!(supplied["current_character_id"], "test");
             Json(json!({"choices":[{"message":{"role":"assistant","content":resolution.to_string()},"finish_reason":"stop"}]}))
         }
         let script: Script = Arc::new(parking_lot::Mutex::new(Default::default()));
@@ -2237,7 +2258,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let router = Arc::new(ModelRouter::new(&cfg).unwrap());
         let manager = Arc::new(ToolCallManager::new(Arc::new(crate::tools::registry::ToolSystem::new()), Default::default()));
-        let runnable = AIResponseGenerationRunnable::with_tool_call_manager(router, manager, new_shared_stream_emitter(), true, 3, 100000, 20);
+        let runnable = AIResponseGenerationRunnable::with_tool_call_manager(router.clone(), manager.clone(), new_shared_stream_emitter(), true, 3, 100000, 20);
         let mut state = PipelineState { should_respond: true, user_input: "就这个".into(), ..Default::default() };
         state.metadata["task_continuation"] = json!({"task":{"phase":"awaiting_selection","goal":"换张壁纸"},"needs_clarification":true});
         state.tool_definitions = vec![ToolDefinition { name: "wallpaper_set".into(), description: "set wallpaper".into(), parameters: json!({}) }];
@@ -2252,9 +2273,26 @@ mod tests {
         explanation.tool_definitions = vec![ToolDefinition { name:"wallpaper_set".into(), description:"set wallpaper".into(), parameters:json!({}) }];
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), runnable.ainvoke(explanation.to_json(), None)).await.unwrap().unwrap();
         assert!(PipelineState::from_json(result).tool_calls.is_empty());
+        for native in [true, false] {
+            let listener = AIResponseGenerationRunnable::with_tool_call_manager(router.clone(), manager.clone(), new_shared_stream_emitter(), native, 3, 100000, 20);
+            let mut state = PipelineState { should_respond:true, current_channel:"broadcast".into(),
+                user_input:"一起录，先试试看工具吧，Vivian能帮我换张天气之子的壁纸吗".into(), ..Default::default() };
+            let resolved: crate::pipeline::task_continuity::ResolvedTurn = serde_json::from_value(json!({
+                "action":true,"continues_task":true,"needs_clarification":false,
+                "task":"更换天气之子壁纸","execution_actor":"vivian"})).unwrap();
+            state.metadata["contextual_intent"] = json!(resolved.for_actor("broadcast", "nana"));
+            state.metadata["communication_context"] = json!({"current_character":"nana","listener":"all"});
+            state.metadata["task_continuation"] = json!({"task":{"phase":"ready","goal":"旧的换壁纸任务"}});
+            state.tool_definitions = vec![ToolDefinition { name:"wallpaper_set".into(), description:"set wallpaper".into(), parameters:json!({}) }];
+            assert!(!AIResponseGenerationRunnable::requests_execution(&state));
+            assert_eq!(AIResponseGenerationRunnable::generation_task(&state, "companion"), "companion");
+            let output = PipelineState::from_json(listener.ainvoke(state.to_json(), None).await.unwrap());
+            assert!(output.tool_calls.is_empty());
+            assert_eq!(output.generation_status, "task_clarification");
+        }
         server.abort();
         let requests = capture.lock();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         for request in requests.iter() {
             assert!(request.get("tools").is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)));
         }

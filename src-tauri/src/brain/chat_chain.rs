@@ -878,6 +878,11 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             "speaker": speaker, "listener": if current_ch == "broadcast" { "all" } else { self.char_id.as_str() },
             "knowledge_source": if current_ch == "cross_character" { "heard" } else if current_ch == "broadcast" { "broadcast" } else { "direct" },
             "current_character": self.char_id,
+            "participants": crate::character_registry::list_character_ids().into_iter().map(|id| {
+                let name = crate::character_registry::get_brain(&id)
+                    .map(|brain| brain.persona.get_config().identity.name).unwrap_or_else(|| id.clone());
+                serde_json::json!({"id":id,"name":name})
+            }).collect::<Vec<_>>(),
         });
         state.metadata["api_turn_text"] = serde_json::json!(turn_text);
         if current_ch == "cross_character" {

@@ -165,3 +165,39 @@ async fn configured_routes_capability_smoke() {
     assert_eq!(rows.len(), crate::providers::task_catalog::tasks().iter().filter(|t| t.kind == "llm").count());
     assert!(rows.iter().all(|r| r["error"].is_null()), "inspect route-results.json");
 }
+
+/// Replay broadcast semantics through the configured judge without running tools.
+#[tokio::test]
+#[ignore]
+async fn configured_broadcast_assignment_smoke() {
+    assert_eq!(std::env::var("VIVIAN_RUN_LIVE_BROADCAST_EVAL").as_deref(), Ok("1"));
+    assert!(std::env::var_os("VIVIAN_TEST_DATA_DIR").is_some());
+    let output = std::path::PathBuf::from(std::env::var_os("VIVIAN_BROADCAST_EVAL_OUTPUT").unwrap());
+    let config = crate::config::ConfigManager::new().get_all();
+    let router = crate::providers::ModelRouter::new(&config).unwrap();
+    let mut rows = Vec::new();
+    for (input, expected) in [
+        ("一起录，先试试看工具吧，Vivian能帮我换张天气之子的壁纸吗", [true,false]),
+        ("Nana，帮我把壁纸换成天气之子，Vivian你先看看就好。", [false,true]),
+        ("Vivian这名字很好听。Nana，帮我查一下杭州明天的天气。", [false,true]),
+        ("Vivian刚才说她会换壁纸，我只是在转述。现在谁都不要换。", [false,false]),
+        ("Vivian帮我找天气之子的壁纸，Nana帮我查杭州明天的天气。", [true,true]),
+        ("你们都听一下，帮我换张壁纸。没有指定谁来，先别操作，问清楚再说。", [false,false]),
+    ] {
+        for (character, expected_action) in ["vivian","nana"].into_iter().zip(expected) {
+            let mut state = PipelineState { current_channel:"broadcast".into(), user_input:input.into(), ..Default::default() };
+            state.metadata["communication_context"] = json!({"current_character":character,"speaker":"user","listener":"all","knowledge_source":"broadcast",
+                "participants":config.characters.list.iter().map(|entry| json!({"id":entry.id,"name":entry.name})).collect::<Vec<_>>()});
+            let result = AIResponseGenerationRunnable::resolve_contextual_intent(&router, &state, character, None).await;
+            let row = match result {
+                Ok(resolved) => json!({"character":character,"input":input,"expected_action":expected_action,
+                    "passed":resolved.action == expected_action,"resolved":resolved}),
+                Err(error) => json!({"character":character,"input":input,"passed":false,"error":error.to_string()}),
+            };
+            rows.push(row);
+            crate::utils::fs::write_atomic(&output, &serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+        }
+    }
+    assert_eq!(rows.len(),12);
+    assert!(rows.iter().all(|row| row["passed"] == true), "inspect the broadcast semantic evaluation output");
+}
