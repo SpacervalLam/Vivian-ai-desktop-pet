@@ -50,7 +50,12 @@ pub mod utils { pub use crate::{assets, fs}; pub mod path {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())
     }
 }}
-// Only the knowledge ingestion boundary is stubbed; it is outside template rendering.
+// This isolated crate has no desktop resource-pack installation. Exercise the
+// supported missing-pack fallback; installer/resolver coverage lives separately.
+pub mod commands { pub mod optional_resources {
+    pub fn resource_path(_: &str, _: &str) -> Option<std::path::PathBuf> { None }
+}}
+// Knowledge ingestion is outside template rendering.
 pub mod memory {
     pub struct MemoryManager;
     pub struct Document { pub id: String }
