@@ -121,13 +121,24 @@
     "instruction": "Analyze a completed interaction to update simulated internal state, supported understanding, or reflection candidates. Use the actual user evidence and verified events; the assistant’s wording is not a new external event. Separate tentative interpretations from durable facts and preserve explicit user settings. Do not extract generic memories instead of the requested reflection, roleplay a reply, or invent psychological certainty. Follow the caller’s structured update schema."
   },
   {
+    "id": "persona_evolution",
+    "groupKey": "config.routing_group_background",
+    "labelKey": "config.routing_persona_evolution",
+    "helpKey": "config.routing_persona_evolution_help",
+    "concurrency": "auxiliary",
+    "spoken": false,
+    "fallback": "reasoning",
+    "instruction": "Act exclusively as the private persona-evolution agent after a diary is saved. Audit the effective character definition, accumulated real interaction evidence, pending understandings and fictional few-shot corpus. Distinguish gradual, evidence-backed changes to local personality from repairs to examples that contradict the already effective persona. Propose bounded, version-referenced edits; the host alone validates and persists them. Preserve identity and explicit user-authored settings, never equate user preferences with the character's own, and never convert fictional samples or diary narration into memories. Return only the caller's structured review, allow no change, and never speak to the user or execute tools."
+  },
+  {
     "id": "diary_growth",
     "groupKey": "config.routing_group_background",
     "labelKey": "config.routing_diary_growth",
     "helpKey": "config.routing_diary_growth_help",
     "concurrency": "auxiliary",
     "spoken": false,
-    "fallback": "diary",
+    "hidden": true,
+    "fallback": "reasoning",
     "instruction": "Distil the day’s interactions into a small number of scoped self-understandings after the diary is written. A diary is the model’s own narration, never evidence: only a verbatim quote from the supplied list of things the user actually said today can support a proposal, and the host re-resolves that quote against stored user messages. Never infer character traits from your own summary, never borrow the user’s preferences as your own, and invent no shared experiences. Prefer refining an existing understanding over adding a new one, and return no proposal when the day holds no durable lesson."
   },
   {

@@ -30,6 +30,14 @@ impl SelfProfileStore {
         next.observe(kind, name, reason, evidence) && self.commit(&mut guard, next)
     }
     pub fn render(&self, now: f64) -> String { self.inner.read().render(now) }
+    pub fn flush_for_backup(&self) -> Result<(), String> {
+        if self.path.as_os_str().is_empty() {
+            return Err("私人画像处于内存模式，无法生成完整备份".into());
+        }
+        let profile = self.inner.read();
+        let json = serde_json::to_string_pretty(&*profile).map_err(|e| e.to_string())?;
+        crate::utils::fs::write_atomic(&self.path, &json).map_err(|e| e.to_string())
+    }
     pub fn reconcile_chat(&self, valid: impl Fn(&SelfEvidence) -> bool) {
         let mut guard = self.inner.write();
         let mut next = guard.clone();
@@ -64,6 +72,7 @@ mod tests {
             quote:"相机可以记录星空中的细节".into(), observed_at:86400.0,
         }));
         let reloaded = SelfProfileStore::new(path);
+        reloaded.flush_for_backup().unwrap();
         assert!(reloaded.render(86400.0).contains("星空摄影"));
         assert!(!reloaded.reserve_web_reflection(86460.0));
         assert!(SelfProfileStore::new(dir.path().join("nana-self.json")).render(86400.0).is_empty());
@@ -79,6 +88,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SelfProfileStore::new(dir.path().to_path_buf());
         assert!(!store.reserve_web_reflection(86400.0));
+        assert!(store.flush_for_backup().is_err());
         assert_eq!(store.inner.read().last_web_reflection, 0.0);
     }
 }

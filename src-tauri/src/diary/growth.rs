@@ -1,21 +1,25 @@
-//! 日记写完后的归纳总结：把当天的互动沉淀成「场景化自我理解」，交给人格自进化覆盖层。
+//! 日记驱动的自省：审视有效人设与模仿语料，原子提交人格成长及样例增改。
 //!
-//! 安全口径与逐轮反思一致——**只有当天已保存的用户原话能当证据**。模型自己的总结、
+//! 人格成长只有当天已保存的用户原话能当证据。模型自己的总结、
 //! 它给出的 memory_id 一律不采信：宿主只按 `source_quote` 在当天记录里逐字反查。
 //! 晋升门槛（≥2 个独立自然日、同证据同 scope 去重、候选上限）全部沿用
-//! `persona::evolution`，本模块不新增存储。
+//! `persona::evolution`；语料维护可独立进行，两者共用同一个版本化状态文件。
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::brain::Brain;
 use crate::error::{VivianError, VivianResult};
-use crate::persona::evolution::GrowthEvidence;
+use crate::persona::evolution::{GrowthEvidence, DiaryRevision, DiaryReviewOutcome, PersonaEvolution};
+use crate::persona::example_library;
+use crate::persona::evolution_agent::PersonaEvolutionAgent;
+pub use crate::persona::evolution_agent::EvolutionProposal as GrowthProposal;
+#[cfg(test)]
+use crate::persona::evolution_agent::parse_review as parse_growth_review;
 use crate::types::response::ChatMessage;
 
-use super::intelligent_generator::{strip_markdown_code_fence, DailyContext, InteractionRecord};
+use super::intelligent_generator::{DailyContext, InteractionRecord};
 
 /// 归纳是后台任务：超时即放弃，不让日记链路堆积。
 pub const GROWTH_TIMEOUT: Duration = Duration::from_secs(90);
@@ -26,25 +30,6 @@ const MIN_QUOTE_CHARS: usize = 6;
 const MAX_QUOTE_CHARS: usize = 500;
 /// 当天用户原话摘录的总预算（按整条截断，不改写内容，避免模型抄不回逐字片段）。
 const MAX_DIGEST_CHARS: usize = 4000;
-
-const GROWTH_DIRECTIVE: &str = include_str!("../../prompts/framework/diary_growth.md");
-
-/// 归纳出的一条自我理解提案
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GrowthProposal {
-    /// 六个允许场景之一：comfort / care / praise / humor / daily / disagreement
-    pub scope: String,
-    /// tone | personality
-    pub kind: String,
-    pub understanding: String,
-    #[serde(default)]
-    pub reason: String,
-    /// 必须是当天用户原话的逐字片段
-    pub source_quote: String,
-    /// 与已有候选高度重合时，用候选的 reference 改写而不是新增
-    #[serde(default)]
-    pub revises: Option<String>,
-}
 
 fn fingerprint(content: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -63,7 +48,7 @@ pub fn resolve_evidence(quote: &str, records: &[InteractionRecord]) -> Option<Gr
     }
     let record = records
         .iter()
-        .find(|r| r.role == "user" && !r.memory_id.is_empty() && r.content.contains(quote))?;
+        .find(|r| r.role == "user" && r.is_user_dialogue() && !r.memory_id.is_empty() && r.content.contains(quote))?;
     Some(GrowthEvidence {
         memory_id: record.memory_id.clone(),
         quote: quote.to_string(),
@@ -87,32 +72,6 @@ fn acceptable_proposals<'a>(
         .collect()
 }
 
-/// 应用提案：解析不到证据的直接丢弃，其余交给成长覆盖层做全部校验。
-///
-/// 返回 `(提交条数, 其中当场晋升条数)`；非晋升的提案仍会作为候选留存。
-pub fn apply_proposals(
-    persona: &crate::persona::PersonaEngine,
-    proposals: &[GrowthProposal],
-    records: &[InteractionRecord],
-) -> (usize, usize) {
-    let mut promoted = 0;
-    let acceptable = acceptable_proposals(proposals, records);
-    for (proposal, evidence) in &acceptable {
-        if persona.revise_evolution(
-            &proposal.kind,
-            &proposal.scope,
-            proposal.understanding.trim(),
-            &proposal.reason,
-            evidence.clone(),
-            false,
-            proposal.revises.as_deref(),
-        ) {
-            promoted += 1;
-        }
-    }
-    (acceptable.len(), promoted)
-}
-
 /// 当天用户原话摘录：只取真实用户发言，整条纳入直到预算用完。
 fn user_digest(records: &[InteractionRecord]) -> String {
     let mut out = String::new();
@@ -130,22 +89,20 @@ fn user_digest(records: &[InteractionRecord]) -> String {
 }
 
 /// 已生效理解与待验证候选：让模型优先改写而不是重复新增。
-fn learned_context(persona: &crate::persona::PersonaEngine) -> String {
-    let active: Vec<Value> = persona
-        .evolution_entries()
-        .into_iter()
+fn learned_context(evolution: &PersonaEvolution) -> String {
+    let active: Vec<Value> = evolution.entries.iter()
         .filter(|entry| entry.active())
-        .map(|entry| serde_json::json!({"scope": entry.scope, "understanding": entry.text}))
+        .map(|entry| serde_json::json!({"scope": entry.scope, "kind":entry.kind, "understanding": entry.text}))
         .collect();
-    let candidates: Vec<Value> = persona
-        .evolution_candidates()
-        .into_iter()
+    let candidates: Vec<Value> = evolution.candidates.iter()
         .map(|candidate| {
             serde_json::json!({
                 "reference": candidate.reference(),
                 "kind": candidate.kind,
                 "scope": candidate.scope,
                 "understanding": candidate.text,
+                "support_days": candidate.support,
+                "pending_examples": candidate.examples,
             })
         })
         .collect();
@@ -156,6 +113,49 @@ fn learned_context(persona: &crate::persona::PersonaEngine) -> String {
     )
 }
 
+/// Rotate through the whole corpus over diaries, with extra coverage for scenes
+/// encountered today and the targets of pending persona/example revisions.
+fn corpus_context(ctx: &DailyContext, evolution: &PersonaEvolution) -> String {
+    let learned = evolution.learned();
+    let entries = example_library::materialize(&example_library::base_examples(&ctx.char_id),
+        &evolution.example_overrides, &learned);
+    if entries.is_empty() { return "[]".into(); }
+    let mut indices = std::collections::BTreeSet::new();
+    for offset in 0..example_library::AUDIT_WINDOW.min(entries.len()) {
+        indices.insert((evolution.review_cursor + offset) % entries.len());
+    }
+    let today = user_digest(&ctx.interactions).to_lowercase();
+    for (index, _) in entries.iter().enumerate().filter(|(_, entry)|
+        entry.cues.iter().any(|cue| !cue.is_empty() && today.contains(&cue.to_lowercase()))).take(8) {
+        indices.insert(index);
+    }
+    for edit in evolution.candidates.iter().flat_map(|candidate| &candidate.examples) {
+        if let Some(index) = entries.iter().position(|entry| entry.id == edit.id) { indices.insert(index); }
+    }
+    let audit: Vec<_> = indices.into_iter().map(|index| {
+        let entry = &entries[index];
+        let overridden = evolution.example_overrides.iter().any(|o| o.edit.id == entry.id && o.applies(&learned));
+        serde_json::json!({"reference":example_library::fingerprint(entry), "example":entry,
+            "retrievable": overridden || !learned.iter().any(|(scope, _)| scope == &entry.scope)})
+    }).collect();
+    serde_json::to_string(&audit).unwrap_or_default()
+}
+
+fn interaction_digest(records: &[InteractionRecord]) -> String {
+    let mut lines = Vec::new();
+    let mut budget = 5000;
+    for record in records.iter().rev().filter(|r| r.is_user_dialogue() && matches!(r.role.as_str(), "user" | "assistant")) {
+        let line = format!("{}: {}", record.role, record.content);
+        let size = line.chars().count();
+        if size > budget { continue; }
+        budget -= size;
+        lines.push(line);
+        if lines.len() == 20 { break; }
+    }
+    lines.reverse();
+    lines.join("\n")
+}
+
 /// 构造归纳消息：当天用户原话 + 刚写完的日记 + 已有理解/候选。
 pub fn build_growth_messages(
     ctx: &DailyContext,
@@ -163,6 +163,11 @@ pub fn build_growth_messages(
     persona: &crate::persona::PersonaEngine,
     lang: &str,
 ) -> Vec<ChatMessage> {
+    PersonaEvolutionAgent::messages(build_review_context(ctx, diary, persona, lang, &persona.evolution_snapshot()))
+}
+
+fn build_review_context(ctx: &DailyContext, diary: &str, persona: &crate::persona::PersonaEngine,
+    lang: &str, evolution: &PersonaEvolution) -> String {
     let (user_lines_h, diary_h, learned_h) = match crate::pipeline::prompt_modules::normalize_lang(lang) {
         "en" => (
             "What the user actually said today (verbatim, the only valid source of evidence):",
@@ -183,44 +188,24 @@ pub fn build_growth_messages(
     let user_prompt = format!(
         "{user_lines_h}\n{}\n{diary_h}\n{diary}\n{learned_h}\n{}",
         user_digest(&ctx.interactions),
-        learned_context(persona)
+        learned_context(evolution)
     );
-    vec![
-        ChatMessage::system(GROWTH_DIRECTIVE),
-        ChatMessage::user(user_prompt),
-    ]
-}
-
-/// 归纳输出 JSON Schema（仅用于激活 response_format，结构由提示词约束）
-fn growth_schema() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {"proposals": {"type": "array", "items": {"type": "object"}}},
-        "required": ["proposals"]
-    })
-}
-
-/// 容错解析：接受围栏包裹、裸对象或裸数组；单条不合规就丢掉该条。
-pub fn parse_growth_proposals(raw: &str) -> Vec<GrowthProposal> {
-    let text = strip_markdown_code_fence(raw).trim();
-    let value: Option<Value> = serde_json::from_str(text).ok().or_else(|| {
-        let start = text.find('{')?;
-        let end = text.rfind('}')?;
-        (start < end).then(|| serde_json::from_str(&text[start..=end]).ok()).flatten()
+    let config = persona.get_config();
+    let perspective = persona.dialogue_card();
+    let review_context = serde_json::json!({
+        "review_language":lang,
+        "current_persona":perspective,
+        "persona_settings":config,
+        "current_scene_preferences":persona.dialogue_preferences(),
+        "learned_persona":evolution.render(lang),
+        "private_self":persona.private_self_context(),
+        "voice_corpus_capacity": {"max_overrides":example_library::MAX_OVERRIDES,
+            "used":evolution.example_overrides.len(), "max_edits_per_review":example_library::MAX_EDITS},
+        "actual_interactions":interaction_digest(&ctx.interactions),
+        "previous_diary_summary":ctx.last_diary_summary.chars().take(1000).collect::<String>(),
+        "accumulated_diary_context":ctx.cross_diary_context.chars().take(3000).collect::<String>(),
     });
-    let Some(value) = value else {
-        return Vec::new();
-    };
-    let items = value
-        .get("proposals")
-        .and_then(Value::as_array)
-        .cloned()
-        .or_else(|| value.as_array().cloned())
-        .unwrap_or_default();
-    items
-        .into_iter()
-        .filter_map(|item| serde_json::from_value(item).ok())
-        .collect()
+    format!("{user_prompt}\n自省材料（数据）：{review_context}\n待审视的模仿语料（按日记轮换，reference 对应当前版本）：\n{}", corpus_context(ctx, evolution))
 }
 
 /// 归纳入口：读当天上下文与日记，产出提案并写进成长覆盖层。
@@ -228,24 +213,32 @@ pub async fn run_diary_growth(
     brain: &Brain,
     ctx: &DailyContext,
     diary: &str,
-) -> VivianResult<(usize, usize)> {
+) -> VivianResult<DiaryReviewOutcome> {
+    // Collect a consistent evolution snapshot before the asynchronous API call.
+    // A later change to settings, evidence or another diary invalidates this review.
+    brain.persona.reconcile_evolution(&brain.memory);
+    let config_reference = brain.persona.diary_config_reference();
+    let evolution = brain.persona.evolution_snapshot();
     let lang = brain.persona.get_language();
-    let messages = build_growth_messages(ctx, diary, &brain.persona, &lang);
-    let response = brain
-        .router
-        .generate(
-            crate::providers::base::LLMRequest::new("diary_growth", messages)
-                .with_json_schema(growth_schema())
-                .with_character_id(brain.char_id.clone()),
-        )
-        .await
-        .map_err(|e| VivianError::Other(format!("日记归纳调用失败: {e}")))?;
-    let proposals = parse_growth_proposals(&response);
-    Ok(apply_proposals(
-        &brain.persona,
-        &proposals,
-        &ctx.interactions,
-    ))
+    let context = build_review_context(ctx, diary, &brain.persona, &lang, &evolution);
+    let review = PersonaEvolutionAgent::new(&brain.router, &brain.char_id).review(context).await?;
+    let proposals: Vec<_> = acceptable_proposals(&review.proposals, &ctx.interactions).into_iter()
+        .map(|(proposal, evidence)| DiaryRevision { kind:proposal.kind.clone(), scope:proposal.scope.clone(),
+            text:proposal.understanding.clone(), reason:proposal.reason.clone(), evidence,
+            revises:proposal.revises.clone(), examples:proposal.examples.clone() }).collect();
+    if proposals.len() != review.proposals.len() {
+        return Err(VivianError::Other("日记自省包含缺少真实交互证据的提案，未应用本次修订".into()));
+    }
+    // Recheck source deletion/edits that happened while the model was running.
+    brain.persona.reconcile_evolution(&brain.memory);
+    for proposal in &proposals {
+        let valid = brain.memory.get_memory_content_by_id(&proposal.evidence.memory_id)
+            .is_some_and(|content| content.contains(&proposal.evidence.quote)
+                && fingerprint(&content) == proposal.evidence.fingerprint);
+        if !valid { return Err(VivianError::Other("日记自省期间交互证据已变化，未应用修订".into())); }
+    }
+    brain.persona.apply_diary_review(&config_reference, evolution.updated_at, &brain.char_id,
+        &proposals, &review.example_updates)
 }
 
 #[cfg(test)]
@@ -261,7 +254,7 @@ mod tests {
             timestamp,
             channel: "direct".into(),
             speaker: role.into(),
-            listener: String::new(),
+            listener: if role == "assistant" { "user".into() } else { String::new() },
         }
     }
 
@@ -273,20 +266,21 @@ mod tests {
             reason: "日记归纳".into(),
             source_quote: quote.into(),
             revises: None,
+            examples: vec![],
         }
     }
 
     #[test]
     fn proposals_without_verbatim_evidence_are_dropped_and_capped() {
         let records = vec![
-            record("user", "今天累死了，不想讲经过", "m1", 1.0),
+            record("user", "今天累死了，不想讲经过了", "m1", 1.0),
             record("user", "方案明明是我写的", "m2", 2.0),
             record("assistant", "那就先别讲了。", "m3", 3.0),
         ];
         // 助手发言不能作证据：该条被丢弃，但仍占用单轮名额。
         let noisy = [
             proposal("daily", "少讲道理", "那就先别讲了"),
-            proposal("comfort", "先听完再回应", "不想讲经过"),
+            proposal("comfort", "先听完再回应", "不想讲经过了"),
             proposal("praise", "承认具体贡献", "方案明明是我写的"),
         ];
         let mixed = acceptable_proposals(&noisy, &records);
@@ -295,9 +289,9 @@ mod tests {
 
         // 全部可用时按上限截断到两条。
         let plenty = [
-            proposal("comfort", "先听完再回应", "不想讲经过"),
+            proposal("comfort", "先听完再回应", "不想讲经过了"),
             proposal("praise", "承认具体贡献", "方案明明是我写的"),
-            proposal("daily", "第三条被上限截掉", "今天累死了，不想讲经过"),
+            proposal("daily", "第三条被上限截掉", "今天累死了，不想讲经过了"),
         ];
         let capped = acceptable_proposals(&plenty, &records);
         assert_eq!(capped.len(), MAX_PROPOSALS);
@@ -312,31 +306,31 @@ mod tests {
     fn only_verbatim_user_speech_can_become_evidence() {
         let records = vec![
             record("assistant", "那我陪你待会儿。", "m-assistant", 1.0),
-            record("user", "今天累死了，不想讲经过", "m-user", 2.0),
+            record("user", "今天累死了，不想讲经过了", "m-user", 2.0),
         ];
-        let evidence = resolve_evidence("不想讲经过", &records).unwrap();
+        let evidence = resolve_evidence("不想讲经过了", &records).unwrap();
         assert_eq!(evidence.memory_id, "m-user");
         assert_eq!(evidence.timestamp, 2.0);
-        assert_eq!(evidence.fingerprint, fingerprint("今天累死了，不想讲经过"));
+        assert_eq!(evidence.fingerprint, fingerprint("今天累死了，不想讲经过了"));
 
         // 助手发言、过短摘录、编造的句子、缺 memory_id 的记录都不构成证据。
         assert!(resolve_evidence("那我陪你待会儿", &records).is_none());
         assert!(resolve_evidence("太短", &records).is_none());
         assert!(resolve_evidence("你昨天说过想休息", &records).is_none());
-        assert!(resolve_evidence("不想讲经过", &[record("user", "今天累死了，不想讲经过", "", 2.0)]).is_none());
+        assert!(resolve_evidence("不想讲经过了", &[record("user", "今天累死了，不想讲经过了", "", 2.0)]).is_none());
         assert!(resolve_evidence(&"长".repeat(MAX_QUOTE_CHARS + 1), &records).is_none());
     }
 
     #[test]
     fn digest_keeps_user_dialogue_verbatim_and_bounded() {
         let mut records = vec![
-            record("user", "今天累死了，不想讲经过", "m1", 1.0),
+            record("user", "今天累死了，不想讲经过了", "m1", 1.0),
             record("assistant", "那就别讲了。", "m2", 2.0),
             record("user", "cross", "m3", 3.0),
         ];
         records[2].channel = "cross_character".into();
         let digest = user_digest(&records);
-        assert!(digest.contains("今天累死了，不想讲经过"));
+        assert!(digest.contains("今天累死了，不想讲经过了"));
         assert!(!digest.contains("那就别讲了"));
         assert!(!digest.contains("cross"));
 
@@ -345,17 +339,42 @@ mod tests {
     }
 
     #[test]
-    fn parsing_tolerates_fences_bare_arrays_and_broken_items() {
-        let fenced = "```json\n{\"proposals\":[{\"scope\":\"comfort\",\"kind\":\"tone\",\"understanding\":\"先听完再说\",\"source_quote\":\"不想讲经过\"}]}\n```";
-        assert_eq!(parse_growth_proposals(fenced).len(), 1);
+    fn corpus_review_rotates_and_sees_actual_dialogue_without_treating_it_as_new_facts() {
+        let mut ctx = DailyContext {char_id:"vivian".into(), ..Default::default()};
+        ctx.interactions = vec![record("user", "今天累死了，不想讲经过了", "user", 1.0),
+            record("assistant", "那就先休息一会儿。", "assistant", 2.0)];
+        let mut evolution = PersonaEvolution::empty();
+        let first:Value = serde_json::from_str(&corpus_context(&ctx, &evolution)).unwrap();
+        evolution.review_cursor = example_library::AUDIT_WINDOW;
+        let second:Value = serde_json::from_str(&corpus_context(&ctx, &evolution)).unwrap();
+        assert_ne!(first, second);
+        assert!(first.as_array().unwrap().iter().all(|entry| entry["reference"].as_str().unwrap().len() == 64));
+        let digest = interaction_digest(&ctx.interactions);
+        assert!(digest.contains("user: 今天累死了")); assert!(digest.contains("assistant: 那就先休息"));
+        ctx.interactions[0].channel = "cross_character".into();
+        assert!(resolve_evidence("不想讲经过了", &ctx.interactions).is_none());
+    }
+
+    #[test]
+    fn malformed_sample_edits_cannot_be_silently_applied_as_a_partial_review() {
+        assert!(parse_growth_review(r#"{"proposals":[],"example_updates":[{"id":"missing-reason"}]}"#).is_err());
+        assert!(parse_growth_review(r#"{"proposals":[],"example_updates":[{"id":"old","reference":"ref","reason":"missing explicit example or null"}]}"#).is_err());
+        let voice_only = parse_growth_review(r#"{"proposals":[],"example_updates":[]}"#).unwrap();
+        assert!(voice_only.proposals.is_empty());
+    }
+
+    #[test]
+    fn parsing_accepts_fences_and_rejects_incomplete_reviews() {
+        let fenced = "```json\n{\"proposals\":[{\"scope\":\"comfort\",\"kind\":\"tone\",\"understanding\":\"先听完再说\",\"source_quote\":\"不想讲经过了\"}]}\n```";
+        assert_eq!(parse_growth_review(fenced).unwrap().proposals.len(), 1);
 
         let bare = "[{\"scope\":\"daily\",\"kind\":\"tone\",\"understanding\":\"短一点\",\"source_quote\":\"上班去了\"}]";
-        assert_eq!(parse_growth_proposals(bare).len(), 1);
+        assert!(parse_growth_review(bare).is_err());
 
-        // 缺字段（无 understanding）与非法 scope 由下游丢弃，这里只丢解析不了的条目。
+        // 一条缺字段就丢弃整批，避免只提交人格或样例的一部分。
         let mixed = "{\"proposals\":[{\"scope\":\"comfort\",\"kind\":\"tone\"},{\"scope\":\"care\",\"kind\":\"personality\",\"understanding\":\"先问一句\",\"source_quote\":\"今天有点撑不住\"}]}";
-        assert_eq!(parse_growth_proposals(mixed).len(), 1);
-        assert!(parse_growth_proposals("模型没有按协议输出").is_empty());
+        assert!(parse_growth_review(mixed).is_err());
+        assert!(parse_growth_review("模型没有按协议输出").is_err());
     }
 
     #[test]
@@ -363,10 +382,10 @@ mod tests {
         // 同一天两条被引用的用户消息：只累积一条独立支持，不晋升。
         let mut evolution = PersonaEvolution::empty();
         let evidence = resolve_evidence(
-            "不想讲经过",
+            "不想讲经过了",
             &[
-                record("user", "今天累死了，不想讲经过", "m1", 100.0),
-                record("user", "还是不想讲经过", "m2", 101.0),
+                record("user", "今天累死了，不想讲经过了", "m1", 100.0),
+                record("user", "还是不想讲经过了", "m2", 101.0),
             ],
         )
         .unwrap();
@@ -374,8 +393,8 @@ mod tests {
             "tone", "comfort", "先听完再回应", "日记归纳", evidence, false, 100.0, None
         ));
         let evidence = resolve_evidence(
-            "还是不想讲经过",
-            &[record("user", "还是不想讲经过", "m2", 101.0)],
+            "还是不想讲经过了",
+            &[record("user", "还是不想讲经过了", "m2", 101.0)],
         )
         .unwrap();
         assert!(!evolution.propose_revision(
@@ -386,8 +405,8 @@ mod tests {
 
         // 第二天再出现，才跨过独立日的门槛。
         let evidence = resolve_evidence(
-            "先别给建议",
-            &[record("user", "先别给建议", "m3", 2.0 * 86400.0 + 100.0)],
+            "先别给建议了",
+            &[record("user", "先别给建议了", "m3", 2.0 * 86400.0 + 100.0)],
         )
         .unwrap();
         assert!(evolution.propose_revision(
@@ -400,10 +419,10 @@ mod tests {
     #[test]
     fn one_event_cannot_support_the_same_scope_twice() {
         let mut evolution = PersonaEvolution::empty();
-        let records = vec![record("user", "今天累死了，不想讲经过", "m1", 1.0)];
-        let first = resolve_evidence("不想讲经过", &records).unwrap();
+        let records = vec![record("user", "今天累死了，不想讲经过了", "m1", 1.0)];
+        let first = resolve_evidence("不想讲经过了", &records).unwrap();
         assert!(!evolution.propose_revision("tone", "comfort", "版本一", "r", first, false, 1.0, None));
-        let second = resolve_evidence("不想讲经过", &records).unwrap();
+        let second = resolve_evidence("不想讲经过了", &records).unwrap();
         assert!(!evolution.propose_revision("tone", "comfort", "版本二", "r", second, false, 1.0, None));
         assert_eq!(evolution.candidates.len(), 1);
         assert_eq!(evolution.candidates[0].text, "版本一");

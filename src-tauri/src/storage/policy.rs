@@ -20,6 +20,17 @@ pub enum DataLayer {
 
 /// 已知派生层顶层目录（可从权威数据重建）。
 const DERIVED_TOP_LEVEL: &[&str] = &["cache"];
+/// Character definitions, learned voice corpora and source memories must travel
+/// together; restored evidence IDs keep learned persona interpretations active.
+const AUTHORITATIVE_TOP_LEVEL: &[&str] = &[
+    "characters",
+    "persona",
+    "memory",
+    "history",
+    "shared",
+    "common",
+    "companion-v2",
+];
 /// 已知运行期层顶层条目（无迁移价值）。
 const EPHEMERAL_TOP_LEVEL: &[&str] = &[
     // 内嵌 Python 运行时（约 280MB，新设备安装时自行释放）
@@ -42,6 +53,9 @@ const EPHEMERAL_TOP_LEVEL: &[&str] = &[
 /// `skills` / `plugins` / `mcp` 等自进化内容是用户定制数据，未被列出故归入
 /// 未知层（按权威层处理），随备份打包并在恢复时回填。
 pub fn classify_top_level(name: &str) -> DataLayer {
+    if AUTHORITATIVE_TOP_LEVEL.contains(&name) {
+        return DataLayer::Authoritative;
+    }
     if DERIVED_TOP_LEVEL.contains(&name) {
         return DataLayer::Derived;
     }

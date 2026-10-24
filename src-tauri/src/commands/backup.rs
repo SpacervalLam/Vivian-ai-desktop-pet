@@ -129,6 +129,10 @@ fn flush_managers(state: &AppState) -> Result<(), String> {
             .persist()
             .map_err(|e| format!("{id} 自我状态落盘失败: {e}"))?;
         c.brain.psychology.flush_for_backup()?;
+        c.brain.persona.flush_for_backup().map_err(|e| format!("{id} 人设、进化及模仿语料落盘失败: {e}"))?;
+        if let Some(chain) = &c.brain.chat_chain {
+            chain.dynamic_profile.flush_for_backup().map_err(|e| format!("{id} 动态画像落盘失败: {e}"))?;
+        }
         c.brain
             .proactive
             .flush_for_backup()

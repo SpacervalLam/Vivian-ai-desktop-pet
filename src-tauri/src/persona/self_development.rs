@@ -9,6 +9,30 @@ pub struct ReadingExperience {
     pub body: String,
 }
 
+static CORPUS_WRITE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+fn corpus_path(char_id: &str) -> std::path::PathBuf {
+    crate::utils::path::get_character_data_dir(char_id).join("persona").join("reading_corpus.json")
+}
+
+pub(crate) fn recent_reading_context(char_id: &str) -> String {
+    crate::utils::fs::load_json_or_backup::<super::reading_corpus::ReadingCorpus>(&corpus_path(char_id))
+        .unwrap_or_default().recent_context()
+}
+
+fn retain_readings(char_id: &str, readings: &[ReadingExperience], now: f64) {
+    let _guard = CORPUS_WRITE.lock();
+    let path = corpus_path(char_id);
+    let mut corpus = crate::utils::fs::load_json_or_backup::<super::reading_corpus::ReadingCorpus>(&path).unwrap_or_default();
+    let mut changed = false;
+    for reading in readings { changed |= corpus.observe(&reading.url, &reading.body, now); }
+    if changed {
+        let result = serde_json::to_string_pretty(&corpus).map_err(std::io::Error::other)
+            .and_then(|data| crate::utils::fs::write_atomic(&path, &data));
+        if let Err(error) = result { tracing::warn!("[ReadingCorpus:{char_id}] 阅读语料保存失败：{error}"); }
+    }
+}
+
 /// Validate each interpretation against host-owned source text, never model-made citations.
 pub(crate) fn record_interpretation(
     persona: &PersonaEngine, update: &Value, evidence: SelfEvidence, original: &str,
@@ -32,8 +56,10 @@ pub fn spawn_from_reading(char_id: &str, readings: Vec<ReadingExperience>) {
         Some(reading)
     }).take(3).collect();
     if readings.is_empty() { return; }
-    let Some(brain) = crate::character_registry::get_brain(char_id) else { return; };
     let now = crate::memory::types::current_timestamp();
+    // 阅读语料独立于反思冷却保存；读过的正文不因模型暂不可用或反思节流而丢失。
+    retain_readings(char_id, &readings, now);
+    let Some(brain) = crate::character_registry::get_brain(char_id) else { return; };
     if !brain.persona.self_profile.reserve_web_reflection(now) { return; }
     let char_id = char_id.to_string();
     tokio::spawn(async move {

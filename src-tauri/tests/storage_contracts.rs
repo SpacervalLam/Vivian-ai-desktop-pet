@@ -22,10 +22,24 @@ pub mod sqlite;
 pub mod storage;
 #[path = "../src/memory/types.rs"]
 pub mod types;
+#[path = "../src/persona/example_library.rs"]
+pub mod example_library;
+pub mod persona { pub use crate::example_library; }
+// Storage accounting only needs the notebook identifier convention, not its UI.
+pub mod notebook { pub mod collected {
+    pub const COLLECTED_PREFIX: &str = "note_collected_";
+    #[test]
+    fn collected_prefix_fixture_matches_production() {
+        assert!(include_str!("../src/notebook/collected.rs").contains(&format!("const COLLECTED_PREFIX: &str = \"{COLLECTED_PREFIX}\"")));
+    }
+} }
 
 pub mod utils {
     pub mod path {
         pub fn get_user_data_dir() -> std::path::PathBuf {
+            panic!("explicit isolated paths required")
+        }
+        pub fn get_character_data_dir(_: &str) -> std::path::PathBuf {
             panic!("explicit isolated paths required")
         }
     }

@@ -214,6 +214,13 @@ impl DynamicBehaviorProfile {
         Ok(())
     }
 
+    pub fn flush_for_backup(&self) -> VivianResult<()> {
+        if self.persistence_path.as_os_str().is_empty() {
+            return Err(VivianError::Memory("动态画像处于内存模式，无法生成完整备份".into()));
+        }
+        self.save_to()
+    }
+
     /// 记录一轮对话（写路径，在 post_process 中调用）
     ///
     /// 追加到滚动窗口，FIFO 淘汰最旧记录，然后持久化。

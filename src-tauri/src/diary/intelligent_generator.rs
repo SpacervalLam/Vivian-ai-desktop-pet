@@ -188,8 +188,9 @@ pub async fn generate_intelligent_diary(
         )
         .await
         {
-            Ok(Ok((submitted, promoted))) => tracing::info!(
-                "[DiaryGrowth] 归纳完成: 提交 {submitted} 条, 当场晋升 {promoted} 条"
+            Ok(Ok(outcome)) => tracing::info!(
+                "[DiaryGrowth] 自省完成: 提交 {} 条, 晋升 {} 条, 更新样例 {} 条",
+                outcome.submitted, outcome.promoted, outcome.examples_updated
             ),
             Ok(Err(e)) => tracing::warn!("[DiaryGrowth] 归纳失败: {e}"),
             Err(_) => tracing::warn!("[DiaryGrowth] 归纳超时"),

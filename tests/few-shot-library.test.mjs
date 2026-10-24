@@ -72,6 +72,8 @@ serde={version="1",features=["derive"]}
 serde_json="1"
 parking_lot="0.12"
 tracing="0.1"
+sha2="0.10"
+uuid={version="1",features=["v4"]}
 [[bin]]
 name="few-shot-library-contract"
 path="main.rs"
@@ -81,6 +83,16 @@ path="main.rs"
 mod error { pub type VivianResult<T> = Result<T, std::io::Error>; }
 mod types {pub mod response {#[derive(serde::Deserialize)] pub struct ChatMessage {pub role:String,pub content:String}}}
 mod pipeline {pub mod message_context {${followup}}}
+mod utils {
+ pub mod path {
+  pub fn get_user_data_dir()->std::path::PathBuf {std::env::var_os("VIVIAN_TEST_DATA_DIR").unwrap().into()}
+  pub fn get_character_data_dir(id:&str)->std::path::PathBuf {get_user_data_dir().join("characters").join(id)}
+ }
+ pub mod fs {pub fn write_atomic(p:&std::path::Path,s:&str)->std::io::Result<()> {if let Some(dir)=p.parent(){std::fs::create_dir_all(dir)?;}std::fs::write(p,s)}}
+}
+mod emotion {#[path=${JSON.stringify(abs('src-tauri/src/emotion/corpus_cache.rs'))}] pub mod corpus_cache;}
+#[path=${JSON.stringify(abs('src-tauri/src/persona/embedding_snapshot.rs'))}] mod embedding_snapshot;
+#[path=${JSON.stringify(abs('src-tauri/src/persona/example_library.rs'))}] mod example_library;
 mod memory {
  pub mod vector_search {${cosine}}
  pub mod embedding {use crate::error::VivianResult;${embeddingTrait}
@@ -153,7 +165,8 @@ fn main() {}
 }
 `);
   const run = spawnSync('cargo', ['test', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml'), '--quiet', '--', '--nocapture'],
-    {encoding:'utf8', timeout:180_000, maxBuffer:4 * 1024 * 1024});
+    {encoding:'utf8', timeout:180_000, maxBuffer:4 * 1024 * 1024,
+      env:{...process.env, VIVIAN_TEST_DATA_DIR:path.join(dir, 'data')}});
   assert.equal(run.status, 0, run.stdout + run.stderr + (run.error?.message ?? ''));
   console.log(run.stdout.trim());
   console.log(`${newEntries[0].length} authored pairs: schema, distinct voices, multilingual coverage, context gates and production retrieval verified.`);

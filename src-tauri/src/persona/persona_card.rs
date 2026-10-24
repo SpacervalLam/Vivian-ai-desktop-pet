@@ -202,6 +202,13 @@ impl PersonaCardStore {
         Ok(())
     }
 
+    pub fn flush_for_backup(&self) -> VivianResult<()> {
+        if self.persistence_path.as_os_str().is_empty() {
+            return Err(VivianError::Memory("人格卡片处于内存模式，无法生成完整备份".into()));
+        }
+        self.save_to()
+    }
+
     fn append_event(&self, event: &PersonaEvent) {
         if self.events_path.as_os_str().is_empty() {
             return;

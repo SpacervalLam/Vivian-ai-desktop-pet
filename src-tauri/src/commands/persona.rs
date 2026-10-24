@@ -277,7 +277,7 @@ pub fn get_persona_card_cooldowns(
     }))
 }
 
-/// 读取自我进化覆盖层（智能体在反思中自行调整的语气/性格记录）
+/// 读取日记自省的语气、性格与模仿语料修订记录。
 #[tauri::command]
 pub fn get_persona_evolution(
     state: State<'_, Arc<AppState>>,
@@ -286,6 +286,7 @@ pub fn get_persona_evolution(
     let brain = state.get_character(character_id.as_deref())?.brain;
     let persona = &brain.persona;
     persona.reconcile_evolution(&brain.memory);
+    let evolution = persona.evolution_snapshot();
     let entries = persona
         .evolution_entries()
         .into_iter()
@@ -307,6 +308,9 @@ pub fn get_persona_evolution(
         "candidates": candidates,
         "is_empty": persona.is_evolution_empty(),
         "last_update": persona.evolution_last_update(),
+        "example_overrides": evolution.example_overrides,
+        "example_history": evolution.example_history,
+        "review_cursor": evolution.review_cursor,
     }))
 }
 

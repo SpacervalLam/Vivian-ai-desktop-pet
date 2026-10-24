@@ -1153,6 +1153,14 @@ pub struct TaskRouteConfig {
     pub reasoning: Option<ReasoningPreference>,
 }
 
+impl TaskRouteConfig {
+    pub fn for_task(task: &str) -> Self {
+        if task == "persona_evolution" {
+            Self { temperature:Some(0.35), max_tokens:Some(6144), ..Self::default() }
+        } else { Self::default() }
+    }
+}
+
 /// 工作智能体模型预置项（编程页可切换的模型配置）
 ///
 /// `id` 用于前端定位与持久化当前选中项；`route` 复用路由矩阵的完整模型配置
@@ -1632,8 +1640,8 @@ pub struct ProactiveConfig {
     /// （空闲越久 tick 越慢，减少空转 IPC），用户交互立即重置到活跃档。
     #[serde(default = "default_true")]
     pub adaptive_tick_enabled: bool,
-    /// 是否启用"内心独白优化的主动问候"——用 current_thought LLM 产出的 social_urge
-    /// 信号门控问候类触发器，让主动问候在角色"真的想说话"时才触发，而非机械按时。
+    /// 在 current_thought 请求中同时决定沉默/问候/续聊/分享。
+    /// 启用后日常搭话只消费新鲜的明确意图，不回退到整点或空闲规则。
     /// 需要同时开启主动对话（enabled）和内心独白（world.enable_inner_monologue）才生效。
     #[serde(default = "default_true")]
     pub enable_social_urge_gating: bool,
@@ -1805,7 +1813,7 @@ impl Default for AppConfig {
                 // 路由矩阵任务键预注册（配置留空，由用户填写）
                 // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时回退到主 LLM API
                 for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
-                    m.insert(spec.id.clone(), TaskRouteConfig::default());
+                    m.insert(spec.id.clone(), TaskRouteConfig::for_task(&spec.id));
                 }
                 m
             },
@@ -1862,8 +1870,15 @@ pub struct ConfigManager {
 /// 表现成"功能存在但永远不可用"，而用户在界面上改了又因为对不上键而无效。
 /// 只补缺失项，绝不覆盖用户已填的值。
 fn ensure_task_routes(cfg: &mut AppConfig) {
+    // Preserve an explicitly configured legacy diary-growth model when upgrading
+    // to the dedicated evolution agent. Never overwrite a new route already set.
+    if !cfg.routing_matrix.contains_key("persona_evolution") {
+        if let Some(legacy) = cfg.routing_matrix.get("diary_growth").filter(|route| !route.model.trim().is_empty()).cloned() {
+            cfg.routing_matrix.insert("persona_evolution".into(), legacy);
+        }
+    }
     for spec in crate::providers::task_catalog::TASK_ROUTES.iter() {
-        cfg.routing_matrix.entry(spec.id.clone()).or_default();
+        cfg.routing_matrix.entry(spec.id.clone()).or_insert_with(|| TaskRouteConfig::for_task(&spec.id));
     }
 }
 

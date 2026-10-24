@@ -10,7 +10,9 @@
 
 pub mod dynamic_profile;
 pub mod evolution;
+pub mod evolution_agent;
 pub mod example_retriever;
+pub mod example_library;
 mod embedding_snapshot;
 pub mod persona_card;
 pub mod persona_decision;
@@ -20,6 +22,7 @@ pub mod scene_selector;
 pub mod self_profile;
 pub(crate) mod self_profile_store;
 pub(crate) mod self_development;
+pub(crate) mod reading_corpus;
 pub mod tone_injector;
 pub mod worldbook;
 
@@ -56,6 +59,7 @@ pub struct PersonaEngine {
     language: RwLock<String>,
     /// 自我进化覆盖层（独立于原始人设文件，智能体反思中自行调整语气/性格）
     evolution: PersonaEvolutionStore,
+    voice_base: Vec<example_library::VoiceExample>,
     pub(crate) self_profile: self_profile_store::SelfProfileStore,
     /// 人设配置修订号（任何 config 变更时递增，驱动 Character 块渲染缓存失效）
     config_revision: std::sync::atomic::AtomicU64,
@@ -70,6 +74,7 @@ impl PersonaEngine {
         std::fs::create_dir_all(&persona_dir).map_err(|e| {
             VivianError::Memory(format!("创建人格目录失败: {e}"))
         })?;
+        let voice_base = example_library::ensure_base(char_id).map_err(VivianError::Memory)?;
 
         let persistence_path = persona_dir.join("persona.json");
         let config = if persistence_path.exists() {
@@ -111,6 +116,7 @@ impl PersonaEngine {
             base_expression: RwLock::new(config.expression),
             language: RwLock::new("zh".to_string()),
             evolution,
+            voice_base,
             self_profile: self_profile_store::SelfProfileStore::new(persona_dir.join("self_profile.json")),
             config_revision: std::sync::atomic::AtomicU64::new(0),
             character_block_cache: RwLock::new(None),
@@ -140,6 +146,19 @@ impl PersonaEngine {
 
     pub fn get_config(&self) -> PersonaConfig {
         self.config.read().clone()
+    }
+
+    /// Export the same base corpus used at initialization, plus all current
+    /// persona stores. A failed write cancels backup rather than claiming success.
+    pub fn flush_for_backup(&self) -> VivianResult<()> {
+        let directory = self.persistence_path.parent().filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| VivianError::Memory("人格配置没有可备份的数据目录".into()))?;
+        self.save_to()?;
+        example_library::save_base_at(&directory.join(example_library::BASE_FILE), &self.voice_base)
+            .map_err(VivianError::Memory)?;
+        self.evolution.flush_for_backup()?;
+        self.self_profile.flush_for_backup().map_err(VivianError::Memory)?;
+        self.card_store.flush_for_backup()
     }
 
     pub fn set_language(&self, lang: &str) {
@@ -456,6 +475,24 @@ impl PersonaEngine {
 
     pub fn evolution_history(&self) -> Vec<EvolutionEntry> { self.evolution.history() }
 
+    pub fn evolution_snapshot(&self) -> PersonaEvolution { self.evolution.snapshot() }
+
+    pub fn diary_config_reference(&self) -> String {
+        example_library::fingerprint(&(&*self.config.read(), self.card_store.get_active_card()))
+    }
+
+    /// Hold the user configuration read lock through the atomic growth commit:
+    /// an asynchronous review cannot overwrite decisions made against newer settings.
+    pub fn apply_diary_review(&self, config_reference: &str, expected_revision: f64, char_id: &str,
+        proposals: &[evolution::DiaryRevision], repairs: &[example_library::ExampleEdit])
+        -> VivianResult<evolution::DiaryReviewOutcome> {
+        let config = self.config.read();
+        if example_library::fingerprint(&(&*config, self.card_store.get_active_card())) != config_reference {
+            return Err(VivianError::Other("日记自省期间用户人设设置已变化，本次修订已丢弃".into()));
+        }
+        self.evolution.review_diary(expected_revision, char_id, proposals, repairs)
+    }
+
     /// Bounded character perspective for structured analysis; no examples or tool protocol.
     pub fn reflection_profile(&self) -> String {
         use prompt_render::CharacterSection;
@@ -721,6 +758,7 @@ impl Default for PersonaEngine {
                 base_expression: RwLock::new(default_config.expression),
                 language: RwLock::new("zh".to_string()),
                 evolution: PersonaEvolutionStore::fallback(),
+                voice_base: example_library::factory_examples("vivian"),
                 self_profile: self_profile_store::SelfProfileStore::fallback(),
                 config_revision: std::sync::atomic::AtomicU64::new(0),
                 character_block_cache: RwLock::new(None),

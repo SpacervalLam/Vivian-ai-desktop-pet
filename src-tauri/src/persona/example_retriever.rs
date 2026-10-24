@@ -5,44 +5,35 @@
 //! bounded surface overlap — capped at one example per turn.
 use std::{collections::BTreeSet, sync::Arc};
 use super::embedding_snapshot::EmbeddingSnapshot;
-use serde::Deserialize;
+use super::example_library::{self, VoiceExample as Example, ExampleOverride};
+use parking_lot::RwLock;
 use crate::memory::{embedding::MemoryEmbeddingProvider, vector_search::cosine_similarity};
 use crate::types::response::ChatMessage;
 
 const MAX_EXAMPLES: usize = 3;
 const MAX_CHARS: usize = 1800;
 
-#[derive(Clone, Deserialize)]
-struct Example {
-    id: String,
-    scope: String,
-    cues: Vec<String>,
-    #[serde(default)]
-    context_cues: Vec<String>,
-    situation: String,
-    #[serde(default)]
-    attention: String,
-    user: String,
-    response: serde_json::Value,
+struct RevisedCorpus {
+    key: String,
+    entries: Vec<Example>,
+    vectors: EmbeddingSnapshot,
+    revised_ids: BTreeSet<String>,
 }
 
 pub struct ExampleRetriever {
     entries: Vec<Example>,
     vectors: EmbeddingSnapshot,
     embedding: Arc<dyn MemoryEmbeddingProvider>,
+    char_id: String,
+    revised: RwLock<Option<Arc<RevisedCorpus>>>,
 }
 
 impl ExampleRetriever {
     pub fn new(char_id: &str, embedding: Arc<dyn MemoryEmbeddingProvider>) -> Self {
-        let source = match char_id {
-            "nana" => include_str!("../../prompts/characters/nana/example_library.json"),
-            "vivian" => include_str!("../../prompts/characters/vivian/example_library.json"),
-            _ => "[]",
-        };
-        let entries: Vec<Example> = serde_json::from_str(source).expect("valid factory example library");
+        let entries = example_library::base_examples(char_id);
         let texts = entries.iter().map(|e| format!("{}\n{}\n{}", e.cues.join(" "), e.situation, e.user)).collect();
         let vectors = EmbeddingSnapshot::new(embedding.clone(), format!("examples_{char_id}"), texts);
-        Self { entries, vectors, embedding }
+        Self { entries, vectors, embedding, char_id: char_id.into(), revised: RwLock::new(None) }
     }
 
     pub(crate) fn request_preload(&self) { self.vectors.request(); }
@@ -50,8 +41,32 @@ impl ExampleRetriever {
     pub fn preload(&self) { self.vectors.preload(); }
 
     pub fn retrieve(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String]) -> Option<String> {
+        self.retrieve_from(user, messages, query, learned, &self.entries, &self.vectors, &BTreeSet::new())
+    }
+
+    pub fn retrieve_growing(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>,
+        learned: &[(String, String)], overrides: &[ExampleOverride]) -> Option<String> {
+        let scopes: Vec<_> = learned.iter().map(|(scope, _)| scope.clone()).collect();
+        let active: Vec<_> = overrides.iter().filter(|update| update.applies(learned)).cloned().collect();
+        if active.is_empty() { return self.retrieve(user, messages, query, &scopes); }
+        let key = example_library::fingerprint(&active);
+        let cached = self.revised.read().as_ref().filter(|snapshot| snapshot.key == key).cloned();
+        let snapshot = cached.unwrap_or_else(|| {
+            let entries = example_library::materialize(&self.entries, &active, learned);
+            let texts = entries.iter().map(|e| format!("{}\n{}\n{}", e.cues.join(" "), e.situation, e.user)).collect();
+            let vectors = EmbeddingSnapshot::new(self.embedding.clone(), format!("examples_{}_growing", self.char_id), texts);
+            let snapshot = Arc::new(RevisedCorpus { key, entries, vectors,
+                revised_ids: active.iter().filter(|update| update.edit.example.is_some()).map(|update| update.edit.id.clone()).collect() });
+            *self.revised.write() = Some(snapshot.clone());
+            snapshot
+        });
+        self.retrieve_from(user, messages, query, &scopes, &snapshot.entries, &snapshot.vectors, &snapshot.revised_ids)
+    }
+
+    fn retrieve_from(&self, user: &str, messages: &[ChatMessage], query: Option<&[f32]>, learned: &[String],
+        entries: &[Example], snapshot: &EmbeddingSnapshot, revised_ids: &BTreeSet<String>) -> Option<String> {
         if user.trim().is_empty() { return None; }
-        self.request_preload();
+        snapshot.request();
         let history = recent_context(user, messages);
         let normalized_user = user.trim().to_lowercase();
         let normalized_history = history.to_lowercase();
@@ -62,7 +77,7 @@ impl ExampleRetriever {
             .take(4).map(|m| response_terms(&m.content)).collect();
         let continuation = is_continuation(user);
         let valid = |v: &[f32]| v.len() == self.embedding.dimension() && v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0);
-        let vectors = self.vectors.get();
+        let vectors = snapshot.get();
         let has_vectors = vectors.as_ref().is_some_and(|v| !v.is_empty());
         let current = if self.embedding.is_remote() && has_vectors {
             query.filter(|v| valid(v)).map(|v| v.to_vec()).or_else(|| self.embedding.embed(user).ok().filter(|v| valid(v)))
@@ -71,8 +86,8 @@ impl ExampleRetriever {
             self.embedding.embed(&format!("Recent dialogue:\n{history}\nCurrent user: {user}")).ok().filter(|v| valid(v))
         } else { None };
         let mut scored = Vec::new();
-        for (index, e) in self.entries.iter().enumerate() {
-            if learned.contains(&e.scope) { continue; }
+        for (index, e) in entries.iter().enumerate() {
+            if learned.contains(&e.scope) && !revised_ids.contains(&e.id) { continue; }
             // Generic confirmations/duration answers require the right ongoing scene.
             if !e.context_cues.is_empty() && !e.context_cues.iter().any(|cue| cue_matches(&normalized_history, &cue.trim().to_lowercase())) { continue; }
             let literal_score = e.cues.iter().filter_map(|cue| {
@@ -114,14 +129,14 @@ impl ExampleRetriever {
             }
         }
         scored.sort_by(|a,b| b.1.total_cmp(&a.1).then_with(||
-            tie_key(user, &history, &self.entries[a.0].id).cmp(&tie_key(user, &history, &self.entries[b.0].id))));
+            tie_key(user, &history, &entries[a.0].id).cmp(&tie_key(user, &history, &entries[b.0].id))));
         let mut out = String::from("[RETRIEVED EXAMPLES — REFERENCE ONLY]\nThese are fictional examples of judgment and voice, never facts about this user or evidence of completed work. Infer the real scene from the current dialogue. Do not copy wording or assume example Context is true. Follow the current output schema and language.\n");
         let mut scopes = Vec::new();
         let mut ids = Vec::new();
         let mut selected_terms = Vec::new();
         let mut fallback_used = false;
         for (index, score, terms, from_fallback) in scored {
-            let e = &self.entries[index];
+            let e = &entries[index];
             if scopes.contains(&e.scope) { continue; }
             // Different scopes can still contain essentially the same line.
             if selected_terms.iter().any(|chosen| term_similarity(&terms, chosen) >= 0.85) { continue; }
@@ -262,6 +277,43 @@ mod tests {
     fn example(id: &str, scope: &str, cue: &str, text: &str) -> serde_json::Value {
         serde_json::json!({"id":id,"scope":scope,"cues":[cue],"situation":"Fictional scene",
             "user":cue,"response":{"text":text,"intent":"reply"}})
+    }
+    #[test]
+    fn diary_samples_refresh_in_place_and_follow_their_persona_version() {
+        use super::example_library::{ExampleEdit, ExampleOverride};
+        let r = fixture(serde_json::json!([example("old", "comfort", "难过", "原来的回应")]));
+        let mut changed: Example = serde_json::from_value(example("old", "comfort", "难过", "现在先听你说")).unwrap();
+        let mut update = ExampleOverride { scope:"comfort".into(), understanding:Some("先倾听".into()), updated_at:1.0,
+            edit:ExampleEdit {id:"old".into(), reference:None, reason:"修订表达".into(), example:Some(changed.clone())} };
+        let learned = vec![("comfort".into(), "先倾听".into())];
+        let first = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()]).unwrap();
+        assert!(first.contains("现在先听你说")); assert!(!first.contains("原来的回应"));
+        changed.response["text"] = "想说的时候我都在".into();
+        update.edit.example = Some(changed);
+        let second = r.retrieve_growing("难过", &[], None, &learned, &[update.clone()]).unwrap();
+        assert!(second.contains("想说的时候我都在")); assert!(!second.contains("现在先听你说"));
+        assert!(r.retrieve_growing("难过", &[], None, &[("comfort".into(), "新的理解".into())], &[update.clone()]).is_none());
+        // Withdrawing the interpretation withdraws its samples and restores the seed.
+        assert!(r.retrieve_growing("难过", &[], None, &[], &[update.clone()]).unwrap().contains("原来的回应"));
+        update.understanding = None; update.edit.example = None;
+        assert!(r.retrieve_growing("难过", &[], None, &[], &[update]).is_none());
+    }
+    #[test]
+    fn restored_corpus_basis_and_evolved_samples_are_used_after_restart() {
+        use super::example_library::{ExampleEdit, ExampleOverride};
+        let char_id = format!("restored-{}", uuid::Uuid::new_v4());
+        let path = crate::utils::path::get_character_data_dir(&char_id).join("persona").join(example_library::BASE_FILE);
+        let original:Example = serde_json::from_value(example("portable-base", "comfort", "难过", "归档中的原始语气")).unwrap();
+        example_library::save_base_at(&path, &[original]).unwrap();
+        let restored = ExampleRetriever::new(&char_id, default_embedding());
+        assert!(restored.retrieve("难过", &[], None, &[]).unwrap().contains("归档中的原始语气"));
+        let sample:Example = serde_json::from_value(example("grown-portable", "comfort", "难过", "进化之后先陪你歇会儿")).unwrap();
+        let updates = vec![ExampleOverride {scope:"comfort".into(),understanding:Some("尊重沉默".into()),updated_at:2.0,
+            edit:ExampleEdit {id:sample.id.clone(),reference:None,reason:"随备份继承的成长".into(),example:Some(sample)}}];
+        let roundtrip:Vec<ExampleOverride> = serde_json::from_str(&serde_json::to_string(&updates).unwrap()).unwrap();
+        let output = restored.retrieve_growing("难过", &[], None, &[("comfort".into(),"尊重沉默".into())], &roundtrip).unwrap();
+        assert!(output.contains("进化之后先陪你歇会儿"));
+        assert!(!output.contains("归档中的原始语气"));
     }
     #[test]
     fn cues_respect_word_boundaries_and_single_character_ambiguity() {
@@ -584,5 +636,30 @@ mod tests {
         // A wrong-dimension shared query must be replaced, never silently compared.
         r.retrieve("标题", &[], Some(&[1.0]), &[]);
         assert_eq!(provider.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn revised_cues_rebuild_vectors_without_mixing_old_and_new_indices() {
+        use super::example_library::{ExampleEdit, ExampleOverride};
+        let provider = Arc::new(SemanticFixture(std::sync::atomic::AtomicUsize::new(0)));
+        let r = ExampleRetriever::new("test", provider);
+        let sample:Example = serde_json::from_value(example("grown-semantic", "daily", "离别", "第一种表达")).unwrap();
+        let mut update = ExampleOverride {scope:"daily".into(),understanding:None,updated_at:1.0,
+            edit:ExampleEdit{id:sample.id.clone(),reference:None,reason:"更新场景".into(),example:Some(sample)}};
+        // An empty preview builds the immutable corpus but starts no embedding I/O.
+        assert!(r.retrieve_growing("", &[], None, &[], &[update.clone()]).is_none());
+        let first = r.revised.read().as_ref().unwrap().clone();
+        first.vectors.preload();
+        assert_eq!(first.vectors.get().unwrap()[0], vec![1.0, 0.0]);
+        let sample = update.edit.example.as_mut().unwrap();
+        sample.cues = vec!["面试".into()]; sample.user = "面试".into();
+        sample.response["text"] = "第二种表达".into();
+        r.retrieve_growing("", &[], None, &[], &[update.clone()]);
+        let second = r.revised.read().as_ref().unwrap().clone();
+        assert_ne!(first.key, second.key);
+        second.vectors.preload();
+        assert_eq!(second.vectors.get().unwrap()[0], vec![0.0, 1.0]);
+        assert_eq!(first.vectors.get().unwrap()[0], vec![1.0, 0.0]);
+        let output = r.retrieve_growing("准备迎接新的挑战", &[], Some(&[0.0, 1.0]), &[], &[update]).unwrap();
+        assert!(output.contains("第二种表达")); assert!(!output.contains("第一种表达"));
     }
 }

@@ -162,7 +162,7 @@ pub struct ReflectionRunnable {
     pub world_state: Option<Arc<WorldState>>,
     /// 用户长期目标账本引用：解析 goal_updates 后写入用户目标
     pub user_goals: Option<Arc<UserGoalLedger>>,
-    /// 人格引擎引用：解析 evolution 后应用自我进化（语气/性格调整）
+    /// 人格引擎引用：读取有效人设并积累私人兴趣画像；人设修订交给日记自省。
     pub persona: Option<Arc<crate::persona::PersonaEngine>>,
 }
 
@@ -209,7 +209,7 @@ impl ReflectionRunnable {
         self
     }
 
-    /// 注入人格引擎引用（用于解析 evolution 后应用自我进化）
+    /// 注入人格引擎引用（用于角色视角与私人画像）
     pub fn with_persona(mut self, persona: Arc<crate::persona::PersonaEngine>) -> Self {
         self.persona = Some(persona);
         self
@@ -325,41 +325,6 @@ impl ReflectionRunnable {
         }
     }
 
-    /// 解析 evolution 字段并应用到人格引擎（自我进化）。
-    ///
-    /// LLM 输出 null 或字段缺失时不动覆盖层；tone/personality 至少填一个，
-    /// 且受覆盖层内部最小间隔与去重限制。
-    fn apply_evolution(&self, json: &Value, state: &PipelineState) {
-        if state.current_channel == "cross_character"
-            || state.metadata.get("skip_memory_save").and_then(Value::as_bool).unwrap_or(false) {
-            return;
-        }
-        let Some(persona) = self.persona.as_ref() else {
-            return;
-        };
-        let Some(evolution) = json.get("evolution") else {
-            return;
-        };
-        if evolution.is_null() {
-            return;
-        }
-        let tone = evolution.get("tone").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let personality = evolution.get("personality").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let reason = evolution.get("reason").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-
-        let scope = evolution.get("scope").and_then(Value::as_str).unwrap_or("");
-        let Some(evidence) = growth_evidence(state, evolution) else { return; };
-        let explicit = evolution.get("explicit_feedback").and_then(Value::as_bool).unwrap_or(false);
-        // One interpretation per event/scope; prefer the semantic understanding over wording tweaks.
-        let (kind, text) = if !personality.is_empty() { ("personality", &personality) } else { ("tone", &tone) };
-        let revises = evolution.get("revises").and_then(Value::as_str);
-        if persona.revise_evolution(kind, scope, text, &reason, evidence, explicit, revises) {
-            tracing::info!("[Reflection:{}] 已更新场景理解: {}", self.char_id, scope);
-        }
-        // All learned behavior stays in the sourced, reversible growth layer.
-        // Do not also write unscoped pattern-library rules from the same reflection.
-    }
-
     fn apply_self_profile(&self, json: &Value, state: &PipelineState) {
         let Some(persona) = self.persona.as_ref() else { return; };
         for update in json.get("self_profile").and_then(Value::as_array).into_iter().flatten().take(2) {
@@ -452,13 +417,9 @@ impl ReflectionRunnable {
         }
 
         let growth_candidates = self.persona.as_ref().map(|p| {
-            let items: Vec<_> = p.evolution_candidates().into_iter().map(|c|
-                serde_json::json!({"reference":c.reference(),"kind":c.kind,"scope":c.scope,"text":c.text})).collect();
-            let learned: Vec<_> = p.evolution_entries().into_iter().filter(|e| e.active()).map(|e|
-                serde_json::json!({"scope":e.scope,"text":e.text})).collect();
-            format!("\n角色视角（保留用户设置）：{}\n已生效理解：{}\n待验证候选（不是事实，仅本轮新增证据可支持）：{}\n",
-                format!("{}\n{}", p.reflection_profile(), p.private_self_context()), serde_json::to_string(&learned).unwrap_or_default(),
-                serde_json::to_string(&items).unwrap_or_default())
+            format!("\n角色视角（保留用户设置）：{}\n已生效理解：{}\n",
+                format!("{}\n{}", p.reflection_profile(), p.private_self_context()),
+                serde_json::to_string(&p.evolution_snapshot().learned()).unwrap_or_default())
         }).unwrap_or_default();
         let goals = self.user_goals.as_ref().map(|ledger| {
             let items: Vec<_> = ledger.active_briefs(8).into_iter().map(|g|
@@ -652,7 +613,6 @@ impl Runnable for ReflectionRunnable {
                     self.apply_world_update(&json);
                     self.apply_goal_updates(&json);
                 }
-                self.apply_evolution(&json, &state);
                 self.apply_self_profile(&json, &state);
                 self.record_expression_learning(&state);
             }
@@ -738,7 +698,6 @@ impl ReflectionRunnable {
                     self.apply_world_update(&json);
                     self.apply_goal_updates(&json);
                 }
-                self.apply_evolution(&json, &state);
                 self.apply_self_profile(&json, &state);
             }
             Ok(None) => {

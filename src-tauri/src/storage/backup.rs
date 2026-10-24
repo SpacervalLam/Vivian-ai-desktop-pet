@@ -784,6 +784,154 @@ mod tests {
     }
 
     #[test]
+    fn persona_backup_restores_definition_full_corpus_growth_and_its_source_memories() {
+        use crate::persona::example_library::{self, ExampleEdit, ExampleOverride};
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let baseline = example_library::factory_examples("vivian");
+        let mut sample = baseline
+            .iter()
+            .find(|e| e.scope == "comfort")
+            .unwrap()
+            .clone();
+        sample.id = "grown-backup-voice".into();
+        sample.response["text"] = "先歇会儿，想说了我再听。".into();
+        let understanding = "先尊重沉默，不把陪伴变成追问";
+        let update = ExampleOverride {
+            scope: "comfort".into(),
+            understanding: Some(understanding.into()),
+            updated_at: 172800.0,
+            edit: ExampleEdit {
+                id: sample.id.clone(),
+                reference: None,
+                example: Some(sample.clone()),
+                reason: "多日交流后的自主理解".into(),
+            },
+        };
+        let evolution = serde_json::json!({
+            "entries":[{"timestamp":172800.0,"kind":"personality","scope":"comfort","text":understanding,"reason":"跨日经历",
+                "support":2,"explicit_feedback":false,"evidence":[{"memory_id":"day1","quote":"今天不想讲经过","timestamp":86400.0,"fingerprint":format!("{:x}",Sha256::digest("今天不想讲经过".as_bytes()))},
+                {"memory_id":"day2","quote":"今天也先别追问","timestamp":172800.0,"fingerprint":format!("{:x}",Sha256::digest("今天也先别追问".as_bytes()))}]}],
+            "candidates":[{"kind":"tone","scope":"daily","text":"待验证的表达","reason":"观察中","first_seen":172800.0,"support":1,"evidence":[],"examples":[]}],
+            "history":[],"updated_at":172800.0,"example_overrides":[update],"example_history":[],"review_cursor":24
+        });
+        let mut expected = BTreeMap::new();
+        for character in ["vivian", "nana"] {
+            for (name, content) in [
+                (
+                    "persona.json",
+                    serde_json::json!({"personality_definition":format!("{character} 的自定义人格"),"speech_definition":"自然简洁",
+                    "expression":{"tsundere":0.3,"clingy":0.5,"genki":0.75,"sass":0.65,"healing":0.65,"curiosity":0.75,"ritual":0.5,"habit_awareness":0.65},"language_style":{}}),
+                ),
+                (
+                    example_library::BASE_FILE,
+                    serde_json::to_value(example_library::factory_examples(character)).unwrap(),
+                ),
+                ("evolution.json", evolution.clone()),
+                (
+                    "self_profile.json",
+                    serde_json::json!({"entries":[],"last_web_reflection":172800.0}),
+                ),
+                (
+                    "reading_corpus.json",
+                    serde_json::json!({"items":[{"url":"https://example.com/read","body":"积累的阅读内容","fingerprint":"read-hash","read_at":172800.0}]}),
+                ),
+                (
+                    "cards.json",
+                    serde_json::json!({"cards":[],"active_card_id":null,"turn_counter":5,"last_update_turns":{}}),
+                ),
+                (
+                    "dynamic_profile.json",
+                    serde_json::json!({"turns":[],"acquired_behaviors":[]}),
+                ),
+            ] {
+                let rel = format!("characters/{character}/persona/{name}");
+                let bytes = serde_json::to_vec(&content).unwrap();
+                let path = source.join(&rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, &bytes).unwrap();
+                expected.insert(rel, bytes);
+            }
+        }
+        for character in ["vivian", "nana"] {
+            let db_path = source.join(format!(
+                "characters/{character}/companion-v2/memory/entries.db"
+            ));
+            std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+            let db = rusqlite::Connection::open(&db_path).unwrap();
+            db.execute_batch("CREATE TABLE entries(id TEXT PRIMARY KEY, content TEXT); INSERT INTO entries VALUES ('day1','今天不想讲经过'),('day2','今天也先别追问');").unwrap();
+        }
+        let archive = temp.path().join("complete.altn");
+        write_archive(&source, &archive).unwrap();
+        for (label, backup) in [
+            ("archive", archive.as_path()),
+            ("legacy-directory", source.as_path()),
+        ] {
+            let restored = temp.path().join(label);
+            std::fs::create_dir_all(restored.join("characters/vivian/persona")).unwrap();
+            std::fs::write(
+                restored.join("characters/vivian/persona/post-backup.json"),
+                "newer state",
+            )
+            .unwrap();
+            run_restore(&restored, backup).unwrap();
+            assert!(!restored
+                .join("characters/vivian/persona/post-backup.json")
+                .exists());
+            for (rel, bytes) in &expected {
+                assert_eq!(
+                    &std::fs::read(restored.join(rel)).unwrap(),
+                    bytes,
+                    "{label}/{rel}"
+                );
+            }
+            for character in ["vivian", "nana"] {
+                let state: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(
+                        restored.join(format!("characters/{character}/persona/evolution.json")),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                let loaded_base = example_library::read_base_at(&restored.join(format!(
+                    "characters/{character}/persona/{}",
+                    example_library::BASE_FILE
+                )))
+                .unwrap();
+                let edits: Vec<ExampleOverride> =
+                    serde_json::from_value(state["example_overrides"].clone()).unwrap();
+                let effective = example_library::materialize(
+                    &loaded_base,
+                    &edits,
+                    &[("comfort".into(), understanding.into())],
+                );
+                assert!(effective
+                    .iter()
+                    .any(|e| e.id == sample.id && e.response == sample.response));
+                let db = rusqlite::Connection::open(restored.join(format!(
+                    "characters/{character}/companion-v2/memory/entries.db"
+                )))
+                .unwrap();
+                for evidence in state["entries"][0]["evidence"].as_array().unwrap() {
+                    let content: String = db
+                        .query_row(
+                            "SELECT content FROM entries WHERE id=?1",
+                            [evidence["memory_id"].as_str().unwrap()],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    assert!(content.contains(evidence["quote"].as_str().unwrap()));
+                    assert_eq!(
+                        format!("{:x}", Sha256::digest(content.as_bytes())),
+                        evidence["fingerprint"].as_str().unwrap()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn incomplete_backup_does_not_clear_existing_conversation() {
         let tmp =
             std::env::temp_dir().join(format!("vivian_incomplete_backup_{}", uuid::Uuid::new_v4()));
