@@ -1467,6 +1467,7 @@ impl AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
+                        state.metadata["result_reply_finalized"] = json!(Self::requests_execution(&state) && state.current_channel != "cross_character");
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
@@ -1649,6 +1650,7 @@ impl AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
+                        state.metadata["result_reply_finalized"] = json!(Self::requests_execution(&state) && state.current_channel != "cross_character");
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
@@ -1931,30 +1933,8 @@ impl Runnable for ResponseParsingRunnable {
             state.text = Self::remove_name(&state.text, &state.user_name);
         }
 
-        // 工具失败容错：用角色化台词反馈（而非冷冰冰的错误信息）
-        // 跨角色对话场景下不追加，避免向室友泄露工具调用细节
-        let is_cross_character_input = state.user_input.starts_with('[')
-            && state.user_input.contains(" says to me]");
-        if !is_cross_character_input {
-            if let Some(failures) = state.metadata.get("tool_failures").and_then(Value::as_array) {
-                if !failures.is_empty() && !state.text.is_empty() {
-                    let failed_tools: Vec<&str> = failures
-                        .iter()
-                        .filter_map(|f| f.get("tool").and_then(Value::as_str))
-                        .collect();
-                    if !failed_tools.is_empty() {
-                        let tool_name = failed_tools.first().unwrap_or(&"");
-                        let error_msg = failures
-                            .first()
-                            .and_then(|f| f.get("error").and_then(Value::as_str))
-                            .unwrap_or("");
-                        let note = crate::engine::feedback::tool_failure_to_character_text(tool_name, error_msg);
-                        state.text.push_str(&note);
-                    }
-                }
-            }
-        }
-
+        // 工具失败不追加模板台词：固定句式（"网络好像有点问题…"）会把角色的口语
+        // 变成客服播报。失败事实已由工具结果消息携带，台词仍由模型自己组织。
         crate::stickers::finalize(&mut state);
         state.generation_status = "response_parsing_complete".to_string();
 
@@ -2322,6 +2302,10 @@ mod tests {
         use axum::{Router, Json, extract::State, routing::post};
         type Captured = Arc<parking_lot::Mutex<Vec<Value>>>;
         async fn handle(State(captured): State<Captured>, Json(body): Json<Value>) -> Json<Value> {
+            if body["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_str())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["review_kind"] == "post_execution_reply") {
+                return Json(json!({"choices":[{"message":{"role":"assistant","content":"{\"accepted\":true,\"issues\":[]}"},"finish_reason":"stop"}]}));
+            }
             let index = { let mut requests = captured.lock(); let i = requests.len(); requests.push(body.clone()); i };
             let message = match index {
                 0 if body.get("tools").is_some() => json!({"role":"assistant","content":null,

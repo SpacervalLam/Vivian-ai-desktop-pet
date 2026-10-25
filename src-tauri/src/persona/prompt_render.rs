@@ -13,12 +13,6 @@ use regex::Regex;
 use super::schemas::{PersonaConfig, SceneMode};
 use crate::types::response::ChatMessage;
 
-/// 编译时嵌入共享人格协议（PERSONA_PROTOCOL，角色无关）。
-///
-/// 该协议定义 `【PERSONA_CONFIG】` 的解析规则与优先级链，注入到 Character 块
-/// 最顶部（紧随 `[PERSONA_LOAD]` 硬约束标志），作为"如何解读下方配置"的契约。
-static PERSONA_PROTOCOL_TEXT: &str = include_str!("../../prompts/framework/persona_protocol.md");
-
 // ============================================================================
 // Character 段落文件路径映射
 // ============================================================================
@@ -503,20 +497,13 @@ fn extract_between<'a>(text: &'a str, start_marker: &str, end_marker: &str) -> &
     &body[..end]
 }
 
-/// 渲染共享人格协议块（PERSONA_PROTOCOL）：截取协议文档 §1–§5 的 LLM 侧规则
-/// （触发条件/解析规则/三层结构/优先级链/执行规则），排除 §6 后端约定与 §7 接入说明。
-/// 协议文本已统一英文。
+/// 人格配置的解析约定：只保留解释数值所需的一行说明。
+/// 完整协议文档（§1–§5，约 3KB）讲的是配置解析与优先级链，属于运行时契约而不是
+/// 说话方式；每轮注入会把模型推向"执行配置"的语域，故不再整段进入 prompt。
 pub fn render_persona_protocol_block() -> String {
-    let md = PERSONA_PROTOCOL_TEXT;
-    let body = extract_between(md, "## 1. Trigger Conditions", "## 6. Runtime Module Conventions").trim();
-    if body.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "[PERSONA_PROTOCOL - DO NOT EMBODY, JUST FOLLOW]\n{}\n[END PERSONA_PROTOCOL]",
-            body
-        )
-    }
+    "[PERSONA_PROTOCOL]\nValues in 【PERSONA_CONFIG】 are tendencies, not per-turn quotas. \
+     Scene rules apply only inside that scene; current user corrections and explicit requests \
+     override factory text.\n[/PERSONA_PROTOCOL]".to_string()
 }
 
 /// 渲染角色结构化人格配置块：从 `persona_config.md` 提取底层 `【PERSONA_CONFIG】`
@@ -768,7 +755,6 @@ pub fn render_character_block_growing(
     entries: &[super::evolution::EvolutionEntry],
 ) -> String {
     let scopes: Vec<&str> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
-    let flags = render_persona_flags_block(config, lang);
     let protocol = render_persona_protocol_block();
     let persona_config = filter_seed_config(&render_persona_config_block(config), &scopes);
     let mut sections = match tier {
@@ -795,7 +781,10 @@ pub fn render_character_block_growing(
     if config.personality_definition.trim().is_empty() {
         sections[1] = filter_seed_scenes(&sections[1], &scopes);
     }
-    let mut head: Vec<String> = vec![flags,
+    // The all-caps [PERSONA_LOAD] flag list used to sit first here. Its constraints
+    // are already expressed by speech/banned_phrases/output rules, and leading with
+    // a config block trained the model to answer like a spec executor.
+    let mut head: Vec<String> = vec![
         include_str!("../../prompts/framework/character_perspective.en.md").trim().to_string()];
     if !protocol.trim().is_empty() {
         head.push(protocol);
@@ -994,7 +983,9 @@ mod tests {
                 assert!(dialogue.contains(&config.identity.name));
                 assert!(!grown.contains(plain));
                 assert!(!grown.contains("WHEN_USER_SAD="));
-                assert!(grown.contains("[CORE_IDENTITY_AND_BOUNDARIES]"));
+                let identity = resolve_section(&config, CharacterSection::Identity, lang);
+                assert!(!identity.trim().is_empty());
+                assert!(grown.contains(identity.trim()), "growth must preserve the actual identity and boundaries, not a removed config label");
                 let restored = render_character_block_growing(&config, lang, CharacterBlockTier::Full, &[]);
                 assert!(restored.contains(plain));
                 let mut custom = config;
@@ -1025,11 +1016,12 @@ mod tests {
     }
 
     #[test]
-    fn test_character_block_prepends_flags() {
+    fn test_character_block_starts_with_perspective_not_config_flags() {
         let config = default_persona_for("vivian");
         let block = render_character_block(&config, "zh");
-        assert!(block.starts_with("[PERSONA_LOAD"));
-        assert!(block.contains("REFUSE_SERVICE_SPEECH"));
+        assert!(block.starts_with("[CHARACTER PERSPECTIVE]"));
+        assert!(!block.contains("[PERSONA_LOAD]"));
+        assert!(block.contains("[PERSONA_PROTOCOL]"));
         assert!(block.contains("# Vivian · Identity"));
     }
 
@@ -1048,7 +1040,8 @@ mod tests {
         // 核心段落两档都保留
         assert!(compact.contains("# Vivian · Identity"));
         assert!(compact.contains("# Vivian · Speech Style"));
-        assert!(compact.starts_with("[PERSONA_LOAD"));
+        assert!(compact.starts_with("[CHARACTER PERSPECTIVE]"));
+        assert!(!compact.contains("[PERSONA_LOAD]"));
 
         // 精简档应显著短于完整档
         assert!(compact.len() < full.len());

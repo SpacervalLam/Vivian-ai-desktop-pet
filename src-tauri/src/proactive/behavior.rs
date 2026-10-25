@@ -420,7 +420,17 @@ impl BehaviorDecider {
         let text_val = data.get("text")?.as_str()?;
         let (delivery_channel, content_type, importance, value_score) = BehaviorContent::parse_extra_fields(&data);
         let limit = if delivery_channel == DeliveryChannel::ChatWindow { 1200 } else { 50 };
-        let text_owned: String = text_val.chars().take(limit).collect();
+        // Bubble text is short, but a hard char cut can end mid-clause. Prefer the
+        // last sentence boundary inside the limit, then fall back to the cut.
+        let clipped: Vec<char> = text_val.chars().take(limit).collect();
+        let text_owned: String = if text_val.chars().count() <= limit {
+            text_val.to_string()
+        } else {
+            match clipped.iter().rposition(|c| matches!(c, '。' | '！' | '？' | '!' | '?' | '\n')) {
+                Some(i) => clipped[..=i].iter().collect(),
+                None => clipped.into_iter().collect(),
+            }
+        };
         if text_owned.is_empty() {
             return None;
         }
@@ -886,6 +896,17 @@ mod delivery_channel_tests {
         assert_eq!(action.listener.as_deref(), Some("nana"));
         assert_eq!(action.trigger, "cross_character_reply");
     }
+    #[test]
+    fn bubble_text_is_cut_at_a_sentence_boundary() {
+        let raw = serde_json::json!({
+            "text": "外面下雨了，出门记得带伞。回来的时候要是还没停，我再提醒你一次，别忘了。",
+            "delivery_channel": "bubble"
+        }).to_string();
+        let content = BehaviorDecider::parse_json_response(&raw).unwrap();
+        assert!(content.text.ends_with('。'), "气泡文案不应停在半句: {}", content.text);
+        assert!(content.text.chars().count() <= 50);
+    }
+
     #[test]
     fn text_message_retains_channel_and_is_not_cut_to_bubble_length() {
         let text = "a".repeat(150);

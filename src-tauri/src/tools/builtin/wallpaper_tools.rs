@@ -991,17 +991,44 @@ fn wallpaper_switch_result(previous: Option<&str>, observed: Option<&str>, targe
         let mut result = ToolResult::standard_success("已读回确认壁纸配置切换到了另一个项目。", Some(json!({
             "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
             "verification_status":"verified_configuration", "verification_source":"wallpaper_engine_config",
-            "changed":true, "note":"配置读回确认，不代表已进行桌面视觉检查。"
+            "changed":true, "desktop_visual_observed":false
         })));
         result.goal_completed = true;
         result
     } else {
-        ToolResult::standard_success("已发送壁纸切换命令，但尚未确认换成了不同壁纸。", Some(json!({
+        ToolResult::standard_success("壁纸切换请求已提交。", Some(json!({
             "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
             "verification_status":if verification == SwitchVerification::Unverifiable { "unverifiable" } else { "unverified" },
-            "changed":false, "command_sent":true,
-            "note":"不能声称已经换好，也不要自动重复发送相同切换命令；如用户纠正，应接受纠正并重新核实。"
+            "changed":null, "command_sent":true, "desktop_visual_observed":false
         })))
+    }
+}
+
+#[cfg(test)]
+mod switch_result_tests {
+    use super::*;
+
+    #[test]
+    fn unconfirmed_switch_is_unknown_not_a_negative_observation() {
+        for observed in [None, Some("F:/old/scene.pkg")] {
+            let result = wallpaper_switch_result(Some("F:/old/scene.pkg"), observed, "F:/new/project.json", false);
+            assert!(result.success);
+            assert!(!result.goal_completed);
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["data"]["data"]["command_sent"], true);
+            assert!(value["data"]["data"]["changed"].is_null());
+            assert_eq!(value["data"]["data"]["desktop_visual_observed"], false);
+        }
+    }
+
+    #[test]
+    fn confirmed_configuration_is_a_positive_result_with_its_actual_scope() {
+        let result = wallpaper_switch_result(Some("F:/old/scene.pkg"), Some("F:/new/scene.pkg"), "F:/new/project.json", false);
+        assert!(result.goal_completed);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["data"]["data"]["changed"], true);
+        assert_eq!(value["data"]["data"]["verification_source"], "wallpaper_engine_config");
+        assert_eq!(value["data"]["data"]["desktop_visual_observed"], false);
     }
 }
 

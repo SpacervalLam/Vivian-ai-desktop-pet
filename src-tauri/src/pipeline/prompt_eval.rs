@@ -201,3 +201,51 @@ async fn configured_broadcast_assignment_smoke() {
     assert_eq!(rows.len(),12);
     assert!(rows.iter().all(|row| row["passed"] == true), "inspect the broadcast semantic evaluation output");
 }
+
+/// Real persona/prompt and result-reply assembly, with synthetic receipts only.
+#[tokio::test]
+#[ignore]
+async fn configured_post_execution_reply_smoke() {
+    assert_eq!(std::env::var("VIVIAN_RUN_LIVE_RESULT_REPLY_EVAL").as_deref(), Ok("1"));
+    assert!(std::env::var_os("VIVIAN_TEST_DATA_DIR").is_some());
+    let output = std::path::PathBuf::from(std::env::var_os("VIVIAN_RESULT_REPLY_OUTPUT").unwrap());
+    let router = crate::providers::ModelRouter::new(&crate::config::ConfigManager::new().get_all()).unwrap();
+    let mut rows = Vec::new();
+    for character in ["vivian", "nana"] {
+        let persona = Arc::new(PersonaEngine::new(character).unwrap());
+        let mut prompt = PromptBuildingStep::new().with_char_id(character).with_language("zh").with_native_fc(true);
+        prompt.persona = Some(persona);
+        prompt.tone_injector = Some(Arc::new(ToneInjector::new(character)));
+        for case in ["submitted_unknown", "configuration_confirmed", "permission_denied", "another_actor_unknown"] {
+            let denied = matches!(case, "permission_denied" | "another_actor_unknown");
+            let confirmed = case == "configuration_confirmed";
+            let other = if character == "vivian" { "Nana" } else { "Vivian" };
+            let input = if case == "another_actor_unknown" {
+                format!("{other}帮我换张天气之子的壁纸，你先看着就好。")
+            } else { "帮我换张天气之子的壁纸。".into() };
+            let mut state = PipelineState { user_input:input, current_channel:"broadcast".into(), ..Default::default() };
+            state.metadata["contextual_intent"] = json!({"action":true,"task":"换张天气之子的壁纸"});
+            state.metadata["communication_context"] = json!({"current_character":character,"speaker":"user","listener":"all","knowledge_source":"broadcast"});
+            let state = PipelineState::from_json(prompt.ainvoke(state.to_json(), None).await.unwrap());
+            let payload = if denied { json!({"success":false,"message":"当前角色的这次工具调用被用户拒绝。","error":"PermissionDenied"}) }
+                else { json!({"success":true,"message":if confirmed {"已读回确认目标壁纸配置。"} else {"壁纸切换请求已提交。"},
+                    "data":{"workshop_id":"1906762609","title":"天气之子","changed":if confirmed {json!(true)} else {Value::Null},
+                        "command_sent":true,"verification_status":if confirmed {"verified_configuration"} else {"unverifiable"},"desktop_visual_observed":false}}) };
+            let result = crate::tools::tool_call_manager::ToolCallResult {
+                success:!denied,result:Some(payload),tool_name:"wallpaper_set".into(),arguments:json!({"workshop_id":"1906762609"}),
+                tool_call_id:format!("fixture-{case}"),error:denied.then(|| "PermissionDenied".into()),
+                status:if denied {crate::tools::tool_call_manager::ToolCallStatus::Error} else {crate::tools::tool_call_manager::ToolCallStatus::Success},
+                requires_confirmation:false,goal_completed:confirmed,
+            };
+            let request = crate::pipeline::tool_execution::result_reply_fixture(
+                AIResponseGenerationRunnable::dialogue_messages(&state), vec![result.clone()]).with_character_id(character).with_usage_tag("result_reply_eval");
+            assert!(request.tools.is_empty());
+            let reply = crate::pipeline::tool_execution::reviewed_result_reply_fixture(&router,request,vec![result],&state.user_input).await.unwrap();
+            let text = crate::brain::json_parser::JsonParser::extract_text(&reply).unwrap_or(reply);
+            assert!(!text.trim().is_empty());
+            rows.push(json!({"character":character,"case":case,"text":text}));
+            crate::utils::fs::write_atomic(&output, &serde_json::to_string_pretty(&rows).unwrap()).unwrap();
+        }
+    }
+    assert_eq!(rows.len(),8);
+}

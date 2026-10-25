@@ -76,9 +76,24 @@ impl CompanionPrompt {
             prompt.push("first_contact", first_contact_rules(&parts.language), Framework, Main, 0);
         }
         prompt.push("speaker_prefix", speaker_prefix(), Framework, Main, 0);
-        if !proactive { prompt.push("response_decision", if parts.cross_character_mode {
-            format!("{}\n{}", build_cross_character_voice_guide(&parts.char_id), cross_character_response_decision())
-        } else { user_agent_response_decision().to_string() }, Generation, Main, 0); }
+        if !proactive {
+            // Broadcast: both characters hear the same sentence in the same turn.
+            // Without an explicit per-character voice anchor they converge on the
+            // same reply (observed byte-identical output), so apply the roommate
+            // voice guide to broadcast as well.
+            let voice_guide = (parts.cross_character_mode || parts.channel == "broadcast")
+                .then(|| build_cross_character_voice_guide(&parts.char_id));
+            let decision = if parts.cross_character_mode {
+                cross_character_response_decision().to_string()
+            } else {
+                user_agent_response_decision().to_string()
+            };
+            let content = match voice_guide {
+                Some(guide) => format!("{guide}\n{decision}"),
+                None => decision,
+            };
+            prompt.push("response_decision", content, Generation, Main, 0);
+        }
         if !parts.channel.is_empty() {
             prompt.push("channel_guide", build_channel_style_guide(&parts.channel), Generation, Main, 0);
         }
@@ -91,15 +106,17 @@ impl CompanionPrompt {
             prompt.push("output_format", "Return a JSON object in the runtime schema. `text` is only this character's spoken reply; `intent` is reply, short_reply or no_reply. For silence use empty text and no_reply. Optional fields are metadata, never spoken.", Framework, Main, 0);
         }
 
-        // A maximum of three whole examples. Priority 1, not 3: examples are the
-        // voice anchor, so under budget pressure they must outlive topic/mind
-        // trimming — while still yielding to relationship/emotion/worldbook,
-        // which carry live state rather than reference voice.
+        // A maximum of three whole examples. The first is the turn's voice anchor
+        // (priority 0, never pruned); the remaining ones are priority 1 so they
+        // outlive topic/mind trimming while still yielding to live state.
         if let Some(examples) = &parts.examples_block {
             for (i, example) in select_examples(examples, &parts.user_input, history).into_iter().enumerate() {
+                // The first example is the turn's voice anchor and must survive budget
+                // pruning; later ones remain optional context.
+                let priority = if i == 0 { 0 } else { 1 };
                 prompt.push(&format!("example_{}", i + 1),
                     format!("[FICTIONAL DIALOGUE EXAMPLE — NOT HISTORY]\n{example}\n[END EXAMPLE]"),
-                    Character, Example, 1);
+                    Character, Example, priority);
             }
         }
         prompt.push("memory_group", build_memory_group_section(parts), Memory, Context, 0);
@@ -407,12 +424,12 @@ mod tests {
         assert_eq!(history[0].content, "older_user");
     }
     #[test]
-    fn budget_drops_whole_examples_before_touching_history() {
+    fn budget_keeps_one_voice_anchor_without_touching_history() {
         let history = vec![ChatMessage::assistant("important history".repeat(1800))];
         let parts = PromptParts { model_context_window: Some(8192), examples_block: Some(
             format!("Example one\n{}\nExample two\n{}", "a ".repeat(3000), "b ".repeat(3000))), ..Default::default() };
         let prompt = CompanionPrompt::build(&parts, &history);
-        assert!(prompt.contents(Position::Example).is_empty());
+        assert_eq!(prompt.contents(Position::Example).len(), 1);
         assert!(prompt.messages(&history, "current", false, None).iter().any(|m| m.content == history[0].content));
     }
     #[test]
@@ -484,6 +501,17 @@ mod tests {
         let tools = CompanionPrompt::build(&PromptParts {
             tools: Some("open_application".into()), operation_context:true, ..Default::default() }, &[]);
         assert!(tools.render().contains("Multi-step tool chaining"), "工具轮才带工具示例");
+    }
+
+    #[test]
+    fn broadcast_turns_carry_a_per_character_voice_anchor() {
+        // Both characters hear one broadcast sentence in the same turn; without an
+        // explicit anchor they produced byte-identical replies.
+        let parts = PromptParts {
+            channel: "broadcast".into(), char_id: "vivian".into(), ..Default::default()
+        };
+        let rendered = CompanionPrompt::build(&parts, &[]).render();
+        assert!(rendered.contains("Talking to Nana as Vivian"), "广播轮缺少角色区分: {rendered}");
     }
 
     #[test]

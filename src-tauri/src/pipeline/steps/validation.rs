@@ -226,7 +226,9 @@ impl Runnable for ValidationRunnable {
         receipts.extend(state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default());
         // Only this turn's execution may rewrite its completion claim; historical outcomes can be superseded.
         let current_receipts = state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default();
-        state.text = crate::pipeline::presentation_grounding::ground_wallpaper_outcome(&state.text, &current_receipts);
+        if state.metadata["result_reply_finalized"] != true {
+            state.text = crate::pipeline::presentation_grounding::ground_wallpaper_outcome(&state.text, &current_receipts);
+        }
         let wallpaper = crate::world::desktop_state::WALLPAPER.read().clone();
         let current = if crate::world::desktop_state::fresh(&wallpaper, chrono::Utc::now().timestamp()) {
             wallpaper.primary.as_ref().map(|item| item.file.as_str())
@@ -380,6 +382,17 @@ mod tests {
     fn truncate_short_text_unchanged() {
         let text = "你好呀～";
         assert_eq!(ValidationRunnable::truncate_at_boundary(text, 500), text);
+    }
+
+    #[tokio::test]
+    async fn finalized_result_reply_survives_legacy_wallpaper_replacement() {
+        let text = "我发了切换请求，不过还没确认有没有换上了。";
+        let mut state = PipelineState { text:text.into(), ai_response:Some(crate::types::response::AiResponse::new(text.into())), ..Default::default() };
+        state.metadata["result_reply_finalized"] = json!(true);
+        state.metadata["verified_tool_receipts"] = json!([{"tool_name":"wallpaper_set","success":true,"result":{"data":{"changed":null,"verification_status":"unverifiable"}}}]);
+        let result = PipelineState::from_json(ValidationRunnable::new().ainvoke(state.to_json(), None).await.unwrap());
+        assert_eq!(result.text, text);
+        assert_eq!(result.ai_response.unwrap().text, text);
     }
 
     #[tokio::test]

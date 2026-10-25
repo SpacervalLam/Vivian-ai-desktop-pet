@@ -11,10 +11,25 @@ pub fn ground_wallpaper_outcome(text: &str, receipts: &[Value]) -> String {
     let same = receipt["error"].as_str() == Some("AlreadyCurrentWallpaper")
         || result["error"].as_str() == Some("AlreadyCurrentWallpaper");
     let lower = text.to_lowercase();
-    if (unsupported || same) && ["搞定", "换好", "换上了", "已切换", "切换成功", "done", "changed your wallpaper", "switched"].iter().any(|claim| lower.contains(claim)) {
-        if same { "目标仍是当前这张，尚未换成其他壁纸。".into() }
-        else { "切换命令已发送，但还没有确认壁纸发生变化。".into() }
-    } else { text.into() }
+    let claims_success = ["搞定", "换好", "换上了", "已切换", "切换成功", "done", "changed your wallpaper", "switched"]
+        .iter().any(|claim| lower.contains(claim));
+    if !((unsupported || same) && claims_success) { return text.into(); }
+    // Remove only the sentences that assert the unverified change; keep the rest of
+    // the character's wording so a failed tool call does not erase her voice.
+    let claims = ["搞定", "换好", "换上了", "已切换", "切换成功", "done", "changed your wallpaper", "switched"];
+    let kept: String = text
+        .split_inclusive(['。', '！', '？', '!', '?', '\n'])
+        .filter(|sentence| {
+            let sentence = sentence.to_lowercase();
+            !claims.iter().any(|claim| sentence.contains(claim))
+        })
+        .collect();
+    let kept = kept.trim();
+    if kept.is_empty() {
+        if same { "还是原来那张。" } else { "这边还没确认到真的换上了。" }.into()
+    } else {
+        kept.to_string()
+    }
 }
 
 pub fn ground_wallpaper_choices(text: &str, receipts: &[Value], current_project: Option<&str>) -> String {
@@ -90,9 +105,11 @@ mod tests {
     #[test]
     fn sent_command_and_same_wallpaper_do_not_support_a_success_claim() {
         let pending = vec![json!({"tool_name":"wallpaper_set","success":true,"result":{"data":{"changed":false,"verification_status":"unverifiable"}}})];
-        assert_eq!(ground_wallpaper_outcome("搞定啦！已经换好了。", &pending), "切换命令已发送，但还没有确认壁纸发生变化。");
+        assert_eq!(ground_wallpaper_outcome("搞定啦！已经换好了。", &pending), "这边还没确认到真的换上了。");
+        // Only the claim is removed; the character keeps the rest of her line.
+        assert_eq!(ground_wallpaper_outcome("我试着切了。搞定了。", &pending), "我试着切了。");
         let same = vec![json!({"tool_name":"wallpaper_set","success":false,"error":"AlreadyCurrentWallpaper"})];
-        assert_eq!(ground_wallpaper_outcome("切换成功。", &same), "目标仍是当前这张，尚未换成其他壁纸。");
+        assert_eq!(ground_wallpaper_outcome("切换成功。", &same), "还是原来那张。");
         let verified = vec![json!({"tool_name":"wallpaper_set","success":true,"result":{"data":{"changed":true,"verification_status":"verified_configuration"}}})];
         assert_eq!(ground_wallpaper_outcome("已经换好了。", &verified), "已经换好了。");
     }
