@@ -1045,11 +1045,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         response.expression = final_state.expression.clone();
         response.expression_duration_ms = final_state.expression_duration_ms;
         response.motion = final_state.motion.clone();
-        // text 字段仅保留纯文本，剥离 Markdown / 富文本渲染语法，以及 TTS 控制标记
-        // （[EMO]/[THINKING]/[SPEED]/[PAUSE] 是 TTS 指令，不应显示在聊天气泡里）
-        let tts_ctrl = crate::speech::tts::parse_tts_controls(&response.text);
-        response.text = crate::utils::strip_markdown_syntax(&tts_ctrl.text);
-
         let trace = self.record_reasoning_trace(user_input, &final_state, &response);
         self.validation.schedule_audit(&final_state, &self.char_id, &trace);
 
@@ -1145,6 +1140,10 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                 AIResponseGenerationRunnable::requests_execution(&final_state),
                 &MemorySavingRunnable::strip_json_if_any(&response.text), receipts,
                 crate::memory::types::current_timestamp());
+        }
+
+        if final_state.metadata["reply_generation_failed"] == true {
+            return Err(crate::error::VivianError::Engine("操作已停止，但角色回复生成失败；执行结果已保留，请查看任务记录。".into()));
         }
 
         // 画像直接消费真实用户原话，不等待批量长期记忆抽取或会话压缩。

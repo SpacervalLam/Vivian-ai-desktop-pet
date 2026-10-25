@@ -662,16 +662,11 @@ pub fn render_dialogue_card(
     let mut sections = Vec::new();
     for section in [CharacterSection::Identity, CharacterSection::Personality,
         CharacterSection::Speech, CharacterSection::Background, CharacterSection::Interests,
-        CharacterSection::Relationships] {
+        CharacterSection::Relationships, CharacterSection::Appearance] {
         let text = resolve_section(config, section, lang);
         sections.push(if section == CharacterSection::Personality && config.personality_definition.trim().is_empty() {
             filter_seed_scenes(&text, &scopes)
         } else { text });
-    }
-    // Identity already carries the visible silhouette. Detailed costume reference
-    // stays in the editor/full card; an explicit appearance override remains active.
-    if !config.appearance_definition.trim().is_empty() {
-        sections.push(resolve_section(config, CharacterSection::Appearance, lang));
     }
     sections.push(render_language_style_block(config));
     for taboo in config.identity.taboos.iter().filter(|t| t.enabled) {

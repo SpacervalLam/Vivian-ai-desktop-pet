@@ -50,6 +50,7 @@ pub fn normalize(raw: &str, planned_channel: &str) -> Result<Option<Value>, &'st
     if prose.is_empty() {
         return Err("empty_text");
     }
+    data["text"] = json!(crate::pipeline::spoken_reply::text(prose));
     if let Some(channel) = data.get("delivery_channel") {
         let channel = match channel.as_str() {
             Some("direct" | "bubble") => "bubble",

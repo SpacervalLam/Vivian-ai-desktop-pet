@@ -177,65 +177,15 @@ impl AIResponseGenerationRunnable {
     ///
     /// 失败向上传递，由 chat:error 显示 toast，不生成角色兜底台词。
     async fn generate_farewell(router: &ModelRouter, state: &PipelineState) -> VivianResult<String> {
-        let lang = crate::i18n::get_language();
-        let context = if state.system_prompt.is_empty() {
-            String::new()
-        } else {
-            state.system_prompt.chars().take(200).collect::<String>()
-        };
-        let exit_reason = if state.exit_reason.is_empty() {
-            if lang.starts_with("en") {
-                "user ended conversation".to_string()
-            } else if lang.starts_with("ja") {
-                "ユーザーが会話を終了した".to_string()
-            } else {
-                "用户结束了对话".to_string()
-            }
-        } else {
-            state.exit_reason.clone()
-        };
-
-        let prompt = if lang.starts_with("en") {
-            format!(
-                "You are a warm AI companion finishing a conversation naturally.\n\n\
-                 Context: {context}\n\
-                 Exit reason: {exit_reason}\n\n\
-                 Generate a brief, natural farewell (1-2 sentences). \
-                 Warm but not overly emotional. Keep under 50 chars. \
-                 No markdown. Just the farewell text."
-            )
-        } else if lang.starts_with("ja") {
-            format!(
-                "あなたは温かいAIコンパニオン。会話を自然に締めくくって。\n\n\
-                 コンテキスト: {context}\n\
-                 終了理由: {exit_reason}\n\n\
-                 短く自然な別れの挨拶を生成して（1-2文）。\
-                 温かすぎず、感情を抑えめに。50字以内。\
-                 markdownなし。別れの挨拶のみ。"
-            )
-        } else {
-            format!(
-                "你是一个温暖的 AI 伙伴，正在自然地结束一段对话。\n\n\
-                 上下文: {context}\n\
-                 退出原因: {exit_reason}\n\n\
-                 生成一句简短自然的告别（1-2 句）。\
-                 温暖但不要过于感性。50 字以内。\
-                 不要 markdown。直接输出告别文本。"
-            )
-        };
-        let messages = vec![ChatMessage::user(&prompt)];
-
-        let text = router
-            .generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages))
-            .await?;
-        let trimmed = text.trim().trim_matches('"').trim_matches('\'');
-        let cleaned = crate::utils::protocol_text::strip_protocol_text(trimmed);
-        let cleaned: String = cleaned.trim().chars().take(200).collect();
-        if cleaned.is_empty() {
-            Err(VivianError::Provider("告别生成失败：模型未返回有效文本".into()))
-        } else {
-            Ok(cleaned)
-        }
+        let mut messages = crate::pipeline::spoken_reply::context(Self::dialogue_messages(state));
+        messages.push(ChatMessage::system(format!(
+            "The conversation is ending. Stay in the full character identity, voice and relationships above. Give one brief natural farewell in the current conversation language. Do not ask a new question or start a task. Exit reason (context only): {}", state.exit_reason)));
+        let raw = router.generate(Self::build_native_chat_request(
+            crate::providers::base::TASK_COMPANION, messages, vec![])).await?;
+        let text = crate::pipeline::spoken_reply::text(&raw);
+        if text.is_empty() || raw.contains("DSML") || !crate::pipeline::tool_execution::calls_from_text(&raw).is_empty() {
+            Err(VivianError::Provider("Character farewell returned invalid dialogue".into()))
+        } else { Ok(text) }
     }
 
     /// 从响应文本提取 JSON（优先数组首元素，其次对象）
@@ -822,10 +772,10 @@ impl AIResponseGenerationRunnable {
     async fn regenerate_blocked_reply(
         router: &ModelRouter,
         messages: &[ChatMessage],
-        task_type: &str,
+        _task_type: &str,
         reason: &str,
     ) -> String {
-        let mut blocked_messages = messages.to_vec();
+        let mut blocked_messages = crate::pipeline::spoken_reply::context(messages.to_vec());
         blocked_messages.push(ChatMessage::system(format!(
             "Runtime notice, not user speech. This turn was intercepted by the execution guard before \
              publishing, and no tool ran. Concrete reason: {reason}. \
@@ -835,49 +785,38 @@ impl AIResponseGenerationRunnable {
              machinery, and never fall back on a fixed canned sentence. \
              Do not claim, imply or hint that the work has started, is running or is done - it has not, \
              and do not promise that it will happen by itself. \
-             Then move the conversation forward: if you still intend to act, say plainly that you have not \
-             started yet and ask whether to go ahead now; if you need exactly one thing from the user, ask \
-             for that one thing; if you cannot do it, say so plainly and offer what you can do instead."
+             State only the concrete blocker or missing information that matters to the user. \
+             Preserve existing authorization; do not ask again whether to begin an already requested task, \
+             offer unsolicited retries, or invent an alternative task. Ask a question only if one specific \
+             missing piece of information actually blocks the request."
         )));
-        let request = Self::build_chat_request(task_type, blocked_messages)
+        let request = Self::build_native_chat_request(crate::providers::base::TASK_COMPANION, blocked_messages, vec![])
             .with_usage_tag("blocked_execution_reply");
         match router.generate(request).await {
             Ok(text) => {
                 let text = JsonParser::extract_text(&text).unwrap_or(text);
                 let text = text.trim().to_string();
                 if text.is_empty() {
-                    tracing::warn!("[AIResponse] blocked-execution reply came back empty; using last resort");
-                    Self::blocked_execution_last_resort()
+                    tracing::warn!("[AIResponse] blocked-execution character reply came back empty");
+                    String::new()
                 } else {
                     text
                 }
             }
             Err(error) => {
                 tracing::warn!("[AIResponse] blocked-execution reply generation failed: {error}");
-                Self::blocked_execution_last_resort()
+                String::new()
             }
         }
     }
 
-    /// 最后手段：连生成受阻回复的模型调用都失败时才会用到（例如 API 不可达）。
-    /// 仍然是角色口吻的诚实陈述，且被 `is_blocked_execution_reply` 识别，不会再入审计。
+    /// Legacy history recognition only. These constants are never emitted as fallbacks.
     const BLOCKED_EXECUTION_EN: &'static str =
         "(tilts head) Hmm - I really didn't run anything that time. Want me to start now?";
     const BLOCKED_EXECUTION_JA: &'static str =
         "（首をかしげて）あれ、今回は本当に何も動かしてないよ。今から始めようか？";
     const BLOCKED_EXECUTION_ZH: &'static str =
         "（歪头）诶，这次我确实没真动手。要我现在就开始吗？";
-
-    fn blocked_execution_last_resort() -> String {
-        let lang = crate::i18n::get_language();
-        if lang.starts_with("en") {
-            Self::BLOCKED_EXECUTION_EN.into()
-        } else if lang.starts_with("ja") {
-            Self::BLOCKED_EXECUTION_JA.into()
-        } else {
-            Self::BLOCKED_EXECUTION_ZH.into()
-        }
-    }
 
     /// 是否为守卫自己的兜底文案。历史里可能残留上一轮、甚至切换语言前写入的变体，
     /// 因此比对全部语言版本，而不是只比对当前语言那一句。
@@ -1288,6 +1227,9 @@ impl AIResponseGenerationRunnable {
         if let Some(context) = state.metadata.get("contextual_intent") {
             messages_vec.push(ChatMessage::system(format!("[Contextual interpretation of the latest human turn, not additional authorization]\n{context}\nInterpret omitted subjects and approvals using the complete conversation. Preserve the actual user's constraints and all permission checks. Assistant promises do not establish execution. Ask for clarification if the interpretation remains ambiguous.")));
         }
+        if state.in_cooldown {
+            messages_vec.push(ChatMessage::system("Respect the current address cooldown: avoid adding a direct name or nickname as a vocative. Keep names that are needed to answer the actual question."));
+        }
         if Self::requests_execution(state) || state.metadata.get("visual_evidence").is_some() {
             messages_vec.push(ChatMessage::system(Self::OBSERVATION_EVIDENCE_RULE));
         }
@@ -1467,7 +1409,7 @@ impl AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
-                        state.metadata["result_reply_finalized"] = json!(Self::requests_execution(&state) && state.current_channel != "cross_character");
+                        state.metadata["result_reply_finalized"] = json!(true);
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
@@ -1515,6 +1457,9 @@ impl AIResponseGenerationRunnable {
                         state.tool_calls = calls;
                     }
 
+                    if final_text.trim().is_empty() && !all_results.is_empty() {
+                        state.metadata["reply_generation_failed"] = json!(true);
+                    }
                     state.generation_status = "ai_generation_complete".to_string();
                     state.ai_response = Some(AiResponse::new(final_text));
                     state.metadata["streamed"] = json!(stream);
@@ -1650,7 +1595,7 @@ impl AIResponseGenerationRunnable {
 
                     if !all_results.is_empty() {
                         state.tool_call_executed = true;
-                        state.metadata["result_reply_finalized"] = json!(Self::requests_execution(&state) && state.current_channel != "cross_character");
+                        state.metadata["result_reply_finalized"] = json!(true);
                         state.metadata["verified_tool_receipts"] = json!(&all_results);
                         state.metadata["tool_call_count"] = json!(all_results.len());
                         state.metadata["tool_call_iterations"] = json!(iterations);
@@ -1705,6 +1650,9 @@ impl AIResponseGenerationRunnable {
                 state.generation_status = "ai_generation_complete".to_string();
 
                 // 同步 ai_response 字段以兼容下游（如 MoodStep）
+                if state.response_text.trim().is_empty() && state.tool_call_executed {
+                    state.metadata["reply_generation_failed"] = json!(true);
+                }
                 state.ai_response = Some(AiResponse::new(state.response_text.clone()));
                 state.metadata["streamed"] = json!(stream);
             }
@@ -1874,16 +1822,7 @@ impl ResponseParsingRunnable {
         s.to_string()
     }
 
-    /// 冷却期移除用户名（避免称呼冷却失效）
-    fn remove_name(text: &str, name: &str) -> String {
-        if name.is_empty() || text.is_empty() {
-            return text.to_string();
-        }
-        text.replace(name, "")
-            .replace(",,", ",")
-            .trim()
-            .to_string()
-    }
+
 }
 
 impl Default for ResponseParsingRunnable {
@@ -1926,11 +1865,6 @@ impl Runnable for ResponseParsingRunnable {
             if !cleaned.is_empty() {
                 state.text = cleaned;
             }
-        }
-
-        // 冷却期称呼移除（避免称呼冷却失效）
-        if state.in_cooldown {
-            state.text = Self::remove_name(&state.text, &state.user_name);
         }
 
         // 工具失败不追加模板台词：固定句式（"网络好像有点问题…"）会把角色的口语
@@ -2298,14 +2232,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn farewells_and_blocked_results_keep_the_full_persona_on_the_companion_route() {
+        use axum::{Router, Json, extract::State, routing::post};
+        type Captured = Arc<parking_lot::Mutex<Vec<Value>>>;
+        async fn handle(State(captured): State<Captured>, Json(body): Json<Value>) -> Json<Value> {
+            let index = { let mut seen = captured.lock(); let index = seen.len(); seen.push(body); index };
+            let text = match index { 0 => "Master，回头见。", 1 => "我还没开始，这里少个保存位置。", _ => "" };
+            Json(json!({"choices":[{"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}))
+        }
+        let captured: Captured = Arc::new(parking_lot::Mutex::new(vec![]));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::config::manager::AppConfig::default();
+        config.enable_routing_matrix = true;
+        config.ai.provider = "chat_completions".into(); config.ai.api_key = Some("local-test-key".into());
+        config.ai.endpoint = Some(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.ai.model = uuid::Uuid::new_v4().to_string(); config.network.proxy_mode = "direct".into();
+        for (task, model) in [("companion", "character-voice"), ("reasoning", "private-executor")] {
+            config.routing_matrix.insert(task.into(), crate::config::manager::TaskRouteConfig {
+                provider_type:"chat_completions".into(), model:model.into(),
+                endpoint:config.ai.endpoint.clone().unwrap(), api_key:"local-test-key".into(), ..Default::default()
+            });
+        }
+        let app = Router::new().route("/v1/chat/completions", post(handle)).with_state(captured.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let router = ModelRouter::new(&config).unwrap();
+        let mut character = crate::persona::default_persona_for("vivian");
+        character.background_definition = format!("{}FULL_BACKGROUND_TAIL", "背景。".repeat(200));
+        character.speech_definition = "CUSTOM_FULL_SPEECH".into();
+        character.appearance_definition = "CUSTOM_FULL_APPEARANCE".into();
+        let parts = crate::pipeline::prompt_modules::PromptParts {
+            character_block:Some(crate::persona::prompt_render::render_dialogue_card(&character, "zh", &[])),
+            ..Default::default()
+        };
+        let prompt = crate::pipeline::companion_prompt::CompanionPrompt::build(&parts, &[]);
+        let mut state = PipelineState { user_input:"我先走了".into(), ..Default::default() };
+        state.metadata["companion_prompt"] = json!(prompt);
+        assert_eq!(AIResponseGenerationRunnable::generate_farewell(&router, &state).await.unwrap(), "Master，回头见。");
+        let messages = AIResponseGenerationRunnable::dialogue_messages(&state);
+        assert_eq!(AIResponseGenerationRunnable::regenerate_blocked_reply(&router, &messages, "reasoning", "missing destination").await, "我还没开始，这里少个保存位置。");
+        assert!(AIResponseGenerationRunnable::regenerate_blocked_reply(&router, &messages, "reasoning", "a different missing destination").await.is_empty());
+        server.abort();
+        let captured = captured.lock();
+        assert_eq!(captured.len(), 3);
+        for body in captured.iter() {
+            assert_eq!(body["model"], "character-voice");
+            let messages = body["messages"].to_string();
+            for reference in ["FULL_BACKGROUND_TAIL", "CUSTOM_FULL_SPEECH", "CUSTOM_FULL_APPEARANCE"] { assert!(messages.contains(reference)); }
+        }
+    }
+
+    #[tokio::test]
     async fn ppt_request_uses_reasoning_first_with_native_and_text_protocols() {
         use axum::{Router, Json, extract::State, routing::post};
         type Captured = Arc<parking_lot::Mutex<Vec<Value>>>;
         async fn handle(State(captured): State<Captured>, Json(body): Json<Value>) -> Json<Value> {
-            if body["messages"].as_array().and_then(|m| m.last()).and_then(|m| m["content"].as_str())
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["review_kind"] == "post_execution_reply") {
-                return Json(json!({"choices":[{"message":{"role":"assistant","content":"{\"accepted\":true,\"issues\":[]}"},"finish_reason":"stop"}]}));
-            }
             let index = { let mut requests = captured.lock(); let i = requests.len(); requests.push(body.clone()); i };
             let message = match index {
                 0 if body.get("tools").is_some() => json!({"role":"assistant","content":null,
@@ -2384,7 +2364,7 @@ mod tests {
         let blocked_reply = json!({"role":"assistant","content":BLOCKED_REPLY});
         // 最后手段（连重生成都失败时）必须原样放行、**一次模型调用都不发**：它要是被送审，
         // 就会被判成"零调用执行草稿"，于是每轮把同一句话重播一遍。
-        let last_resort = AIResponseGenerationRunnable::blocked_execution_last_resort();
+        let last_resort = AIResponseGenerationRunnable::BLOCKED_EXECUTION_ZH.to_string();
         // 文本路径回退材料（prompt 阶段预存的工具清单文本版）
         const TOOLS_TEXT: &str = "## Available Tools\ndelegate_to_work_agent\n**Tool Call Format**: {\"tool\": \"tool_name\", \"arguments\": {}}";
         // 文本路径返回的工具调用（JSON tool_calls，由 calls_from_text 解析）
@@ -2579,21 +2559,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_name_basic() {
-        let text = "Master，你好呀";
-        assert_eq!(
-            ResponseParsingRunnable::remove_name(text, "Master"),
-            "，你好呀"
-        );
-    }
-
-    #[test]
-    fn test_remove_name_empty_name() {
-        let text = "你好呀";
-        assert_eq!(ResponseParsingRunnable::remove_name(text, ""), "你好呀");
-    }
-
-    #[test]
     fn test_extract_from_processed_no_reply() {
         let mut state = PipelineState::default();
         state.text = "默认文本".to_string();
@@ -2751,7 +2716,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_parsing_cooldown_removes_name() {
+    async fn test_response_parsing_preserves_authored_text_during_cooldown() {
         let runnable = ResponseParsingRunnable::new();
         let mut state = PipelineState::default();
         state.should_respond = true;
@@ -2760,7 +2725,7 @@ mod tests {
         state.user_name = "Master".to_string();
         let result = runnable.ainvoke(state.to_json(), None).await.unwrap();
         let new_state = PipelineState::from_json(result);
-        assert!(!new_state.text.contains("Master"));
+        assert_eq!(new_state.text, "Master，你好呀");
     }
 
     #[tokio::test]

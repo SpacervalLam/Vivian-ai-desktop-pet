@@ -78,7 +78,7 @@ impl MemoryRecall {
 
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
-        let sys = crate::proactive::behavior::speaking_voice(system_prompt, lang, char_id);
+        let sys = crate::proactive::behavior::speaking_voice(system_prompt, lang, char_id)?;
 
         let prompt = match lang_norm {
             "en" => format!(

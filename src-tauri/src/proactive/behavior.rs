@@ -143,21 +143,18 @@ impl BehaviorContent {
 }
 
 /// 人设 prompt 兜底（PersonaEngine 未注入时使用，按语言+角色返回）
-pub(crate) fn default_persona_prompt(lang: &str, char_id: &str) -> String {
-    let config = crate::persona::default_persona_for(&char_id.to_lowercase());
-    format!("{}\n{}\n{}\n{}\n{}\n{}",
-        crate::pipeline::prompt_modules::companion_dialogue_rules(lang),
-        crate::pipeline::prompt_modules::dialogue_tone_rules(lang),
-        crate::pipeline::prompt_modules::companion_reply_language(lang),
-        include_str!("../../prompts/framework/companion_contract.en.md"),
-        crate::pipeline::prompt_modules::creator_identity_rules(),
-        crate::persona::prompt_render::render_dialogue_card(&config, lang, &[]))
+pub(crate) fn default_persona_prompt(lang: &str, char_id: &str) -> Option<String> {
+    // Reload the selected character's saved overrides/evolution; a factory persona
+    // must not silently replace a customized character when the caller is legacy.
+    let persona = crate::persona::PersonaEngine::new(char_id).ok()?;
+    persona.set_language(lang);
+    Some(persona.dialogue_voice_prompt(50.0, 12))
 }
 
-/// Preserve complete caller voices; upgrade older scene-only callers with the same foundation.
-pub(crate) fn speaking_voice(system_prompt: &str, lang: &str, char_id: &str) -> String {
-    if system_prompt.contains("[COMPANION DIALOGUE]") { system_prompt.to_string() }
-    else { format!("{}\n{}", default_persona_prompt(lang, char_id), system_prompt) }
+/// Preserve the full caller snapshot; missing identity must be loaded, not guessed.
+pub(crate) fn speaking_voice(system_prompt: &str, lang: &str, char_id: &str) -> Option<String> {
+    if system_prompt.contains("[COMPANION DIALOGUE]") { Some(system_prompt.to_string()) }
+    else { Some(format!("{}\n{}", default_persona_prompt(lang, char_id)?, system_prompt)) }
 }
 
 /// 触发类型字符串常量（与 `ProactiveTrigger::as_str` 对齐）
@@ -224,7 +221,7 @@ impl BehaviorDecider {
     ///
     /// `system_prompt` 来自 PersonaEngine.dialogue_voice_prompt(intimacy, hour)，
     /// 旧的场景风格调用方也会补齐角色身份与语气。
-    /// 返回 `None` 时调用方应回退到模板池。
+    /// 返回 `None` 时跳过本次发言，不能用模板伪装成角色回复。
     /// 仅对支持的触发器构造 prompt：HourlyGreeting /
     /// IdleGreeting / TeasingResponse / Spontaneous。其余触发器返回 `None`。
     pub async fn decide_content_llm(
@@ -282,7 +279,7 @@ impl BehaviorDecider {
         if ignored_rounds > 0 {
             prompt.push_str(&format!("\n{}", ignored_directive(ignored_rounds, lang)));
         }
-        let sys = speaking_voice(system_prompt, lang, char_id);
+        let sys = speaking_voice(system_prompt, lang, char_id)?;
         let voice = if trigger == ProactiveTrigger::CrossCharacterReply {
             crate::pipeline::prompt_modules::build_cross_character_voice_guide(char_id)
         } else { String::new() };
@@ -419,18 +416,7 @@ impl BehaviorDecider {
         let data: serde_json::Value = serde_json::from_str(slice).ok()?;
         let text_val = data.get("text")?.as_str()?;
         let (delivery_channel, content_type, importance, value_score) = BehaviorContent::parse_extra_fields(&data);
-        let limit = if delivery_channel == DeliveryChannel::ChatWindow { 1200 } else { 50 };
-        // Bubble text is short, but a hard char cut can end mid-clause. Prefer the
-        // last sentence boundary inside the limit, then fall back to the cut.
-        let clipped: Vec<char> = text_val.chars().take(limit).collect();
-        let text_owned: String = if text_val.chars().count() <= limit {
-            text_val.to_string()
-        } else {
-            match clipped.iter().rposition(|c| matches!(c, '。' | '！' | '？' | '!' | '?' | '\n')) {
-                Some(i) => clipped[..=i].iter().collect(),
-                None => clipped.into_iter().collect(),
-            }
-        };
+        let text_owned = crate::pipeline::spoken_reply::text(text_val);
         if text_owned.is_empty() {
             return None;
         }
@@ -897,14 +883,14 @@ mod delivery_channel_tests {
         assert_eq!(action.trigger, "cross_character_reply");
     }
     #[test]
-    fn bubble_text_is_cut_at_a_sentence_boundary() {
+    fn bubble_text_preserves_the_full_authored_utterance() {
         let raw = serde_json::json!({
-            "text": "外面下雨了，出门记得带伞。回来的时候要是还没停，我再提醒你一次，别忘了。",
+            "text": "外面下雨了，出门记得带伞。回来的时候要是还没停，我再提醒你一次，别忘了。".repeat(3),
             "delivery_channel": "bubble"
         }).to_string();
         let content = BehaviorDecider::parse_json_response(&raw).unwrap();
         assert!(content.text.ends_with('。'), "气泡文案不应停在半句: {}", content.text);
-        assert!(content.text.chars().count() <= 50);
+        assert_eq!(content.text, serde_json::from_str::<serde_json::Value>(&raw).unwrap()["text"].as_str().unwrap());
     }
 
     #[test]
@@ -963,7 +949,7 @@ mod structured_context_tests {
     #[test]
     fn fallback_upgrades_scene_only_voices_and_does_not_repeat_tone_rules() {
         let ctx = LlmContext::default();
-        for supplied in ["scene-only fixture".to_string(), default_persona_prompt("zh", "nana")] {
+        for supplied in ["scene-only fixture".to_string(), default_persona_prompt("zh", "nana").unwrap()] {
             let messages = BehaviorDecider::build_messages(ProactiveTrigger::HourlyGreeting, &ctx,
                 &supplied, "zh", "nana", None, "", "", &[], "", 0).unwrap();
             assert!(messages[0].content.contains("Nana"));

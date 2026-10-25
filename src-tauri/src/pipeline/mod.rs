@@ -31,6 +31,7 @@ pub mod react;
 pub mod request_intent;
 pub mod retrieval_ledger;
 pub(crate) mod tool_execution;
+pub(crate) mod spoken_reply;
 pub mod state;
 pub(crate) mod task_continuity;
 pub mod steps;

@@ -240,7 +240,7 @@ async fn configured_post_execution_reply_smoke() {
             let request = crate::pipeline::tool_execution::result_reply_fixture(
                 AIResponseGenerationRunnable::dialogue_messages(&state), vec![result.clone()]).with_character_id(character).with_usage_tag("result_reply_eval");
             assert!(request.tools.is_empty());
-            let reply = crate::pipeline::tool_execution::reviewed_result_reply_fixture(&router,request,vec![result],&state.user_input).await.unwrap();
+            let reply = crate::pipeline::tool_execution::authored_result_reply_fixture(&router,request,vec![result]).await.unwrap();
             let text = crate::brain::json_parser::JsonParser::extract_text(&reply).unwrap_or(reply);
             assert!(!text.trim().is_empty());
             rows.push(json!({"character":character,"case":case,"text":text}));

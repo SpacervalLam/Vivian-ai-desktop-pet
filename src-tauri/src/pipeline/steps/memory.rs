@@ -1013,20 +1013,10 @@ impl MemorySavingRunnable {
         text.to_string()
     }
 
-    /// 收集 AI 回复（immediate_response_text + text，去重）
+    /// Only the finalized character turn is a spoken memory source.
     fn collect_ai_responses(state: &PipelineState) -> Vec<String> {
-        let mut responses: Vec<String> = Vec::new();
-        let immediate = state.immediate_response_text.trim();
-        if !immediate.is_empty() {
-            responses.push(immediate.to_string());
-        }
-        let final_text = state.text.trim();
-        if !final_text.is_empty() {
-            if responses.last().map(|s| s.as_str()) != Some(final_text) {
-                responses.push(final_text.to_string());
-            }
-        }
-        responses
+        let final_text = crate::pipeline::spoken_reply::text(&state.text);
+        if final_text.is_empty() { vec![] } else { vec![final_text] }
     }
 }
 
@@ -1187,6 +1177,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn persisted_reply_is_the_presented_text_without_unpublished_drafts_or_templates() {
+        let owner = format!("authored-reply-{}", uuid::Uuid::new_v4());
+        let memory = Arc::new(MemoryManager::new(&crate::config::AppConfig::default(), &owner).unwrap());
+        let state = PipelineState {
+            text:"**Master**，换好了。".into(),
+            immediate_response_text:"PRIVATE_REASONING_DRAFT".into(),
+            ai_response:Some(crate::types::response::AiResponse::new("**Master**，换好了。".into())),
+            ..Default::default()
+        };
+        let validated = super::super::validation::ValidationRunnable::new().ainvoke(state.to_json(), None).await.unwrap();
+        let state = PipelineState::from_json(validated.clone());
+        assert_eq!(state.text, "Master，换好了。");
+        assert_eq!(state.ai_response.unwrap().text, state.text);
+        MemorySavingRunnable::with_memory(memory.clone()).ainvoke(validated, None).await.unwrap();
+        let memories = memory.get_all_memories().await.unwrap();
+        assert_eq!(memories.iter().filter(|m| m.content == "Master，换好了。").count(), 1);
+        assert!(memories.iter().all(|m| !m.content.contains("PRIVATE_REASONING_DRAFT")));
+    }
+
+    #[tokio::test]
     async fn sent_stickers_are_searchable_memory_with_original_reference() {
         let owner = format!("sticker-memory-{}", uuid::Uuid::new_v4());
         let memory = Arc::new(MemoryManager::new(&crate::config::AppConfig::default(), &owner).unwrap());
@@ -1279,11 +1289,11 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_ai_responses_distinct() {
+    fn test_collect_ai_responses_excludes_unpublished_drafts() {
         let mut state = PipelineState::default();
         state.immediate_response_text = "即时回复".to_string();
         state.text = "最终回复".to_string();
         let resp = MemorySavingRunnable::collect_ai_responses(&state);
-        assert_eq!(resp.len(), 2);
+        assert_eq!(resp, vec!["最终回复".to_string()]);
     }
 }

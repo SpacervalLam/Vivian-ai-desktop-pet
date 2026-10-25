@@ -8,6 +8,10 @@ use super::{message_context, prompt_modules::*, template_engine::{SectionLayer, 
 #[serde(rename_all = "snake_case")]
 enum Position { Main, Example, Context, PostHistory }
 
+fn private_operation(id: &str) -> bool {
+    matches!(id, "operation_contract" | "tool_dispatch" | "tools" | "deferred_tools" | "tool_protocol")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Block {
     id: String,
@@ -181,8 +185,10 @@ impl CompanionPrompt {
         // longer prescribe a response script to the speaking character. Real state wins.
         prompt.push("scene_continuity", parts.interaction_guidance_section.clone().unwrap_or_default(), World, PostHistory, 1);
         prompt.push("character_note", parts.character_note_section.clone().unwrap_or_default(), Character, PostHistory, 0);
-        prompt.push("post_history", if proactive || parts.enable_native_fc || !has_tools { companion_post_history_rules(&parts.language).to_string() }
-            else { format!("{}\n{}", companion_post_history_rules(&parts.language), JSON_PROTOCOL) }, Generation, PostHistory, 0);
+        prompt.push("post_history", companion_post_history_rules(&parts.language), Generation, PostHistory, 0);
+        if !proactive && !parts.enable_native_fc && has_tools {
+            prompt.push("tool_protocol", JSON_PROTOCOL, Generation, Main, 0);
+        }
         prompt.push("reply_language", companion_reply_language(&parts.language), Generation, PostHistory, 0);
 
         if let Some(evidence) = visual_evidence.filter(|s| !s.trim().is_empty()) {
@@ -221,8 +227,12 @@ impl CompanionPrompt {
     pub fn messages_with_communication(&self, history: &[ChatMessage], input: &str, internal: bool,
         status: Option<&str>, communication: Option<&crate::messages::CommunicationContext>) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
-        let main = self.contents(Position::Main).join("\n\n");
+        let main = self.blocks.iter().filter(|b| b.position == Position::Main && !private_operation(&b.id))
+            .map(|b| b.content.as_str()).collect::<Vec<_>>().join("\n\n");
         if !main.is_empty() { messages.push(ChatMessage::system(main)); }
+        for block in self.blocks.iter().filter(|b| private_operation(&b.id)) {
+            messages.push(ChatMessage::system(format!("{}\n{}", super::spoken_reply::PRIVATE_OPERATION, block.content)));
+        }
         for block in self.contents(Position::Example) { messages.push(ChatMessage::system(block)); }
         let context = self.contents(Position::Context).join("\n\n");
         if !context.is_empty() { messages.push(ChatMessage::system(format!("{DATA_BOUNDARY}{context}\n[END CONTEXT DATA]"))); }
@@ -540,7 +550,7 @@ mod tests {
             assert!(card.contains(&config.identity.name));
             let full = crate::persona::prompt_render::render_character_block(&config, "zh");
             assert!(card.chars().count() < full.chars().count());
-            assert!(!card.contains("· Appearance"));
+            assert!(card.contains("· Appearance"), "the speaking card must retain the full configured character");
             customized.appearance_definition = "explicit_visual_preference".into();
             assert!(crate::persona::prompt_render::render_dialogue_card(&customized, "zh", &[]).contains("explicit_visual_preference"));
             assert!(crate::persona::prompt_render::render_dialogue_preferences(&config, crate::persona::SceneMode::DailyChat).is_empty());

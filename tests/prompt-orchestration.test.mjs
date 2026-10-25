@@ -9,7 +9,11 @@ const tests=source.slice(source.indexOf('    #[test]\n    fn literal_prefix'),so
 const metaSource=await readFile('src-tauri/src/messages.rs','utf8');
 const communication=metaSource.slice(metaSource.indexOf('#[derive',metaSource.indexOf('/// Trusted routing')),metaSource.indexOf('/// 消息元数据'));
 const companion=await readFile('src-tauri/src/pipeline/companion_prompt.rs','utf8');
-const assembly=companion.match(/    pub fn messages_with_communication\([\s\S]*?\n    \}/)?.[0];assert.ok(assembly);
+const extractedAssembly=companion.match(/    pub fn messages_with_communication\([\s\S]*?\n    \}/)?.[0];assert.ok(extractedAssembly);
+const assembly=extractedAssembly.replaceAll('super::spoken_reply::PRIVATE_OPERATION','PRIVATE_OPERATION');
+const privateRule=companion.match(/fn private_operation\([\s\S]*?\n\}/)?.[0];assert.ok(privateRule);
+const spoken=await readFile('src-tauri/src/pipeline/spoken_reply.rs','utf8');
+const privateMarker=spoken.match(/const PRIVATE_OPERATION: &str = ([^\n]+);/)?.[1];assert.ok(privateMarker);
 const boundary=companion.match(/const DATA_BOUNDARY: &str = ([^\n]+);/)?.[1];assert.ok(boundary);
 const dir=await mkdtemp(path.join(tmpdir(),'vivian-communication-'));
 try{
@@ -27,10 +31,13 @@ ${context}
 mod message_context{pub use crate::{append_current_turn,append_history};}
 const DATA_BOUNDARY:&str=${boundary};
 #[derive(PartialEq)]enum Position{Main,Example,Context,PostHistory}
-struct CompanionPrompt{blocks:Vec<(Position,String)>}
-impl CompanionPrompt{fn contents(&self,position:Position)->Vec<&str>{self.blocks.iter().filter(|(p,_)|*p==position).map(|(_,s)|s.as_str()).collect()}${assembly}}
+struct Block{id:String,position:Position,content:String}
+struct CompanionPrompt{blocks:Vec<Block>}
+const PRIVATE_OPERATION:&str=${privateMarker};
+${privateRule}
+impl CompanionPrompt{fn contents(&self,position:Position)->Vec<&str>{self.blocks.iter().filter(|b|b.position==position).map(|b|b.content.as_str()).collect()}${assembly}}
 #[cfg(test)]mod tests{use super::*;#[test]fn evidence_precedes_history_and_current_input_stays_original(){
-let p=CompanionPrompt{blocks:vec![(Position::Main,"rules".into()),(Position::Example,"fictional example".into()),(Position::Context,"retrieved context".into()),(Position::PostHistory,"final protocol".into())]};
+let p=CompanionPrompt{blocks:vec![(Position::Main,"rules".into()),(Position::Example,"fictional example".into()),(Position::Context,"retrieved context".into()),(Position::PostHistory,"final protocol".into())].into_iter().enumerate().map(|(i,(position,content))|Block{id:format!("fixture_{i}"),position,content}).collect()};
 let history=vec![ChatMessage::user("old user"),ChatMessage::assistant("old answer")];
 let input="[Nana says to me] 用户自己输入的文本";
 let messages=p.messages_with_communication(&history,input,false,None,None);

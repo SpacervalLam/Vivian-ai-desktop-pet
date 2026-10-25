@@ -4674,10 +4674,8 @@ impl ProactiveOrchestrator {
         let language = persona.as_ref().map(|p|p.get_language()).unwrap_or_else(||"zh".into());
         // Keep the selected speaker's identity, temperament and configured speech;
         // scene delivery alone does not identify Vivian/Nana.
-        let voice = persona.as_ref().map(|p|format!("{}\n{}",
-            crate::persona::prompt_render::render_dialogue_note(&p.get_config(), &language),
-            p.build_style_prompt(intimacy,hour)))
-            .unwrap_or_else(||behavior::default_persona_prompt(&language,&self.char_id));
+        let voice = persona.as_ref().map(|p| p.dialogue_voice_prompt(intimacy, hour))
+            .or_else(||behavior::default_persona_prompt(&language,&self.char_id))?;
         let voice = format!("{}\n{}", voice, crate::config::personalization::prompt_section());
         let channel = crate::conversation::CONVERSATION_MANAGER.user_channel(&self.char_id).unwrap_or_else(||"wechat".into());
         let key = work_relay::RelayKey {character:self.char_id.clone(),voice,language,channel,facts:facts.into()};

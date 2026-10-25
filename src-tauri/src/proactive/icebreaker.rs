@@ -121,7 +121,7 @@ impl IcebreakerGenerator {
             IceBreakerLevel::None => return None,
         };
 
-        let sys = super::behavior::speaking_voice(system_prompt, lang, char_id);
+        let sys = super::behavior::speaking_voice(system_prompt, lang, char_id)?;
 
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);

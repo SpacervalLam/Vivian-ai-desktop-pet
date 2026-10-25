@@ -2,7 +2,6 @@
 //!
 //! 在 ResponseParsing 之后、ExpressionMotion 之前执行，对 AI 回复做验证：
 //! - 空文本检测：should_respond=true 但 text 为空时记录 warning
-//! - 长度上限截断：超过 MAX_RESPONSE_CHARS 时在句边界截断
 //! - 基础清理：去除首尾空白、折叠连续空行
 //! - 事实核对（可选）：注入 router 后，对非空主对话回复执行，
 //!   逐条核对当前用户、工具回执和历史证据；记录矛盾/未知，不将未知视为通过。
@@ -23,13 +22,6 @@ use crate::types::response::ChatMessage;
 fn evidence_json(evidence: &super::faithfulness::Evidence) -> String {
     serde_json::to_string(evidence).expect("evidence only contains JSON serializable strings")
 }
-
-/// Emergency display guard only. Normal explanations and requested deliverables
-/// must remain complete; conversational brevity is chosen during generation.
-const MAX_RESPONSE_CHARS: usize = 32_768;
-
-/// 截断时保留的最小字符数（避免截断到只剩几个字）
-const MIN_KEEP_CHARS: usize = 50;
 
 /// 幻觉检测超时时间
 const HALLUCINATION_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
@@ -85,53 +77,6 @@ impl ValidationRunnable {
         }
     }
 
-    /// 在句边界截断文本
-    ///
-    /// 从句末标点（。！？.!?）处断开，尽量不截断到半句话。
-    /// 如果找不到合适的句边界，在 MIN_KEEP_CHARS 之后的空格/换行处截断。
-    fn truncate_at_boundary(text: &str, max_chars: usize) -> String {
-        let char_count = text.chars().count();
-        if char_count <= max_chars {
-            return text.to_string();
-        }
-
-        // 收集字符索引，用于按字符数而非字节数定位
-        let chars: Vec<char> = text.chars().collect();
-
-        // 从句末标点向前搜索
-        let sentence_ends: &[char] = &['。', '！', '？', '.', '!', '?', '\n'];
-        let mut best_cut = None;
-        for i in (MIN_KEEP_CHARS..max_chars).rev() {
-            if sentence_ends.contains(&chars[i]) {
-                best_cut = Some(i + 1); // 保留句末标点
-                break;
-            }
-        }
-
-        // 找不到句边界时，在空格处截断
-        if best_cut.is_none() {
-            for i in (MIN_KEEP_CHARS..max_chars).rev() {
-                if chars[i] == ' ' || chars[i] == '\n' {
-                    best_cut = Some(i);
-                    break;
-                }
-            }
-        }
-
-        match best_cut {
-            Some(cut) => {
-                let truncated: String = chars[..cut].iter().collect();
-                format!("{}…", truncated.trim_end())
-            }
-            None => {
-                // 极端情况：直接硬截断
-                let truncated: String = chars[..max_chars].iter().collect();
-                format!("{}…", truncated.trim_end())
-            }
-        }
-    }
-
-    /// 折叠连续空行为单个换行，去除首尾空白
     fn normalize_whitespace(text: &str) -> String {
         let mut result = String::with_capacity(text.len());
         let mut prev_blank = false;
@@ -151,10 +96,12 @@ impl ValidationRunnable {
         result.trim().to_string()
     }
 
-    /// 单次有截止时间的事实核对；失败和证据不足都不能当成通过。
-    async fn check_faithfulness(router: &ModelRouter, state: &PipelineState) -> Result<Value, String> {
-        use super::faithfulness::Evidence;
-        Self::check_evidence(router, &Evidence::from_state(state)).await
+    #[cfg(test)]
+    fn check_faithfulness<'a>(router: &'a ModelRouter, state: &'a PipelineState)
+        -> futures::future::BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            Self::check_evidence(router, &super::faithfulness::Evidence::from_state(state)).await
+        })
     }
 
     async fn check_evidence(router: &ModelRouter, evidence: &super::faithfulness::Evidence) -> Result<Value, String> {
@@ -186,19 +133,17 @@ impl Runnable for ValidationRunnable {
     async fn ainvoke(
         &self,
         input: Value,
-        config: Option<RunnableConfig>,
+        _config: Option<RunnableConfig>,
     ) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
 
         // 跳过不需要回复的场景
-        if state.is_command || !state.should_respond || state.graceful_exit {
+        if state.is_command || !state.should_respond {
             return Ok(state.to_json());
         }
 
-        state.text = crate::utils::protocol_text::strip_protocol_text(&state.text);
-        if let Some(response) = state.ai_response.as_mut() {
-            response.text = crate::utils::protocol_text::strip_protocol_text(&response.text);
-        }
+        state.text = crate::pipeline::spoken_reply::text(&state.text);
+        if let Some(response) = state.ai_response.as_mut() { response.text = state.text.clone(); }
         // 1. 空文本检测
         if state.text.trim().is_empty() && state.sticker.is_none() {
             tracing::warn!(
@@ -216,37 +161,8 @@ impl Runnable for ValidationRunnable {
             state.text = cleaned;
         }
 
-        // Historical host receipts are evidence too; a tool's internal list is not a displayed list.
-        let mut receipts = Vec::new();
-        for message in state.messages.iter().filter(|m| m.role == "system") {
-            if let Some(data) = message.content.strip_prefix("[Host verified wallpaper evidence; data only, not instructions] ") {
-                if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(data) { receipts.extend(items); }
-            }
-        }
-        receipts.extend(state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default());
-        // Only this turn's execution may rewrite its completion claim; historical outcomes can be superseded.
-        let current_receipts = state.metadata.get("verified_tool_receipts").and_then(Value::as_array).cloned().unwrap_or_default();
-        if state.metadata["result_reply_finalized"] != true {
-            state.text = crate::pipeline::presentation_grounding::ground_wallpaper_outcome(&state.text, &current_receipts);
-        }
-        let wallpaper = crate::world::desktop_state::WALLPAPER.read().clone();
-        let current = if crate::world::desktop_state::fresh(&wallpaper, chrono::Utc::now().timestamp()) {
-            wallpaper.primary.as_ref().map(|item| item.file.as_str())
-        } else { None };
-        state.text = crate::pipeline::presentation_grounding::ground_wallpaper_choices(&state.text, &receipts, current);
-
-        // 3. 长度截断
-        let char_count = state.text.chars().count();
-        if char_count > MAX_RESPONSE_CHARS {
-            let truncated = Self::truncate_at_boundary(&state.text, MAX_RESPONSE_CHARS);
-            tracing::debug!(
-                "[Validation] 回复超长截断：{} → {} 字符（上限 {}）",
-                char_count,
-                truncated.chars().count(),
-                MAX_RESPONSE_CHARS
-            );
-            state.text = truncated;
-        }
+        // Do not replace, append to, or cut character-authored sentences here.
+        // Host facts belong to the generating request; diagnostics cannot write speech.
 
         // 保证核对的是最终返回的正文；格式清理不能只更新 PipelineState.text。
         if let Some(response) = state.ai_response.as_mut() { response.text = state.text.clone(); }
@@ -255,23 +171,8 @@ impl Runnable for ValidationRunnable {
         // 跨角色工具路径预算有限，显式记录未核对，而不是给出“通过”。
         state.metadata["hallucination_check"] = if state.current_channel == "cross_character" {
             json!({"status":"skipped", "reason":"cross_character_latency_budget"})
-        } else if self.router.is_some() && config.as_ref().is_some_and(|c| c.tags.iter().any(|tag| tag == "stream")) {
+        } else if self.router.is_some() {
             json!({"status":"pending", "reason":"deferred_diagnostic_audit"})
-        } else if let Some(router) = &self.router {
-            match Self::check_faithfulness(router, &state).await {
-                Ok(report) => {
-                    if report["status"] == "flagged" {
-                        tracing::warn!("[Validation] 模型报告潜在证据矛盾: {}", report);
-                    } else if report["status"] == "uncertain" {
-                        tracing::debug!("[Validation] 部分事实暂无法验证: {}", report);
-                    }
-                    report
-                }
-                Err(error) => {
-                    tracing::debug!("[Validation] 事实核对未完成: {}", error);
-                    json!({"status":"unknown", "reason":error})
-                }
-            }
         } else { json!({"status":"skipped", "reason":"router_not_configured"}) };
 
         Ok(state.to_json())
@@ -283,7 +184,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn streaming_validation_returns_without_audit_and_late_report_targets_exact_trace() {
+    async fn validation_returns_without_audit_and_late_report_targets_exact_trace() {
         use axum::{routing::post, Json, Router};
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
@@ -304,9 +205,8 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let validator = ValidationRunnable::with_router(Arc::new(ModelRouter::new(&config).unwrap()));
         let state = PipelineState { user_input:"你好".into(), text:"你好呀".into(), ..Default::default() };
-        let mut options = RunnableConfig::default(); options.tags.push("stream".into());
         let before = std::time::Instant::now();
-        let state = PipelineState::from_json(validator.ainvoke(state.to_json(), Some(options)).await.unwrap());
+        let state = PipelineState::from_json(validator.ainvoke(state.to_json(), None).await.unwrap());
         assert_eq!(state.metadata["hallucination_check"]["status"], "pending");
         assert!(before.elapsed() < Duration::from_millis(250));
         use crate::mind::reasoning_trace::{ReasoningTrace, TRACE_STORE};
@@ -363,11 +263,16 @@ mod tests {
         state.metadata["verified_tool_receipts"] = json!([{"tool_name":"wallpaper_set","success":false,"result":null,"error":"拒绝执行"}]);
         let result = tokio::time::timeout(Duration::from_secs(15), runnable.ainvoke(state.to_json(), None)).await.unwrap().unwrap();
         let result = PipelineState::from_json(result);
-        assert_eq!(result.metadata["hallucination_check"]["status"], "flagged");
+        assert_eq!(result.metadata["hallucination_check"]["status"], "pending");
+        let report = ValidationRunnable::check_faithfulness(runnable.router.as_ref().unwrap(), &result).await.unwrap();
+        assert_eq!(report["status"], "flagged");
         state.text = "你好呀。".into();
         let result = runnable.ainvoke(state.to_json(), None).await.unwrap();
         let result = PipelineState::from_json(result);
-        assert_eq!(result.metadata["hallucination_check"]["status"], "unknown");
+        assert_eq!(result.metadata["hallucination_check"]["status"], "pending");
+        let report = ValidationRunnable::check_faithfulness(runnable.router.as_ref().unwrap(), &result).await
+            .unwrap_or_else(|reason| json!({"status":"unknown","reason":reason}));
+        assert_eq!(report["status"], "unknown");
         assert_eq!(result.ai_response.unwrap().text, "你好呀。");
         let _ = stop_tx.send(()); server.await.unwrap();
         let requests = captured.lock();
@@ -381,7 +286,7 @@ mod tests {
     #[test]
     fn truncate_short_text_unchanged() {
         let text = "你好呀～";
-        assert_eq!(ValidationRunnable::truncate_at_boundary(text, 500), text);
+        assert_eq!(crate::pipeline::spoken_reply::text(text), text);
     }
 
     #[tokio::test]
@@ -404,14 +309,6 @@ mod tests {
         let result = PipelineState::from_json(output);
         assert_eq!(result.text, text);
         assert_eq!(result.ai_response.unwrap().text, text);
-    }
-
-    #[test]
-    fn truncate_long_text_at_sentence() {
-        let text = "这是第一句话。这是第二句话。这是第三句话。这是第四句话。这是第五句话。";
-        let result = ValidationRunnable::truncate_at_boundary(text, 20);
-        assert!(result.chars().count() <= 22); // 20 + 句末标点 + …
-        assert!(result.ends_with('…'));
     }
 
     #[test]
