@@ -12,6 +12,12 @@ Vivian 是面向 Windows 的多角色桌面陪伴应用。Vivian 与 Nana 可以
 
 角色数据保存在本地；模型、远程嵌入、搜索、天气和语音等服务按配置访问外部端点。
 
+## 应用演示
+
+[![Vivian 应用演示：做了一个实用型的双人桌宠](https://i0.hdslb.com/bfs/archive/8e1b82a1c753897dee4c958a0910f1d3c808b8de.jpg)](https://www.bilibili.com/video/BV1m3nS66EXn/)
+
+点击封面或 [前往 B 站观看演示视频](https://www.bilibili.com/video/BV1m3nS66EXn/)。
+
 ## 能做什么
 
 | 能力 | 说明 |
