@@ -126,7 +126,10 @@ impl Tool for ReadImageTool {
         if !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        ValidationResult::success(None)
+        if !ctx.is_path_authorized(&resolved) { return ValidationResult::failure("路径不在授权工作区内", 2); }
+        let mut normalized = input.clone();
+        normalized["path"] = json!(resolved);
+        ValidationResult::success(Some(normalized))
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
@@ -328,8 +331,12 @@ impl Tool for StrReplaceEditorTool {
         if path.is_empty() {
             return ValidationResult::failure("path 不能为空", 2);
         }
-        if !is_path_safe(&resolve_path(path, ctx)) {
+        let resolved = resolve_path(path, ctx);
+        if !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
+        }
+        if !ctx.is_path_authorized(&resolved) || (action != "view" && !ctx.is_path_writable(&resolved)) {
+            return ValidationResult::failure("路径超出授权范围或属于只读工作区", 2);
         }
         if action == "str_replace" {
             if input.get("old_string").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
@@ -339,7 +346,9 @@ impl Tool for StrReplaceEditorTool {
         if action == "create" && input.get("file_text").and_then(|v| v.as_str()).is_none() {
             return ValidationResult::failure("create 需要 file_text", 2);
         }
-        ValidationResult::success(None)
+        let mut normalized = input.clone();
+        normalized["path"] = json!(resolved);
+        ValidationResult::success(Some(normalized))
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {

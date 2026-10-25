@@ -14,16 +14,16 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::tools::terminal_buffer::{OutputBuffer, Utf8Stream};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdin, Command};
 
 use crate::tools::types::{
-    PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
+    PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
+    ValidationResult,
 };
-
-const MAX_BUFFER_CHARS: usize = 200_000;
 
 /// 终端背后的进程形态
 ///
@@ -43,6 +43,41 @@ enum TermProc {
 }
 
 impl TermProc {
+    fn control_path(&self) -> std::path::PathBuf {
+        let directory = match self {
+            #[cfg(windows)]
+            Self::Sandboxed { shell, .. } => shell.scratch_dir().to_path_buf(),
+            _ => std::env::temp_dir(),
+        };
+        directory.join(format!(
+            "vivian-command-{}.status",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    fn start_kill(&self) {
+        match self {
+            Self::Plain { child, .. } => {
+                if let Ok(mut child) = child.try_lock() {
+                    let _ = child.start_kill();
+                }
+            }
+            #[cfg(windows)]
+            Self::Sandboxed { shell, .. } => shell.kill(),
+        }
+    }
+    async fn is_alive(&self) -> bool {
+        match self {
+            Self::Plain { child, .. } => child
+                .lock()
+                .await
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false),
+            #[cfg(windows)]
+            Self::Sandboxed { shell, .. } => shell.try_wait().is_none(),
+        }
+    }
     /// 是否运行在沙箱里（结果里回传给模型，便于解释"写不进去"这类现象）
     fn sandboxed(&self) -> bool {
         !matches!(self, TermProc::Plain { .. })
@@ -61,8 +96,16 @@ impl TermProc {
 }
 
 struct TermHandle {
+    _slot: tokio::sync::OwnedSemaphorePermit,
     id: String,
     session_id: String,
+    char_id: String,
+    agent_kind: String,
+    user_id: String,
+    access_level: Option<crate::tools::types::AgentAccessLevel>,
+    workspaces: Vec<crate::tools::types::WorkingDirectoryPermission>,
+    workspace_root: String,
+    sandbox_config: crate::config::manager::SandboxConfig,
     cwd: String,
     proc: TermProc,
     /// 命令级互斥：同一终端上一次只允许一个"写命令→等输出→读输出"的完整回合。
@@ -72,8 +115,8 @@ struct TermHandle {
     /// 否则一条 send 会插进别人正在等的窗口里。
     cmd_lock: tokio::sync::Mutex<()>,
     /// 累积输出（保留尾部 MAX_BUFFER_CHARS）+ 已读游标
-    buffer: Arc<Mutex<String>>,
-    cursor: Arc<Mutex<usize>>,
+    buffer: Arc<Mutex<OutputBuffer>>,
+
     alive: Arc<AtomicBool>,
 }
 
@@ -88,36 +131,37 @@ fn next_term_id() -> String {
 }
 
 /// 起一个持久 PowerShell。
-fn spawn_reader<R>(reader: R, buffer: Arc<Mutex<String>>, alive: Arc<AtomicBool>, tag: &'static str)
-where
+fn spawn_reader<R>(
+    mut reader: R,
+    buffer: Arc<Mutex<OutputBuffer>>,
+    _alive: Arc<AtomicBool>,
+    tag: &'static str,
+) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
+        let mut decoder = Utf8Stream::default();
+        let mut chunk = [0u8; 8192];
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    let mut b = buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    b.push_str(tag);
-                    b.push_str(&line);
-                    b.push('\n');
-                    let len = b.chars().count();
-                    if len > MAX_BUFFER_CHARS {
-                        *b = b.chars().skip(len - MAX_BUFFER_CHARS / 2).collect();
-                    }
-                }
-                _ => {
-                    alive.store(false, Ordering::Relaxed);
-                    break;
-                }
+            let n = match reader.read(&mut chunk).await {
+                Ok(n) => n,
+                Err(_) => 0,
+            };
+            let text = decoder.decode(&chunk[..n], n == 0);
+            if !text.is_empty() {
+                let mut output = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                output.append(tag);
+                output.append(&text);
+            }
+            if n == 0 {
+                break;
             }
         }
     });
 }
-
 /// 起一个普通 PowerShell 子进程（非沙箱路径）
 async fn spawn_plain(
-    buffer: &Arc<Mutex<String>>,
+    buffer: &Arc<Mutex<OutputBuffer>>,
     alive: &Arc<AtomicBool>,
     cwd: &str,
 ) -> Result<TermProc, String> {
@@ -136,7 +180,9 @@ async fn spawn_plain(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("启动 PowerShell 失败：{e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 PowerShell 失败：{e}"))?;
     let stdin = child.stdin.take().ok_or("拿不到 stdin")?;
     let stdout = child.stdout.take().ok_or("拿不到 stdout")?;
     let stderr = child.stderr.take().ok_or("拿不到 stderr")?;
@@ -153,64 +199,66 @@ async fn spawn_plain(
 /// 沙箱进程的 stdio 是匿名管道，只拿到同步句柄——tokio 的 `File` 面向常规文件，
 /// 套在管道上行为不可靠。这里直接起阻塞线程读，读到的行推进同一个缓冲。
 fn spawn_reader_blocking(
-    reader: std::fs::File,
-    buffer: Arc<Mutex<String>>,
-    alive: Arc<AtomicBool>,
+    mut reader: std::fs::File,
+    buffer: Arc<Mutex<OutputBuffer>>,
+    _alive: Arc<AtomicBool>,
     tag: &'static str,
 ) {
     std::thread::spawn(move || {
-        use std::io::BufRead;
-        let mut br = std::io::BufReader::new(reader);
-        let mut line = String::new();
+        use std::io::Read;
+        let mut decoder = Utf8Stream::default();
+        let mut chunk = [0u8; 8192];
         loop {
-            line.clear();
-            match br.read_line(&mut line) {
-                Ok(0) | Err(_) => {
-                    alive.store(false, Ordering::Relaxed);
-                    break;
-                }
-                Ok(_) => {
-                    let mut b = buffer.lock().unwrap_or_else(|e| e.into_inner());
-                    b.push_str(tag);
-                    b.push_str(line.trim_end_matches(['\r', '\n']));
-                    b.push('\n');
-                    let len = b.chars().count();
-                    if len > MAX_BUFFER_CHARS {
-                        *b = b.chars().skip(len - MAX_BUFFER_CHARS / 2).collect();
-                    }
-                }
+            let n = match reader.read(&mut chunk) {
+                Ok(n) => n,
+                Err(_) => 0,
+            };
+            let text = decoder.decode(&chunk[..n], n == 0);
+            if !text.is_empty() {
+                let mut output = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                output.append(tag);
+                output.append(&text);
+            }
+            if n == 0 {
+                break;
             }
         }
     });
 }
-
 async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle>, String> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let slot = Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(64))))
+        .try_acquire_owned()
+        .map_err(|_| "终端数量已达到上限（64），请先关闭不再使用的终端。")?;
+    let sandbox_config = crate::tools::sandbox_env::config();
     // 非 Windows 上没有受限令牌可用；配置要求必须有隔离时就地拒绝，
     // 不开一个全权限的长活 shell 糊过去。
-    #[cfg(not(windows))]
-    if crate::tools::sandbox_env::require_isolation() {
+    let isolated = cfg!(windows) && sandbox_config.enabled && sandbox_config.sandbox_terminal;
+    if sandbox_config.require_isolation && !isolated {
         return Err(
             "当前环境没有可用的 OS 级沙箱，已按配置拒绝打开终端。若要使用请关闭「要求 OS 级隔离」。"
                 .to_string(),
         );
     }
     let id = next_term_id();
-    let buffer = Arc::new(Mutex::new(String::new()));
-    let cursor = Arc::new(Mutex::new(0usize));
+    let buffer = Arc::new(Mutex::new(OutputBuffer::default()));
+
     let alive = Arc::new(AtomicBool::new(true));
 
     #[cfg(windows)]
     let proc = {
-        if crate::tools::sandbox_env::sandbox_terminal()
-            && crate::tools::sandbox_env::enabled()
-        {
+        if isolated {
             let req = crate::tools::sandbox_env::request_for(ctx);
             let dir = if cwd.trim().is_empty() {
                 None
             } else {
                 Some(std::path::PathBuf::from(cwd))
             };
-            let shell = crate::utils::sandbox::spawn_sandboxed_shell(&req, dir.as_deref())?;
+            let shell = tokio::task::spawn_blocking(move || {
+                crate::utils::sandbox::spawn_sandboxed_shell(&req, dir.as_deref())
+            })
+            .await
+            .map_err(|e| format!("沙箱终端任务失败: {e}"))??;
             let sin = shell
                 .stdin
                 .try_clone()
@@ -237,20 +285,28 @@ async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle
     let proc = spawn_plain(&buffer, &alive, cwd).await?;
 
     let handle = Arc::new(TermHandle {
+        _slot: slot,
         id: id.clone(),
         session_id: ctx.session_id.clone(),
+        char_id: ctx.char_id.clone(),
+        agent_kind: ctx.agent_kind.clone(),
+        user_id: ctx.user_id.clone(),
+        access_level: ctx.access_level,
+        workspaces: ctx.extra_working_directories.clone(),
+        workspace_root: ctx.working_directory.clone(),
+        sandbox_config,
         cwd: cwd.to_string(),
         cmd_lock: tokio::sync::Mutex::new(()),
         proc,
         buffer,
-        cursor,
+
         alive,
     });
 
     // 首条命令把编码切到 UTF-8（与 run_command 同一套理由）
     let _ = write_line(
         &handle,
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[Console]::OutputEncoding",
+        "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding",
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -260,17 +316,12 @@ async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle
 }
 
 /// 取走自上次读取以来的新输出。
-fn drain_new(h: &TermHandle) -> String {
-    let buffer = h.buffer.lock().unwrap_or_else(|e| e.into_inner());
-    let mut cursor = h.cursor.lock().unwrap_or_else(|e| e.into_inner());
-    if *cursor > buffer.len() {
-        *cursor = buffer.len();
-    }
-    let slice = buffer[*cursor..].to_string();
-    *cursor = buffer.len();
-    slice
+fn drain_new(h: &TermHandle, max_chars: usize) -> String {
+    h.buffer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .read(max_chars)
 }
-
 async fn write_line(h: &TermHandle, text: &str) -> Result<(), String> {
     match &h.proc {
         TermProc::Plain { stdin, .. } => {
@@ -303,10 +354,30 @@ where
 async fn get_owned(id: &str, ctx: &ToolUseContext) -> Result<Arc<TermHandle>, String> {
     let map = terms().lock().await;
     match map.get(id) {
-        None => Err(format!("没有 id 为 {id} 的终端。用 terminal_list 看现有终端，或 terminal_open 新建。")),
-        Some(h) if h.session_id != ctx.session_id => Err("该终端不属于本会话。".to_string()),
+        None => Err(format!(
+            "没有 id 为 {id} 的终端。用 terminal_list 看现有终端，或 terminal_open 新建。"
+        )),
+        Some(h) if !owns(h, ctx) => Err("该终端不属于本角色、调用侧和会话。".to_string()),
         Some(h) => Ok(Arc::clone(h)),
     }
+}
+
+fn owns(h: &TermHandle, ctx: &ToolUseContext) -> bool {
+    h.session_id == ctx.session_id
+        && h.char_id == ctx.char_id
+        && h.agent_kind == ctx.agent_kind
+        && h.user_id == ctx.user_id
+}
+
+fn check_terminal_scope(h: &TermHandle, ctx: &ToolUseContext) -> Result<(), String> {
+    if h.access_level != ctx.access_level
+        || h.workspaces != ctx.extra_working_directories
+        || h.workspace_root != ctx.working_directory
+        || h.sandbox_config != crate::tools::sandbox_env::config()
+    {
+        return Err("终端的权限或沙箱配置已变化，请关闭旧终端后重新打开。".into());
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -363,7 +434,14 @@ impl Tool for TerminalOpenTool {
         self.parameters_schema()
     }
 
-    async fn validate_input(&self, _input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        if let Some(cwd) = input.get("cwd").and_then(Value::as_str) {
+            if !cwd.is_empty()
+                && (!std::path::Path::new(cwd).is_absolute() || !ctx.is_path_authorized(cwd))
+            {
+                return ValidationResult::failure("终端 cwd 必须是授权工作区内的绝对路径", 2);
+            }
+        }
         ValidationResult::success(None)
     }
 
@@ -462,7 +540,13 @@ impl Tool for TerminalSendTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        if input.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty() {
+        if input
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return ValidationResult::failure("terminal_id 不能为空", 2);
         }
         ValidationResult::success(None)
@@ -473,13 +557,20 @@ impl Tool for TerminalSendTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let id = args.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let id = args
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
         let h = match get_owned(id, ctx).await {
             Ok(h) => h,
             Err(e) => return ToolResult::standard_error(&e, Some("TerminalNotFound"), None),
         };
-        if !h.alive.load(Ordering::Relaxed) {
+        if let Err(e) = check_terminal_scope(&h, ctx) {
+            return ToolResult::standard_error(&e, Some("TerminalPermissionChanged"), None);
+        }
+        if !h.proc.is_alive().await {
             return ToolResult::standard_error(
                 &format!("终端 {id} 的进程已经退出。用 terminal_open 重开一条。"),
                 Some("TerminalClosed"),
@@ -564,7 +655,13 @@ impl Tool for TerminalReadTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        if input.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty() {
+        if input
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return ValidationResult::failure("terminal_id 不能为空", 2);
         }
         ValidationResult::success(None)
@@ -575,8 +672,16 @@ impl Tool for TerminalReadTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let id = args.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let wait_ms = args.get("wait_ms").and_then(|v| v.as_u64()).unwrap_or(800).min(15_000);
+        let id = args
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        let wait_ms = args
+            .get("wait_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(800)
+            .min(15_000);
         let max_chars = args
             .get("max_chars")
             .and_then(|v| v.as_u64())
@@ -589,27 +694,45 @@ impl Tool for TerminalReadTool {
         // 读也要排队：等待窗口内如果有别的命令在跑，读到的是别人的输出
         let _turn = h.cmd_lock.lock().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
-        let mut out = drain_new(&h);
+        let mut out = drain_new(&h, max_chars);
         while out.is_empty() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            out = drain_new(&h);
+            out = drain_new(&h, max_chars);
         }
-        let alive = h.alive.load(Ordering::Relaxed);
-        let truncated = out.chars().count() > max_chars;
+        let alive = h.proc.is_alive().await;
+        h.alive.store(alive, Ordering::Relaxed);
+        let truncated = h
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_unread();
         let body: String = out.chars().take(max_chars).collect();
         if body.trim().is_empty() {
             return ToolResult::standard_success(
                 &format!(
                     "（{}内没有新输出；进程{}）",
-                    if wait_ms == 0 { "此刻".to_string() } else { format!("{wait_ms}ms") },
+                    if wait_ms == 0 {
+                        "此刻".to_string()
+                    } else {
+                        format!("{wait_ms}ms")
+                    },
                     if alive { "仍在运行" } else { "已退出" }
                 ),
                 Some(json!({"terminal_id": id, "output": "", "process_alive": alive})),
             );
         }
         ToolResult::standard_success(
-            &format!("{body}{}", if truncated { "\n（输出已截断）" } else { "" }),
-            Some(json!({"terminal_id": id, "output": body, "truncated": truncated, "process_alive": alive})),
+            &format!(
+                "{body}{}",
+                if truncated {
+                    "\n（输出已截断）"
+                } else {
+                    ""
+                }
+            ),
+            Some(
+                json!({"terminal_id": id, "output": body, "truncated": truncated, "process_alive": alive}),
+            ),
         )
     }
 
@@ -656,7 +779,9 @@ impl Tool for TerminalListTool {
     fn description_in(&self, lang: &str) -> &str {
         match lang {
             "zh" => "列出本会话的持久终端：id、起始目录、进程是否还活着。",
-            "ja" => "このセッションの永続ターミナル一覧：id・作業ディレクトリ・プロセスが生きているか。",
+            "ja" => {
+                "このセッションの永続ターミナル一覧：id・作業ディレクトリ・プロセスが生きているか。"
+            }
             _ => self.description(),
         }
     }
@@ -681,7 +806,7 @@ impl Tool for TerminalListTool {
         let map = terms().lock().await;
         let rows: Vec<_> = map
             .values()
-            .filter(|h| h.session_id == ctx.session_id)
+            .filter(|h| owns(h, ctx))
             .map(|h| {
                 json!({
                     "terminal_id": h.id,
@@ -702,7 +827,11 @@ impl Tool for TerminalListTool {
                 "- {} cwd={} {}\n",
                 r["terminal_id"].as_str().unwrap_or(""),
                 r["cwd"].as_str().unwrap_or(""),
-                if r["alive"].as_bool().unwrap_or(false) { "运行中" } else { "已退出" }
+                if r["alive"].as_bool().unwrap_or(false) {
+                    "运行中"
+                } else {
+                    "已退出"
+                }
             ));
         }
         ToolResult::standard_success(&text, Some(json!({"terminals": rows})))
@@ -771,7 +900,13 @@ impl Tool for TerminalSignalTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        if input.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty() {
+        if input
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return ValidationResult::failure("terminal_id 不能为空", 2);
         }
         match input.get("signal").and_then(|v| v.as_str()) {
@@ -788,7 +923,11 @@ impl Tool for TerminalSignalTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let id = args.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let id = args
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         let h = match get_owned(id, ctx).await {
             Ok(h) => h,
             Err(e) => return ToolResult::standard_error(&e, Some("TerminalNotFound"), None),
@@ -859,7 +998,13 @@ impl Tool for TerminalCloseTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        if input.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty() {
+        if input
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return ValidationResult::failure("terminal_id 不能为空", 2);
         }
         ValidationResult::success(None)
@@ -870,7 +1015,11 @@ impl Tool for TerminalCloseTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let id = args.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let id = args
+            .get("terminal_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         let h = match get_owned(id, ctx).await {
             Ok(h) => h,
             Err(e) => return ToolResult::standard_error(&e, Some("TerminalNotFound"), None),
@@ -943,7 +1092,7 @@ impl Tool for PwshPersistentTool {
             "properties": {
                 "command": { "type": "string", "description": "PowerShell 命令" },
                 "terminal_id": { "type": "string", "description": "可选：复用已有终端；不传则用本会话最近的一条，没有就新建" },
-                "settle_ms": { "type": "integer", "description": "等待输出稳定的毫秒数（默认 700）", "minimum": 100 }
+                "settle_ms": { "type": "integer", "description": "输出检查间隔毫秒数（默认 25，上限 100）；命令完成即返回", "minimum": 100 }
             },
             "required": ["command"]
         })
@@ -954,7 +1103,13 @@ impl Tool for PwshPersistentTool {
     }
 
     async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        if input.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().is_empty() {
+        if input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return ValidationResult::failure("command 不能为空", 2);
         }
         ValidationResult::success(None)
@@ -965,8 +1120,17 @@ impl Tool for PwshPersistentTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let settle = args.get("settle_ms").and_then(|v| v.as_u64()).unwrap_or(700).clamp(100, 15_000);
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let settle = args
+            .get("settle_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(25)
+            .clamp(10, 100);
 
         let handle = if let Some(id) = args.get("terminal_id").and_then(|v| v.as_str()) {
             match get_owned(id.trim(), ctx).await {
@@ -977,7 +1141,7 @@ impl Tool for PwshPersistentTool {
             let existing = {
                 let map = terms().lock().await;
                 map.values()
-                    .filter(|h| h.session_id == ctx.session_id && h.alive.load(Ordering::Relaxed))
+                    .filter(|h| owns(h, ctx) && h.alive.load(Ordering::Relaxed))
                     .map(Arc::clone)
                     .next()
             };
@@ -991,37 +1155,102 @@ impl Tool for PwshPersistentTool {
         };
 
         // 整个「清缓冲 → 写命令 → 等输出 → 读输出」是一个原子回合：
+        if let Err(e) = check_terminal_scope(&handle, ctx) {
+            return ToolResult::standard_error(&e, Some("TerminalPermissionChanged"), None);
+        }
         // 同一终端上并发调用会排队，各自拿到属于自己的输出。
         let _turn = handle.cmd_lock.lock().await;
         // 先清掉历史输出，避免把上一次的残留当成这次的
-        let _ = drain_new(&handle);
-        if let Err(e) = write_line(&handle, &command).await {
+        handle
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .discard();
+        use base64::Engine;
+        let status = handle.proc.control_path();
+        struct RunningCommand<'a> {
+            process: &'a TermProc,
+            status: std::path::PathBuf,
+            finished: bool,
+        }
+        impl Drop for RunningCommand<'_> {
+            fn drop(&mut self) {
+                if !self.finished {
+                    self.process.start_kill();
+                }
+                let _ = std::fs::remove_file(&self.status);
+                let _ = std::fs::remove_file(self.status.with_extension("status.tmp"));
+            }
+        }
+        let mut running = RunningCommand {
+            process: &handle.proc,
+            status: status.clone(),
+            finished: false,
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+        let status_text = status.to_string_lossy().replace('\'', "''");
+        // Publish the exit code by atomic rename. It cannot be confused with tool
+        // output, and state from Invoke-Expression stays in this shell's scope.
+        let wrapped = format!("$global:LASTEXITCODE=0; $__vivian_code=0; try {{ Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))); $__vivian_ok=$?; if ($LASTEXITCODE) {{ $__vivian_code=[int]$LASTEXITCODE }} elseif (-not $__vivian_ok) {{ $__vivian_code=1 }} }} catch {{ $__vivian_code=1; [Console]::Error.WriteLine($_.ToString()) }} finally {{ [IO.File]::WriteAllText('{status_text}.tmp', [string]$__vivian_code); [IO.File]::Move('{status_text}.tmp','{status_text}') }}");
+        if let Err(e) = write_line(&handle, &wrapped).await {
             return ToolResult::standard_error(&e, Some("TerminalError"), None);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
-        let mut out = drain_new(&handle);
-        // 输出可能还在滚动：再补一次短等待，拿"稳定后"的结果
-        if !out.trim_end().ends_with("PS>") && !out.trim().is_empty() {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            out.push_str(&drain_new(&handle));
-        }
-        let alive = handle.alive.load(Ordering::Relaxed);
-        let body: String = out.chars().take(8_000).collect();
-        let display = if body.trim().is_empty() {
-            "（无输出）".to_string()
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let mut out = String::new();
+        let mut remaining = 8_000;
+        let code = loop {
+            let page = drain_new(&handle, remaining);
+            remaining = remaining.saturating_sub(page.chars().count());
+            out.push_str(&page);
+            if let Ok(raw) = std::fs::read_to_string(&status) {
+                if let Ok(code) = raw.trim().parse::<i32>() {
+                    break code;
+                }
+            }
+            if !handle.proc.is_alive().await {
+                return ToolResult::standard_error(
+                    "终端在命令完成前退出。",
+                    Some("TerminalClosed"),
+                    Some(json!({"output":out})),
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                return ToolResult::standard_error(
+                    "持久终端命令执行超时（120 秒），已终止进程树。",
+                    Some("timeout"),
+                    Some(json!({"output":out})),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
+        };
+        running.finished = true;
+        // Allow pipe readers to collect bytes written immediately before status.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        out.push_str(&drain_new(&handle, remaining));
+        let alive = handle.proc.is_alive().await;
+        handle.alive.store(alive, Ordering::Relaxed);
+        let truncated = handle
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_unread();
+        let display = if out.trim().is_empty() {
+            format!("命令退出码 {code}（无输出）")
         } else {
-            body.clone()
+            out.clone()
         };
         ToolResult::standard_success(
             &display,
             Some(json!({
-                "terminal_id": handle.id,
-                "output": body,
-                "process_alive": alive,
+                "terminal_id": handle.id, "output": out, "process_alive": alive,
+                "command_completed": true, "exit_code": code, "success": code == 0, "truncated": truncated,
             })),
         )
     }
 
+    fn execution_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(135))
+    }
     fn is_read_only(&self) -> bool {
         false
     }
@@ -1033,5 +1262,95 @@ impl Tool for PwshPersistentTool {
     }
     fn search_hint(&self) -> &str {
         "pwsh persistent shell keep state cd 持久 保留状态"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn terminal_cwd_is_checked_against_the_work_scope() {
+        let ctx = ToolUseContext::default()
+            .with_agent_kind("work")
+            .with_working_directory("C:/audit/work");
+        assert!(
+            !TerminalOpenTool
+                .validate_input(&json!({"cwd":"C:/outside"}), &ctx)
+                .await
+                .result
+        );
+        assert!(
+            !TerminalOpenTool
+                .validate_input(&json!({"cwd":"relative"}), &ctx)
+                .await
+                .result
+        );
+        assert!(
+            TerminalOpenTool
+                .validate_input(&json!({"cwd":"C:/audit/work/sub"}), &ctx)
+                .await
+                .result
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "launches Windows PowerShell; run explicitly in isolated test data"]
+    async fn persistent_completion_ownership_paging_and_cancellation() {
+        let ctx = ToolUseContext::default()
+            .with_char_id("terminal-audit-a")
+            .with_session_id(format!("terminal-{}", uuid::Uuid::new_v4()));
+        let handle = open_terminal(&ctx, "").await.unwrap();
+        let other = ctx.clone().with_char_id("terminal-audit-b");
+        assert!(get_owned(&handle.id, &other).await.is_err());
+        assert!(get_owned(&handle.id, &ctx.clone().with_agent_kind("work"))
+            .await
+            .is_err());
+        let tool = PwshPersistentTool;
+        let result = tool.call(json!({"terminal_id":handle.id,"command":"$n=40; Start-Sleep -Milliseconds 1100; $n+=2; [Console]::Write($n)"}), &ctx).await;
+        assert!(result.success, "{result:?}");
+        let data = &result.data.as_ref().unwrap()["data"];
+        assert_eq!(data["exit_code"], 0);
+        assert_eq!(data["output"], "42");
+        let result = tool
+            .call(
+                json!({"terminal_id":handle.id,"command":"[Console]::Write($n); cmd /d /c exit 7"}),
+                &ctx,
+            )
+            .await;
+        assert_eq!(
+            result.data.as_ref().unwrap()["data"]["exit_code"],
+            7,
+            "{result:?}"
+        );
+        let result = tool
+            .call(
+                json!({"terminal_id":handle.id,"command":"[Console]::Write(('x' * 10000))"}),
+                &ctx,
+            )
+            .await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            result.data.as_ref().unwrap()["data"]["output"]
+                .as_str()
+                .unwrap()
+                .len(),
+            8000
+        );
+        assert!(handle.buffer.lock().unwrap().has_unread());
+        assert_eq!(drain_new(&handle, 8000).len(), 2000);
+        let future = tool.call(
+            json!({"terminal_id":handle.id,"command":"Start-Sleep -Seconds 30"}),
+            &ctx,
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), future)
+                .await
+                .is_err()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!handle.proc.is_alive().await);
+        terms().lock().await.remove(&handle.id);
     }
 }

@@ -3,6 +3,17 @@ export interface SessionGroup { id: string; name: string }
 export interface SessionGroupState { groups: SessionGroup[]; membership: Record<string, string> }
 export const SESSION_GROUP_KEY = 'vivian.workbench.session-groups.v1';
 export const SPECIAL_GROUPS = ['projects', 'recent'] as const;
+/** Keep loaded history, but never revive a locally deleted row from an older snapshot. */
+export function mergeSidebarSessions<T extends SidebarSession & { history_loaded?: boolean; extra_workspaces?: unknown }>(previous: T[], list: T[], activeId: string | null, deleted: ReadonlySet<string>): T[] {
+  const loaded = new Map(previous.filter(session => session.history_loaded !== false).map(session => [session.session_id, session]));
+  const rows = [...new Map(list.filter(session => !deleted.has(session.session_id)).map(session => {
+    const opened = loaded.get(session.session_id);
+    return [session.session_id, opened ? { ...opened, title: session.title, status: session.status, updated_at: session.updated_at, working_directory: session.working_directory, extra_workspaces: session.extra_workspaces } : session] as const;
+  })).values()];
+  const active = previous.find(session => session.session_id === activeId && !deleted.has(session.session_id));
+  if (active && !rows.some(session => session.session_id === active.session_id)) rows.push(active);
+  return rows;
+}
 export function readSessionGroups(raw: string | null): SessionGroupState {
   try {
     const value = JSON.parse(raw || '{}');

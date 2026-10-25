@@ -41,6 +41,7 @@ pub mod registry;
 pub mod runnable_adapter;
 pub mod sandbox;
 pub mod sandbox_env;
+pub(crate) mod terminal_buffer;
 pub mod semantic_filter;
 pub mod usage_corpus;
 pub mod services;

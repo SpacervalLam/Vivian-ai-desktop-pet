@@ -141,11 +141,14 @@ impl ToolConfirmationRegistry {
     /// - 请求不存在（已被超时清理或重复解决）→ 返回 false
     pub fn resolve_request(&self, request_id: u64, response: ConfirmationResponse) -> bool {
         if let Some(entry) = self.pending.lock().remove(&request_id) {
-            let _ = entry.sender.send(response);
-            true
+            entry.created_at.elapsed() < entry.ttl && entry.sender.send(response).is_ok()
         } else {
             false
         }
+    }
+
+    pub(crate) fn cancel_on_drop(self: &Arc<Self>, request_id: u64) -> PendingRequestGuard {
+        PendingRequestGuard { registry: Arc::clone(self), request_id }
     }
 
     /// 取消一个 pending 请求（用于超时清理）
@@ -178,6 +181,14 @@ impl ToolConfirmationRegistry {
             );
         }
     }
+}
+
+pub(crate) struct PendingRequestGuard {
+    registry: Arc<ToolConfirmationRegistry>,
+    request_id: u64,
+}
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) { self.registry.cancel_request(self.request_id); }
 }
 
 impl Default for ToolConfirmationRegistry {
@@ -501,6 +512,25 @@ mod tests {
     async fn test_resolve_unknown_returns_false() {
         let registry = ToolConfirmationRegistry::new();
         assert!(!registry.resolve_request(999, ConfirmationResponse::Deny));
+    }
+
+    #[test]
+    fn cancelled_closed_and_expired_requests_cannot_be_approved() {
+        let registry = Arc::new(ToolConfirmationRegistry::new());
+        let request = || ConfirmationRequest {
+            request_id:0, tool:"read_file".into(), arguments:serde_json::json!({}), reason:"test".into(),
+            risk_level:ConfirmationRisk::Low, char_id:"audit".into(), allow_always_scope:"session".into(),
+        };
+        let (id, mut rx) = registry.create_request(request());
+        { let _pending = registry.cancel_on_drop(id); assert_eq!(registry.pending_count(), 1); }
+        assert_eq!(registry.pending_count(), 0);
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
+        let (id, rx) = registry.create_request(request()); drop(rx);
+        assert!(!registry.resolve_request(id, ConfirmationResponse::AllowAlways));
+        let (id, mut rx) = registry.create_request_with_timeout(request(), Duration::from_millis(1));
+        registry.pending.lock().get_mut(&id).unwrap().created_at = Instant::now() - Duration::from_secs(1);
+        assert!(!registry.resolve_request(id, ConfirmationResponse::AllowOnce));
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
 
     #[tokio::test]

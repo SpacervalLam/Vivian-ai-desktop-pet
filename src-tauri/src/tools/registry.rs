@@ -333,6 +333,14 @@ impl ToolSystem {
         let timeout_secs = *self.confirmation_timeout_secs.read();
         let (id, rx) = self.confirmation.create_request_with_timeout(
             request.clone(), std::time::Duration::from_secs(timeout_secs));
+        let _pending = self.confirmation.cancel_on_drop(id);
+        struct ConfirmationUiCleanup(AppHandle, u64);
+        impl Drop for ConfirmationUiCleanup {
+            fn drop(&mut self) {
+                let _ = self.0.emit("toast:confirm_done", serde_json::json!({"request_id":self.1}));
+            }
+        }
+        let _ui_cleanup = ConfirmationUiCleanup(handle.clone(), id);
         let request = ConfirmationRequest { request_id: id, ..request };
 
         tracing::info!(request_id = id, tool = tool, char_id = char_id,

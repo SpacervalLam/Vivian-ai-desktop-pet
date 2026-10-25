@@ -16,6 +16,7 @@ pub mod schema;
 pub mod spark;
 pub mod thinking_stripper;
 pub(crate) mod tool_history;
+mod user_identity;
 pub mod usage_store;
 pub mod wenxin;
 pub mod web_citations;

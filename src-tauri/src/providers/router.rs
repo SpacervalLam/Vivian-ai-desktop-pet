@@ -1596,6 +1596,7 @@ impl ModelRouter {
         }
         // Provider fallback must not inject the main desktop-pet framework into a private task.
         request.include_framework_instructions = Some(false);
+        super::user_identity::personalize(request);
         Ok(())
     }
 

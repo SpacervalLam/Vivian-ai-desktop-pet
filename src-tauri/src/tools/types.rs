@@ -548,11 +548,23 @@ impl ToolUseContext {
     /// 与沙箱硬闸门、各工具 `validate_input` 共用 [`is_path_within_any`]，
     /// 保证「是否在授权范围内」在全链路只有一个判定口径。
     pub fn is_path_authorized(&self, path: &str) -> bool {
+        // Companion cwd is the application's launch directory, not a workspace
+        // selected by the user. Its file operations still require permission.
+        if !self.is_work_agent() { return true; }
         is_path_within_any(
             path,
             &self.working_directory,
             self.extra_working_directories.iter().map(|d| d.path.as_str()),
         )
+    }
+
+    pub fn is_path_writable(&self, path: &str) -> bool {
+        if !self.is_path_authorized(path) || self.access_level == Some(AgentAccessLevel::ReadOnly) { return false; }
+        let in_primary = !self.working_directory.is_empty() && is_path_within(path, &self.working_directory);
+        let mount = self.extra_working_directories.iter().filter(|dir| is_path_within(path, &dir.path)
+            && (!in_primary || dir.path.len() >= self.working_directory.len()))
+            .max_by_key(|dir| dir.path.len());
+        mount.is_none_or(|dir| !dir.is_read_only && dir.permissions.iter().any(|p| p == "write" || p == "*"))
     }
 
     /// 设置调用方智能体类型（"chat" / "work"）
@@ -981,7 +993,7 @@ fn default_access_level_enum() -> AgentAccessLevel {
 }
 
 /// 工作目录权限
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkingDirectoryPermission {
     /// 路径
     pub path: String,
@@ -1092,8 +1104,27 @@ pub fn normalize_path(path: &str) -> String {
 /// 字符串前缀会把相邻同名前缀目录误认成授权目录的子路径；
 /// Path::starts_with 按组件比较，可保持工作区授权边界封闭。
 pub fn is_path_within(path: &str, root: &str) -> bool {
-    let normalized_path = normalize_path(path);
-    let normalized_root = normalize_path(root);
+    if path.trim().is_empty() || root.trim().is_empty() { return false; }
+    // Existing ancestors include junctions; a new file below an escaping link
+    // must be checked against its actual target, rather than the link's name.
+    fn resolved(path: &str) -> String {
+        let mut ancestor = std::path::PathBuf::from(path);
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(real) = std::fs::canonicalize(&ancestor) { ancestor = real; break; }
+            let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else { break; };
+            suffix.push(name);
+            if !ancestor.pop() { break; }
+        }
+        for part in suffix.iter().rev() { ancestor.push(part); }
+        let text = ancestor.to_string_lossy();
+        let text = if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else { text.strip_prefix(r"\\?\").unwrap_or(&text).to_string() };
+        normalize_path(&text)
+    }
+    let normalized_path = resolved(path);
+    let normalized_root = resolved(root);
     std::path::Path::new(&normalized_path)
         .starts_with(std::path::Path::new(&normalized_root))
 }

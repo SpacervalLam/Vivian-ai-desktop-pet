@@ -9,6 +9,8 @@ pub mod cache;
 pub mod catalog;
 #[path = "../src/tools/observability.rs"]
 pub mod observability;
+#[path = "../src/tools/terminal_buffer.rs"]
+pub mod terminal_buffer;
 
 #[cfg(test)]
 mod benchmarks {

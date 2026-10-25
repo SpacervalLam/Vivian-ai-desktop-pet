@@ -37,9 +37,10 @@ import './browserStrings';
 import SessionSearch from './SessionSearch';
 import WorkMemoryPanel from './WorkMemoryPanel';
 import SessionSidebar from './SessionSidebar';
+import { mergeSidebarSessions } from './sessionSidebarModel';
 import WebEvidenceCard from './WebEvidenceCard';
 import { parseWebEvidence } from './webEvidence';
-import { workbenchLayout, groupWorkMessages as groupChatMessages, WORKBENCH_READING_WIDTH } from './workbenchLayout';
+import { workbenchLayout, groupWorkMessages as groupChatMessages, stripToolCallAnnotations, WORKBENCH_READING_WIDTH } from './workbenchLayout';
 import TurnRail, { buildTurns } from './TurnRail';
 import ComposerEditor, { type ComposerEditorHandle } from './ComposerEditor';
 import PinnedSummary from './PinnedSummary';
@@ -3492,6 +3493,7 @@ const CodeAgentPage: React.FC = () => {
   /** 后台子任务的运行计数（work_delegate 的 background 模式）。 */
   const [sessions, setSessions] = useState<CodingSession[]>([]);
   const sessionRefresh = useRef(0);
+  const deletedSessionIds = useRef(new Set<string>());
   const sessionSelection = useRef(0);
   const [activeId, setActiveId] = useState<string | null>(null);
   /**
@@ -4153,18 +4155,9 @@ const CodeAgentPage: React.FC = () => {
   const refreshSessions = useCallback(async () => {
     const generation = ++sessionRefresh.current;
     try {
-      const list = (await invoke<CodingSession[]>('coding_list_sessions', { sidebar: true })).sort((a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id));
+      const list = (await invoke<CodingSession[]>('coding_list_sessions', { sidebar: true })).filter(session => !deletedSessionIds.current.has(session.session_id)).sort((a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id));
       if (generation === sessionRefresh.current) {
-        setSessions(previous => {
-          const loaded = new Map(previous.filter(session => session.history_loaded !== false).map(session => [session.session_id, session]));
-          const rows = [...new Map(list.map(s => {
-            const opened = loaded.get(s.session_id);
-            return [s.session_id, opened ? { ...opened, title: s.title, status: s.status, updated_at: s.updated_at, working_directory: s.working_directory, extra_workspaces: s.extra_workspaces } : s] as const;
-          })).values()];
-          const active = previous.find(s => s.session_id === activeIdRef.current);
-          if (active && !rows.some(s => s.session_id === active.session_id)) rows.push(active);
-          return rows;
-        });
+        setSessions(previous => mergeSidebarSessions(previous, list, activeIdRef.current, deletedSessionIds.current));
       }
       return list;
     } catch {
@@ -4290,10 +4283,11 @@ const CodeAgentPage: React.FC = () => {
   }, []);
 
   const switchSession = useCallback(async (s: CodingSession) => {
+    if (deletedSessionIds.current.has(s.session_id)) return false;
     const selection = ++sessionSelection.current;
     try { s = await hydrateSession(s); }
     catch (error) { if (selection === sessionSelection.current) notifyError(String(error)); return false; }
-    if (selection !== sessionSelection.current) return false;
+    if (selection !== sessionSelection.current || deletedSessionIds.current.has(s.session_id)) return false;
     const detail = s;
     setSessions(previous => previous.some(item => item.session_id === detail.session_id)
       ? previous.map(item => item.session_id === detail.session_id ? detail : item) : [...previous, detail]);
@@ -4450,15 +4444,26 @@ const CodeAgentPage: React.FC = () => {
       );
       if (!ok) return;
     }
+    if (deletedSessionIds.current.has(id)) return;
+    deletedSessionIds.current.add(id);
+    ++sessionRefresh.current;
+    setSessions(previous => previous.filter(session => session.session_id !== id));
     try {
       await invoke('coding_delete_session', { sessionId: id });
-      const list = await refreshSessions();
       if (activeIdRef.current === id) {
-        if (list.length > 0) switchSession(list[0]);
-        else { setActiveId(null); setMessages([]); }
+        const next = sessions.find(session => !deletedSessionIds.current.has(session.session_id));
+        openDraftSession();
+        if (next) void switchSession(next);
       }
-    } catch { /* ignore */ }
-  }, [sessions, refreshSessions, switchSession, t]);
+      void refreshSessions();
+    } catch (error) {
+      deletedSessionIds.current.delete(id);
+      ++sessionRefresh.current;
+      if (target) setSessions(previous => previous.some(session => session.session_id === id) ? previous : [...previous, target].sort((a, b) => b.updated_at - a.updated_at));
+      notifyError(String(error));
+      void refreshSessions();
+    }
+  }, [sessions, refreshSessions, openDraftSession, switchSession, notifyError, t]);
 
   const handleSessionContextAction = useCallback(async (action: 'rename' | 'pin' | 'unread' | 'delete' | 'fork') => {
     const id = sessionMenu?.id;
@@ -5346,20 +5351,8 @@ const CodeAgentPage: React.FC = () => {
     try { all = await invoke<CodingSession[]>('coding_list_sessions', { workspace: dir }); }
     catch (error) { notifyError(String(error)); return; }
     const ids = all.map(s => s.session_id);
-    for (const id of ids) {
-      try {
-        await invoke('coding_delete_session', { sessionId: id });
-      } catch { /* ignore */ }
-    }
-    const list = await refreshSessions();
-    if (activeIdRef.current && ids.includes(activeIdRef.current)) {
-      if (list.length > 0) switchSession(list[0]);
-      else {
-        setActiveId(null);
-        setMessages([]);
-      }
-    }
-  }, [refreshSessions, switchSession, notifyError]);
+    for (const id of ids) await handleDelete(id, true);
+  }, [handleDelete, notifyError]);
 
   // 工作区管理菜单
   // 重命名工作区（本地显示标题）
@@ -5652,6 +5645,7 @@ const CodeAgentPage: React.FC = () => {
           <SessionSidebar sessions={searchSessionsData} activeId={activeId} unread={unreadSessions} waitingId={ask ? activeId : null}
             onSelect={switchSession} onContextMenu={(session, event) => setSessionMenu({ id: session.session_id, x: event.clientX, y: event.clientY })}
             onSearch={() => { setLeftDrawerOpen(false); setSessionSearchOpen(true); }} workspaceName={workspaceDisplayName}
+            onOpenProject={path => { void invoke('coding_reveal_in_explorer', { path }).catch(error => notifyError(String(error))); }}
             onNewProjectSession={path => openDraftSession(path)} onRenameProject={startRenameWorkspace} onDeleteProject={path => { void confirmDialog(t('mind_inspector.code_delete_workspace_confirm', { name: workspaceDisplayName(path) }), { title: t('mind_inspector.code_delete_confirm_title'), kind: 'warning' }).then(confirmed => { if (confirmed) void deleteWorkspace(path); }); }} onHoverStart={cancelLeftPeekClose} onHoverEnd={() => { if (leftPeekAvailable) closeLeftPeekLater(); }} />
 
         </div>
@@ -5927,9 +5921,9 @@ const CodeAgentPage: React.FC = () => {
                           </React.Fragment>
                         );
                       })}
-                      {streamingText && (
+                      {stripToolCallAnnotations(streamingText) && (
                         <div className="codex-msg-assistant">
-                          <MarkdownText text={streamingText} keyPrefix="stream" animate />
+                          <MarkdownText text={stripToolCallAnnotations(streamingText)} keyPrefix="stream" animate />
                           <span className="codex-cursor" />
                         </div>
                       )}

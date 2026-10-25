@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { buildSync } from 'esbuild';
 
 const result = buildSync({ entryPoints: ['src/components/mind-inspector/pages/workbenchLayout.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
-const { workbenchLayout, reconcileToolMessages, groupWorkMessages } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const { workbenchLayout, reconcileToolMessages, groupWorkMessages, stripToolCallAnnotations } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 let cases = 0;
 for (const width of [320, 480, 640, 768, 960, 1180, 1440, 1920]) {
@@ -61,3 +61,14 @@ console.log('Progress, reasoning, late results, reload, interruption and repeate
 const acrossProgress = groupWorkMessages([user, intent, commentary, outcome], true);
 assert.equal(acrossProgress[1].index, 1, 'merged calls retain the original invocation anchor');
 assert.equal(reconcileToolMessages([intent, { ...user, interjected: true }, outcome]).length, 2, 'interjection preserves active call reconciliation');
+for (const content of ['调用工具：write_file', '调用工具：run_command, run_command', '调用工具：`edit_file`、`read_file`', 'Tool calls: read_file, edit_file']) {
+  assert.equal(stripToolCallAnnotations(content), '');
+  const history = [user, { role: 'commentary', content }, intent, outcome, final];
+  for (const running of [true, false]) {
+    assert.deepEqual(groupWorkMessages(JSON.parse(JSON.stringify(history)), running).map(item => item.kind), ['msg', 'group', 'msg'], 'legacy tool announcements stay hidden after reload');
+  }
+}
+assert.equal(stripToolCallAnnotations('发现编码问题。\n\n调用工具：run_command\n'), '发现编码问题。');
+assert.equal(stripToolCallAnnotations('调用工具失败，需要检查权限。'), '调用工具失败，需要检查权限。');
+assert.equal(stripToolCallAnnotations('调用工具：这次需要先检查编码。'), '调用工具：这次需要先检查编码。');
+assert.equal(groupWorkMessages([{ role: 'user', content: '调用工具：write_file' }], false)[0].msg.content, '调用工具：write_file', 'user requests remain verbatim');

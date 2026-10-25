@@ -30,12 +30,24 @@ type WorkMessage = {
   guided?: boolean | null;
 };
 
+/** Legacy models echo tool names as prose; the activity cards already show these. */
+export function stripToolCallAnnotations(content: string): string {
+  const lines = content.split('\n');
+  const kept = lines.filter(line => !/^\s*(?:调用工具|tool calls?)\s*[:：]\s*`?[a-zA-Z_][\w.-]*`?(?:\s*[,，、]\s*`?[a-zA-Z_][\w.-]*`?)*\s*[。.]?\s*$/i.test(line));
+  return kept.length === lines.length ? content : kept.join('\n').trim();
+}
+
 /** Preserve invocation order and original indexes, even when results arrive after prose. */
 function reconcileRows<T extends WorkMessage>(messages: T[]) {
   const rows: { message: T; index: number }[] = [];
   const calls = new Map<string, number>();
   messages.forEach((message, sourceIndex) => {
     if (message.role === 'tool_use' && !message.tool_name) return;
+    if ((message.role === 'assistant' || message.role === 'commentary') && message.content) {
+      const content = stripToolCallAnnotations(message.content);
+      if (!content) return;
+      if (content !== message.content) message = { ...message, content };
+    }
     if (message.role === 'user' && !message.interjected && !message.guided) calls.clear();
     const id = message.role === 'tool_use' || message.role === 'tool_result' ? message.tool_call_id : undefined;
     const index = id ? calls.get(id) : undefined;

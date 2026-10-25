@@ -108,7 +108,7 @@ impl MemoryRecall {
         };
         Some(vec![
             ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm))),
-            ChatMessage::user(prompt),
+            ChatMessage::internal_prompt(prompt),
         ])
     }
 

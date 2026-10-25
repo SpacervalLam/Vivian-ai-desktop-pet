@@ -14,6 +14,7 @@ interface Props<T extends SidebarSession> {
   workspaceName: (path: string) => string;
   onNewProjectSession: (path: string) => void;
   onRenameProject: (path: string) => void;
+  onOpenProject: (path: string) => void;
   onDeleteProject?: (path: string) => void;
   onHoverStart?: () => void;
   onHoverEnd?: () => void;
@@ -72,8 +73,8 @@ export default function SessionSidebar<T extends SidebarSession>(props: Props<T>
   };
   const leaveDetails = () => { cancelHover(); hoverTimer.current = setTimeout(() => setHover(null), 150); };
   const sessionGroups = (session: T) => [state.groups.find(group => group.id === state.membership[session.session_id])?.name, session.working_directory.trim() ? text('projects') : null, recentIds.has(session.session_id) ? text('recent') : null].filter(Boolean) as string[];
-  const openMenu = (event: MouseEvent<HTMLButtonElement>, kind: NonNullable<typeof menu>['kind'], id: string) => {
-    event.stopPropagation(); hideHover(); const rect = event.currentTarget.getBoundingClientRect();
+  const openMenu = (event: MouseEvent<HTMLElement>, kind: NonNullable<typeof menu>['kind'], id: string) => {
+    event.preventDefault(); event.stopPropagation(); hideHover(); const rect = event.currentTarget.getBoundingClientRect();
     setMenu({ kind, id, x: Math.max(8, Math.min(rect.right, innerWidth - 238)), y: Math.max(8, Math.min(rect.bottom + 6, innerHeight - 308)), theme: theme(event.currentTarget) });
   };
   const assign = (sessionId: string, groupId: string) => { setState(current => { const membership = { ...current.membership }; if (groupId) membership[sessionId] = groupId; else delete membership[sessionId]; return { ...current, membership }; }); setMenu(null); };
@@ -107,7 +108,7 @@ export default function SessionSidebar<T extends SidebarSession>(props: Props<T>
     {error && <p role="alert" className="session-sidebar-error">{error}</p>}
     {state.groups.map(group => { const sessions = props.sessions.filter(session => state.membership[session.session_id] === group.id).sort((a, b) => b.updated_at - a.updated_at); return section(group.id, group.name, sessions.length ? sessions.map(row) : <p className="session-sidebar-empty">{text('emptyGroup')}</p>, sessions.length, true); })}
     {section('projects', text('projects'), projects.length ? projects.map(project => <details className="session-sidebar-project" key={project.path} open>
-      <summary onMouseEnter={event => showDetails(event.currentTarget, { title: props.workspaceName(project.path), groups: [text('projects')], path: project.path, count: t('sessionSidebar.chatCount', { count: project.sessions.length, running: project.sessions.filter(session => session.status === 'running').length }) })} onMouseLeave={leaveDetails}>
+      <summary onContextMenu={event => openMenu(event, 'project', project.path)} onMouseEnter={event => showDetails(event.currentTarget, { title: props.workspaceName(project.path), groups: [text('projects')], path: project.path, count: t('sessionSidebar.chatCount', { count: project.sessions.length, running: project.sessions.filter(session => session.status === 'running').length }) })} onMouseLeave={leaveDetails}>
         <ChevronRight size={12} /><Folder size={14} /><span>{props.workspaceName(project.path)}</span><button type="button" aria-label={`${text('projectActions')} · ${props.workspaceName(project.path)}`} onClick={event => { event.preventDefault(); openMenu(event, 'project', project.path); }}><Ellipsis size={13} /></button><button type="button" aria-label={`${text('newSession')} · ${props.workspaceName(project.path)}`} onClick={event => { event.preventDefault(); props.onNewProjectSession(project.path); }}><Plus size={13} /></button>
       </summary>{(expandedProjects.has(project.path) ? project.sessions : project.sessions.slice(0, 5)).map(row)}{project.sessions.length > 5 && <button type="button" className="session-sidebar-more" onClick={() => setExpandedProjects(current => { const next = new Set(current); next.has(project.path) ? next.delete(project.path) : next.add(project.path); return next; })}>{text(expandedProjects.has(project.path) ? 'less' : 'more')}</button>}
     </details>) : <p className="session-sidebar-empty">{text('noProjects')}</p>, projects.length)}
@@ -116,7 +117,7 @@ export default function SessionSidebar<T extends SidebarSession>(props: Props<T>
     {menu && createPortal(<div ref={menuRef} className="session-sidebar-menu" role="menu" data-browser-overlay="true" onMouseEnter={() => { cardHovered.current = true; props.onHoverStart?.(); }} onMouseLeave={() => { cardHovered.current = false; props.onHoverEnd?.(); }} style={{ ...menu.theme, left: menu.x, top: menu.y }}>
       {menu.kind === 'session' && <><strong>{text('assign')}</strong><button type="button" role="menuitem" onClick={() => assign(menu.id, '')}>{text('noCustomGroup')}</button>{state.groups.map(group => <button type="button" role="menuitem" key={group.id} onClick={() => assign(menu.id, group.id)}>{state.membership[menu.id] === group.id ? '✓ ' : ''}{group.name}</button>)}{!state.groups.length && <button type="button" onClick={() => { setMenu(null); setEditor({ id: null, name: '' }); }}>{text('newGroup')}</button>}</>}
       {menu.kind === 'group' && <><button type="button" role="menuitem" onClick={() => { setEditor({ id: menu.id, name: state.groups.find(group => group.id === menu.id)?.name || '' }); setMenu(null); }}>{text('rename')}</button><button type="button" role="menuitem" onClick={() => { setState(current => removeSessionGroup(current, menu.id)); setMenu(null); }}>{text('deleteGroup')}</button><small>{text('keepSessions')}</small></>}
-      {menu.kind === 'project' && <><button type="button" role="menuitem" onClick={() => { props.onRenameProject(menu.id); setMenu(null); }}>{text('renameProject')}</button>{props.onDeleteProject && <button type="button" role="menuitem" onClick={() => { props.onDeleteProject?.(menu.id); setMenu(null); }}>{t('mind_inspector.code_delete_workspace')}</button>}</>}
+      {menu.kind === 'project' && <><button type="button" role="menuitem" onClick={() => { props.onOpenProject(menu.id); setMenu(null); }}>{text('openProject')}</button><button type="button" role="menuitem" onClick={() => { props.onRenameProject(menu.id); setMenu(null); }}>{text('renameProject')}</button>{props.onDeleteProject && <button type="button" role="menuitem" onClick={() => { props.onDeleteProject?.(menu.id); setMenu(null); }}>{t('mind_inspector.code_delete_workspace')}</button>}</>}
     </div>, document.body)}
   </div>;
 }

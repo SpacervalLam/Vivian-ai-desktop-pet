@@ -280,7 +280,9 @@ impl ToolSandbox {
         context: Option<&ToolUseContext>,
     ) -> SafetyResult {
         // 1. 危险命令检查（命令文本在 2.5 复用，故先取出来）
-        let command = extract_command(args);
+        let command = if tool_name == "terminal_send" {
+            args.get("text").and_then(Value::as_str).map(str::to_owned)
+        } else { extract_command(args) };
         if let Some(cmd) = &command {
             if is_dangerous_command(cmd, command_shell(tool_name)) {
                 return SafetyResult::denied(format!(
@@ -629,7 +631,7 @@ pub enum CommandShell {
 /// `run_command` / `run_job` 在 Windows 上固定以 `powershell -Command` 执行，
 /// 因此按 PowerShell 语义判定；其余工具（以及非 Windows 构建）沿用 POSIX。
 pub fn command_shell(tool_name: &str) -> CommandShell {
-    if cfg!(windows) && matches!(tool_name, "run_command" | "run_job") {
+    if cfg!(windows) && matches!(tool_name, "run_command" | "run_job" | "pwsh_persistent" | "terminal_send") {
         CommandShell::PowerShell
     } else {
         CommandShell::Posix

@@ -809,32 +809,17 @@ pub struct CodingWorkspace {
 /// 有效权限等级。
 pub const CODING_PERMISSIONS: &[&str] = &["read_only", "workspace_write", "full_access"];
 
-/// 沙箱确认回调：工具执行判定为「需要确认」时，由它裁决是否放行。
-///
-/// 按键因素两维分三种形态：
-///
-/// 1. **有工作区** → 恒放行。路径校验（限工作区）才是真正的边界，沙箱层「首次使用 /
-///    前 N 次确认」再弹一次纯属重复打扰，所以这里直接放行。
-/// 2. **无工作区 + 有应答者（主 agent）** → 返回 `None`，执行器会走前端确认弹窗。
-///    无工作区就没有任何路径边界（`is_path_authorized` 恒真），写入必须真的经过用户同意。
-///    子 agent 在下面单独处理——它面前没有人。
-/// 3. **无工作区 + 无应答者（子 agent）** → 恒拒绝。弹窗发出去没人应答会把子任务挂死，
-///    所以让它快速失败，好把「我需要写文件」写进最终回复交回上层。
-///
-/// 注意：第 2 种形态下 shell 类工具（`run_command` 等 Shell 风险）同样会走到这里——
-/// 它们绕过路径校验，所以「无工作区时不许改文件」这条规则必须在这一层兜住，光靠路径校验不够。
+/// 主智能体沿用真实用户确认；子任务不能自行获取新的授权。
+/// 工作区只说明路径边界，不为 shell、输入控制或外部操作提供通用放行。
 pub(crate) fn coding_sandbox_confirm(
-    has_workspace: bool,
+    _has_workspace: bool,
     has_responder: bool,
 ) -> Option<CanUseTool> {
-    static ALLOW: once_cell::sync::Lazy<CanUseTool> =
-        once_cell::sync::Lazy::new(|| Arc::new(|_tool_name: &str, _args: &serde_json::Value| true));
     static DENY: once_cell::sync::Lazy<CanUseTool> =
         once_cell::sync::Lazy::new(|| Arc::new(|_tool_name: &str, _args: &serde_json::Value| false));
-    match (has_workspace, has_responder) {
-        (true, _) => Some(Arc::clone(&*ALLOW)),
-        (false, true) => None,
-        (false, false) => Some(Arc::clone(&*DENY)),
+    match has_responder {
+        true => None,
+        false => Some(Arc::clone(&*DENY)),
     }
 }
 
@@ -1476,6 +1461,21 @@ impl CodingAgentService {
     pub fn get_session(&self, session_id: &str) -> Option<CodingSession> {
         self.sessions.write().retry_failed(session_id);
         self.sessions.read().get(session_id).cloned()
+    }
+
+    /// The tool gate needs only current policy, never a clone of the transcript.
+    pub(crate) fn tool_execution_policy(&self, ctx: &ToolUseContext) -> Result<Option<(bool, bool)>, String> {
+        let sessions = self.sessions.read();
+        let Some(session) = sessions.get(&ctx.session_id) else { return Ok(None); };
+        let level = permission_to_access_level(&session.permission);
+        if session.char_id != ctx.char_id || session.working_directory != ctx.working_directory
+            || ctx.access_level.is_some_and(|requested| requested > level)
+            || session.extra_workspaces.len() != ctx.extra_working_directories.len()
+            || session.extra_workspaces.iter().any(|live| !ctx.extra_working_directories.iter()
+                .any(|old| old.path == live.path && old.is_read_only == live.read_only)) {
+            return Err("会话权限或工作区已变化，请在当前权限下重新发起操作。".into());
+        }
+        Ok(Some((session.memory_policy.use_memories, session.memory_policy.generate_memories)))
     }
 
     /// Read lifecycle state without hydrating or cloning message history.
@@ -3904,10 +3904,8 @@ impl CodingAgentService {
             CodingMessage {
                 role: CodingRole::ToolUse,
                 images: None,
-                content: format!(
-                    "调用工具：{}",
-                    calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join("、")
-                ),
+                // 工具名称由结构化调用块展示，不再把合成提示词回灌给模型。
+                content: String::new(),
                 file_refs: None,
                 widgets: None,
                 interjected: None,
@@ -4822,6 +4820,7 @@ impl CodingAgentService {
         let rules = format!(
             "\n{execution_contract}\n# 回复要求\n\
              - 用与用户相同的语言回复。\n\
+             - 工具调用由界面的结构化工具块展示，不要输出“调用工具：工具名”等重复说明，也不要逐次口头播报工具调用；只在有实际发现、决策、阻碍或最终结果时输出有用文字。\n\
              - 命令和代码使用等宽格式；本地文件路径不要只放在反引号中，必须按下面的「文件链接协议」输出。\n\
              {link_protocol}\n\
              - 仅阅读或解释代码时，凡引用具体文件或代码位置，也使用上述可点击文件链接。不要使用 `file://`，不要输出编辑器私有 URI。\n\

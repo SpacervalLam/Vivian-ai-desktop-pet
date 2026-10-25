@@ -904,7 +904,7 @@ pub use crate::utils::sandbox_policy::SandboxNetworkMode;
 /// 覆盖 one-shot 命令（`run_command` / 编程智能体命令 / 插件脚本）与持久终端
 /// 会话。网络三项只在 `network_mode` 为 `proxy` 时生效——默认 `allow` 保持
 /// 与隔离层接入前一致的行为，需要收紧时再逐条打开。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// 是否启用 OS 级隔离（Windows 受限令牌 + 低完整性级别）。
     ///

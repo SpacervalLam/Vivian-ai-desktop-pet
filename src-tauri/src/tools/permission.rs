@@ -56,7 +56,12 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
     "edit_file",
     "list_dir",
     "grep_search",
+    "glob",
+    "read_image",
     "run_command",
+    "terminal_open",
+    "terminal_send",
+    "pwsh_persistent",
     // 屏幕感知
     "take_screenshot",
     "screenshot_analyze",
@@ -158,9 +163,9 @@ const SENSITIVE_PATH_MARKERS: &[&str] = &[
 /// 所以给一次明确的确认机会，而不是静默拦住）。
 const EQUIVALENCE_CLUSTERS: &[&[&str]] = &[
     // 写盘
-    &["write_file", "edit_file", "run_command"],
+    &["write_file", "edit_file", "run_command", "terminal_send", "pwsh_persistent"],
     // 读盘
-    &["read_file", "grep_search", "list_dir"],
+    &["read_file", "grep_search", "list_dir", "glob", "read_image"],
     // 屏幕 / 前台感知
     &[
         "take_screenshot",
@@ -287,7 +292,7 @@ fn equivalence_conflict(tool_name: &str, context: &PermissionContext) -> Option<
 /// 文件工具 → 操作类型映射
 fn file_operation_for(tool_name: &str) -> Option<&'static str> {
     match canonical_tool_name(tool_name).as_str() {
-        "read_file" | "list_dir" | "grep_search" => Some("read"),
+        "read_file" | "list_dir" | "grep_search" | "glob" | "read_image" => Some("read"),
         "write_file" | "edit_file" => Some("write"),
         _ => None,
     }
@@ -310,7 +315,7 @@ fn extract_file_paths(tool_name: &str, args: &Value) -> Vec<String> {
         }
         return paths;
     }
-    for key in &["file_path", "path"] {
+    for key in &["file_path", "path", "directory"] {
         if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
             paths.push(v.to_string());
         }
@@ -348,6 +353,14 @@ pub async fn check_tool_permission(
              我不会代你操作。请自己在浏览器里完成这一步。",
             tool_name
         ));
+    }
+
+    // An explicit read-only mount remains read-only even in Bypass/always_allow.
+    if let Some(operation) = file_operation_for(tool_name) {
+        for path in extract_file_paths(tool_name, args) {
+            let result = check_file_permission(&path, operation, permission_context);
+            if result.is_denied() { return result; }
+        }
     }
 
     // 1. Bypass 模式直接放行
@@ -439,7 +452,10 @@ pub async fn check_tool_permission(
     // Selected workspaces are already authorized. Keep explicit Ask/Deny and read-only
     // checks above, but do not ask again for every bounded file operation.
     if let Some(operation) = file_operation_for(tool_name) {
-        let paths = extract_file_paths(tool_name, args);
+        let mut paths = extract_file_paths(tool_name, args);
+        if paths.is_empty() && matches!(tool_name, "list_dir" | "grep_search" | "glob") {
+            paths.push(context.working_directory.clone());
+        }
         if context.is_work_agent() && !context.working_directory.is_empty()
             && !paths.is_empty() && paths.iter().all(|path| context.is_path_authorized(path)
                 && check_file_permission(path, operation, permission_context).is_allowed()) {
@@ -537,10 +553,6 @@ pub fn check_file_permission(
     operation: &str,
     context: &PermissionContext,
 ) -> PermissionResult {
-    if context.is_bypass_mode() {
-        return PermissionResult::allow();
-    }
-
     // 多个工作区可以互相嵌套（附加目录落在主工作区内）。这里必须取**最长匹配**（最具体的
     // 那个）而不是第一个匹配：HashMap 迭代顺序不确定，否则「主工作区可写 + 其中某个子目录
     // 只读」这种配置下，同一路径的结论会随机在 allow 与 deny 之间跳。
@@ -568,6 +580,9 @@ pub fn check_file_permission(
     }
 
     // 路径不在任何工作目录中：写入/删除操作需要询问
+    if context.is_bypass_mode() {
+        return PermissionResult::allow();
+    }
     if operation == "write" || operation == "delete" {
         return PermissionResult::ask(format!(
             "路径 '{}' 不在已授权的工作目录中，需要确认",
@@ -699,6 +714,16 @@ pub fn requires_permission(
         return true;
     }
 
+    if confirmation_tier(tool.name(), args) == ToolConfirmationTier::HandOff {
+        return true;
+    }
+    if let Some(operation) = file_operation_for(tool.name()) {
+        if extract_file_paths(tool.name(), args).iter().any(|path|
+            check_file_permission(path, operation, context).is_denied()) {
+            return true;
+        }
+    }
+
     // 免确认工具直接放行：never_confirm 是"不必问"，不是"禁止用"——
     // 仍然置于 Bypass 判定之前，与 always_deny 一样优先于一切档位判定。
     if NEVER_CONFIRM_TOOLS.contains(&tool.name()) {
@@ -718,6 +743,9 @@ pub fn requires_permission(
         return true;
     }
     if matches_tool_pattern(tool.name(), &context.always_ask) {
+        return true;
+    }
+    if equivalence_conflict(tool.name(), context).is_some() {
         return true;
     }
     if matches_tool_pattern(tool.name(), &context.always_allow) {
@@ -848,6 +876,47 @@ mod tests {
 
         assert!(result.is_denied());
         assert!(requires_permission(&TestTool, &json!({}), &permissions));
+    }
+
+    #[tokio::test]
+    async fn readonly_mount_is_not_overridden_by_bypass_or_allow_rule() {
+        let tool = crate::tools::builtin::coding_tools::EditFileTool::new();
+        for mode in [PermissionMode::Default, PermissionMode::Bypass] {
+            let permissions = PermissionContextBuilder::new(mode)
+                .with_access_level(AgentAccessLevel::FullControl)
+                .with_working_directory("C:/work", false)
+                .with_working_directory("C:/work/locked", true).allow("edit_file").build();
+            let args = json!({"path":"C:/work/locked/file.txt"});
+            assert!(requires_permission(&tool, &args, &permissions));
+            assert!(check_tool_permission(&tool, &args, &ToolUseContext::default(), &permissions).await.is_denied());
+        }
+    }
+
+    #[test]
+    fn terminal_commands_share_powershell_checks() {
+        let sandbox = crate::tools::sandbox::ToolSandbox::new(crate::tools::sandbox::ProtectionMode::Permissive, 600);
+        let ctx = ToolUseContext::default().with_agent_kind("work").with_working_directory("C:/work");
+        assert!(!sandbox.check_tool_safety("terminal_send", &json!({"text":"format C:"}), Some(&ctx)).allowed);
+        assert!(sandbox.check_tool_safety("terminal_send", &json!({"text":"Write-Output \"count=$($x.Count)\""}), Some(&ctx)).allowed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junctions_do_not_authorize_existing_or_new_files_outside_the_workspace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("existing.txt"), "private").unwrap();
+        let link = root.join("link");
+        let status = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"])
+            .arg(&link).arg(&outside).output().unwrap();
+        assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
+        for file in ["existing.txt", "new/sub/file.txt"] {
+            assert!(!is_path_within(&link.join(file).to_string_lossy(), &root.to_string_lossy()));
+        }
+        assert!(is_path_within(&root.join("new/file.txt").to_string_lossy(), &root.to_string_lossy()));
     }
 
     /// 免确认名单：即使在最低访问级别 + Ask 模式（最严苛语境）下也不进权限流程，
@@ -991,6 +1060,7 @@ mod tests {
     fn equivalence_clusters_reference_known_tools() {
         // 与本仓库 `tools/builtin/**` 里 `fn name()` 的返回值对齐
         const KNOWN: &[&str] = &[
+            "glob", "read_image", "terminal_send", "pwsh_persistent",
             "read_file",
             "write_file",
             "edit_file",
@@ -1023,6 +1093,7 @@ mod tests {
     #[test]
     fn unresolved_names_detects_missing_tools() {
         const REGISTERED: &[&str] = &[
+            "glob", "read_image", "terminal_open", "terminal_send", "pwsh_persistent",
             "read_file",
             "write_file",
             "edit_file",

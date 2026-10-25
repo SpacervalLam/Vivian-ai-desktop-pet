@@ -201,6 +201,9 @@ impl AnthropicProvider {
             }
         }
 
+        if converted.is_empty() && system_text.is_some() {
+            converted.push(json!({"role": "user", "content": "[Host generation trigger; no human message]"}));
+        }
         let system_value = system_text.map(|s| {
             // cache_control 策略时给 system 块打 ephemeral 标记
             // system 作为数组形式以携带 cache_control 字段

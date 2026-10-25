@@ -29,7 +29,8 @@ const strings = {
     "rename": "重命名",
     "deleteGroup": "删除分组",
     "keepSessions": "删除分组会保留所有会话。",
-    "renameProject": "编辑项目名称"
+    "renameProject": "编辑项目名称",
+    "openProject": "在资源管理器中打开"
   },
   "en": {
     "projects": "Projects",
@@ -60,7 +61,8 @@ const strings = {
     "rename": "Rename",
     "deleteGroup": "Delete group",
     "keepSessions": "Deleting a group preserves all sessions.",
-    "renameProject": "Edit project name"
+    "renameProject": "Edit project name",
+    "openProject": "Open in File Explorer"
   },
   "ja": {
     "projects": "プロジェクト",
@@ -91,7 +93,8 @@ const strings = {
     "rename": "名前を変更",
     "deleteGroup": "グループを削除",
     "keepSessions": "グループを削除してもセッションは残ります。",
-    "renameProject": "プロジェクト名を編集"
+    "renameProject": "プロジェクト名を編集",
+    "openProject": "エクスプローラーで開く"
   }
 };
 for (const [lang, values] of Object.entries(strings)) i18n.addResourceBundle(lang, 'translation', { sessionSidebar: values }, true, false);

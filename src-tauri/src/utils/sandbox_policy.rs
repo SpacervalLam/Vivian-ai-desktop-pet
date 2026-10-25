@@ -27,13 +27,14 @@ impl Default for SandboxNetworkMode {
 }
 
 impl SandboxNetworkMode {
-    /// 从配置字符串解析；未识别的值一律落到 `Allow`（放行），
-    /// 不因为拼写错误把用户的网络悄悄断掉。
+    /// 从配置字符串解析；未识别的非空值一律落到 `Blocked`（拒绝代理出口），
+    /// 避免拼写错误把网络策略悄悄放宽。
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "proxy" | "allowlist" | "whitelist" => SandboxNetworkMode::Proxy,
             "blocked" | "block" | "offline" | "none" => SandboxNetworkMode::Blocked,
-            _ => SandboxNetworkMode::Allow,
+            "allow" | "" => SandboxNetworkMode::Allow,
+            _ => SandboxNetworkMode::Blocked,
         }
     }
 
@@ -116,7 +117,10 @@ pub fn host_of_authority(authority: &str) -> &str {
         // [::1]:8080
         return rest.split(']').next().unwrap_or(rest);
     }
-    authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority)
 }
 
 #[cfg(test)]
@@ -153,7 +157,10 @@ mod tests {
             let m = SandboxNetworkMode::parse(s);
             assert_eq!(m.as_str(), s);
         }
-        // 未知值落回放行，不静默断网
-        assert_eq!(SandboxNetworkMode::parse("typo"), SandboxNetworkMode::Allow);
+        // 未知值失败关闭，不静默放行
+        assert_eq!(
+            SandboxNetworkMode::parse("typo"),
+            SandboxNetworkMode::Blocked
+        );
     }
 }

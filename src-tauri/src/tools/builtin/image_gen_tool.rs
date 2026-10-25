@@ -315,7 +315,7 @@ impl Tool for GenerateImageTool {
                     .to_string()
             }
         };
-        if !ctx.is_path_authorized(&output_path) {
+        if !ctx.is_path_writable(&output_path) {
             return ToolResult::standard_error(
                 &format!(
                     "输出路径不在授权工作区内：{output_path}。生图结果必须落在工作区里才能被读回与交付；\

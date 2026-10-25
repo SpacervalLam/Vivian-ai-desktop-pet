@@ -163,7 +163,7 @@ impl IcebreakerGenerator {
 
         Some(vec![
             ChatMessage::system(sys),
-            ChatMessage::user(prompt),
+            ChatMessage::internal_prompt(prompt),
         ])
     }
 

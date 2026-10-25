@@ -205,10 +205,9 @@ pub fn coding_write_file(path: String, content: String) -> Result<(), String> {
     std::fs::write(p, content.as_bytes()).map_err(|e| format!("写入文件失败: {e}"))
 }
 
-/// 在系统文件管理器中定位并选中该文件（预览页签右键菜单「在文件资源管理器中显示」）。
+/// 文件在系统文件管理器中定位选中，项目目录则直接打开。
 ///
-/// 只负责把文件管理器「呼出来并选中」，不打开文件本身；Windows 走 `explorer /select,`，
-/// macOS 走 `open -R`，Linux 没有统一的「选中」语义，退化为打开所在目录。
+/// 文件在 Windows 走 `explorer /select,`、macOS 走 `open -R`，Linux 打开所在目录。
 #[tauri::command]
 pub fn coding_reveal_in_explorer(path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
@@ -220,19 +219,33 @@ pub fn coding_reveal_in_explorer(path: String) -> Result<(), String> {
     // explorer 的参数解析很特殊：必须是 `/select,<路径>` 这样的单参数形式，
     // 拆成两个参数（`/select,` + 路径）会被当成两个待打开对象而失效。
     #[cfg(windows)]
-    let spawned = crate::utils::process::silent_command("explorer")
-        .arg(format!("/select,{}", target.to_string_lossy()))
-        .spawn();
+    let spawned = {
+        // canonicalize 添加的扩展路径前缀不能直接交给 Explorer。
+        let text = target.to_string_lossy();
+        let explorer_path = if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+        };
+        let mut command = crate::utils::process::silent_command("explorer");
+        if target.is_dir() {
+            command.arg(&explorer_path);
+        } else {
+            command.arg(format!("/select,{explorer_path}"));
+        }
+        command.spawn()
+    };
 
     #[cfg(target_os = "macos")]
-    let spawned = crate::utils::process::silent_command("open")
-        .arg("-R")
-        .arg(&target)
-        .spawn();
+    let spawned = {
+        let mut command = crate::utils::process::silent_command("open");
+        if !target.is_dir() { command.arg("-R"); }
+        command.arg(&target).spawn()
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let spawned = crate::utils::process::silent_command("xdg-open")
-        .arg(target.parent().unwrap_or(std::path::Path::new(".")))
+        .arg(if target.is_dir() { target.as_path() } else { target.parent().unwrap_or(std::path::Path::new(".")) })
         .spawn();
 
     #[cfg(not(any(windows, unix)))]

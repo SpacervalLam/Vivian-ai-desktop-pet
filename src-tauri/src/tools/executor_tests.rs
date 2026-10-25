@@ -13,6 +13,78 @@ struct Probe {
     name: &'static str,
     wait: Option<Arc<tokio::sync::Notify>>,
 }
+
+#[tokio::test]
+async fn work_file_edits_use_selected_workspace_without_a_blanket_approval_callback() {
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(
+        crate::tools::builtin::coding_tools::WriteFileTool::new(),
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let ctx = ToolUseContext::default()
+        .with_working_directory(directory.path().to_string_lossy())
+        .with_agent_kind("work");
+    let ctx = ToolUseContext {
+        access_level: Some(AgentAccessLevel::FsWrite),
+        ..ctx
+    };
+    let path = directory.path().join("approved.txt");
+    let result = execute_tool_use(
+        "write_file",
+        json!({"path":path,"content":"bounded"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "bounded");
+}
+
+#[tokio::test]
+async fn readonly_work_and_child_workflows_cannot_obtain_implicit_shell_approval() {
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(
+        crate::tools::builtin::coding_tools::RunCommandTool::new(),
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let mut ctx = ToolUseContext::default()
+        .with_working_directory(directory.path().to_string_lossy())
+        .with_agent_kind("work");
+    ctx.access_level = Some(AgentAccessLevel::ReadOnly);
+    let approved: CanUseTool = Arc::new(|_, _| true);
+    let result = execute_tool_use(
+        "run_command",
+        json!({"command":"Write-Output 'not-run'"}),
+        &system,
+        &ctx,
+        Some(approved),
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("PermissionDenied"));
+    ctx.access_level = Some(AgentAccessLevel::FsWrite);
+    ctx.subagent_depth = 1;
+    let result = execute_tool_use(
+        "run_command",
+        json!({"command":"Write-Output 'not-run'"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("ParentApprovalRequired"));
+    ctx.subagent_depth = 0;
+    ctx = ctx.with_extra_working_directory(directory.path().join("locked").to_string_lossy(), true);
+    let result = execute_tool_use(
+        "run_command",
+        json!({"command":"Write-Output 'not-run'"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("ReadOnlyWorkspaceIsolation"));
+}
 impl Probe {
     fn new() -> Self {
         Self {
@@ -25,6 +97,41 @@ impl Probe {
             wait: None,
         }
     }
+}
+
+#[tokio::test]
+async fn composite_tools_do_not_bypass_disabled_dependencies_or_child_allowlists() {
+    let system = ToolSystem::new();
+    let mut probe = Probe::new();
+    probe.name = "computer_action";
+    let calls = probe.calls.clone();
+    system.register_tool(Arc::new(probe));
+    system.set_disabled_tools(vec!["take_screenshot".into()], Vec::new());
+    let ctx = ToolUseContext::default();
+    let result = execute_tool_use(
+        "computer_action",
+        json!({"action":"move"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("DependencyDisabled"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let ctx = ToolUseContext {
+        subagent_depth: 1,
+        allowed_tools: Some(vec!["read_file".into()]),
+        ..ctx
+    };
+    let result = execute_tool_use(
+        "computer_action",
+        json!({"action":"move"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("ToolNotAuthorized"));
 }
 #[async_trait]
 impl Tool for Probe {
@@ -210,7 +317,9 @@ async fn validated_targets_are_checked_by_the_sandbox() {
     probe.replacement = Some(json!({"path":"C:/outside/private.txt"}));
     let calls = probe.calls.clone();
     system.register_tool(Arc::new(probe));
-    let ctx = ToolUseContext::default().with_working_directory("C:/workspace");
+    let ctx = ToolUseContext::default()
+        .with_working_directory("C:/workspace")
+        .with_agent_kind("work");
     let result = execute_tool_use(
         "read_file",
         json!({"path":"C:/workspace/safe.txt"}),

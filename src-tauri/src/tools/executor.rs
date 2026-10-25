@@ -112,28 +112,34 @@ pub(crate) fn text_page_budget(requested: usize) -> usize {
 ///
 /// 用户在确认 toast 中选择"本次运行允许"时，工具名写入此集合，
 /// 同一应用会话内该工具不再弹出确认。
-static SESSION_ALLOWED_TOOLS: Lazy<RwLock<std::collections::HashSet<String>>> =
+type ApprovalKey = (String, String, String, String, String);
+static SESSION_ALLOWED_TOOLS: Lazy<RwLock<std::collections::HashSet<ApprovalKey>>> =
     Lazy::new(|| RwLock::new(std::collections::HashSet::new()));
 
+fn approval_key(tool: &str, ctx: &ToolUseContext) -> ApprovalKey {
+    (tool.into(), ctx.user_id.clone(), ctx.char_id.clone(), ctx.agent_kind.clone(), ctx.session_id.clone())
+}
+
 /// 检查工具是否已被本次会话放行
-fn is_session_allowed(tool: &str) -> bool {
-    SESSION_ALLOWED_TOOLS.read().contains(tool)
+fn is_session_allowed(tool: &str, ctx: &ToolUseContext) -> bool {
+    if tool == "create_tool" { return false; }
+    SESSION_ALLOWED_TOOLS.read().contains(&approval_key(tool, ctx))
 }
 
 /// 将工具加入本次会话放行列表
-fn session_allow(tool: &str) {
-    SESSION_ALLOWED_TOOLS.write().insert(tool.to_string());
+fn session_allow(tool: &str, ctx: &ToolUseContext) {
+    SESSION_ALLOWED_TOOLS.write().insert(approval_key(tool, ctx));
     tracing::info!("[Executor] 工具 {} 已加入会话级放行列表", tool);
 }
 
 /// 查询工具是否已被本次会话放行（供主动截屏等旁路流程复用）
-pub(crate) fn is_session_allowed_tool(tool: &str) -> bool {
-    is_session_allowed(tool)
+pub(crate) fn is_session_allowed_tool(tool: &str, char_id: &str) -> bool {
+    SESSION_ALLOWED_TOOLS.read().contains(&(tool.into(), String::new(), char_id.into(), "chat".into(), String::new()))
 }
 
 /// 将工具加入会话级放行列表（旁路流程收到 AllowAlways 后调用）
-pub(crate) fn session_allow_tool(tool: &str) {
-    session_allow(tool);
+pub(crate) fn session_allow_tool(tool: &str, char_id: &str) {
+    SESSION_ALLOWED_TOOLS.write().insert((tool.into(), String::new(), char_id.into(), "chat".into(), String::new()));
 }
 
 /// 把 `Value` 序列化为紧凑 JSON 字符串，失败时回退到 String 化
@@ -240,8 +246,8 @@ fn compact_text_page(mut data: Value, max_chars: usize) -> Option<Value> {
     Some(data)
 }
 
-fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationResponse) {
-    if response != ConfirmationResponse::AllowAlways {
+fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationResponse, ctx: &ToolUseContext) {
+    if response != ConfirmationResponse::AllowAlways || tool == "create_tool" {
         return;
     }
     if tool == "open_application" {
@@ -249,7 +255,7 @@ fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationRespons
             super::trust::add_trusted_app(app);
         }
     } else {
-        session_allow(tool);
+        session_allow(tool, ctx);
     }
 }
 
@@ -406,10 +412,14 @@ pub async fn execute_tool_use(
     let name = resolved.as_ref()
         .map(|(tool, _)| tool.name().to_string()).unwrap_or_else(|| tool_name.to_string());
     if context.agent_kind == "work" {
-        if let Some(session) = crate::commands::coding_agent::CODING_AGENT.get_session(&context.session_id) {
+        let policy = match crate::commands::coding_agent::CODING_AGENT.tool_execution_policy(context) {
+            Ok(policy) => policy,
+            Err(error) => return ToolResult::standard_error(&error, Some("PermissionContextChanged"), None),
+        };
+        if let Some((read_memory, write_memory)) = policy {
             let reading = name.starts_with("session_") || matches!(name.as_str(), "search_memories" | "search_memory" | "read_memory" | "get_recent_interactions" | "summarize_today_context");
             let writing = matches!(name.as_str(), "save_memory" | "write_memory");
-            if (reading && !session.memory_policy.use_memories) || (writing && !session.memory_policy.generate_memories) {
+            if (reading && !read_memory) || (writing && !write_memory) {
                 return ToolResult::standard_error("本会话已关闭相应的记忆读取或生成。", Some("MemoryDisabled"), None);
             }
         }
@@ -492,11 +502,30 @@ async fn execute_tool_use_inner(
 
     let tool_name = tool.name();
     trace.phase = "availability";
+    if context.subagent_depth > 0 && context.allowed_tools.as_ref().is_some_and(|allowed|
+        !allowed.iter().any(|name| name == tool_name || tool_system.find_tool(name).is_some_and(|tool| tool.name() == tool_name))) {
+        return ToolResult::standard_error("该工具不在子任务获准使用的工具列表中。", Some("ToolNotAuthorized"), None);
+    }
 
     // 1.05 用户在**本侧**禁用的工具直接拒绝（正常情况下禁用工具不会出现在该侧
     // LLM 工具列表中，此处防御幻觉调用旧工具名 / 历史消息重放）。
     // 禁用状态分侧隔离：陪伴侧与工作侧各自判定，同一工具在一侧禁用不影响另一侧。
     let agent_side = AgentSide::from_agent_kind(&context.agent_kind);
+    let mut dependencies = Vec::new();
+    if tool_name == "computer_action" {
+        match arguments.get("action").and_then(Value::as_str) {
+            Some("click") => dependencies.push("click_mouse"),
+            Some("key") => dependencies.push("hotkey"),
+            Some("type") => dependencies.push("type_text"),
+            _ => {},
+        }
+        if arguments.get("observe_after").and_then(Value::as_bool).unwrap_or(true) { dependencies.push("take_screenshot"); }
+    } else if matches!(tool_name, "spawn_teammate" | "ralph") {
+        dependencies.push("work_delegate");
+    }
+    if let Some(dependency) = dependencies.into_iter().find(|name| tool_system.is_tool_disabled(name, agent_side)) {
+        return ToolResult::standard_error(&format!("{tool_name} 依赖的 {dependency} 已在本侧禁用，无法执行。"), Some("DependencyDisabled"), None);
+    }
     if tool_system.is_tool_disabled(tool_name, agent_side) {
         tracing::warn!(
             "[ToolExecutor] 工具 {} 已被用户在 {:?} 侧禁用，拒绝执行",
@@ -541,6 +570,21 @@ async fn execute_tool_use_inner(
     }
     let validated_args = validation.data.unwrap_or(arguments);
 
+    // A work session's read-only setting is a hard capability boundary, including
+    // shell, custom scripts and dispatchers whose parameters are opaque to path checks.
+    if context.is_work_agent() && context.access_level == Some(AgentAccessLevel::ReadOnly)
+        && !tool.is_read_only() && tool_name != "save_memory" {
+        return ToolResult::standard_error("只读工作会话不能执行有副作用的工具。", Some("PermissionDenied"), None);
+    }
+    // This Low-IL backend cannot express an inner read-only mount in an opaque
+    // shell program. Preserve that constraint by refusing execution, rather than
+    // granting the enclosing workspace recursively and silently making it writable.
+    if context.is_work_agent() && context.extra_working_directories.iter().any(|dir| dir.is_read_only)
+        && (tool.is_custom() || matches!(tool_name, "run_command" | "terminal_open" | "terminal_send" | "pwsh_persistent")) {
+        return ToolResult::standard_error("当前 Windows 沙箱无法在任意脚本中保证附加只读工作区的写保护；请使用文件读取工具或单独的工作会话。",
+            Some("ReadOnlyWorkspaceIsolation"), None);
+    }
+
     trace.phase = "sandbox";
     // 2. 沙箱安全检查
     let safety = tool_system
@@ -549,8 +593,19 @@ async fn execute_tool_use_inner(
     let mut action_confirmed = false;
     if !safety.allowed {
         if safety.requires_confirmation {
+            let bounded_file = context.is_work_agent() && matches!(tool_name, "write_file" | "edit_file")
+                && !context.working_directory.is_empty()
+                && validated_args.get("path").and_then(Value::as_str).is_some_and(|path| context.is_path_authorized(path));
+            if bounded_file {
+                // The selected workspace already authorizes bounded edits. The
+                // permission gate below still enforces nested read-only mounts.
+                action_confirmed = true;
             // 委托给 can_use_tool 回调
-            if let Some(cb) = &can_use_tool {
+            } else if is_session_allowed(tool_name, context) {
+                action_confirmed = true;
+            } else if context.subagent_depth > 0 {
+                return ToolResult::standard_error("子任务需要新的用户授权，请把待确认操作交回主智能体。", Some("ParentApprovalRequired"), None);
+            } else if let Some(cb) = &can_use_tool {
                 if !cb(tool_name, &validated_args) {
                     return ToolResult::standard_error(
                         "用户拒绝了沙箱确认请求",
@@ -559,8 +614,6 @@ async fn execute_tool_use_inner(
                     );
                 }
                 action_confirmed = true;
-            } else if is_session_allowed(tool_name) {
-                action_confirmed = true;
             } else {
                 let (risk, reason) = confirmation_info(tool_name, &validated_args);
                 let scope = if tool_name == "open_application" { "persistent" } else { "session" };
@@ -568,7 +621,7 @@ async fn execute_tool_use_inner(
                     format!("{reason}\n{}", safety.warning), risk, &context.char_id, scope).await
                 {
                     Some(response @ (ConfirmationResponse::AllowOnce | ConfirmationResponse::AllowAlways)) => {
-                        remember_confirmation(tool_name, &validated_args, response);
+                        remember_confirmation(tool_name, &validated_args, response, context);
                         action_confirmed = true;
                     }
                     Some(ConfirmationResponse::Deny) => return ToolResult::standard_error(
@@ -621,7 +674,7 @@ async fn execute_tool_use_inner(
     // 注册工具上下文的工作目录为已授权目录：工作目录内的读写操作免用户确认
     // （路径范围已由各工具 validate_input 的沙箱校验限制在工作目录内；
     //   ReadOnly 访问级别注册为只读目录，写入仍会被权限检查拒绝）
-    if !context.working_directory.is_empty() {
+    if context.is_work_agent() && !context.working_directory.is_empty() {
         permission_context.add_working_directory(
             context.working_directory.clone(),
             access_level == AgentAccessLevel::ReadOnly,
@@ -655,7 +708,10 @@ async fn execute_tool_use_inner(
             );
         }
 
-        if permission.requires_confirmation() && !action_confirmed {
+        if permission.requires_confirmation() && !action_confirmed && !is_session_allowed(tool_name, context) {
+            if context.subagent_depth > 0 && !is_session_allowed(tool_name, context) {
+                return ToolResult::standard_error("子任务需要新的用户授权，请交回主智能体确认。", Some("ParentApprovalRequired"), None);
+            }
             // 能力进化事件（create_tool）例外：宿主的 can_use_tool 回调
             // （如编程侧的 coding_sandbox_confirm）不适用——新工具创建必须经
             // 用户预览卡片授权，无论发起方是陪伴侧还是工作智能体
@@ -674,7 +730,7 @@ async fn execute_tool_use_inner(
             }
             if evolution_gate || can_use_tool.is_none() {
                 // 快速通道 1：会话级放行列表（用户本次运行内已选择"本次运行允许"）
-                if is_session_allowed(tool_name) {
+                if is_session_allowed(tool_name, context) {
                     tracing::debug!("[Executor] 工具 {} 命中会话放行列表，跳过确认", tool_name);
                 } else if tool_name == "open_application"
                     && validated_args
@@ -708,7 +764,7 @@ async fn execute_tool_use_inner(
                             // 仅批准当前参数的这一次调用，不扩大为同类工具会话授权。
                         }
                         Some(ConfirmationResponse::AllowAlways) => {
-                            remember_confirmation(tool_name, &validated_args, ConfirmationResponse::AllowAlways);
+                            remember_confirmation(tool_name, &validated_args, ConfirmationResponse::AllowAlways, context);
                         }
                         Some(ConfirmationResponse::Deny) => {
                             let info = ToolErrorCode::UserDenied.get_error_info();
@@ -755,6 +811,9 @@ async fn execute_tool_use_inner(
                         );
                     }
                     ToolGuardDecision::RequireConfirmation { reason } => {
+                        if context.subagent_depth > 0 {
+                            return ToolResult::standard_error(&reason, Some("ParentApprovalRequired"), None);
+                        }
                         if let Some(cb) = &can_use_tool {
                             if !cb(tool_name, &validated_args) {
                                 let info = ToolErrorCode::UserDenied.get_error_info();
@@ -765,11 +824,13 @@ async fn execute_tool_use_inner(
                                 );
                             }
                         } else {
-                            return ToolResult::standard_error(
-                                &reason,
-                                Some("PermissionRequired"),
-                                None,
-                            );
+                            let (risk, _) = confirmation_info(tool_name, &validated_args);
+                            match tool_system.request_confirmation(tool_name, &validated_args, reason.clone(), risk, &context.char_id, "session").await {
+                                Some(response @ (ConfirmationResponse::AllowOnce | ConfirmationResponse::AllowAlways)) =>
+                                    remember_confirmation(tool_name, &validated_args, response, context),
+                                Some(ConfirmationResponse::Deny) => return ToolResult::standard_error(&reason, Some("UserDenied"), None),
+                                None => return ToolResult::standard_error(&reason, Some("PermissionRequired"), None),
+                            }
                         }
                     }
                 }
@@ -1060,13 +1121,18 @@ mod initiative_confirmation_tests {
     #[test]
     fn single_approval_does_not_authorize_future_actions() {
         let tool = "initiative_test_single_approval";
-        SESSION_ALLOWED_TOOLS.write().remove(tool);
-        remember_confirmation(tool, &serde_json::json!({"command": "Get-Date"}), ConfirmationResponse::AllowOnce);
-        assert!(!is_session_allowed(tool));
-        remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::Deny);
-        assert!(!is_session_allowed(tool));
-        remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::AllowAlways);
-        assert!(is_session_allowed(tool));
-        SESSION_ALLOWED_TOOLS.write().remove(tool);
+        let ctx = ToolUseContext::default().with_char_id("approval-test").with_session_id("one");
+        SESSION_ALLOWED_TOOLS.write().remove(&approval_key(tool, &ctx));
+        remember_confirmation(tool, &serde_json::json!({"command": "Get-Date"}), ConfirmationResponse::AllowOnce, &ctx);
+        assert!(!is_session_allowed(tool, &ctx));
+        remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::Deny, &ctx);
+        assert!(!is_session_allowed(tool, &ctx));
+        remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::AllowAlways, &ctx);
+        assert!(is_session_allowed(tool, &ctx));
+        for other in [ctx.clone().with_char_id("other"), ctx.clone().with_agent_kind("work"),
+            ctx.clone().with_session_id("two")] {
+            assert!(!is_session_allowed(tool, &other));
+        }
+        SESSION_ALLOWED_TOOLS.write().remove(&approval_key(tool, &ctx));
     }
 }

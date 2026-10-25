@@ -4,14 +4,13 @@
 //! 进程（Job Object 只做生命周期遏制）。本模块把子进程放进受限执行环境：
 //! - **特权全剥**：`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`——调试、
 //!   备份、加载驱动等特权一概不可用
-//! - **restricting SID**：Everyone + BUILTIN\Users——访问检查按"标准用户"
-//!   二次评审，显式授予当前用户 SID 的路径（用户资料目录）被拒之门外
+//! - **写入受限令牌**：Everyone + BUILTIN\Users + 当前登录会话作为 restricting SID，
+//!   写访问做二次检查；读取沿用用户权限，避免阻断 PowerShell/.NET 的启动读取
 //! - **低完整性级别**（S-1-16-4096）：强制完整性控制下不可写 Medium/High
 //!   IL 对象——用户文件与 HKCU 常规注册表键均拒绝写入
-//! - **可写面收窄**：唯一写入出口是 scratch 目录（`%TEMP%\vivian-sandbox-low`，
-//!   打 Low IL 标签 + Everyone RW DACL），子进程 TMP/TEMP 指向它
-//! - **网络不拦**（本阶段取舍）：fetch 型脚本需要网络，且命令清单已经
-//!   AST 审计呈现给用户
+//! - **可写面收窄**：scratch 目录和显式授权的工作区带 Low IL 标签 + 当前登录会话写
+//!   DACL；子进程 TMP/TEMP 指向 `%TEMP%\vivian-sandbox-low` 下的 scratch
+//! - **网络策略**：通过环境变量与本地代理提供协作式约束，不是防火墙级隔离
 //!
 //! spawn 走 `CreateProcessAsUserW`（`std::process::Command` 不支持指定令牌）；
 //! 管道句柄经 STARTUPINFO 标准句柄 + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`
@@ -57,6 +56,13 @@ impl HandleWrap {
     fn get(&self) -> HANDLE {
         self.0
     }
+
+    fn into_file(self) -> std::fs::File {
+        use std::os::windows::io::FromRawHandle;
+        let raw = self.0 .0;
+        std::mem::forget(self);
+        unsafe { std::fs::File::from_raw_handle(raw) }
+    }
 }
 
 impl Drop for HandleWrap {
@@ -67,14 +73,85 @@ impl Drop for HandleWrap {
     }
 }
 
+struct AttributeList(windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST);
+impl Drop for AttributeList {
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::System::Threading::DeleteProcThreadAttributeList(self.0);
+        }
+    }
+}
+
+struct ScriptFile(PathBuf);
+impl Drop for ScriptFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Per-execution lifetime, nested inside the application's crash-recovery job.
+/// Handles are stored as integers so a persistent shell can cross async tasks.
+struct ProcessJob(usize);
+impl ProcessJob {
+    fn start(process: HANDLE, thread: HANDLE) -> Result<Self, String> {
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        use windows::Win32::System::Threading::{ResumeThread, TerminateProcess};
+        unsafe {
+            let setup = || -> Result<Self, String> {
+                let raw = CreateJobObjectW(None, windows::core::PCWSTR::null())
+                    .map_err(|e| format!("创建沙箱进程 Job 失败: {e}"))?;
+                let job = Self(raw.0 as usize);
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    raw,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const _,
+                    std::mem::size_of_val(&info) as u32,
+                )
+                .map_err(|e| format!("设置沙箱进程 Job 失败: {e}"))?;
+                crate::utils::job_object::assign_process(process.0 as isize);
+                AssignProcessToJobObject(raw, process)
+                    .map_err(|e| format!("绑定沙箱进程 Job 失败: {e}"))?;
+                if ResumeThread(thread) == u32::MAX {
+                    return Err("恢复沙箱进程线程失败".into());
+                }
+                Ok(job)
+            };
+            let result = setup();
+            if result.is_err() {
+                let _ = TerminateProcess(process, 1);
+            }
+            result
+        }
+    }
+    fn kill(&self) {
+        unsafe {
+            let _ =
+                windows::Win32::System::JobObjects::TerminateJobObject(HANDLE(self.0 as *mut _), 1);
+        }
+    }
+}
+impl Drop for ProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(HANDLE(self.0 as *mut _));
+        }
+    }
+}
+
 // ============================================================================
-// scratch 目录（子进程唯一可写面）
+// scratch 目录（显式授权工作区以外的临时可写面）
 // ============================================================================
 
 /// scratch 目录（懒初始化，进程内复用）：`%TEMP%\vivian-sandbox-low`
 ///
-/// 安全属性：DACL 授 Everyone 完全访问（restricted token 的允许判定走
-/// restricting SID，授予当前用户 SID 无效），强制标签 Low——低箱进程可写，
+/// 安全属性：DACL 授当前登录会话与 SYSTEM 完全访问（restricted token 的允许判定走
+/// restricting SID，当前登录 SID 同时存在于允许与 restricting 列表），强制标签 Low——低箱进程可写，
 /// 宿主（Medium）写入向下不受限。
 fn scratch_dir() -> Result<PathBuf, String> {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -90,10 +167,8 @@ fn scratch_dir() -> Result<PathBuf, String> {
 
 /// 按会话隔离的 scratch 目录：`%TEMP%\vivian-sandbox-low\s-<会话标识>`
 ///
-/// 共享 scratch 有个实际问题：会话 A 落盘的脚本与临时文件，会话 B 的沙箱进程
-/// 同样能读——两个会话的模型是不是该互相看到对方的中间产物，答案显然是否定的。
-/// 隔离后每个会话只看得见自己的目录（父目录仍可列举出兄弟目录名，但内容读不到
-/// 也无意义：脚本文件名是 uuid）。
+/// 分目录避免临时文件混用和名称碰撞。各沙箱仍使用同一 Windows 登录 SID，
+/// 因此目录划分不提供会话之间的 OS 级读写隔离。
 fn scratch_dir_for(session_id: &str) -> Result<PathBuf, String> {
     let base = scratch_dir()?;
     if session_id.trim().is_empty() {
@@ -105,9 +180,17 @@ fn scratch_dir_for(session_id: &str) -> Result<PathBuf, String> {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .take(64)
         .collect();
-    let dir = base.join(format!("s-{}", if safe.is_empty() { "default" } else { &safe }));
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    session_id.hash(&mut hash);
+    let dir = base.join(format!(
+        "s-{}-{:016x}",
+        if safe.is_empty() { "default" } else { &safe },
+        hash.finish()
+    ));
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建会话 scratch 目录失败: {e}"))?;
-    // 父目录已经带 Low IL 标签且带继承标志，子目录自动继承，无需再设
+    // 修复旧版本创建的 Medium IL 会话目录；仅依赖父目录继承无法修复已有目录。
+    apply_scratch_security(&dir)?;
     Ok(dir)
 }
 
@@ -127,12 +210,17 @@ fn grant_workspaces(req: &SandboxRequest) -> (usize, Option<String>) {
             continue;
         }
         let outcome = crate::utils::sandbox_workspace::grant_workspace_write(&path);
-        if outcome.tagged > 0 && outcome.error.is_none() {
+        if outcome.usable() {
             ok += 1;
         } else if let Some(e) = outcome.error {
             if first_err.is_none() {
                 first_err = Some(format!("{}: {}", dir, e));
             }
+        } else if first_err.is_none() {
+            first_err = Some(format!(
+                "工作区授权不完整: {dir}（已处理 {} 项）",
+                outcome.tagged
+            ));
         }
     }
     if ok > 0 || !req.workspace_dirs.is_empty() {
@@ -146,10 +234,10 @@ fn grant_workspaces(req: &SandboxRequest) -> (usize, Option<String>) {
     (ok, first_err)
 }
 
-/// 给 scratch 目录打 Low IL 标签 + Everyone 完全访问 DACL
+/// 给 scratch 目录打 Low IL 标签 + 当前登录会话 DACL
 fn apply_scratch_security(dir: &std::path::Path) -> Result<(), String> {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
         SDDL_REVISION_1, SE_FILE_OBJECT,
@@ -160,8 +248,11 @@ fn apply_scratch_security(dir: &std::path::Path) -> Result<(), String> {
     };
 
     unsafe {
-        // Everyone 完全访问 + 强制标签 Low（NW：完整性低于对象者不可写）
-        let sddl = wide("D:PAI(A;OICI;FA;;;WD)S:PAI(ML;;NW;;;LW)");
+        // 当前登录会话访问 + 强制标签 Low（NW：完整性低于对象者不可写）
+        let logon = current_logon_sid_sddl()?;
+        let sddl = wide(&format!(
+            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;{logon})S:PAI(ML;OICI;NW;;;LW)"
+        ));
         let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(sddl.as_ptr()),
@@ -192,7 +283,10 @@ fn apply_scratch_security(dir: &std::path::Path) -> Result<(), String> {
         );
         let _ = LocalFree(Some(HLOCAL(sd.0)));
         if err != windows::Win32::Foundation::WIN32_ERROR(0) {
-            return Err(format!("设置 scratch 目录安全属性失败: WIN32_ERROR({:?})", err.0));
+            return Err(format!(
+                "设置 scratch 目录安全属性失败: WIN32_ERROR({:?})",
+                err.0
+            ));
         }
         Ok(())
     }
@@ -290,9 +384,8 @@ fn token_integrity_level(token: HANDLE) -> IntegrityLevel {
         if count == 0 {
             return IntegrityLevel::Unknown;
         }
-        let last = std::ptr::read_unaligned(
-            (sid.0 as *const u8).add(8 + 4 * (count - 1)) as *const u32,
-        );
+        let last =
+            std::ptr::read_unaligned((sid.0 as *const u8).add(8 + 4 * (count - 1)) as *const u32);
         IntegrityLevel::from_rid(last)
     }
 }
@@ -316,7 +409,7 @@ pub fn current_integrity_level() -> IntegrityLevel {
 // 受限令牌
 // ============================================================================
 
-/// 当前进程令牌 → 受限主令牌（全特权剥离 + Everyone/Users restricting SID + Low IL）
+/// 当前进程令牌 → 写入受限主令牌（全特权剥离 + restricting SID + Low IL）
 ///
 /// **绝不改动当前进程的令牌。** `OpenProcessToken(GetCurrentProcess())` 打开的是本进程
 /// 那个主令牌对象本身，不是副本；在它上面写 `TokenIntegrityLevel` 会把整个应用永久降成
@@ -336,7 +429,7 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
         CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation,
         SetTokenInformation, TokenIntegrityLevel, TokenPrimary, WinBuiltinUsersSid, WinWorldSid,
         DISABLE_MAX_PRIVILEGE, SID_AND_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE,
-        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY, WRITE_RESTRICTED,
     };
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -349,19 +442,27 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
             TOKEN_QUERY | TOKEN_DUPLICATE,
             &mut base,
         )
-            .map_err(|e| format!("打开进程令牌失败: {e}"))?;
+        .map_err(|e| format!("打开进程令牌失败: {e}"))?;
         let base = HandleWrap::new(base);
 
-        // restricting SIDs：Everyone + BUILTIN\Users
+        // restricting SIDs：Everyone + BUILTIN\Users + 当前登录会话。
+        // 登录 SID 让会话系统对象及下方默认 DACL 同时通过两轮访问检查。
         let mut restrict_sids: Vec<SID_AND_ATTRIBUTES> = Vec::new();
         let mut sid_buffers: Vec<Vec<u8>> = Vec::new();
         for kind in [WinWorldSid, WinBuiltinUsersSid] {
             let mut buf = vec![0u8; 68]; // SECURITY_MAX_SID_SIZE
             let mut size = buf.len() as u32;
-            CreateWellKnownSid(kind, None, Some(windows::Win32::Security::PSID(buf.as_mut_ptr() as *mut _)), &mut size)
-                .map_err(|e| format!("构造 well-known SID 失败: {e}"))?;
+            CreateWellKnownSid(
+                kind,
+                None,
+                Some(windows::Win32::Security::PSID(buf.as_mut_ptr() as *mut _)),
+                &mut size,
+            )
+            .map_err(|e| format!("构造 well-known SID 失败: {e}"))?;
             sid_buffers.push(buf);
         }
+        let logon = logon_sid(base.get())?;
+        sid_buffers.push(logon.clone());
         for buf in &sid_buffers {
             restrict_sids.push(SID_AND_ATTRIBUTES {
                 Sid: windows::Win32::Security::PSID(buf.as_ptr() as *mut _),
@@ -373,7 +474,9 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
         let mut restricted = HANDLE::default();
         CreateRestrictedToken(
             base.get(),
-            DISABLE_MAX_PRIVILEGE,
+            // 完整的读取限制会阻断 PowerShell/.NET 启动（8007000e）。只对写入做
+            // SID 二次检查；Low IL 仍阻止写用户数据、注册表等非授权的 Medium 对象。
+            DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED,
             None,
             None,
             Some(&restrict_sids),
@@ -394,6 +497,7 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
         )
         .map_err(|e| format!("复制受限令牌失败: {e}"))?;
         let primary = HandleWrap::new(primary);
+        grant_token_default_dacl(primary.get(), &logon)?;
 
         // 第 3 步：在副本上降完整性（SetTokenInformation 需要 TOKEN_ADJUST_DEFAULT，
         // 副本带 TOKEN_ALL_ACCESS，够用）
@@ -428,12 +532,124 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
     }
 }
 
+/// 复制当前令牌的登录 SID（不是用户 SID），供受限进程访问会话内的系统对象。
+fn logon_sid(token: HANDLE) -> Result<Vec<u8>, String> {
+    use windows::Win32::Security::{
+        GetLengthSid, GetTokenInformation, TokenLogonSid, TOKEN_GROUPS,
+    };
+
+    unsafe {
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenLogonSid, None, 0, &mut needed);
+        if needed < std::mem::size_of::<TOKEN_GROUPS>() as u32 {
+            return Err("查询登录 SID 大小失败".into());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        GetTokenInformation(
+            token,
+            TokenLogonSid,
+            Some(buf.as_mut_ptr().cast()),
+            needed,
+            &mut needed,
+        )
+        .map_err(|e| format!("读取登录 SID 失败: {e}"))?;
+        let groups = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_GROUPS>());
+        if groups.GroupCount != 1 || groups.Groups[0].Sid.0.is_null() {
+            return Err("令牌没有唯一登录 SID".into());
+        }
+        let sid = groups.Groups[0].Sid;
+        let len = GetLengthSid(sid) as usize;
+        Ok(std::slice::from_raw_parts(sid.0.cast::<u8>(), len).to_vec())
+    }
+}
+
+pub(super) fn current_logon_sid_sddl() -> Result<String, String> {
+    static SID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(sid) = SID.get() {
+        return Ok(sid.clone());
+    }
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{PSID, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    unsafe {
+        let mut handle = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle)
+            .map_err(|e| e.to_string())?;
+        let handle = HandleWrap::new(handle);
+        let sid = logon_sid(handle.get())?;
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(PSID(sid.as_ptr() as *mut _), &mut text)
+            .map_err(|e| e.to_string())?;
+        let result = text.to_string().map_err(|e| e.to_string());
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        let result = result?;
+        let _ = SID.set(result.clone());
+        Ok(result)
+    }
+}
+
+/// 子进程创建的内核对象需要允许自身访问；原默认 DACL 常常只授权用户/SYSTEM，
+/// 无法通过 restricting SID 的第二轮检查，KERNELBASE 初始化便会失败。
+/// 仅合并当前登录 SID 的权限，保留原 ACL，且只修改派生令牌。
+fn grant_token_default_dacl(token: HANDLE, logon: &[u8]) -> Result<(), String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{LocalFree, GENERIC_ALL, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        SetEntriesInAclW, EXPLICIT_ACCESS_W, GRANT_ACCESS, TRUSTEE_IS_SID, TRUSTEE_W,
+    };
+    use windows::Win32::Security::{
+        GetTokenInformation, SetTokenInformation, TokenDefaultDacl, TOKEN_DEFAULT_DACL,
+    };
+
+    unsafe {
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenDefaultDacl, None, 0, &mut needed);
+        if needed < std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32 {
+            return Err("查询沙箱默认 DACL 大小失败".into());
+        }
+        let mut buf = vec![0u8; needed as usize];
+        GetTokenInformation(
+            token,
+            TokenDefaultDacl,
+            Some(buf.as_mut_ptr().cast()),
+            needed,
+            &mut needed,
+        )
+        .map_err(|e| format!("读取沙箱默认 DACL 失败: {e}"))?;
+        let current = std::ptr::read_unaligned(buf.as_ptr().cast::<TOKEN_DEFAULT_DACL>());
+        let entry = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL.0,
+            grfAccessMode: GRANT_ACCESS,
+            Trustee: TRUSTEE_W {
+                TrusteeForm: TRUSTEE_IS_SID,
+                ptstrName: PWSTR(logon.as_ptr() as *mut u16),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut acl = std::ptr::null_mut();
+        SetEntriesInAclW(Some(&[entry]), Some(current.DefaultDacl), &mut acl)
+            .ok()
+            .map_err(|e| format!("合并沙箱默认 DACL 失败: {e}"))?;
+        let updated = TOKEN_DEFAULT_DACL { DefaultDacl: acl };
+        let result = SetTokenInformation(
+            token,
+            TokenDefaultDacl,
+            &updated as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32,
+        );
+        let _ = LocalFree(Some(HLOCAL(acl.cast())));
+        result.map_err(|e| format!("设置沙箱默认 DACL 失败: {e}"))
+    }
+}
 
 /// SDDL 字符串 → 自有缓冲的 SID 字节
 fn string_to_sid(sddl: &str) -> Result<Vec<u8>, String> {
-    use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
 
     unsafe {
         let w = wide(sddl);
@@ -467,7 +683,8 @@ fn build_env_block(
 
     unsafe {
         let mut raw: *mut core::ffi::c_void = std::ptr::null_mut();
-        let have_env = CreateEnvironmentBlock(&mut raw, Some(token), false).is_ok() && !raw.is_null();
+        let have_env =
+            CreateEnvironmentBlock(&mut raw, Some(token), false).is_ok() && !raw.is_null();
 
         let mut vars: Vec<(String, String)> = if have_env {
             parse_env_block(raw)
@@ -509,6 +726,9 @@ fn build_env_block(
 /// 行事**的程序（curl / PowerShell / npm / git / .NET）按策略走，而不是假装
 /// 挡得住有意绕行的代码。
 fn apply_network_env(vars: &mut Vec<(String, String)>, req: &SandboxRequest) {
+    if req.network_mode == SandboxNetworkMode::Allow {
+        return;
+    }
     let proxy_keys = [
         "HTTP_PROXY",
         "http_proxy",
@@ -526,17 +746,24 @@ fn apply_network_env(vars: &mut Vec<(String, String)>, req: &SandboxRequest) {
             .as_ref()
             .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty())
-            .map(|a| format!("http://{a}")),
+            .map(|a| format!("http://{a}"))
+            .or_else(|| Some("http://127.0.0.1:0".into())),
         // 指向必然拒绝连接的回环端口：不依赖代理进程是否活着，
         // 未被白名单放行的请求连不上就是连不上
         SandboxNetworkMode::Blocked => Some("http://127.0.0.1:0".to_string()),
     };
 
     if let Some(url) = target {
+        vars.retain(|(key, _)| !key.eq_ignore_ascii_case("NO_PROXY"));
+        vars.push(("NO_PROXY".into(), String::new()));
         for k in proxy_keys {
             vars.push((k.to_string(), url.clone()));
         }
-        tracing::info!("[sandbox] 网络模式 {:?}，代理出口 {}", req.network_mode, url);
+        tracing::info!(
+            "[sandbox] 网络模式 {:?}，代理出口 {}",
+            req.network_mode,
+            url
+        );
     }
 }
 
@@ -599,15 +826,15 @@ pub fn run_powershell_sandboxed_with(
     cwd: Option<&std::path::Path>,
 ) -> Result<SandboxOutput, String> {
     use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
-    use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT, HANDLE_FLAGS};
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-        InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-        WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-        PROCESS_INFORMATION,
-        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+        CreateProcessAsUserW, GetExitCodeProcess, InitializeProcThreadAttributeList,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW,
     };
 
     let scratch = scratch_dir_for(&req.session_id)?;
@@ -616,16 +843,20 @@ pub fn run_powershell_sandboxed_with(
     let _ = grant_workspaces(req);
 
     // 脚本落盘（BOM），用后删除
-    let script_path =
-        scratch.join(format!("vivian-script-{}.ps1", uuid::Uuid::new_v4().simple()));
+    let script_path = scratch.join(format!(
+        "vivian-script-{}.ps1",
+        uuid::Uuid::new_v4().simple()
+    ));
     std::fs::write(&script_path, format!("\u{feff}{script}\n"))
         .map_err(|e| format!("写沙箱脚本文件失败: {e}"))?;
+    let _script_file = ScriptFile(script_path.clone());
 
     // PowerShell 绝对路径（%SystemRoot% 定位，不依赖子进程 PATH）
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     let ps_exe = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+    // 内部生成的临时脚本只在本进程跳过签名检查，不修改系统/用户执行策略。
     let mut cmdline = wide(&format!(
-        "\"{ps_exe}\" -NoProfile -NonInteractive -File \"{}\"",
+        "\"{ps_exe}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
         script_path.display()
     ));
     let appname = wide(&ps_exe);
@@ -664,9 +895,11 @@ pub fn run_powershell_sandboxed_with(
         let mut attr_size: usize = 0;
         let _ = InitializeProcThreadAttributeList(None, 1, None, &mut attr_size);
         let mut attr_buf = vec![0u8; attr_size];
-        let attr_list = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut core::ffi::c_void);
+        let attr_list =
+            LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut core::ffi::c_void);
         InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
             .map_err(|e| format!("初始化属性列表失败: {e}"))?;
+        let _attributes = AttributeList(attr_list);
         UpdateProcThreadAttribute(
             attr_list,
             0,
@@ -694,7 +927,11 @@ pub fn run_powershell_sandboxed_with(
             None,
             None,
             true,
-            EXTENDED_STARTUPINFO_PRESENT,
+            // build_env_block 返回 UTF-16；W 版 API 仍要求显式声明环境块编码。
+            EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | CREATE_SUSPENDED,
             Some(env_block.as_ptr() as *const core::ffi::c_void),
             PCWSTR(cwd.as_ptr()),
             &siex.StartupInfo,
@@ -709,26 +946,12 @@ pub fn run_powershell_sandboxed_with(
         drop(stdin_read);
         drop(stdout_write);
         drop(stderr_write);
-        DeleteProcThreadAttributeList(attr_list);
 
         let process = HandleWrap::new(pi.hProcess);
         let _thread = HandleWrap::new(pi.hThread);
 
         // Job Object 兜底回收（应用崩溃/强杀时 OS 回收子进程）
-        crate::utils::job_object::assign_process(process.get().0 as isize);
-
-        // stdin 写入后关闭（EOF）；from_raw_handle 接管句柄，File drop 即 CloseHandle
-        {
-            use std::io::Write;
-            use std::os::windows::io::FromRawHandle;
-            let mut file = std::fs::File::from_raw_handle(stdin_write.get().0 as *mut _);
-            file.write_all(stdin_payload.as_bytes())
-                .map_err(|e| format!("写沙箱 stdin 失败: {e}"))?;
-            drop(file);
-        }
-        // stdin_write 包装与上面的 File 会对同一句柄 double close——
-        // File 已 drop 关闭，这里让包装静默过期（不要 CloseHandle）
-        std::mem::forget(stdin_write);
+        let job = ProcessJob::start(process.get(), _thread.get())?;
 
         // stdout/stderr 后台读取（限幅）；File 接管父侧读句柄，读取完成后 drop 关闭
         let cap = req.cap();
@@ -740,10 +963,13 @@ pub fn run_powershell_sandboxed_with(
                 let mut file = std::fs::File::from_raw_handle(raw as *mut _);
                 let mut out = Vec::new();
                 let mut chunk = [0u8; 8192];
-                while out.len() < cap {
+                loop {
                     match file.read(&mut chunk) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => out.extend_from_slice(&chunk[..n]),
+                        Ok(n) => {
+                            let keep = n.min(cap.saturating_sub(out.len()));
+                            out.extend_from_slice(&chunk[..keep]);
+                        }
                     }
                 }
                 out
@@ -754,17 +980,27 @@ pub fn run_powershell_sandboxed_with(
         std::mem::forget(stdout_read);
         std::mem::forget(stderr_read);
 
+        // Readers and writer run concurrently: neither a full stdout pipe nor a
+        // script that never reads stdin may hold up the timeout clock.
+        let mut input = stdin_write.into_file();
+        let payload = stdin_payload.as_bytes().to_vec();
+        let input_thread = std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = input.write_all(&payload);
+        });
         // 带超时等待
         let wait_ms = timeout_secs.saturating_mul(1000).min(u32::MAX as u64) as u32;
         let mut timed_out = false;
         if WaitForSingleObject(process.get(), wait_ms) == WAIT_TIMEOUT {
             timed_out = true;
-            let _ = TerminateProcess(process.get(), 1);
+            job.kill();
             let _ = WaitForSingleObject(process.get(), 5000);
         }
 
         let mut exit_code: u32 = 0;
         let _ = GetExitCodeProcess(process.get(), &mut exit_code);
+        job.kill();
+        let _ = input_thread.join();
         let stdout = String::from_utf8_lossy(&out_thread.join().unwrap_or_default()).into_owned();
         let stderr = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
 
@@ -813,12 +1049,17 @@ pub fn run_command_sandboxed(
 /// 与 one-shot 路径的区别：stdin **不关闭**，进程一直活着等下一条命令。
 pub struct SandboxedShell {
     process: usize,
+    job: ProcessJob,
+    scratch: PathBuf,
     pub stdin: std::fs::File,
     pub stdout: std::fs::File,
     pub stderr: std::fs::File,
 }
 
 impl SandboxedShell {
+    pub fn scratch_dir(&self) -> &std::path::Path {
+        &self.scratch
+    }
     /// 进程句柄裸值（供 Job Object 归属与等待）
     pub fn process_raw(&self) -> usize {
         self.process
@@ -841,9 +1082,7 @@ impl SandboxedShell {
 
     /// 终止进程（终端关闭 / 超时兜底）
     pub fn kill(&self) {
-        use windows::Win32::System::Threading::TerminateProcess;
-        let h = HANDLE(self.process as *mut core::ffi::c_void);
-        let _ = unsafe { TerminateProcess(h, 1) };
+        self.job.kill();
     }
 }
 
@@ -862,14 +1101,12 @@ pub fn spawn_sandboxed_shell(
     cwd: Option<&std::path::Path>,
 ) -> Result<SandboxedShell, String> {
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{
-        SetHandleInformation, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
-    };
+    use windows::Win32::Foundation::{SetHandleInformation, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
     use windows::Win32::Security::SECURITY_ATTRIBUTES;
     use windows::Win32::System::Pipes::CreatePipe;
     use windows::Win32::System::Threading::{
-        CreateProcessAsUserW, DeleteProcThreadAttributeList,
-        InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+        CreateProcessAsUserW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
+        CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
         EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
@@ -881,7 +1118,9 @@ pub fn spawn_sandboxed_shell(
 
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     let ps_exe = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-    let mut cmdline = wide(&format!("\"{ps_exe}\" -NoProfile -NonInteractive -Command -"));
+    let mut cmdline = wide(&format!(
+        "\"{ps_exe}\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -"
+    ));
     let appname = wide(&ps_exe);
     let cwd_w = wide(&cwd.unwrap_or(scratch.as_path()).to_string_lossy());
 
@@ -918,6 +1157,7 @@ pub fn spawn_sandboxed_shell(
             LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut core::ffi::c_void);
         InitializeProcThreadAttributeList(Some(attr_list), 1, None, &mut attr_size)
             .map_err(|e| format!("初始化属性列表失败: {e}"))?;
+        let _attributes = AttributeList(attr_list);
         UpdateProcThreadAttribute(
             attr_list,
             0,
@@ -945,7 +1185,11 @@ pub fn spawn_sandboxed_shell(
             None,
             None,
             true,
-            EXTENDED_STARTUPINFO_PRESENT,
+            // 与一次性命令相同：显式环境块编码，并避免桌面上弹出控制台。
+            EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW
+                | CREATE_SUSPENDED,
             Some(env_block.as_ptr() as *const core::ffi::c_void),
             PCWSTR(cwd_w.as_ptr()),
             &siex.StartupInfo,
@@ -956,15 +1200,22 @@ pub fn spawn_sandboxed_shell(
         drop(stdin_read);
         drop(stdout_write);
         drop(stderr_write);
-        DeleteProcThreadAttributeList(attr_list);
 
+        // Assign the suspended process before it can create descendants.
+        let job = match ProcessJob::start(pi.hProcess, pi.hThread) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = CloseHandle(pi.hThread);
+                let _ = CloseHandle(pi.hProcess);
+                return Err(error);
+            }
+        };
         // 主线程句柄不需要：只留进程句柄做等待与终止
         if !pi.hThread.is_invalid() {
             let _ = CloseHandle(pi.hThread);
         }
 
         // Job Object 兜底：宿主崩溃时 OS 回收进程树
-        crate::utils::job_object::assign_process(pi.hProcess.0 as isize);
 
         use std::os::windows::io::FromRawHandle;
         let stdin = std::fs::File::from_raw_handle(stdin_write.get().0 as *mut _);
@@ -974,10 +1225,15 @@ pub fn spawn_sandboxed_shell(
         std::mem::forget(stdout_read);
         std::mem::forget(stderr_read);
 
-        tracing::info!("[sandbox] 持久终端已在受限令牌下启动，cwd={:?}", cwd.map(|p| p.display().to_string()));
+        tracing::info!(
+            "[sandbox] 持久终端已在受限令牌下启动，cwd={:?}",
+            cwd.map(|p| p.display().to_string())
+        );
 
         Ok(SandboxedShell {
             process: pi.hProcess.0 as usize,
+            job,
+            scratch,
             stdin,
             stdout,
             stderr,
@@ -1026,18 +1282,15 @@ mod tests {
         // 端到端版：真的跑一次沙箱命令，宿主完整性级别必须原样。
         // 派生令牌是否干净由 restricted_token_never_downgrades_the_host 守住，
         // 这条守的是 spawn 路径（环境块 / 句柄继承 / CreateProcessAsUser）。
-        // 不断言命令必须跑成功——注入进程创建钩子的宿主环境会让它返回
-        // ERROR_INVALID_PARAMETER，那与"有没有污染宿主"是两件事。
         let before = current_integrity_level();
         assert!(
             before.can_write_user_data(),
             "宿主需以 Medium 及以上完整性运行才能验证这件事，实测 {}",
             before.as_str()
         );
-        match run_powershell_sandboxed("Write-Output 'sandbox-ok'", "", 60) {
-            Ok(out) => tracing::info!("沙箱执行: exit={} stdout={}", out.exit_code, out.stdout),
-            Err(error) => tracing::warn!("沙箱执行未成功（不影响本断言）: {error}"),
-        }
+        let out = run("Write-Output 'sandbox-ok'", "");
+        assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+        assert!(out.stdout.contains("sandbox-ok"), "stdout: {}", out.stdout);
         let after = current_integrity_level();
         assert_eq!(
             after,
@@ -1060,7 +1313,11 @@ mod tests {
             r#"{"name":"sandbox"}"#,
         );
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
-        assert!(out.stdout.contains("hello-sandbox"), "stdout: {}", out.stdout);
+        assert!(
+            out.stdout.contains("hello-sandbox"),
+            "stdout: {}",
+            out.stdout
+        );
         assert!(!out.timed_out);
     }
 
@@ -1080,8 +1337,9 @@ mod tests {
     #[ignore = "requires Windows restricted-token process privileges; run test:windows-integration in a supported environment"]
     fn user_profile_write_denied() {
         // 低完整性 + Users restricting SID：用户资料目录写不进去
+        let filename = format!("vivian-sandbox-denied-{}.txt", uuid::Uuid::new_v4());
         let out = run(
-            r#"try { Set-Content -Path (Join-Path $env:USERPROFILE 'vivian-sandbox-denied.txt') -Value 'x' -ErrorAction Stop; Write-Output 'WROTE' } catch { Write-Output 'DENIED' }"#,
+            &format!("try {{ Set-Content -LiteralPath (Join-Path $env:USERPROFILE '{filename}') -Value 'x' -ErrorAction Stop; Write-Output 'WROTE' }} catch {{ Write-Output 'DENIED' }}"),
             "",
         );
         assert!(
@@ -1092,7 +1350,7 @@ mod tests {
         );
         // 兜底清理（不应存在，但防测试残留）
         let home = std::env::var("USERPROFILE").map(PathBuf::from).unwrap();
-        let _ = std::fs::remove_file(home.join("vivian-sandbox-denied.txt"));
+        let _ = std::fs::remove_file(home.join(filename));
     }
 
     #[test]
@@ -1101,5 +1359,227 @@ mod tests {
         let out = run("exit 3", "");
         assert_eq!(out.exit_code, 3);
         assert!(!out.timed_out);
+    }
+
+    struct TestWorkspace {
+        root: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("vivian-sandbox-test-{}", uuid::Uuid::new_v4()));
+            let dir = root.join("工作区 with spaces");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(root.join("outside.txt"), "unchanged").unwrap();
+            Self { root, dir }
+        }
+
+        fn request(&self) -> SandboxRequest {
+            SandboxRequest {
+                session_id: uuid::Uuid::new_v4().simple().to_string(),
+                workspace_dirs: vec![self.dir.to_string_lossy().into_owned()],
+                ..Default::default()
+            }
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn command_writes_unicode_workspace_and_temp_but_denies_outside_write() {
+        let workspace = TestWorkspace::new();
+        let req = workspace.request();
+        // 模拟宿主在会话 TEMP 下创建文件；Low 标签必须可继承，子进程才可修改。
+        let scratch = scratch_dir_for(&req.session_id).unwrap();
+        std::fs::write(scratch.join("host-created.txt"), "before").unwrap();
+        let out = run_command_sandboxed(
+            &req,
+            r#"$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+Set-Content -LiteralPath 'result.txt' -Value '42'
+Set-Content -LiteralPath (Join-Path $env:TEMP 'host-created.txt') -Value 'scratch-ok'
+try { Set-Content -LiteralPath '..\outside.txt' -Value 'bad'; Write-Output 'WROTE-OUTSIDE' } catch { Write-Output 'DENIED-OUTSIDE' }
+Write-Output (Get-Location).Path
+Write-Output (Get-Content -LiteralPath (Join-Path $env:TEMP 'host-created.txt'))
+& $env:ComSpec /d /c 'exit 7'"#,
+            15,
+            Some(&workspace.dir),
+        ).expect("命令应能启动并执行");
+        assert_eq!(out.exit_code, 7, "{out:?}");
+        assert!(!out.timed_out);
+        assert!(out.stdout.contains("工作区 with spaces"), "{out:?}");
+        assert!(out.stdout.contains("scratch-ok"), "{out:?}");
+        assert!(out.stdout.contains("DENIED-OUTSIDE"), "{out:?}");
+        assert!(!out.stdout.contains("WROTE-OUTSIDE"), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.dir.join("result.txt"))
+                .unwrap()
+                .trim(),
+            "42"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.root.join("outside.txt")).unwrap(),
+            "unchanged"
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn persistent_shell_preserves_state_and_can_spawn_piped_children() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let workspace = TestWorkspace::new();
+        let req = workspace.request();
+        let mut shell =
+            spawn_sandboxed_shell(&req, Some(&workspace.dir)).expect("持久沙箱应能启动");
+        let read = |mut file: std::fs::File| {
+            std::thread::spawn(move || {
+                let mut text = String::new();
+                file.read_to_string(&mut text).unwrap();
+                text
+            })
+        };
+        let stdout = read(shell.stdout.try_clone().unwrap());
+        let stderr = read(shell.stderr.try_clone().unwrap());
+        shell
+            .stdin
+            .write_all(
+                br#"$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.Encoding]::UTF8
+$n=40
+$n+=2; Set-Content -LiteralPath 'persistent.txt' -Value $n
+$p=New-Object System.Diagnostics.Process
+$p.StartInfo.FileName=$env:ComSpec
+$p.StartInfo.Arguments='/d /c echo piped-child-ok'
+$p.StartInfo.UseShellExecute=$false
+$p.StartInfo.RedirectStandardOutput=$true
+$null=$p.Start(); Write-Output $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+Write-Output "persistent=$n"
+exit 0
+"#,
+            )
+            .unwrap();
+        shell.stdin.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let code = loop {
+            if let Some(code) = shell.try_wait() {
+                break Some(code);
+            }
+            if Instant::now() >= deadline {
+                shell.kill();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = stdout.join().unwrap();
+        let stderr = stderr.join().unwrap();
+        assert_eq!(code, Some(0), "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains("persistent=42"),
+            "stdout={stdout} stderr={stderr}"
+        );
+        assert!(
+            stdout.contains("piped-child-ok"),
+            "stdout={stdout} stderr={stderr}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.dir.join("persistent.txt"))
+                .unwrap()
+                .trim(),
+            "42"
+        );
+        let _ = std::fs::remove_dir_all(scratch_dir_for(&req.session_id).unwrap());
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn sandbox_timeout_terminates_the_process() {
+        let out = run_powershell_sandboxed("Start-Sleep -Seconds 30", "", 1).unwrap();
+        assert!(out.timed_out, "{out:?}");
+        assert_ne!(out.exit_code, 0, "{out:?}");
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn bounded_output_drains_while_large_stdin_is_written() {
+        let req = SandboxRequest {
+            output_cap: 64,
+            ..Default::default()
+        };
+        let input = "x".repeat(1024 * 1024);
+        let out = run_powershell_sandboxed_with(&req,
+            "[Console]::Write(('x' * 262144)); $p=[Console]::In.ReadToEnd(); [Console]::Error.Write($p.Length); exit 0",
+            &input, 15, None).unwrap();
+        assert_eq!(out.exit_code, 0, "{out:?}");
+        assert_eq!(out.stdout.len(), 64);
+        assert!(out.stderr.contains("1048576"), "{out:?}");
+        assert!(!out.timed_out);
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn unread_stdin_does_not_prevent_timeout() {
+        let started = std::time::Instant::now();
+        let out = run_powershell_sandboxed("Start-Sleep -Seconds 30", &"x".repeat(1024 * 1024), 1)
+            .unwrap();
+        assert!(out.timed_out);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes; run test:windows-integration"]
+    fn completed_command_reaps_its_descendants() {
+        let out = run("$p=New-Object System.Diagnostics.Process; $p.StartInfo.FileName=\"$PSHOME\\powershell.exe\"; $p.StartInfo.Arguments='-NoProfile -NonInteractive -Command Start-Sleep -Seconds 30'; $p.StartInfo.UseShellExecute=$false; $p.StartInfo.CreateNoWindow=$true; $null=$p.Start(); Write-Output $p.Id; exit 0", "");
+        assert_eq!(out.exit_code, 0, "{out:?}");
+        let pid: u32 = out.stdout.trim().parse().unwrap();
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let alive = unsafe {
+                match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                    Ok(handle) => {
+                        let handle = HandleWrap::new(handle);
+                        let mut code = 0;
+                        GetExitCodeProcess(handle.get(), &mut code).is_ok() && code == 259
+                    }
+                    Err(_) => false,
+                }
+            };
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "descendant {pid} survived completion"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn missing_proxy_and_no_proxy_bypass_fail_closed() {
+        let req = SandboxRequest {
+            network_mode: SandboxNetworkMode::Proxy,
+            ..Default::default()
+        };
+        let mut vars = vec![("NO_PROXY".into(), "*".into())];
+        apply_network_env(&mut vars, &req);
+        assert!(vars
+            .iter()
+            .any(|(key, value)| key == "HTTP_PROXY" && value == "http://127.0.0.1:0"));
+        assert!(!vars
+            .iter()
+            .any(|(key, value)| key.eq_ignore_ascii_case("NO_PROXY") && !value.is_empty()));
     }
 }

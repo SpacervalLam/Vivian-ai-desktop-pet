@@ -262,8 +262,8 @@ pub struct LLMRequest {
     pub reasoning: ReasoningPreference,
     /// 发起本次 LLM 调用的角色 ID（None = 无归属/全局任务）。
     ///
-    /// 仅供错误通知（llm:error / chat:route_fallback）做角色路由：
-    /// 归属明确时 toast 只弹到该角色窗口，无归属则不弹。
+    /// 用于错误通知（llm:error / chat:route_fallback）的角色路由，以及从该角色
+    /// 已保存的用户画像补全提示词称呼。无归属时不读取其他角色的画像。
     ///
     /// 注意：`LLMRequest` 不参与序列化（wire 层由各 provider 自建请求体），
     /// 因此这里不能挂 `#[serde(default)]` —— 该结构体没有 serde derive。

@@ -306,6 +306,11 @@ pub fn anthropic_messages(messages: &[ChatMessage]) -> Vec<Value> {
             _ => converted.push(json!({"role": "user", "content": m.content})),
         }
     }
+    if converted.is_empty() && messages.iter().any(|message| message.role == "system") {
+        // Anthropic requires a nonempty messages array even for an internal task.
+        // The actual task remains in system; this is only a transport trigger.
+        converted.push(json!({"role": "user", "content": "[Host generation trigger; no human message]"}));
+    }
     converted
 }
 
@@ -444,5 +449,17 @@ mod tests {
         let msgs = vec![text_msg("system", "a"), text_msg("user", "b"), text_msg("system", "c")];
         assert_eq!(anthropic_system(&msgs), Some("a\n\nc".to_string()));
         assert!(anthropic_messages(&msgs).iter().all(|m| m["role"] != "system"));
+    }
+
+    #[test]
+    fn anthropic_internal_task_keeps_instructions_in_system_with_only_a_transport_trigger() {
+        let task = ChatMessage::internal_prompt("Think about the supplied observations.");
+        let messages = vec![task];
+        let system = anthropic_system(&messages).unwrap();
+        assert!(system.contains("Think about the supplied observations."));
+        let wire = anthropic_messages(&messages);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["content"], "[Host generation trigger; no human message]");
+        assert!(!wire[0]["content"].as_str().unwrap().contains("observations"));
     }
 }

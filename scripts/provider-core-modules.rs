@@ -39,6 +39,8 @@ pub mod thinking_stripper;
 pub mod transport;
 #[path = "../src-tauri/src/providers/usage_store.rs"]
 pub mod usage_store;
+#[path = "../src-tauri/src/providers/user_identity.rs"]
+pub mod user_identity;
 #[path = "../src-tauri/src/providers/web_citations.rs"]
 pub mod web_citations;
 #[path = "../src-tauri/src/providers/wenxin.rs"]
