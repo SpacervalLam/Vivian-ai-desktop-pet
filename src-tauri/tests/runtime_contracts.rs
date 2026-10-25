@@ -44,6 +44,35 @@ pub mod desktop_contract;
 pub mod plugin_contract;
 #[path = "../src/pipeline/inline_tag_scanner.rs"]
 pub mod inline_tag_scanner;
+#[path = "../src/utils/action_text.rs"]
+pub mod action_text;
+
+#[cfg(test)]
+mod action_text_output_tests {
+    use super::{action_text::filter_parentheses, inline_tag_scanner::InlineTagScanner};
+
+    #[test]
+    fn inline_scanner_tail_is_filtered_before_stream_completion() {
+        for (chunks, expected) in [
+            (vec!["好呀（猫耳", "抖了抖<e"], "好呀"),
+            (vec!["（点头）嗯(抬手", "<m name="], "嗯"),
+            (vec!["你好<", "e"], "你好<e"),
+            (vec!["（点头）", "<e name=\"happy\"/>", "好。"], "好。"),
+        ] {
+            let mut scanner = InlineTagScanner::new(Box::new(|_| {}));
+            let mut deferred = String::new();
+            let mut output = String::new();
+            for chunk in chunks {
+                let (visible, pending) = filter_parentheses(&scanner.feed(chunk), &deferred);
+                output.push_str(&visible);
+                deferred = pending;
+            }
+            let (visible, _) = filter_parentheses(&scanner.flush(), &deferred);
+            output.push_str(&visible);
+            assert_eq!(output, expected);
+        }
+    }
+}
 #[path = "../src/feature_flags.rs"]
 pub mod feature_flags;
 #[path = "../src/memory/tokenize.rs"]

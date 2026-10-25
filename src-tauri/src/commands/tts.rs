@@ -114,8 +114,7 @@ pub async fn set_tts_enabled_all(
 
 /// 过滤掉文本中的括号动作描述（如 `(轻声笑了笑)`），避免 TTS 朗读动作文本
 fn strip_action_text(text: &str) -> String {
-    let re = regex::Regex::new(r"\([^)]*\)").unwrap();
-    let result = re.replace_all(text, "").into_owned();
+    let result = crate::utils::filter_parentheses_sync(text);
     // 清理多余空白
     result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -665,6 +664,20 @@ pub fn list_gpt_sovits_models(
 /// 路径转字符串(统一用正斜杠,避免后端 JSON 转义)
 fn path_to_str(p: &std::path::Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod action_text_tests {
+    use super::strip_action_text;
+
+    #[test]
+    fn tts_filters_fullwidth_nested_and_unfinished_actions() {
+        assert_eq!(strip_action_text("哇！（猫耳抖了抖，好奇地凑近屏幕）你好。"), "哇！你好。");
+        assert_eq!(strip_action_text("好(点头（微笑）)呀"), "好呀");
+        assert_eq!(strip_action_text("嗯（轻轻点头"), "嗯");
+        assert_eq!(strip_action_text("（点头）"), "");
+        assert_eq!(strip_action_text("Hello\n  world!"), "Hello world!");
+    }
 }
 
 #[cfg(test)]

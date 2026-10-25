@@ -836,6 +836,15 @@ async fn send_message_stream_impl(
     if let Some(ref scanner) = inline_scanner {
         let mut s = scanner.lock();
         let remaining = s.flush();
+        // The scanner may finish inside narration; its tail must use the same filter as chunks.
+        let remaining = if let Some(ref buffer) = paren_buffer {
+            let mut buf = buffer.lock();
+            let (clean, deferred) = crate::utils::filter_parentheses(&remaining, &buf);
+            *buf = deferred;
+            clean
+        } else {
+            remaining
+        };
         if !remaining.is_empty() {
             let _ = app.emit(
                 "chat:chunk",
@@ -844,16 +853,9 @@ async fn send_message_stream_impl(
         }
     }
 
-    // ── direct 模式括号缓冲区 flush：将未闭合括号的残余文本输出 ──
+    // 未闭合的括号内容仍是动作旁白，结束时丢弃，不能作为台词输出。
     if let Some(ref buffer) = paren_buffer {
-        let mut buf = buffer.lock();
-        let remaining = std::mem::take(&mut *buf);
-        if !remaining.is_empty() {
-            let _ = app.emit(
-                "chat:chunk",
-                json!({ "text": remaining, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
-            );
-        }
+        buffer.lock().clear();
     }
 
     // ── 会话生命周期：think 完成后更新会话状态 ──

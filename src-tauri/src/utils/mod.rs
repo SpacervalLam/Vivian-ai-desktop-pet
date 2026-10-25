@@ -1,4 +1,5 @@
 pub mod protocol_text;
+pub mod action_text;
 pub mod autostart;
 pub mod cancel_token;
 pub mod background_priority;
@@ -26,6 +27,7 @@ pub mod watchdog;
 pub mod prompt_time;
 
 pub use environment::{CurrentState, EnvironmentInfo, EnvironmentManager, UserActivity};
+pub use action_text::{filter_parentheses, filter_parentheses_sync};
 pub use path::get_user_data_dir;
 pub use playback_gate::{PlaybackEvent, PlaybackGate};
 pub use powershell::{run_ps, run_ps_async};
@@ -84,111 +86,6 @@ pub fn messages_cache_key(messages: &[crate::types::response::ChatMessage]) -> S
         })
         .collect();
     serde_json::to_string(&projected).unwrap_or_default()
-}
-
-/// 移除文本中括号及其内容
-///
-/// 移除所有中文括号（()、（））及其内部的文本内容。
-/// 对于未闭合的括号（流式场景），暂存到 deferred 中，等待下一个 chunk。
-///
-/// 返回值: (清理后的文本, 暂存的未闭合括号内容)
-pub fn filter_parentheses(text: &str, deferred: &str) -> (String, String) {
-    let mut combined = String::with_capacity(deferred.len() + text.len());
-    combined.push_str(deferred);
-    combined.push_str(text);
-
-    let mut result = String::with_capacity(combined.len());
-    let mut in_paren = false;
-    let mut paren_count = 0;
-    let mut i = 0;
-    let chars: Vec<char> = combined.chars().collect();
-
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '(' || c == '（' {
-            if !in_paren {
-                in_paren = true;
-                paren_count = 1;
-            } else {
-                paren_count += 1;
-            }
-            i += 1;
-            continue;
-        }
-
-        if c == ')' || c == '）' {
-            if in_paren {
-                paren_count -= 1;
-                if paren_count == 0 {
-                    in_paren = false;
-                }
-            } else {
-                result.push(c);
-            }
-            i += 1;
-            continue;
-        }
-
-        if in_paren {
-            i += 1;
-            continue;
-        }
-
-        result.push(c);
-        i += 1;
-    }
-
-    let remaining = if in_paren {
-        let start_idx = result.len();
-        let mut remaining_text = String::new();
-        let mut j = start_idx;
-        while j < chars.len() {
-            remaining_text.push(chars[j]);
-            j += 1;
-        }
-        remaining_text
-    } else {
-        String::new()
-    };
-
-    (result, remaining)
-}
-
-/// 非流式版本：一次性移除所有括号内容
-pub fn filter_parentheses_sync(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut in_paren = false;
-    let mut paren_count = 0;
-
-    for c in text.chars() {
-        if c == '(' || c == '（' {
-            if !in_paren {
-                in_paren = true;
-                paren_count = 1;
-            } else {
-                paren_count += 1;
-            }
-            continue;
-        }
-
-        if c == ')' || c == '）' {
-            if in_paren {
-                paren_count -= 1;
-                if paren_count == 0 {
-                    in_paren = false;
-                }
-            } else {
-                result.push(c);
-            }
-            continue;
-        }
-
-        if !in_paren {
-            result.push(c);
-        }
-    }
-
-    result
 }
 
 /// 清洗 Markdown / 富文本渲染语法，仅保留纯文本内容。

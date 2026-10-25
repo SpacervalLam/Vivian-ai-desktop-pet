@@ -849,7 +849,7 @@ impl Brain {
             return Ok(());
         }
 
-        let speak_text = if self.dialogue.get_channel() == "direct" {
+        let speak_text = if matches!(self.dialogue.get_channel().as_str(), "direct" | "broadcast") {
             crate::utils::filter_parentheses_sync(text)
         } else {
             text.to_string()
