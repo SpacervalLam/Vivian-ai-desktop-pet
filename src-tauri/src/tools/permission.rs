@@ -523,6 +523,11 @@ pub fn unresolved_confirmation_names(
     let mut missing: Vec<&'static str> = Vec::new();
 
     for name in CONFIRM_AT_ACTION_TOOLS {
+        // Legacy policy remains enforced if an extension restores this tool, but
+        // the embedded browser deliberately does not expose arbitrary JS.
+        if *name == "browser_eval_js" {
+            continue;
+        }
         // 浏览器桥工具在注册表里是模型可见名，名单里填的是线名——两种都认。
         let ok = is_registered(name) || is_registered(&to_mcp_style(name));
         if !ok {
@@ -1122,6 +1127,9 @@ mod tests {
         // 反向：注册表缺了 manage_todo 时必须被检出
         let missing = unresolved_confirmation_names(|n| n != "manage_todo");
         assert!(missing.contains(&"manage_todo"));
+        let missing = unresolved_confirmation_names(|name| !name.contains("eval_js"));
+        assert!(missing.is_empty(), "retired browser tool must not fail startup validation");
+        assert!(is_confirmation_required_tool("mcp__browser__eval_js"));
     }
 
     // ========================================================================

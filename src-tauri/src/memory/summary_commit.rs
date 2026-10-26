@@ -32,6 +32,15 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn persisted_timestamp_keeps_source_version_after_reload() {
+        let source = vec![json!({"id":"archive-a","summary":"unchanged",
+            "created_at":1792940000.0000021_f64})];
+        let persisted = serde_json::to_string(&source).unwrap();
+        let reloaded: Vec<serde_json::Value> = serde_json::from_str(&persisted).unwrap();
+        assert!(sources_current(&reloaded, &source));
+        assert!(prefix_current(&reloaded, &source));
+    }
+    #[test]
     fn appended_records_survive_and_stale_or_duplicate_sources_are_rejected() {
         let sources = vec![
             json!({"id":"a","summary":"old"}),

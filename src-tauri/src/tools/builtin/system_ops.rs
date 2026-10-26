@@ -502,7 +502,11 @@ mod windows_resolver {
                 }
             }
             return Ok(vec![ResolvedCandidate {
-                target: AppTarget::Exe(path),
+                target: if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("lnk")) {
+                    AppTarget::Lnk(path)
+                } else {
+                    AppTarget::Exe(path)
+                },
                 score: 1.0,
                 source: "direct_path",
                 path_desc: application.to_string(),
@@ -1950,6 +1954,17 @@ fn parse_screen_inspection_args(args: &Value) -> Result<ScreenshotOptions, Strin
 #[cfg(test)]
 mod screen_inspection_tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn explicit_shortcut_path_is_not_an_executable() {
+        for path in [r"C:\Games\原神.lnk", r"C:\Games\原神.LNK"] {
+            let candidates = windows_resolver::resolve(path).unwrap();
+            assert!(matches!(candidates[0].target, windows_resolver::AppTarget::Lnk(_)));
+        }
+        let candidates = windows_resolver::resolve(r"C:\Games\game.exe").unwrap();
+        assert!(matches!(candidates[0].target, windows_resolver::AppTarget::Exe(_)));
+    }
 
     #[test]
     fn capture_outputs_are_explicit_and_share_one_tool() {

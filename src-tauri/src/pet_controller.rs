@@ -259,12 +259,27 @@ impl PetController {
         }
 
         // 通过 manifest 归一化动作名（语义名 → 注册名）
-        let mapped_name = {
+        let (mapped_name, sprite) = {
             let char_id = self.character_id.read().clone();
             crate::character_registry::get_manifest(&char_id)
-                .map(|m| m.normalize_motion(name))
-                .unwrap_or_else(|| name.to_string())
+                .map(|m| motion_target(&m, name))
+                .unwrap_or_else(|| (name.to_string(), false))
         };
+
+        // Sprite animations live in the frontend vocabulary, not motion files.
+        if sprite {
+            crate::tools::builtin::pet_tools::push_action(
+                crate::tools::builtin::pet_tools::PetActionRequest {
+                    kind: "motion".into(),
+                    target: mapped_name.clone(),
+                    params: serde_json::json!({"priority": priority, "interruptible": interruptible, "loop": r#loop}),
+                    timestamp: chrono::Utc::now().timestamp(),
+                    character_id: self.character_id(),
+                },
+            );
+            return ControlResult::ok(format!("动作 '{}' 已提交播放", name))
+                .with_data(serde_json::json!({"motion_name": mapped_name, "priority": priority}));
+        }
 
         let result = am.play_motion(&mapped_name, priority, interruptible, r#loop);
 
@@ -843,9 +858,28 @@ impl PetController {
     }
 }
 
+fn motion_target(manifest: &crate::engine::manifest::ResourceManifest, name: &str) -> (String, bool) {
+    if manifest.model_manifest().is_some_and(|model| model.model_kind == "sprite") {
+        // Frontend resolves the complete vocabulary, including emotion
+        // animations omitted from manifest.motions().
+        (name.trim().to_string(), true)
+    } else {
+        (manifest.normalize_motion(name), false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sprite_motion_uses_frontend_vocabulary_without_motion_files() {
+        let loader = ResourceLoader::new("nonexistent-test-resources", "vivian");
+        let manifest = crate::engine::manifest::ResourceManifest::from_loader(&loader);
+        assert!(loader.get_motion("happy").is_none());
+        assert_eq!(motion_target(&manifest, " happy "), ("happy".into(), true));
+        assert_eq!(motion_target(&manifest, "idle"), ("idle".into(), true));
+    }
 
     #[test]
     fn test_command_type_values() {

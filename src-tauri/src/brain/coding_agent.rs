@@ -2598,13 +2598,15 @@ impl CodingAgentService {
             persist_project_memory_source(working_directory, session_id, messages)?
         };
         let mut staged = String::new();
-        let system = format!("{MEMORY_DISTILL_SYSTEM_PROMPT}\n输出严格 JSON 数组，每项包含 text（单行正文，不带列表符号）、topic（40字符内主题，不能使用常驻约定/关键约定/权限边界）、source_messages（本批材料中支持该条目的 message 索引数组）、supersedes（被明确纠正的已有条目 ID 数组，无则空）。没有新知识输出 []。全文按顺序分批提供；不能忽略晚出现的纠正或失败结果。新发现和关键约定冲突时标记正文待核实，不覆盖用户约定。来源必须在当前批次内，不生成来源文件名或验证时间；工具成功不代表结论经过验证。分片材料不完整时不要推断缺失内容。");
+        let system = format!("{MEMORY_DISTILL_SYSTEM_PROMPT}\n输出严格 JSON 对象，唯一字段 candidates 为数组，每项包含 text（单行正文，不带列表符号）、topic（40字符内主题，不能使用常驻约定/关键约定/权限边界）、source_messages（本批材料中支持该条目的 message 索引数组）、supersedes（被明确纠正的已有条目 ID 数组，无则空）。没有新知识输出 candidates 为空数组的对象。全文按顺序分批提供；不能忽略晚出现的纠正或失败结果。新发现和关键约定冲突时标记正文待核实，不覆盖用户约定。来源必须在当前批次内，不生成来源文件名或验证时间；工具成功不代表结论经过验证。分片材料不完整时不要推断缺失内容。");
         for (batch, indices) in batches {
             let recent: String = staged.chars().rev().take(4_000).collect::<Vec<_>>().into_iter().rev().collect();
             let prompt = format!("受程序保护的用户约定：\n{}\n已有经验（仅供去重，可能未完整展示）：\n{}\n前面批次的近期候选（尚未提交，可用条目 ID 明确纠正）：\n{recent}\n\n本批原始材料（零基 message 索引）：\n{batch}",
                 if policy.is_some_and(|p| !p.use_memories) { String::new() } else { records::pinned_rules(old) },
                 if policy.is_some_and(|p| !p.use_memories) { String::new() } else { super::work_memory::recall(old, &batch, 4_000) });
-            let response = router.generate(LLMRequest::new("work_memory", vec![ChatMessage::system(&system), ChatMessage::user(prompt)]))
+            let response = router.generate(LLMRequest::new("work_memory", vec![ChatMessage::system(&system), ChatMessage::user(prompt)])
+                .without_framework_instructions().with_reasoning(false)
+                .with_json_schema(records::candidate_schema()))
                 .await.map_err(|e| format!("分批提炼失败，未提交: {e}"))?;
             for mut candidate in records::parse_candidates(&response, &indices)? {
                 for prior in &candidate.supersedes {

@@ -151,7 +151,7 @@ fn result_to_string(
     if r.success {
         Ok(format!("{} 成功", action))
     } else {
-        Err(format!("{} 失败", action))
+        Err(format!("{} 失败: {}", action, r.message))
     }
 }
 

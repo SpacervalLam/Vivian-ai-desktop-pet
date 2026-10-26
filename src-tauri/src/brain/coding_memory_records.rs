@@ -15,6 +15,17 @@ fn default_topic() -> String {
     "经验".into()
 }
 
+pub fn candidate_schema() -> serde_json::Value {
+    serde_json::json!({"type":"object","additionalProperties":false,
+        "properties":{"candidates":{"type":"array","items":{
+            "type":"object","additionalProperties":false,
+            "properties":{"text":{"type":"string"},"topic":{"type":"string"},
+                "source_messages":{"type":"array","items":{"type":"integer"}},
+                "supersedes":{"type":"array","items":{"type":"string"}}},
+            "required":["text","topic","source_messages","supersedes"]}}},
+        "required":["candidates"]})
+}
+
 pub fn batches(records: &[(usize, String)], budget: usize) -> Vec<(String, Vec<usize>)> {
     let mut batches = Vec::new();
     let mut text = String::new();
@@ -72,8 +83,15 @@ pub fn parse_candidates(raw: &str, allowed: &[usize]) -> Result<Vec<Candidate>, 
         .trim()
         .trim_end_matches("```")
         .trim();
-    let mut candidates: Vec<Candidate> =
+    let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("提炼输出不是有效条目 JSON: {e}"))?;
+    // Accept the legacy array as well as the schema's object envelope.
+    if value.is_object() {
+        value = value.get_mut("candidates").map(serde_json::Value::take)
+            .ok_or("提炼输出缺少 candidates 数组")?;
+    }
+    let mut candidates: Vec<Candidate> = serde_json::from_value(value)
+        .map_err(|e| format!("提炼输出不是有效条目 JSON: {e}"))?;
     for candidate in &mut candidates {
         candidate.text = candidate.text.trim().to_string();
         if candidate.text.is_empty()
@@ -210,6 +228,14 @@ pub fn retry_at(now: i64, failures: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structured_candidates_keep_citation_validation() {
+        let raw = r#"{"candidates":[{"text":"fact","topic":"经验","source_messages":[2],"supersedes":[]}]}"#;
+        assert_eq!(parse_candidates(raw, &[2]).unwrap()[0].text, "fact");
+        assert!(parse_candidates(raw, &[1]).is_err());
+        assert!(parse_candidates(&format!("{raw} trailing prose"), &[2]).is_err());
+        assert!(parse_candidates(r#"{"candidates":[]}"#, &[]).unwrap().is_empty());
+    }
     #[test]
     fn every_fragment_keeps_the_speaker_and_observation_time() {
         let record =
