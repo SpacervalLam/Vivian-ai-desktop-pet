@@ -30,6 +30,18 @@ pub fn kind(item: &MemoryItem) -> RecordKind {
         .unwrap_or(RecordKind::Internal)
 }
 
+/// Raw user↔character material for diary admission; derived records never inflate it.
+pub fn is_diary_material(item: &MemoryItem) -> bool {
+    kind(item) == RecordKind::Dialogue && !item.consolidated
+        && (!item.content.trim().is_empty() || item.metadata["kind"] == "image" || !item.metadata["sticker"].is_null())
+        && !matches!(item.metadata["source"].as_str(), Some("system_seed" | "environment_preset"))
+        && item.metadata["seed_chunk"] != true && !item.tags.iter().any(|tag| tag == "backstory")
+        && matches!(item.metadata["channel"].as_str(), Some("direct" | "wechat"))
+        && item.metadata["memory_disabled"] != true
+        && (item.metadata["speaker"].as_str().is_none_or(|s| s.is_empty() || s == "user")
+            || item.metadata["listener"] == "user")
+}
+
 /// Stamp a newly created record from the write API, never reinterpret stored data.
 pub fn initialize_record(item: &mut MemoryItem) {
     let record_kind = item

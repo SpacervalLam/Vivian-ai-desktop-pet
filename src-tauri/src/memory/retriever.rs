@@ -10,8 +10,10 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use lru::LruCache;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
@@ -79,9 +81,11 @@ struct DocTokens {
 /// 分词缓存：key = memory_id，value = (内容指纹, 分词结果)。
 /// 指纹由 content/tags/description 哈希得到，记忆内容变更后指纹不同会自动重算，
 /// 避免每次对话都对全部候选记忆重复 jieba 分词。
-/// 有界容量，超出阈值整体清空（分词重建成本可接受，换取内存上界）。
-static TOKEN_CACHE: Lazy<Mutex<HashMap<String, (u64, DocTokens)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// 先收集整批命中，再插入未命中项，避免大于容量的顺序扫描让 LRU 逐项失效。
+/// 分词和评分在锁外执行，词频表通过 Arc 共享。
+type TokenCache = LruCache<String, (u64, Arc<DocTokens>)>;
+static TOKEN_CACHE: Lazy<Mutex<TokenCache>> =
+    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(TOKEN_CACHE_MAX).unwrap())));
 
 /// 分词缓存最大条目数
 const TOKEN_CACHE_MAX: usize = 8000;
@@ -166,49 +170,7 @@ impl RetrievalWeights {
     }
 }
 
-/// 结构化/元数据过滤条件（企业级检索预过滤）。
-///
-/// 在混合检索前按 memory_type / 标签 / 时间窗口对候选记忆做精确过滤，
-/// 使调用方可以定向检索（如"只要重要事件""只要某标签的近期记忆"）。
-/// 所有字段均为可选；命中任一字段即参与 AND 语义（多条件同时满足）。
-#[derive(Debug, Clone, Default)]
-pub struct MemoryRetrievalFilter {
-    /// 仅保留这些 memory_type（空/None = 不限）
-    pub memory_types: Option<Vec<String>>,
-    /// 命中任一标签即可（空/None = 不限）
-    pub tags_any: Option<Vec<String>>,
-    /// 仅保留 timestamp >= time_after
-    pub time_after: Option<f64>,
-    /// 仅保留 timestamp < time_before
-    pub time_before: Option<f64>,
-}
-
-impl MemoryRetrievalFilter {
-    /// 判断一条记忆是否满足过滤条件
-    pub fn matches(&self, item: &MemoryItem) -> bool {
-        if let Some(types) = &self.memory_types {
-            if !types.iter().any(|t| t == &item.memory_type) {
-                return false;
-            }
-        }
-        if let Some(tags) = &self.tags_any {
-            if !tags.iter().any(|t| item.tags.iter().any(|it| it == t)) {
-                return false;
-            }
-        }
-        if let Some(after) = self.time_after {
-            if item.timestamp < after {
-                return false;
-            }
-        }
-        if let Some(before) = self.time_before {
-            if item.timestamp >= before {
-                return false;
-            }
-        }
-        true
-    }
-}
+pub use super::types::MemoryRetrievalFilter;
 
 /// 单条检索结果（融合后）
 pub struct RetrievalHit {
@@ -220,6 +182,13 @@ pub struct RetrievalHit {
     pub fused_score: f64,
     /// 归属认知层级，由 `attach_items_with_weights` 填充真实 item 时推导
     pub result_type: RetrievalResultType,
+}
+
+/// Candidate scores already obtained from persistent indexes before loading bodies.
+#[derive(Default)]
+pub struct RecallArms {
+    pub lexical: Vec<(String, f64)>,
+    pub vector: Vec<(String, f64)>,
 }
 
 /// 执行 BM25 + 向量 + 图谱并行检索，RRF 融合后返回 top-K
@@ -240,15 +209,23 @@ pub fn hybrid_search(
     candidate_k: usize,
     limit: usize,
 ) -> Vec<RetrievalHit> {
+    hybrid_search_with_arms(entries,query,query_emb,vector_store,graph,candidate_k,limit,None)
+}
+
+pub fn hybrid_search_with_arms(
+    entries: &[MemoryItem], query: &str, query_emb: Option<&[f32]>,
+    vector_store: Option<&MemoryVectorStore>, graph: Option<&Arc<KnowledgeGraph>>,
+    candidate_k: usize, limit: usize, prepared: Option<&RecallArms>,
+) -> Vec<RetrievalHit> {
     if entries.is_empty() {
         return Vec::new();
     }
 
-    let bm25_hits = bm25_search(entries, query, candidate_k);
-    let vector_hits = match (query_emb, vector_store) {
+    let bm25_hits = prepared.map(|arms| arms.lexical.clone()).unwrap_or_else(|| bm25_search(entries, query, candidate_k));
+    let vector_hits = if let Some(arms) = prepared { arms.vector.clone() } else { match (query_emb, vector_store) {
         (Some(emb), Some(store)) if !store.is_empty() => vector_search(store, emb, entries, candidate_k),
         _ => Vec::new(),
-    };
+    }};
     // 实体/专名补充召回路：从 query 提取显著词（人名/产品名等），对每个显著词单独做
     // 词面检索，补回长 query 中被 BM25 稀释的专名命中。作为第四路参与 RRF 融合。
     let entity_hits = entity_arm_search(entries, query, candidate_k);
@@ -326,48 +303,49 @@ fn apply_post_graph_compensation(
 
 /// BM25 检索：返回 (memory_id, bm25_score) 列表，按分数降序
 fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f64)> {
+    bm25_search_cached(entries, query, k, &TOKEN_CACHE)
+}
+
+fn bm25_search_cached(entries: &[MemoryItem], query: &str, k: usize,
+    token_cache: &Mutex<TokenCache>) -> Vec<(String, f64)> {
     let query_terms = tokenize(query);
     if query_terms.is_empty() {
         return Vec::new();
     }
 
-    // 从缓存获取每条记忆的分词频次与长度，命中且指纹一致时跳过重复分词
-    let mut cache = TOKEN_CACHE.lock();
-    let mut doc_freqs: Vec<HashMap<String, usize>> = Vec::with_capacity(entries.len());
-    let mut doc_lens: Vec<usize> = Vec::with_capacity(entries.len());
-    for e in entries {
-        let fp = content_fingerprint(&e.content, &e.tags, &e.description);
-        if let Some((cached_fp, dt)) = cache.get(&e.id) {
-            if *cached_fp == fp {
-                doc_freqs.push(dt.freqs.clone());
-                doc_lens.push(dt.token_count);
-                continue;
-            }
+    let fingerprints: Vec<_> = entries.iter()
+        .map(|e| content_fingerprint(&e.content, &e.tags, &e.description)).collect();
+    let mut docs: Vec<Option<Arc<DocTokens>>> = {
+        let mut cache = token_cache.lock();
+        entries.iter().zip(&fingerprints).map(|(e, fp)| {
+            cache.get(&e.id).filter(|(cached, _)| cached == fp).map(|(_, doc)| doc.clone())
+        }).collect()
+    };
+    let mut additions = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        if docs[i].is_none() {
+            let (freqs, token_count) = tokenize_entry(e);
+            let doc = Arc::new(DocTokens { freqs, token_count });
+            additions.push((e.id.clone(), (fingerprints[i], doc.clone())));
+            docs[i] = Some(doc);
         }
-        let (freqs, len) = tokenize_entry(e);
-        doc_lens.push(len);
-        doc_freqs.push(freqs.clone());
-        cache.insert(e.id.clone(), (fp, DocTokens { freqs, token_count: len }));
     }
-    if cache.len() > TOKEN_CACHE_MAX {
-        cache.clear();
+    {
+        let mut cache = token_cache.lock();
+        for (id, value) in additions { cache.put(id, value); }
     }
+    let docs: Vec<_> = docs.into_iter().map(Option::unwrap).collect();
 
     let n_docs = entries.len() as f64;
-    let avg_dl: f64 = doc_lens.iter().map(|&l| l as f64).sum::<f64>() / n_docs.max(1.0);
+    let avg_dl: f64 = docs.iter().map(|doc| doc.token_count as f64).sum::<f64>() / n_docs.max(1.0);
 
-    // IDF（BM25 变体，避免分母为 0）
-    let mut df: HashMap<String, usize> = HashMap::new();
-    for freq in &doc_freqs {
-        for term in freq.keys() {
-            *df.entry(term.clone()).or_insert(0) += 1;
-        }
-    }
-    let idf: HashMap<String, f64> = df
-        .iter()
-        .map(|(term, &d)| {
+    // 只统计查询词的文档频率，不为整份语料重建完整词典；BM25 分数保持不变。
+    let idf: HashMap<&str, f64> = query_terms.iter().map(|term| term.as_str())
+        .collect::<std::collections::HashSet<_>>().into_iter()
+        .map(|term| {
+            let d = docs.iter().filter(|doc| doc.freqs.contains_key(term)).count();
             let idf = ((n_docs - d as f64 + 0.5) / (d as f64 + 0.5) + 1.0).ln();
-            (term.clone(), idf)
+            (term, idf)
         })
         .collect();
 
@@ -375,13 +353,13 @@ fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f6
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let freqs = &doc_freqs[i];
-            let dl = doc_lens[i] as f64;
+            let freqs = &docs[i].freqs;
+            let dl = docs[i].token_count as f64;
             let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl.max(1.0));
             let mut score = 0.0;
             for term in &query_terms {
                 if let Some(&tf) = freqs.get(term) {
-                    let idf_v = idf.get(term).copied().unwrap_or(0.0);
+                    let idf_v = idf.get(term.as_str()).copied().unwrap_or(0.0);
                     let tf_norm = (tf as f64 * (BM25_K1 + 1.0))
                         / (tf as f64 + BM25_K1 * norm);
                     score += idf_v * tf_norm;
@@ -398,19 +376,27 @@ fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f6
 }
 
 /// 向量检索：返回 (memory_id, vector_score) 列表，按分数降序
-fn vector_search(
+pub(super) fn vector_search(
     store: &MemoryVectorStore,
     query_emb: &[f32],
     entries: &[MemoryItem],
     k: usize,
 ) -> Vec<(String, f64)> {
-    let hits = store.search(query_emb, k);
-    // 过滤掉已不在 entries 中的（防止 vector_store 与 entries 不同步）
+    if k == 0 || entries.is_empty() { return Vec::new(); }
     let valid_ids: std::collections::HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-    hits.into_iter()
-        .filter(|(_, mid, _)| valid_ids.contains(mid.as_str()))
-        .map(|(_, mid, score)| (mid, score))
-        .collect()
+    // 候选可能被归属/时间/归档过滤排除；有界补取，避免 top-k 被无效 ID 占满。
+    let maximum = k.saturating_mul(16).max(256);
+    let mut fetch = k;
+    loop {
+        let hits = store.search(query_emb, fetch);
+        let exhausted = hits.len() < fetch;
+        let mut seen = std::collections::HashSet::new();
+        let selected: Vec<_> = hits.into_iter()
+            .filter(|(_, mid, _)| valid_ids.contains(mid.as_str()) && seen.insert(mid.clone()))
+            .map(|(_, mid, score)| (mid, score)).take(k).collect();
+        if selected.len() >= k || exhausted || fetch >= maximum { return selected; }
+        fetch = fetch.saturating_mul(2).min(maximum);
+    }
 }
 
 /// 实体/专名补充召回路（查询增强）
@@ -1519,5 +1505,38 @@ mod tests {
         let r2 = bm25_search(&entries, "苹果", 5); // 第二次命中缓存
         assert!(!r1.is_empty());
         assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn bm25_scan_larger_than_cache_reuses_existing_tokens() {
+        let cache = Mutex::new(TokenCache::new(NonZeroUsize::new(8).unwrap()));
+        let entries: Vec<_> = (0..9).map(|i| make_item(&format!("large-{i}"), "Rust project sqlite", 0.5)).collect();
+        let first = bm25_search_cached(&entries, "Rust project", 3, &cache);
+        let before: HashMap<_, _> = cache.lock().iter().map(|(id, (_, doc))| (id.clone(), doc.clone())).collect();
+        assert_eq!(before.len(), 8);
+        let second = bm25_search_cached(&entries, "Rust project", 3, &cache);
+        assert_eq!(first, second);
+        let after = cache.lock();
+        assert_eq!(after.len(), 8);
+        let reused = after.iter().filter(|(id, (_, doc))|
+            before.get(*id).is_some_and(|old| Arc::ptr_eq(old, doc))).count();
+        assert_eq!(reused, 7, "a single cache miss must not invalidate the other cached documents");
+    }
+
+    #[test]
+    fn vector_filter_refills_excluded_and_duplicate_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryVectorStore::new(dir.path().join("vectors.db"), 2, "hashing").unwrap();
+        for (i, id) in ["excluded", "wanted", "wanted", "later"].iter().enumerate() {
+            store.add(super::super::vector_search::MemoryVector {
+                doc_id: format!("doc-{i}"), memory_id: id.to_string(), content: id.to_string(),
+                embedding: vec![1.0, i as f32 * 0.1], importance: 0.8,
+                memory_type: "user".into(), timestamp: current_timestamp(),
+            }).unwrap();
+        }
+        let eligible = vec![make_item("wanted", "wanted", 0.8), make_item("later", "later", 0.8)];
+        let result = vector_search(&store, &[1.0, 0.0], &eligible, 2);
+        assert_eq!(result.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["wanted", "later"]);
+        assert!(vector_search(&store, &[1.0, 0.0], &eligible, 0).is_empty());
     }
 }

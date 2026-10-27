@@ -2,7 +2,7 @@
 //!
 //! 将 MemoryManager.search_memories 中的 4 种 RetrievalStrategy 分发逻辑
 //! 拆分为独立 struct，每个 struct 实现一个策略。Auto 策略作为组合策略，
-//! 内部按 3 档回退调用其他策略。
+//! Auto 以本地多路召回为基础，向量不可用时保留词法和图谱结果。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,9 +10,15 @@ use std::sync::Arc;
 use crate::memory::age::staleness_text;
 use crate::memory::embedding::MemoryEmbeddingProvider;
 use crate::memory::graph_store::KnowledgeGraph;
-use crate::memory::retriever::{attach_items_with_weights, hybrid_search, RetrievalWeights};
+use crate::memory::retriever::{attach_items_with_weights, hybrid_search_with_arms, RecallArms, RetrievalWeights};
 use crate::memory::types::MemoryItem;
 use crate::memory::vector_search::MemoryVectorStore;
+
+pub enum QueryEmbedding<'a> {
+    Generate,
+    /// None means embedding already failed or exceeded its budget; never retry it here.
+    Prepared(Option<&'a [f32]>),
+}
 
 /// 检索上下文：策略执行所需的只读访问
 pub struct RetrievalContext<'a> {
@@ -23,12 +29,23 @@ pub struct RetrievalContext<'a> {
     pub graph: Option<&'a Arc<KnowledgeGraph>>,
     /// 五因子加权配置；None 时使用默认权重
     pub weights: Option<RetrievalWeights>,
+    pub query_embedding: QueryEmbedding<'a>,
+    pub prepared_arms: Option<&'a RecallArms>,
 }
 
 impl<'a> RetrievalContext<'a> {
     /// 当前生效的权重（None 退化为默认）
     pub fn effective_weights(&self) -> RetrievalWeights {
         self.weights.unwrap_or_default()
+    }
+
+    fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
+        match self.query_embedding {
+            QueryEmbedding::Prepared(value) => value.map(<[f32]>::to_vec),
+            QueryEmbedding::Generate => self.embedding.embed(query).map_err(|error| {
+                tracing::warn!(%error, "查询嵌入失败，保留本地召回");
+            }).ok(),
+        }
     }
 }
 
@@ -120,15 +137,10 @@ fn search_vector_impl(
     query: &str,
     limit: usize,
 ) -> Vec<MemoryItem> {
-    let qemb = match ctx.embedding.embed(query) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("[VectorStrategy] 嵌入计算失败，回退 importance: {}", e);
-            return search_importance_based_impl(ctx.entries, query, limit);
-        }
+    let hits = if let Some(arms) = ctx.prepared_arms { arms.vector.clone() } else {
+        let Some(qemb) = ctx.embed_query(query) else {return search_keyword_impl(ctx.entries,query,limit);};
+        super::retriever::vector_search(ctx.vector_store, &qemb, ctx.entries, limit)
     };
-
-    let hits = ctx.vector_store.search(&qemb, limit);
     if hits.is_empty() {
         return search_importance_based_impl(ctx.entries, query, limit);
     }
@@ -140,7 +152,7 @@ fn search_vector_impl(
     }
 
     let mut results: Vec<MemoryItem> = Vec::new();
-    for (_doc_id, memory_id, sim) in hits {
+    for (memory_id, sim) in hits {
         let Some(&idx) = id_index.get(memory_id.as_str()) else {
             continue;
         };
@@ -243,7 +255,7 @@ impl MemoryRetrievalStrategy for HybridStrategy {
 }
 
 // ============================================================================
-// AutoStrategy：组合策略，3 档回退
+// AutoStrategy：向量可选的多路融合
 // ============================================================================
 
 pub struct AutoStrategy;
@@ -254,56 +266,26 @@ impl MemoryRetrievalStrategy for AutoStrategy {
     }
 
     fn search(&self, ctx: &RetrievalContext<'_>, query: &str, limit: usize) -> Vec<MemoryItem> {
-        // 档位 1：entries ≥ 3 时走 BM25 + 向量 + 实体 + RRF 四路融合。
-        // 混合检索对小集合同样有效（各路内部自处理空结果），低门槛让
-        // 新库/清空重建后的早期也能享受多路召回，而非退化到朴素关键词匹配。
-        if ctx.entries.len() >= 3 {
-            let qemb = match ctx.embedding.embed(query) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!(
-                        "[AutoStrategy] query embedding 生成失败，降级到 BM25+图谱: {}", e
-                    );
-                    None
-                }
-            };
-            if let Some(qemb) = qemb {
-                let candidate_k = (limit * 4).max(20);
-                let hits = hybrid_search(
-                    ctx.entries,
-                    query,
-                    Some(qemb.as_slice()),
-                    Some(ctx.vector_store),
-                    ctx.graph,
-                    candidate_k,
-                    limit,
-                );
-                if !hits.is_empty() {
-                    let attached = attach_items_with_weights(hits, ctx.entries, ctx.effective_weights(), query);
-                    let mut items: Vec<MemoryItem> = attached.into_iter().map(|h| h.item).collect();
-                    // 注入陈旧度提示到 metadata（供 LLM 判断时效性）
-                    inject_staleness(&mut items);
-                    // 对 Knowledge 类型施加时间衰减和过期惩罚
-                    apply_temporal_decay(&mut items);
-                    return items;
-                }
+        if limit == 0 || ctx.entries.is_empty() { return Vec::new(); }
+        // 向量是可选的一路：失败或超时仍执行 BM25、实体与图谱，不再重复嵌入。
+        if ctx.prepared_arms.is_some() || ctx.entries.len() >= 3 {
+            let qemb = ctx.embed_query(query);
+            let candidate_k = limit.saturating_mul(4).max(20);
+            let hits = hybrid_search_with_arms(
+                ctx.entries, query, qemb.as_deref(), Some(ctx.vector_store), ctx.graph,
+                candidate_k, limit, ctx.prepared_arms,
+            );
+            if !hits.is_empty() {
+                let attached = attach_items_with_weights(hits, ctx.entries, ctx.effective_weights(), query);
+                let mut items: Vec<MemoryItem> = attached.into_iter().map(|h| h.item).collect();
+                inject_staleness(&mut items);
+                apply_temporal_decay(&mut items);
+                return items;
             }
+            return search_keyword_impl(ctx.entries, query, limit);
         }
 
-        // 档位 2：向量库非空时走单路向量检索
-        if !ctx.vector_store.is_empty() {
-            let results = search_vector_impl(ctx, query, limit);
-            if !results.is_empty() {
-                return results;
-            }
-        }
-
-        // 档位 3：根据 query 长度与 entries 数量选择
-        if query.len() < 5 || ctx.entries.len() < 10 {
-            search_keyword_impl(ctx.entries, query, limit)
-        } else {
-            HybridStrategy.search(ctx, query, limit)
-        }
+        search_keyword_impl(ctx.entries, query, limit)
     }
 }
 
@@ -520,6 +502,8 @@ mod tests {
             embedding: &emb,
             graph: None,
             weights: None,
+            query_embedding: QueryEmbedding::Generate,
+            prepared_arms: None,
         };
         let result = KeywordStrategy.search(&ctx, "咖啡", 5);
         assert!(result.iter().any(|m| m.content.contains("咖啡")));
@@ -535,6 +519,8 @@ mod tests {
             embedding: &emb,
             graph: None,
             weights: None,
+            query_embedding: QueryEmbedding::Generate,
+            prepared_arms: None,
         };
         let result = VectorStrategy.search(&ctx, "用户喜好", 3);
         // 向量检索应返回非空结果
@@ -557,8 +543,10 @@ mod tests {
             embedding: &emb,
             graph: None,
             weights: None,
+            query_embedding: QueryEmbedding::Generate,
+            prepared_arms: None,
         };
-        // 档位 1 失败（entries<10 不走 BM25），档位 2 失败（vector_store 空），档位 3 走 keyword
+        // 空向量库仍可通过本地词法召回。
         let result = AutoStrategy.search(&ctx, "咖啡", 5);
         assert!(result.iter().any(|m| m.content.contains("咖啡")));
     }
@@ -571,5 +559,46 @@ mod tests {
         assert_eq!(create_strategy(&RetrievalStrategy::Vector).name(), "vector");
         assert_eq!(create_strategy(&RetrievalStrategy::Hybrid).name(), "hybrid");
         assert_eq!(create_strategy(&RetrievalStrategy::Graph).name(), "graph");
+    }
+
+    #[test]
+    fn failed_or_timed_out_embedding_keeps_lexical_recall_without_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Offline(Arc<AtomicUsize>);
+        impl MemoryEmbeddingProvider for Offline {
+            fn dimension(&self) -> usize { 2 }
+            fn embed(&self, _: &str) -> crate::error::VivianResult<Vec<f32>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Err(crate::error::VivianError::Memory("offline".into()))
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let embedding: Arc<dyn MemoryEmbeddingProvider> = Arc::new(Offline(calls.clone()));
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryVectorStore::new(dir.path().join("vectors.db"), 2, "offline").unwrap();
+        let items = make_items();
+        let mut ctx = RetrievalContext { entries: &items, vector_store: &store, embedding: &embedding,
+            graph: None, weights: None, query_embedding: QueryEmbedding::Generate, prepared_arms: None };
+        let result = AutoStrategy.search(&ctx, "咖啡", 5);
+        assert!(result.iter().any(|item| item.content.contains("咖啡")));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        ctx.query_embedding = QueryEmbedding::Prepared(None);
+        let result = AutoStrategy.search(&ctx, "咖啡", 5);
+        assert!(result.iter().any(|item| item.content.contains("咖啡")));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn prepared_semantic_match_survives_a_single_candidate_without_word_overlap() {
+        let mut item=MemoryItem::new("雨停了，天边出现了彩虹".into(),Granularity::Summary,0.8);
+        item.id="semantic-only".into();
+        let items=vec![item];let dir=tempfile::tempdir().unwrap();
+        let store=MemoryVectorStore::new(dir.path().join("vectors.db"),2,"test").unwrap();
+        let embedding:Arc<dyn MemoryEmbeddingProvider>=Arc::new(HashingMemoryEmbedding::default());
+        let arms=RecallArms{lexical:Vec::new(),vector:vec![("semantic-only".into(),0.9)]};
+        let context=RetrievalContext{entries:&items,vector_store:&store,embedding:&embedding,
+            graph:None,weights:None,query_embedding:QueryEmbedding::Prepared(None),prepared_arms:Some(&arms)};
+        let hits=AutoStrategy.search(&context,"weather changed",5);
+        assert_eq!(hits.first().map(|hit|hit.id.as_str()),Some("semantic-only"));
     }
 }

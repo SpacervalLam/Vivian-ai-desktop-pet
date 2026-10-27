@@ -6,14 +6,14 @@
 //! - 明文镜像：默认关闭；显式设置 `VIVIAN_MEMORY_PLAIN_MIRROR=1` 后写入
 //!   `plain/<id>.txt`，删除时同步移除
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 use rusqlite::Connection;
 
-use super::types::MemoryItem;
+use super::types::{MemoryItem, MemoryRetrievalFilter};
 use crate::error::{VivianError, VivianResult};
 
 pub struct MemoryEntryStore {
@@ -22,6 +22,39 @@ pub struct MemoryEntryStore {
     plain_dir: PathBuf,
     /// Human-readable mirrors duplicate private content and are therefore opt-in.
     plain_mirror_enabled: bool,
+}
+
+/// Pending IDs survive a failed transaction; committing never scans untouched rows.
+#[derive(Default)]
+pub struct EntryChanges {
+    upserts: HashSet<String>,
+    deletes: HashSet<String>,
+}
+
+impl EntryChanges {
+    pub fn changed(&mut self, id: &str) {
+        self.deletes.remove(id);
+        self.upserts.insert(id.to_owned());
+    }
+
+    pub fn removed(&mut self, id: &str) {
+        self.upserts.remove(id);
+        self.deletes.insert(id.to_owned());
+    }
+
+    pub fn flush(&mut self, store: &MemoryEntryStore, entries: &[MemoryItem],
+        index: &HashMap<String, usize>) -> VivianResult<()> {
+        let upserts = self.upserts.iter().map(|id| {
+            let entry = index.get(id).and_then(|&i| entries.get(i))
+                .filter(|entry| &entry.id == id)
+                .ok_or_else(|| VivianError::Memory(format!("待写入记忆索引缺失: {id}")))?;
+            Ok((id.clone(), entry.clone()))
+        }).collect::<VivianResult<Vec<_>>>()?;
+        store.write_rows(upserts, &self.deletes.iter().cloned().collect::<Vec<_>>())?;
+        self.upserts.clear();
+        self.deletes.clear();
+        Ok(())
+    }
 }
 
 impl MemoryEntryStore {
@@ -44,6 +77,8 @@ impl MemoryEntryStore {
             .map_err(|e| VivianError::Memory(format!("记忆表结构无效: {e}")))?;
         conn.prepare("SELECT key, value FROM meta LIMIT 0")
             .map_err(|e| VivianError::Memory(format!("记忆元数据表结构无效: {e}")))?;
+        super::search_index::initialize(&conn)
+            .map_err(|e| VivianError::Memory(format!("初始化记忆检索索引失败: {e}")))?;
 
         let plain_dir = db_path
             .parent()
@@ -138,6 +173,8 @@ impl MemoryEntryStore {
                         .map_err(|e| VivianError::Serialization(e.to_string()))?;
                     stmt.execute([id.as_str(), json.as_str()])
                         .map_err(|e| VivianError::Memory(format!("写入记忆行失败: {e}")))?;
+                    super::search_index::upsert(&tx, item)
+                        .map_err(|e| VivianError::Memory(format!("更新记忆检索索引失败: {e}")))?;
                 }
             }
             {
@@ -201,6 +238,25 @@ impl MemoryEntryStore {
         }
         Ok(())
     }
+
+    pub fn search_candidates(&self, query: &str, owner: &str,
+        filter: &MemoryRetrievalFilter, limit: usize) -> VivianResult<Vec<(String,f64)>> {
+        super::search_index::search(&self.conn.lock(), query, owner, filter, limit)
+            .map_err(|error| VivianError::Memory(format!("检索记忆候选失败: {error}")))
+    }
+
+    pub fn load_by_ids(&self, ids: &[String], owner: Option<&str>,
+        filter: &MemoryRetrievalFilter) -> VivianResult<Vec<MemoryItem>> {
+        if ids.is_empty() {return Ok(Vec::new());}
+        super::search_index::load_ids(&self.conn.lock(),ids,owner,filter)
+            .map_err(|error| VivianError::Memory(format!("按需读取记忆失败: {error}")))
+    }
+
+    pub fn context_neighbors(&self, hits: &[MemoryItem], owner: &str, limit: usize) -> VivianResult<Vec<MemoryItem>> {
+        if limit == 0 || hits.is_empty() {return Ok(Vec::new());}
+        super::search_index::neighbors(&self.conn.lock(),hits,owner,limit)
+            .map_err(|error| VivianError::Memory(format!("读取记忆上下文失败: {error}")))
+    }
 }
 
 /// 计算条目的内容指纹（用于差异比对；compact 序列化后哈希）
@@ -222,6 +278,32 @@ pub fn fingerprint_all(entries: &[MemoryItem]) -> HashMap<String, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_delta_commit_is_atomic_and_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryEntryStore::open(dir.path().join("entries.db")).unwrap();
+        let entries: Vec<_> = ["a", "b"].iter().map(|id| {
+            let mut item = MemoryItem::new(id.to_string(), super::super::types::Granularity::Summary, 0.8);
+            item.id = id.to_string(); item
+        }).collect();
+        let index = entries.iter().enumerate().map(|(i, item)| (item.id.clone(), i)).collect();
+        let mut changes = EntryChanges::default();
+        changes.changed("a"); changes.changed("b");
+        store.conn.lock().execute_batch("CREATE TRIGGER reject_b BEFORE INSERT ON entries WHEN NEW.id='b' BEGIN SELECT RAISE(FAIL,'test failure'); END;").unwrap();
+        assert!(changes.flush(&store, &entries, &index).is_err());
+        assert!(store.load_all().unwrap().is_empty());
+        assert_eq!(changes.upserts.len(), 2);
+        store.conn.lock().execute_batch("DROP TRIGGER reject_b").unwrap();
+        changes.flush(&store, &entries, &index).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 2);
+        assert!(changes.upserts.is_empty());
+        changes.removed("a"); changes.changed("a");
+        changes.flush(&store, &entries, &index).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 2);
+        changes.removed("a"); changes.flush(&store, &entries, &index).unwrap();
+        assert_eq!(store.load_all().unwrap()[0].id, "b");
+    }
 
     #[test]
     fn storage_entries_create_current_schema_and_reopen_records() {

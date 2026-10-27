@@ -5,10 +5,11 @@
 //! - `intelligent_generator`：基于 LLM 的智能日记生成
 
 pub mod growth;
+pub mod cycle;
+pub mod dream;
 pub mod intelligent_generator;
 pub mod ongoing_stories;
 
-use tauri::Emitter;
 use crate::brain::Brain;
 use crate::error::{VivianError, VivianResult};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,8 @@ pub struct DiaryEntry {
     pub mood_samples: Vec<MoodSample>,
     #[serde(default = "default_diary_version")]
     pub version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dream: Option<cycle::DreamContext>,
 }
 
 fn default_diary_version() -> u8 {
@@ -292,11 +295,11 @@ pub fn set_config(char_id: &str, enable_auto_diary: Option<bool>, min_interactio
     Ok(config)
 }
 
-/// write_diary 工具可见性缓存（按 char_id 索引，由 proactive tick 每 10s 更新）
+/// 安排请求工具的可见性缓存；由环境智能体的程序资格检查更新。
 static DIARY_TOOL_AVAILABILITY: once_cell::sync::Lazy<parking_lot::RwLock<std::collections::HashMap<String, bool>>> =
     once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
-/// 更新 write_diary 工具可见性（由 spawn_auto_diary_check 内部调用）
+/// 更新完整做梦与日记流程的工具可见性。
 pub fn set_tool_availability(char_id: &str, available: bool) {
     DIARY_TOOL_AVAILABILITY.write().insert(char_id.to_string(), available);
 }
@@ -304,39 +307,6 @@ pub fn set_tool_availability(char_id: &str, available: bool) {
 /// 查询 write_diary 工具当前是否对 LLM 可见（PromptBuildingStep 同步读取）
 pub fn is_tool_available(char_id: &str) -> bool {
     DIARY_TOOL_AVAILABILITY.read().get(char_id).copied().unwrap_or(false)
-}
-
-/// 检查自动日记条件，满足时在后台异步生成日记并持久化。
-/// 同时更新 write_diary 工具可见性缓存（供 PromptBuildingStep 同步读取）。
-/// 生成成功后通过 Tauri 事件 `diary:written` 通知前端。
-/// 调用方（proactive_tick）无需等待结果。
-pub fn spawn_auto_diary_check(brain: &crate::brain::Brain, char_name: String, app: tauri::AppHandle) {
-    let brain = brain.clone();
-    let char_id = brain.char_id.clone();
-    tokio::spawn(async move {
-        let (should, reason) = should_trigger(&brain).await;
-        // 更新工具可见性缓存（无论是否触发，都更新可见性）
-        set_tool_availability(&char_id, should);
-        if should {
-            tracing::info!("[DiarySystem] 自动日记触发: {}", reason);
-            match intelligent_generator::generate_intelligent_diary(&brain, "auto").await {
-                Ok(entry) => {
-                    tracing::info!(
-                        "[DiarySystem] 自动日记生成并保存成功: id={}, date={}",
-                        entry.id,
-                        entry.date
-                    );
-                    let _ = app.emit(
-                        "diary:written",
-                        serde_json::json!({ "character_id": char_id, "character_name": char_name }),
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("[DiarySystem] 自动日记生成失败: {e}");
-                }
-            }
-        }
-    });
 }
 
 pub fn get_stats(char_id: &str) -> VivianResult<serde_json::Value> {
@@ -377,74 +347,23 @@ fn current_timestamp() -> f64 {
 // 自动触发 / 启动补记 / Markdown 导出
 // ============================================================================
 
-/// 判断是否应该触发生成日记
+/// 检查做梦与日记的候选资格；是否启动由环境智能体规划，不能直接用此结果触发写入。
 ///
 /// 条件（全部满足）：
 /// - 自动日记已开启
 /// - 今天尚未生成过日记
-/// - 自上次日记（或初次启动）以来，微信渠道与直接渠道的直接对话消息
+/// - 目标日期内微信渠道与直接渠道的原始对话消息
 ///   累计达 `min_interaction_threshold` 条（默认 20），素材不足时不触发
-/// - 触发分数 ≥ 30（含 23:00 后时间兜底，详见 calculate_trigger_score）
+/// - 当前位于本地时间 20:00–24:00；满足条件仅提供候选，不自动启动。
 pub async fn should_trigger(brain: &Brain) -> (bool, String) {
-    let config = match get_config(&brain.char_id) {
-        Ok(c) => c,
-        Err(_) => return (false, "配置加载失败".to_string()),
-    };
-    if !config.enable_auto_diary {
-        return (false, "自动日记未开启".to_string());
+    match dream::candidate(brain, chrono::Local::now()) {
+        Ok(Some(candidate)) => (true,candidate.reason),
+        Ok(None) => (false,"素材量、时间窗、开关或进度条件不满足，不送入环境智能体判断".into()),
+        Err(error) => (false,error.to_string()),
     }
-
-    // 仅在 20:00-24:00 之间允许自动触发
-    use chrono::Timelike;
-    let hour = chrono::Local::now().hour();
-    if hour < 20 {
-        return (false, "未到日记时间（20:00-24:00）".to_string());
-    }
-
-    // 今天是否已生成过日记
-    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    match get_entries(&brain.char_id, Some(&today_str)) {
-        Ok(e) if !e.is_empty() => return (false, "今天已生成过日记".to_string()),
-        Ok(_) => {}
-        Err(_) => {}
-    }
-
-    // 素材收集起点：上次日记生成时间；无日记则从初次启动（0.0）开始
-    let since = match get_latest_entry(&brain.char_id) {
-        Ok(Some(entry)) => entry.created_at as f64,
-        _ => 0.0,
-    };
-
-    // 收集自上次日记（或初次启动）以来的交互记录
-    let interactions = intelligent_generator::collect_interactions_since(&brain.memory, since).await;
-
-    // 仅统计微信渠道与直接渠道的直接对话消息作为日记素材
-    let direct_dialogue_count = interactions
-        .iter()
-        .filter(|r| r.channel == "direct" || r.channel == "wechat")
-        .count();
-    if direct_dialogue_count < config.min_interaction_threshold {
-        return (
-            false,
-            format!(
-                "直接对话素材不足（{}/{}）",
-                direct_dialogue_count,
-                config.min_interaction_threshold
-            ),
-        );
-    }
-
-    // 计算触发分数（含情绪变化维度 + 20:00-24:00 时间兜底）
-    let mood = intelligent_generator::collect_mood_summary(brain);
-    let score = intelligent_generator::calculate_trigger_score(&interactions, Some(&mood));
-    if score < 30 {
-        return (false, format!("触发分数不足（{}/100）", score));
-    }
-
-    (true, format!("满足条件（分数: {}）", score))
 }
 
-/// 启动时检查遗漏的日记并触发后台补记
+/// 检查遗漏的日记并提交补记候选，等待环境智能体安排。
 ///
 /// 检测从上次日记日期到昨天
 /// 的断层，异步补记遗漏日记。
@@ -475,10 +394,10 @@ pub async fn check_missed_diaries_on_startup(brain: &Brain) -> VivianResult<()> 
     Ok(())
 }
 
-/// 逐日补记遗漏的日记
+/// 逐日提交遗漏日记的候选请求；不直接触发生成。
 ///
 /// 从 start_date 次日逐日补记到 end_date，
-/// 交互过少（<3）则跳过，避免过于频繁调用 LLM。
+/// 原始对话不足配置阈值时跳过，仍由程序时间窗及环境智能体决定是否执行。
 pub async fn catch_up_missed_diaries(
     brain: &Brain,
     start_date: chrono::NaiveDate,
@@ -491,7 +410,7 @@ pub async fn catch_up_missed_diaries(
             tracing::error!("[DiarySystem] 补记 {} 失败: {e}", current);
         }
         current += chrono::Duration::days(1);
-        // 避免过于频繁调用 LLM
+        // 批量扫描让出运行时，实际模型调用由环境智能体另行安排。
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     Ok(())
@@ -499,77 +418,15 @@ pub async fn catch_up_missed_diaries(
 
 /// 补记单日日记
 async fn catch_up_one_day(brain: &Brain, date: chrono::NaiveDate) -> VivianResult<()> {
-    use chrono::TimeZone;
-
+    if !get_entries(&brain.char_id, Some(&date.to_string()))?.is_empty() { return Ok(()); }
     let ctx = intelligent_generator::collect_daily_context(brain, date).await;
-    if ctx.interactions.len() < 3 {
-        tracing::info!("[DiarySystem] {} 交互过少，跳过补记", date);
+    let threshold = get_config(&brain.char_id)?.min_interaction_threshold.max(1);
+    if ctx.interactions.iter().filter(|record| record.channel == "direct" || record.channel == "wechat").count() < threshold {
+        tracing::info!("[DreamDiary] {} 交互过少，跳过补记", date);
         return Ok(());
     }
-
-    let trigger_score =
-        intelligent_generator::calculate_trigger_score(&ctx.interactions, Some(&ctx.mood_summary));
-    let fallback_mood_tag = intelligent_generator::get_mood_tag(&ctx.mood_summary);
-
-    let diary_result = intelligent_generator::generate_content_via_llm(brain, &ctx).await?;
-
-    let mood_tag = diary_result
-        .mood_tag
-        .as_deref()
-        .map(|t| {
-            const VALID: &[&str] = &["happy", "good", "neutral", "sad", "angry", "tired"];
-            if VALID.contains(&t) { t.to_string() } else { "neutral".to_string() }
-        })
-        .unwrap_or(fallback_mood_tag);
-
-    let key_events: Vec<String> = if let Some(ref sk) = diary_result.structured_keywords {
-        let mut flat: Vec<String> = Vec::new();
-        flat.extend(sk.events.iter().cloned());
-        flat.extend(sk.themes.iter().cloned());
-        flat.truncate(5);
-        flat
-    } else {
-        diary_result.keywords.clone()
-    };
-
-    let date_str = date.format("%Y-%m-%d").to_string();
-    let start_of_day = date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
-        date.and_hms_opt(0, 0, 1).unwrap()
-    });
-    let start_ts = chrono::Local
-        .from_local_datetime(&start_of_day)
-        .single()
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0);
-    let end_ts = start_ts + 24 * 3600;
-
-    let entry = DiaryEntry {
-        id: String::new(),
-        date: date_str.clone(),
-        start_time: start_ts,
-        end_time: end_ts,
-        content: diary_result.content.clone(),
-        key_events,
-        mood_average: ctx.mood_summary.clone(),
-        word_count: diary_result.content.chars().count(),
-        interaction_count: ctx.interactions.len(),
-        trigger_type: "catch_up".to_string(),
-        trigger_score,
-        mood_tag,
-        created_at: chrono::Local::now().timestamp(),
-        structured_keywords: diary_result.structured_keywords.clone(),
-        story_update: diary_result.story_update.clone(),
-        relationship_delta: ctx.relationship_delta.clone(),
-        mood_samples: ctx.mood_samples.clone(),
-        version: 2,
-    };
-    add_entry(&brain.char_id, entry)?;
-
-    if let Some(ref update) = diary_result.story_update {
-        let _ = ongoing_stories::update_ongoing_stories(&brain.char_id, update, &date_str);
-    }
-
-    tracing::info!("[DiarySystem] 补记成功: {}", date);
+    cycle::cycle_for(&brain.char_id).request(date)?;
+    tracing::info!("[DreamDiary] 补记安排已提交，等待环境智能体决定: {}", date);
     Ok(())
 }
 

@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 const CHUNK_CHARS: usize = 12_000;
 const SLICE_CHARS: usize = 4_000;
 
+pub fn is_active_summary(item: &super::types::MemoryItem) -> bool {
+    !item.consolidated && item.metadata["index_active"] != false
+        && item.memory_type == "session_summary"
+        && item.metadata["source"] == "session_consolidation"
+}
+
 /// 稳定、文件名安全的摘要 ID（可用于可选明文镜像），会话关联仍存于 metadata。
 pub fn summary_id(character: &str, conversation: &str) -> String {
     use sha2::{Digest, Sha256};

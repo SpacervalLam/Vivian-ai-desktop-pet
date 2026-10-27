@@ -855,6 +855,23 @@ impl DialogueManager {
         Ok(())
     }
 
+    /// Optimistic source version for background consolidation. An unchanged
+    /// file and buffer need no full-history read after a provider call.
+    pub fn history_source_stamp(&self) -> VivianResult<(u64, u128, u64)> {
+        use std::hash::{Hash, Hasher};
+        let _io = self.history_io.lock();
+        let pending = self.buffer.lock();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(&*pending)?.hash(&mut hash);
+        let path = self.history_jsonl_file();
+        let (len, modified) = match std::fs::metadata(&path) {
+            Ok(metadata) => (metadata.len(), metadata.modified()?.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, 0),
+            Err(error) => return Err(error.into()),
+        };
+        Ok((len, modified, hash.finish()))
+    }
+
     /// 获取所有历史消息（供命令层调用）
     ///
     /// 合并"磁盘已持久化" + "内存 buffer 未落盘"两份数据，去重后按时间升序返回。

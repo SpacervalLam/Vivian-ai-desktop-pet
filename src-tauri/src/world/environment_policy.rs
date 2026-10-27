@@ -72,6 +72,56 @@ pub struct PlanningDecision {
     pub opportunity: Option<Selection>,
     #[serde(default, deserialize_with = "optional_guidance")]
     pub guidance: Option<super::interaction_guidance::Suggestion>,
+    #[serde(default, deserialize_with = "optional_private_activity")]
+    pub private_activity: Option<PrivateActivitySelection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiaryCandidate {
+    pub character_id: String,
+    pub date: String,
+    pub resume: bool,
+    pub reason: String,
+    pub material_count_at_least: usize,
+    pub material_threshold: usize,
+}
+
+/// Diary judgment does not exist in the prompt until program admission supplied a candidate.
+pub fn planning_prompt(base: &str, mut observations: serde_json::Value, candidate: Option<&DiaryCandidate>) -> (String, serde_json::Value) {
+    let mut system = base.to_owned();
+    if let Some(map) = observations.as_object_mut() {
+        map.remove("private_activity_candidate");
+        if let Some(candidate) = candidate {
+            system.push_str("\n\n");
+            system.push_str(include_str!("../../prompts/framework/environment_diary.en.md"));
+            map.insert("private_activity_candidate".into(), serde_json::json!(candidate));
+        }
+    }
+    (system, observations)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrivateActivitySelection {
+    pub kind: PrivateActivityKind,
+    pub character_id: String,
+    pub date: String,
+    pub confidence: f64,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateActivityKind { DreamThenDiary }
+
+impl PrivateActivitySelection {
+    pub fn matches(&self, candidate: &DiaryCandidate) -> bool {
+        self.character_id == candidate.character_id && self.date == candidate.date
+            && self.confidence.is_finite() && (0.8..=1.0).contains(&self.confidence)
+    }
+}
+fn optional_private_activity<'de, D: serde::Deserializer<'de>>(deserializer: D)
+    -> Result<Option<PrivateActivitySelection>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn optional_guidance<'de, D: serde::Deserializer<'de>>(deserializer: D)
@@ -767,6 +817,34 @@ mod tests {
         assert_eq!(plan.user_intent.unwrap().kind,IntentKind::NeedsSpace);
         assert!(PlanningDecision::parse(r#"{"user_intent":{"kind":"execute_shell"}}"#).is_none());
         assert!(PlanningDecision::parse("not JSON").is_none());
+    }
+
+    #[test]
+    fn private_diary_decision_requires_the_exact_eligible_character_and_date() {
+        let candidate=DiaryCandidate { character_id:"vivian".into(),date:"2026-10-26".into(),resume:false,reason:"eligible".into(),material_count_at_least:20,material_threshold:20 };
+        let parse=|kind:&str,role:&str,date:&str,confidence:f64| PlanningDecision::parse(&serde_json::json!({
+            "user_intent":null,"opportunity":null,"private_activity":{"kind":kind,"character_id":role,"date":date,"confidence":confidence}
+        }).to_string()).unwrap().private_activity;
+        assert!(parse("dream_then_diary","vivian","2026-10-26",0.9).unwrap().matches(&candidate));
+        assert!(!parse("dream_then_diary","nana","2026-10-26",0.9).unwrap().matches(&candidate));
+        assert!(!parse("dream_then_diary","vivian","2026-10-27",0.9).unwrap().matches(&candidate));
+        assert!(!parse("dream_then_diary","vivian","2026-10-26",0.79).unwrap().matches(&candidate));
+        assert!(parse("execute_shell","vivian","2026-10-26",0.9).is_none());
+        assert!(parse("write_diary","vivian","2026-10-26",0.9).is_none(),"the diary cannot bypass the dream stage");
+        assert!(PlanningDecision::parse(r#"{"user_intent":null,"opportunity":null,"private_activity":null}"#).unwrap().private_activity.is_none());
+    }
+
+    #[test]
+    fn diary_instructions_and_observations_are_absent_without_program_admission() {
+        let base=include_str!("../../prompts/framework/environment_agent.en.md");
+        let (system,observed)=planning_prompt(base,serde_json::json!({"scene":"normal","private_activity_candidate":"untrusted"}),None);
+        assert_eq!(system,base);assert!(!system.contains("dream_then_diary"));
+        assert!(observed.get("private_activity_candidate").is_none());
+        let candidate=DiaryCandidate{character_id:"vivian".into(),date:"2026-10-26".into(),resume:false,reason:"eligible".into(),material_count_at_least:20,material_threshold:20};
+        let (system,observed)=planning_prompt(base,serde_json::json!({"scene":"normal"}),Some(&candidate));
+        assert!(system.contains("dream_then_diary"));
+        assert_eq!(observed["private_activity_candidate"]["material_threshold"],20);
+        assert_eq!(observed["private_activity_candidate"]["character_id"],"vivian");
     }
 
     #[test]

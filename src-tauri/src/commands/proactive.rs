@@ -1490,9 +1490,6 @@ async fn proactive_tick_inner(
         deliver_cross_character_messages(&app, &state_arc, &char_id, cross_messages).await;
     }
 
-    // 自动日记检查（后台异步，不阻塞 tick 返回）
-    crate::diary::spawn_auto_diary_check(&brain, instance.name.clone(), app);
-
     // 计算推荐的下次 tick 间隔（毫秒）
     // adaptive_tick_enabled=true 时根据空闲时间动态调整；否则使用配置的固定间隔
     // 策略 A：传入 char_id 让每个角色获得独立的随机抖动因子，tick 相位自然漂移

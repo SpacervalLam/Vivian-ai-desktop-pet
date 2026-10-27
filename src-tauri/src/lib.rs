@@ -990,6 +990,7 @@ pub fn run() {
                                 router.set_app_handle(handle.clone());
                             }
                             // 注入 AppHandle + Router 到全局事件账本（启用前端通知 + LLM 摘要压缩）
+                            state.world_provider.environment.set_app_handle(handle.clone());
                             {
                                 let ledger = crate::memory::unified_event_ledger();
                                 ledger.set_app_handle(handle.clone());

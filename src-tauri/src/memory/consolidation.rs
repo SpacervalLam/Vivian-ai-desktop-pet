@@ -1,6 +1,6 @@
-//! 记忆巩固 —— 夜间/空闲时整理记忆，模拟"睡眠巩固"
+//! 记忆巩固 —— 做梦、休息及启动恢复时整理记忆。
 //!
-//! 在深夜（2-5 点）或用户长时间离场时触发：
+//! 每日做梦由程序门槛筛选、环境智能体决定；此模块执行整理及联想：
 //! 1. 调用 ConsolidationPipeline 跑 Stage 1（ShortTerm→MidTerm SessionSummary）；
 //!    长期事实统一由 AutoExtractor 从原始对话提取，不再由摘要二次抽取
 //! 2. 强化近期重要记忆（提升 importance）
@@ -28,6 +28,17 @@ use crate::memory::step_health::StepHealthTracker;
 use crate::mind::{BeliefGenerator, Mind};
 use crate::providers::base::LLMRequest;
 use crate::types::response::ChatMessage;
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DreamReport {
+    pub stage1_summaries: usize,
+    pub pending_sessions: usize,
+    pub beliefs_created: usize,
+    pub beliefs_reinforced: usize,
+    pub goals_added: usize,
+    pub memory_notes_updated: bool,
+    pub disabled: bool,
+}
 
 /// 成功后的完整冷却（6 小时）
 const SUCCESS_COOLDOWN_SEC: f64 = 6.0 * 3600.0;
@@ -78,6 +89,7 @@ pub struct MemoryConsolidator {
     last_consolidation: Mutex<f64>,
     /// 步骤健康跟踪（pipeline / belief / memory_md 三步）
     health: StepHealthTracker,
+    execution: tokio::sync::Mutex<()>,
 }
 
 impl MemoryConsolidator {
@@ -91,6 +103,7 @@ impl MemoryConsolidator {
             char_id: String::new(),
             last_consolidation: Mutex::new(0.0),
             health: StepHealthTracker::load(None),
+            execution: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -131,33 +144,48 @@ impl MemoryConsolidator {
     /// 失败不烧满冷却：30 分钟后自动重试，凭证/网络恢复即可自愈。
     /// 连续失败达阈值的步骤熔断暂停：完全跳过，1 小时后半开重试。
     pub async fn consolidate(&self) -> bool {
-        self.consolidate_with_report().await.is_some()
+        self.consolidate_with_report(None).await.is_some()
     }
 
-    // 外层 None = 冷却跳过；内层 None = 失败/暂停，无法确认完整产出。
-    async fn consolidate_with_report(&self) -> Option<Option<usize>> {
+    /// 做梦是一次有界的记忆整理及联想；日记入口显式等待它，不受后台 6h 冷却限制。
+    pub async fn before_diary(&self, after: f64, before: f64) -> crate::error::VivianResult<DreamReport> {
+        match self.consolidate_with_report(Some((after, before))).await {
+            Some((report, true, _)) => Ok(report),
+            _ => Err(crate::error::VivianError::Memory("做梦整理尚未完成，已保存成功分段，稍后重试".into())),
+        }
+    }
+
+    // None = 后台冷却跳过；Some = 产出、全部步骤是否成功、摘要阶段是否完成。
+    async fn consolidate_with_report(&self, diary_range: Option<(f64, f64)>) -> Option<(DreamReport, bool, bool)> {
+        let _guard = self.execution.lock().await;
         // 半开恢复：暂停超过 1 小时的步骤解除暂停，允许本轮重试
         self.health.try_resume(PAUSE_COOLDOWN_SEC);
 
         let now = chrono::Utc::now().timestamp() as f64;
-        if !self.should_run() {
+        if diary_range.is_none() && !self.should_run() {
             return None;
         }
 
-        tracing::info!("开始夜间记忆巩固...");
+        tracing::info!("开始记忆整理与联想...");
         let mut all_ok = true;
-        let mut stage1_summaries = None;
+        let mut report = DreamReport::default();
+        let mut pipeline_completed = false;
 
-        // 跑完整巩固流水线（Stage 1/2/3：ShortTerm→MidTerm→LongTerm→Insight）
-        // ConsolidationPipeline::run 会处理 ShortTerm 摘要、画像抽取、Insight 生成
+        // 先从原始会话生成可恢复摘要；事实提取仍由 AutoExtractor 独立负责。
         if let Some(reason) = self.health.is_paused("pipeline") {
             tracing::warn!("[MemoryConsolidator] 巩固流水线处于熔断暂停，跳过：{}", reason);
             all_ok = false;
         } else {
-            match self.pipeline.run(&self.memory).await {
-                Ok(report) => {
-                    stage1_summaries = Some(report.stage1_summaries);
-                    tracing::info!("记忆巩固完成: {:?}", report);
+            let result = match diary_range {
+                Some((after, before)) => self.pipeline.run_before_diary(&self.memory, after, before).await,
+                None => self.pipeline.run(&self.memory).await,
+            };
+            match result {
+                Ok(summary_report) => {
+                    report.stage1_summaries = summary_report.stage1_summaries;
+                    report.pending_sessions = summary_report.pending_sessions;
+                    pipeline_completed = true;
+                    tracing::info!("记忆巩固完成: {:?}", summary_report);
                     self.health.mark_success("pipeline");
                 }
                 Err(e) => {
@@ -168,6 +196,12 @@ impl MemoryConsolidator {
             }
         }
 
+        // 来源整理失败时不继续联想，避免把未完成的整理当成这轮的新证据。
+        if diary_range.is_some() && (!pipeline_completed || report.pending_sessions > 0) {
+            *self.last_consolidation.lock() = now;
+            return Some((report, false, false));
+        }
+
         // Stage 4: Belief/Goal 生成（仅在注入 Mind 时执行）
         if let (Some(gen), Some(mind)) = (&self.belief_generator, &self.mind) {
             if let Some(reason) = self.health.is_paused("belief") {
@@ -175,8 +209,11 @@ impl MemoryConsolidator {
                 all_ok = false;
             } else {
                 match gen.generate(&self.memory, mind).await {
-                    Ok(report) => {
-                        tracing::info!("Belief 生成完成: {:?}", report);
+                    Ok(belief_report) => {
+                        report.beliefs_created = belief_report.beliefs_created;
+                        report.beliefs_reinforced = belief_report.beliefs_reinforced;
+                        report.goals_added = belief_report.goals_added;
+                        tracing::info!("Belief 生成完成: {:?}", belief_report);
                         self.health.mark_success("belief");
                     }
                     Err(e) => {
@@ -202,6 +239,7 @@ impl MemoryConsolidator {
                 if need != crate::memory::memory_md::TidyNeed::None {
                     match self.tidy_memory_md(need).await {
                         Ok(true) => {
+                            report.memory_notes_updated = true;
                             tracing::info!("[MemoryConsolidator] memory.md 已整理合并（{need:?}）");
                             self.health.mark_success("memory_md");
                             *self.memory_md_last_tidy.lock() = now;
@@ -225,7 +263,7 @@ impl MemoryConsolidator {
         if !all_ok {
             tracing::info!("巩固部分失败，{:.0} 分钟后自动重试", FAILURE_RETRY_SEC / 60.0);
         }
-        Some(stage1_summaries)
+        Some((report, all_ok, pipeline_completed))
     }
 
     /// 整理角色长期记忆笔记（memory.md）。
@@ -331,12 +369,13 @@ impl MemoryConsolidator {
     /// 返回值：本次恢复是否补跑了摘要（Stage 1 产出 > 0）。
     pub async fn recover(&self) -> bool {
         tracing::info!("[MemoryConsolidator] 启动检查：补跑满足条件的会话摘要");
-        match self.consolidate_with_report().await {
-            Some(Some(summaries)) => {
+        match self.consolidate_with_report(None).await {
+            Some((report, _, true)) => {
+                let summaries = report.stage1_summaries;
                 tracing::info!("[MemoryConsolidator] 启动检查完成：实际生成 {} 份会话摘要", summaries);
                 summaries > 0
             }
-            Some(None) => {
+            Some((_, _, false)) => {
                 tracing::warn!("[MemoryConsolidator] 启动检查未完成：没有完整产出报告，保留记忆等待重试");
                 false
             }

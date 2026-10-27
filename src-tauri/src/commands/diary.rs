@@ -60,40 +60,9 @@ pub async fn get_diary_range(
 pub async fn generate_diary(
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<Value, String> {
-    let instance = state.get_character(character_id.as_deref())?;
-    let now = chrono::Local::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
-    let start_ts = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-        start_of_day,
-        *chrono::Local::now().offset(),
-    ).timestamp();
-    let end_ts = now.timestamp();
-
-    let entry = diary::DiaryEntry {
-        id: String::new(),
-        date,
-        start_time: start_ts,
-        end_time: end_ts,
-        content: "今日暂无足够的互动数据来生成日记。".to_string(),
-        key_events: Vec::new(),
-        mood_average: json!({"pet_valence": 0.0, "pet_energy": 50}),
-        word_count: 0,
-        interaction_count: 0,
-        trigger_type: "manual".to_string(),
-        trigger_score: 0,
-        mood_tag: "neutral".to_string(),
-        created_at: end_ts,
-        structured_keywords: None,
-        story_update: None,
-        relationship_delta: None,
-        mood_samples: Vec::new(),
-        version: 2,
-    };
-
-    let saved = diary::add_entry(&instance.id, entry).map_err(|e| e.to_string())?;
-    serde_json::to_value(saved).map_err(|e| e.to_string())
+    generate_diary_intelligent(state, character_id, Some("manual".into()), app).await
 }
 
 /// 智能日记生成 — 调用 LLM 基于当日对话历史与情绪状态生成
@@ -396,6 +365,7 @@ pub async fn add_common_diary_entry(
         relationship_delta: None,
         mood_samples: Vec::new(),
         version: 2,
+        dream: None,
     };
     let saved = diary::add_common_entry(entry).map_err(|e| e.to_string())?;
     serde_json::to_value(&saved).map_err(|e| e.to_string())

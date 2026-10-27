@@ -4,19 +4,17 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::character_registry;
-use crate::diary::intelligent_generator;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
     ToolRiskTier,
 };
 
-/// write_diary 工具 - 触发智能日记生成
+/// write_diary 兼容工具名：只提交做梦与日记安排请求。
 ///
-/// 调用 `generate_intelligent_diary` 基于当日对话历史与情绪状态生成日记。
+/// 环境智能体决定是否开始；获准后先做梦、随后写日记，工具不直接写入。
 /// 仅在满足前置条件时对 LLM 可见（由 PromptBuildingStep 动态控制）：
 /// - 当天尚未生成过日记
-/// - 最近 24h 交互轮次 ≥ min_interaction_threshold
-/// - 触发分数 ≥ 30
+/// - 当日原始对话 ≥ min_interaction_threshold，且在允许时间窗内
 pub struct WriteDiaryTool;
 
 impl WriteDiaryTool {
@@ -38,29 +36,29 @@ impl Tool for WriteDiaryTool {
     }
 
     fn description(&self) -> &str {
-        "Write today's diary based on the day's conversations and emotional state. \
+        "Request scheduling of the daily dream: organize memories and associate experiences, then write today's diary. \
          Call this when you feel the day has had enough interactions worth recording, \
          or when the day is winding down and you want to reflect. \
          The diary is generated automatically from your memories — no content parameter needed. \
-         IMPORTANT: A successful write_diary means the diary task is COMPLETE. \
-         Do NOT call any further tools after writing the diary."
+         IMPORTANT: Success means the request was submitted, not that a diary was written. \
+         Completion is notified separately. Do not repeat this request or claim the diary is ready."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "根据当天的对话和情绪状态写今天的日记。当你觉得这一天有足够值得记录的互动，\
+            "zh" => "请求安排做梦整理、联想记忆，获准后紧接着写今天的日记，无需分别触发。当你觉得这一天有足够值得记录的互动，\
             或者一天即将结束、你想反思时调用此工具。日记会基于你的记忆自动生成——无需 content 参数。\
-            重要：write_diary 成功即表示日记任务完成。写完日记后不要再调用任何其他工具。",
-            "ja" => "その日の会話と感情状態に基づいて今日の日記を書く。その日に記録する価値のあるやり取りが十分あったと感じた時、\
+            重要：成功只代表安排请求已提交，日记尚未生成；完成后另行通知。不要重复提交，也不要宣称日记已经写好。",
+            "ja" => "先に夢として記憶を整理・関連付け、その直後に今日の日記を書く。別々に呼ぶ必要はない。その日に記録する価値のあるやり取りが十分あったと感じた時、\
             または一日が終わりに近づいて振り返りたい時に呼び出す。日記は記憶から自動的に生成される——content パラメータは不要。\
-            重要：write_diary の成功は日記タスクの完了を意味する。日記を書いた後は他のツールを呼び出さないこと。",
+            重要：成功は予約リクエストの送信を意味し、日記の完成ではない。完了は別途通知される。再送したり完成したと伝えたりしないこと。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "把我今天的事写进日记\n记一篇日记\n帮我写日记\n今天值得记下来",
+            "zh" => "做个梦整理记忆\n整理联想后写日记\n把我今天的事写进日记\n记一篇日记\n帮我写日记\n今天值得记下来",
             "en" => "write today into my diary\nkeep a diary entry\nnote this day down",
             "ja" => "今日のことを日記に書いて\n日記をつけて\n今日を記録して",
             _ => "",
@@ -114,39 +112,15 @@ impl Tool for WriteDiaryTool {
             }
         };
 
-        // 前置条件校验（与 should_trigger 一致，防止 LLM 在不满足条件时调用）
-        match crate::diary::should_trigger(&brain).await {
-            (false, reason) => {
-                return ToolResult::standard_error(
-                    &format!("当前不满足写日记条件: {}", reason),
-                    None,
-                    None,
-                );
-            }
-            (true, _) => {}
+        if !matches!(crate::diary::dream::candidate(&brain, chrono::Local::now()), Ok(Some(_))) {
+            return ToolResult::standard_error("素材量或时间窗等程序条件不满足，暂不安排判断", None, None);
         }
-
-        match intelligent_generator::generate_intelligent_diary(&brain, "tool").await {
-            Ok(entry) => {
-                let preview: String = entry.content.chars().take(80).collect();
-                let data = json!({
-                    "id": entry.id,
-                    "date": entry.date,
-                    "word_count": entry.word_count,
-                    "mood_tag": entry.mood_tag,
-                    "preview": preview,
-                });
-                ToolResult::standard_success(
-                    &format!("日记已生成：{}（{}字）", entry.date, entry.word_count),
-                    Some(data),
-                )
-            }
-            Err(e) => ToolResult::standard_error(
-                &format!("日记生成失败: {}", e),
-                None,
-                None,
-            ),
-        }
+        let Some(environment) = crate::world::environment_agent::shared() else {
+            return ToolResult::standard_error("日常安排尚未就绪，请稍后重试", None, None);
+        };
+        environment.request_diary_check(char_id);
+        ToolResult::standard_success("已请求安排做梦与日记，尚未生成日记，完成后会另行通知。",
+            Some(json!({"requested":true,"completed":false})))
     }
 
     fn is_read_only(&self) -> bool {
@@ -162,7 +136,7 @@ impl Tool for WriteDiaryTool {
         ToolRiskTier::FsWrite
     }
 
-    /// 写完日记即任务完成，终止 Agent 循环
+    /// 安排请求提交后结束本轮，避免反复请求；不表示日记已完成。
     fn signals_goal_completion(&self) -> bool {
         true
     }

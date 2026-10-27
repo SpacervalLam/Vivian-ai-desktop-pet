@@ -306,6 +306,9 @@ impl ConversationBoundaryStore {
         let state = self.state.lock();
         (state.epoch, state.decisions.clone())
     }
+    pub fn epoch(&self) -> u64 {
+        self.state.lock().epoch
+    }
     /// Clear invalidates in-flight reviews; persistence succeeds before readers see changes.
     pub fn apply(
         &self,

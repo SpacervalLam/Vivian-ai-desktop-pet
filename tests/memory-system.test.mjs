@@ -61,10 +61,12 @@ pub mod providers {
             pub fn without_framework_instructions(self)->Self{self}
         }
     }
-    #[derive(Default)] pub struct ModelRouter { pub outputs:Mutex<VecDeque<String>>, pub prompts:Mutex<Vec<String>> }
+    #[derive(Default)] pub struct ModelRouter { pub outputs:Mutex<VecDeque<String>>, pub prompts:Mutex<Vec<String>>,
+        pub hooks:Mutex<VecDeque<Box<dyn FnOnce()+Send>>> }
     impl ModelRouter {
         pub async fn generate(&self,req:base::LLMRequest)->crate::error::VivianResult<String> {
             self.prompts.lock().push(req.messages[0].content.clone());
+            if let Some(hook)=self.hooks.lock().pop_front(){hook();}
             Ok(self.outputs.lock().pop_front().unwrap_or_else(|| String::from(r#"{"title":"交流","summary":"确认了约定。","topics":["约定"],"importance":0.7,"events":[]}"#)))
         }
     }
@@ -73,11 +75,15 @@ pub mod dialogue {
     use crate::error::VivianResult;
     #[derive(Debug,Clone,serde::Serialize,serde::Deserialize)] __HISTORY_ENTRY__
     pub struct DialogueManager { pub entries:parking_lot::RwLock<Vec<HistoryEntry>>, pub char_id:String,
-        pub conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore }
+        pub conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore,
+        pub history_reads:std::sync::atomic::AtomicUsize }
     impl DialogueManager {
-        pub fn new(entries:Vec<HistoryEntry>)->Self{Self{char_id:"vivian".into(),entries:parking_lot::RwLock::new(entries),conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore::new(std::env::temp_dir().join(format!("vivian-grouping-test-{}.json",uuid::Uuid::new_v4())))}}
+        pub fn new(entries:Vec<HistoryEntry>)->Self{Self{char_id:"vivian".into(),entries:parking_lot::RwLock::new(entries),conversation_boundaries:crate::memory::conversation_semantics::ConversationBoundaryStore::new(std::env::temp_dir().join(format!("vivian-grouping-test-{}.json",uuid::Uuid::new_v4()))),history_reads:Default::default()}}
         __VISIBLE_CONVERSATIONS__
-        pub fn get_all_history(&self)->crate::error::VivianResult<Vec<HistoryEntry>>{Ok(self.entries.read().clone())}
+        pub fn get_all_history(&self)->crate::error::VivianResult<Vec<HistoryEntry>>{self.history_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Ok(self.entries.read().clone())}
+        pub fn history_source_stamp(&self)->crate::error::VivianResult<(u64,u128,u64)>{
+            use std::hash::{Hash,Hasher};let mut hash=std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_vec(&*self.entries.read())?.hash(&mut hash);Ok((0,0,hash.finish()))}
         pub fn memory_conversations(&self)->crate::error::VivianResult<Vec<crate::memory::conversations::ConversationRecord>>{
             let (_,d)=self.conversation_boundaries.snapshot();Ok(crate::memory::conversations::project_conversations(&self.entries.read(),"vivian",&d).0)}
         pub fn notify_conversation_grouping_changed(&self){}
@@ -88,12 +94,16 @@ pub mod memory {
     __MODULES__
     pub mod manager {
         use super::types::{MemoryItem,Granularity};
-        #[derive(Default)] pub struct MemoryManager { pub items:parking_lot::RwLock<Vec<MemoryItem>> }
+        #[derive(Default)] pub struct MemoryManager { pub items:parking_lot::RwLock<Vec<MemoryItem>>, pub full_reads:std::sync::atomic::AtomicUsize,
+            pub summary_reads:std::sync::atomic::AtomicUsize, pub index_checks:std::sync::atomic::AtomicUsize }
         impl MemoryManager {
             pub fn char_id(&self)->&str{"vivian"}
             pub fn reconcile_conversation_projection(&self,_:&[super::conversations::ConversationRecord])->crate::error::VivianResult<()>{Ok(())}
-            pub fn check_index_drift_and_rebuild(&self)->Option<usize>{None}
-            pub async fn get_all_memories(&self)->crate::error::VivianResult<Vec<MemoryItem>>{Ok(self.items.read().clone())}
+            pub fn check_index_drift_and_rebuild(&self)->Option<usize>{self.index_checks.fetch_add(1,std::sync::atomic::Ordering::Relaxed);None}
+            pub async fn get_all_memories(&self)->crate::error::VivianResult<Vec<MemoryItem>>{self.full_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Ok(self.items.read().clone())}
+            pub fn consolidation_summaries(&self,_:&[String])->crate::error::VivianResult<Vec<MemoryItem>>{
+                self.summary_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                Ok(self.items.read().iter().filter(|m|super::session_summary::is_active_summary(m)).cloned().collect())}
             pub async fn upsert_session_summary(&self,id:&str,text:&str,importance:f64,meta:serde_json::Value)->crate::error::VivianResult<MemoryItem>{
                 let mut all=self.items.write(); let stable=format!("summary:{id}");
                 let existing=all.iter().position(|m|m.id==stable);
@@ -228,6 +238,57 @@ pub mod memory {
 const modules = ['types', 'kinds', 'provenance', 'conversations', 'conversation_semantics', 'session_summary', 'companion_policy', 'pipeline', 'seed'];
 const visibleConversations = history.match(/    pub fn visible_memory_conversations\([\s\S]*?\n    \}/)?.[0];
 if (!visibleConversations) throw new Error('UI conversation projection not found');
+const historySourceStamp = history.match(/    pub fn history_source_stamp\([\s\S]*?\n    \}/)?.[0];
+if (!historySourceStamp) throw new Error('History source version not found');
+source += `
+#[cfg(test)] mod history_source_version {
+    use crate::{dialogue::HistoryEntry,error::VivianResult};
+    struct DialogueManager { history_io:parking_lot::Mutex<()>,buffer:parking_lot::Mutex<Vec<HistoryEntry>>,path:std::path::PathBuf }
+    impl DialogueManager {
+        fn history_jsonl_file(&self)->std::path::PathBuf{self.path.clone()}
+        ${historySourceStamp}
+    }
+    #[test] fn production_source_version_detects_pending_edits_flushes_and_deletion() {
+        let root=std::env::temp_dir().join(format!("vivian-source-stamp-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&root).unwrap();
+        let manager=DialogueManager{history_io:Default::default(),buffer:Default::default(),path:root.join("history.jsonl")};
+        let empty=manager.history_source_stamp().unwrap();assert_eq!(empty,manager.history_source_stamp().unwrap());
+        manager.buffer.lock().push(HistoryEntry{id:"source".into(),role:"user".into(),content:"原始内容".into(),timestamp:1.0,session_id:None,metadata:serde_json::json!({})});
+        let pending=manager.history_source_stamp().unwrap();assert_ne!(pending,empty);
+        manager.buffer.lock()[0].metadata["speaker"]=serde_json::json!("nana");
+        assert_ne!(pending,manager.history_source_stamp().unwrap());
+        manager.buffer.lock().clear();assert_eq!(empty,manager.history_source_stamp().unwrap());
+        // The stamp only reads metadata: even an arbitrary non-JSON body is sufficient.
+        std::fs::write(&manager.path,"raw body").unwrap();let stored=manager.history_source_stamp().unwrap();assert_ne!(stored,empty);
+        assert_eq!(stored,manager.history_source_stamp().unwrap());
+        std::fs::write(&manager.path,"a different length").unwrap();assert_ne!(stored,manager.history_source_stamp().unwrap());
+        std::fs::remove_file(&manager.path).unwrap();assert_eq!(empty,manager.history_source_stamp().unwrap());
+        std::fs::remove_dir(root).unwrap();
+    }
+    #[test] #[ignore="synthetic full-history read versus production source-version check"]
+    fn history_source_stamp_benchmark() {
+        use std::io::Write;
+        let root=std::env::temp_dir().join(format!("vivian-stamp-bench-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&root).unwrap();
+        let manager=DialogueManager{history_io:Default::default(),buffer:Default::default(),path:root.join("history.jsonl")};
+        let mut output=std::io::BufWriter::new(std::fs::File::create(&manager.path).unwrap());
+        for i in 0..20_000 {
+            let entry=HistoryEntry{id:format!("turn-{i}"),role:"user".into(),content:"原始对话记录".repeat(40),timestamp:i as f64,session_id:None,metadata:serde_json::json!({})};
+            serde_json::to_writer(&mut output,&entry).unwrap();writeln!(output).unwrap();
+        }
+        output.flush().unwrap();drop(output);
+        let expected=manager.history_source_stamp().unwrap();let mut full=Vec::new();let mut stamps=Vec::new();
+        for _ in 0..7 {
+            let started=std::time::Instant::now();let text=std::fs::read_to_string(&manager.path).unwrap();
+            let rows:Vec<HistoryEntry>=text.lines().map(|line|serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(rows.len(),20_000);full.push(started.elapsed().as_secs_f64()*1000.0);
+            let started=std::time::Instant::now();assert_eq!(expected,manager.history_source_stamp().unwrap());
+            stamps.push(started.elapsed().as_secs_f64()*1000.0);
+        }
+        full.sort_by(f64::total_cmp);stamps.sort_by(f64::total_cmp);
+        println!("HISTORY_STAMP_BENCH {}",serde_json::json!({"turns":20_000,"full_read_median_ms":full[3],"version_check_median_ms":stamps[3],"full_samples_ms":full,"version_samples_ms":stamps}));
+        std::fs::remove_file(&manager.path).unwrap();std::fs::remove_dir(root).unwrap();
+    }
+}
+`;
 source = source.replace('__VISIBLE_CONVERSATIONS__', visibleConversations);
 source = source.replace('__HISTORY_ENTRY__', entry).replace('__STRIP__', strip).replace('__PREFIX__', prefix)
   .replace('__PROMPT_TIME__', `#[path="${rustPath('src-tauri/src/utils/prompt_time.rs')}"] pub mod prompt_time;`)
@@ -326,10 +387,13 @@ source += `
     }
 }
 `;
+source += `\n#[cfg(test)] #[path="${rustPath('tests/fixtures/memory-consolidation-bench.rs')}"] mod consolidation_bench;
+#[cfg(test)] #[path="${rustPath('tests/fixtures/memory-consolidation-tests.rs')}"] mod consolidation_regressions;\n`;
 await writeFile(path.join(dir, 'src/lib.rs'), source);
 // CARGO_INCREMENTAL=0: rustc 1.96.0 panics in rmeta::encoder when it reuses the
 // incremental cache of these generated crates ("the compiler unexpectedly
 // panicked"), which made the second and later runs of this harness fail.
-const result = spawnSync('cargo', ['test', ...(process.env.VIVIAN_TEST_OFFLINE === '0' ? [] : ['--offline']), '--manifest-path', path.join(dir, 'Cargo.toml'), '-j', '1'], { cwd: root, stdio: 'inherit', env: { ...process.env, CARGO_INCREMENTAL: '0' } });
+const result = spawnSync('cargo', ['test', ...(process.env.VIVIAN_TEST_OFFLINE === '0' ? [] : ['--offline']), '--manifest-path', path.join(dir, 'Cargo.toml'), '-j', '1',
+  ...(process.argv.includes('--bench') ? ['_benchmark', '--', '--ignored', '--nocapture', '--test-threads=1'] : [])], { cwd: root, stdio: 'inherit', env: { ...process.env, CARGO_INCREMENTAL: '0' } });
 if (result.error) throw result.error;
 process.exitCode = result.status ?? 1;

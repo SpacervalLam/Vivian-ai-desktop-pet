@@ -4,7 +4,7 @@ use crate::dialogue::HistoryEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,32 +249,58 @@ pub fn refresh_derived_links(
     valid: &HashSet<&str>,
     owners: &HashMap<&str, &str>,
 ) -> bool {
+    derived_link_changes(item, valid, owners).is_some_and(|changes| changes.apply(item))
+}
+
+/// An unchanged projection must not clone memory bodies while holding the write lock.
+pub fn updated_derived_links(
+    item: &super::types::MemoryItem,
+    valid: &HashSet<&str>,
+    owners: &HashMap<&str, &str>,
+) -> Option<(super::types::MemoryItem, bool)> {
+    let changes = derived_link_changes(item, valid, owners)?;
+    let mut updated = item.clone();
+    let retired = changes.apply(&mut updated);
+    Some((updated, retired))
+}
+
+struct DerivedLinkChanges {
+    retired: bool,
+    conversation: Option<String>,
+    evidence: Vec<(usize, String)>,
+}
+
+impl DerivedLinkChanges {
+    fn apply(self, item: &mut super::types::MemoryItem) -> bool {
+        if self.retired {
+            item.consolidated = true;
+            item.metadata["index_active"] = serde_json::json!(false);
+            item.metadata["superseded_by_grouping"] = serde_json::json!(true);
+        }
+        if let Some(id) = self.conversation { item.metadata["conversation_id"] = serde_json::json!(id); }
+        for (index, id) in self.evidence {
+            item.metadata["evidence_sources"][index]["conversation_id"] = serde_json::json!(id);
+        }
+        self.retired
+    }
+}
+
+fn derived_link_changes(
+    item: &super::types::MemoryItem,
+    valid: &HashSet<&str>,
+    owners: &HashMap<&str, &str>,
+) -> Option<DerivedLinkChanges> {
     let expected = item.metadata["conversation_id"].as_str().unwrap_or("");
-    let ids_moved = item.metadata["source_message_ids"]
-        .as_array()
-        .is_some_and(|ids| {
-            ids.iter()
-                .filter_map(|id| id.as_str())
-                .any(|id| owners.get(id).copied() != Some(expected))
-        });
-    let parts_moved = item.metadata["summary_parts"]
-        .as_array()
-        .is_some_and(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part["slices"].as_array())
-                .flatten()
-                .filter_map(|slice| slice["message_id"].as_str())
-                .any(|id| owners.get(id).copied() != Some(expected))
-        });
+    let moved = |ids: &serde_json::Value| ids.as_array().is_some_and(|ids| {
+        ids.iter().filter_map(|id| id.as_str()).any(|id| owners.get(id).copied() != Some(expected))
+    });
     let retired = item.metadata["source"] == "session_consolidation"
         && !item.consolidated
-        && (!valid.contains(expected) || ids_moved || parts_moved);
-    if retired {
-        item.consolidated = true;
-        item.metadata["index_active"] = serde_json::json!(false);
-        item.metadata["superseded_by_grouping"] = serde_json::json!(true);
-    }
+        && (!valid.contains(expected) || moved(&item.metadata["source_message_ids"])
+            || item.metadata["summary_parts"].as_array().is_some_and(|parts| parts.iter()
+                .filter_map(|p| p["slices"].as_array()).flatten()
+                .filter_map(|s| s["message_id"].as_str()).any(|id| owners.get(id).copied() != Some(expected))));
+    let mut changes = DerivedLinkChanges { retired, conversation: None, evidence: Vec::new() };
     if super::kinds::kind(item) == super::kinds::RecordKind::Fact {
         let locate = |meta: &serde_json::Value, key: &str| {
             meta[key].as_array().and_then(|ids| {
@@ -283,17 +309,17 @@ pub fn refresh_derived_links(
             })
         };
         if let Some(id) = locate(&item.metadata, "source_message_ids") {
-            item.metadata["conversation_id"] = serde_json::json!(id);
+            if item.metadata["conversation_id"].as_str() != Some(id) { changes.conversation = Some(id.to_owned()); }
         }
-        if let Some(sources) = item.metadata["evidence_sources"].as_array_mut() {
-            for source in sources {
+        if let Some(sources) = item.metadata["evidence_sources"].as_array() {
+            for (index, source) in sources.iter().enumerate() {
                 if let Some(id) = locate(source, "message_ids") {
-                    source["conversation_id"] = serde_json::json!(id);
+                    if source["conversation_id"].as_str() != Some(id) { changes.evidence.push((index, id.to_owned())); }
                 }
             }
         }
     }
-    retired
+    (changes.retired || changes.conversation.is_some() || !changes.evidence.is_empty()).then_some(changes)
 }
 
 /// 证据定位只匹配原话及其说话者，绝不拿摘要或 OS 作事实来源。
@@ -326,6 +352,25 @@ pub fn locate_quote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn derived_projection_only_copies_changed_links_and_preserves_evidence() {
+        let valid = ["new"].into_iter().collect();
+        let owners = [("original", "new")].into_iter().collect();
+        let mut fact = super::super::types::MemoryItem::new("用户原话".into(), super::super::types::Granularity::Summary, 0.8);
+        fact.memory_type = "user".into();
+        fact.metadata = serde_json::json!({"record_kind":"fact","source_message_ids":["original"],"conversation_id":"old",
+            "evidence_sources":[{"message_ids":["original"],"conversation_id":"old","quote":"用户原话","speaker":"user"}]});
+        let (updated, retired) = updated_derived_links(&fact, &valid, &owners).unwrap();
+        assert!(!retired); assert!(!updated.consolidated);
+        assert_eq!(updated.content, fact.content);
+        assert_eq!(fact.metadata["conversation_id"], "old", "planning an update must leave the source untouched");
+        assert_eq!(updated.metadata["conversation_id"], "new");
+        assert_eq!(updated.metadata["evidence_sources"][0]["conversation_id"], "new");
+        assert_eq!(updated.metadata["evidence_sources"][0]["quote"], "用户原话");
+        assert_eq!(updated.metadata["evidence_sources"][0]["speaker"], "user");
+        assert!(updated_derived_links(&updated, &valid, &owners).is_none());
+    }
+
     fn entry(id: &str, time: f64, role: &str, meta: serde_json::Value) -> HistoryEntry {
         HistoryEntry {
             id: id.into(),

@@ -12,6 +12,14 @@ pub mod coding_memory_records;
 pub mod coding_session_store;
 #[path = "../src/memory/entry_store.rs"]
 pub mod entry_store;
+#[path = "../src/memory/search_index.rs"]
+pub mod search_index;
+#[path = "../src/memory/kinds.rs"]
+pub mod kinds;
+#[path = "../src/memory/provenance.rs"]
+pub mod provenance;
+#[path = "../src/memory/tokenize.rs"]
+pub mod tokenize;
 #[path = "../src/error.rs"]
 pub mod error;
 #[path = "../src/utils/fs.rs"]

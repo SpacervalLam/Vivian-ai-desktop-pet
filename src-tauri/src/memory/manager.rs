@@ -2,7 +2,6 @@ use crate::config::manager::AppConfig;
 use crate::error::{VivianError, VivianResult};
 use crate::utils::path;
 use parking_lot::{Mutex, RwLock};
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -18,7 +17,7 @@ use super::graph_store::KnowledgeGraph;
 use super::llm_enricher::{EnrichedMeta, MemoryEnricher};
 use super::redact::{redact_content, RedactStatus};
 use super::recycle_bin::RecycleBin;
-use super::strategy::{create_strategy, RetrievalContext};
+use super::strategy::{create_strategy, QueryEmbedding, RetrievalContext};
 use super::takes_fence::TakesFence;
 use super::types::{
     current_timestamp, Granularity, MemoryItem, MemoryStoreData, MemoryType,
@@ -110,11 +109,11 @@ struct MemoryManagerInner {
     id_index: HashMap<String, usize>,
     capacities: HashMap<Granularity, usize>,
     /// 条目 SQLite 存储（行级 upsert，替代全量 JSON 重写）
-    entry_store: super::entry_store::MemoryEntryStore,
-    /// 已落盘条目指纹（id → 内容哈希），差异比对确定需写入/删除的行
-    persisted: HashMap<String, u64>,
+    entry_store: Arc<super::entry_store::MemoryEntryStore>,
+    changes: super::entry_store::EntryChanges,
+    revision: u64,
     /// 向量存储（用于 RetrievalStrategy::Vector）
-    vector_store: MemoryVectorStore,
+    vector_store: Arc<MemoryVectorStore>,
     /// 嵌入服务（默认 HashingMemoryEmbedding，256 维）
     embedding: Arc<dyn MemoryEmbeddingProvider>,
     /// 检索三因子加权配置（运行时可热更新）
@@ -123,6 +122,34 @@ struct MemoryManagerInner {
     dirty: bool,
     /// 上次落盘时间戳（用于 5s 节流判断）
     last_save_at: Option<std::time::Instant>,
+}
+
+/// A request owns its candidates while network/index work proceeds without the manager lock.
+struct RecallSnapshot {
+    entries: Vec<MemoryItem>,
+    vector_store: Arc<MemoryVectorStore>,
+    embedding: Arc<dyn MemoryEmbeddingProvider>,
+    weights: RetrievalWeights,
+    revision: u64,
+    arms: super::retriever::RecallArms,
+    entry_store: Arc<super::entry_store::MemoryEntryStore>,
+}
+
+#[cfg(test)]
+#[path = "manager_access_tests.rs"]
+mod access_tests;
+
+impl RecallSnapshot {
+    fn search(&self, query: &str, strategy: RetrievalStrategy, limit: usize,
+        query_embedding: Option<&[f32]>, graph: &Arc<KnowledgeGraph>) -> Vec<MemoryItem> {
+        let context = RetrievalContext {
+            entries: &self.entries, vector_store: &self.vector_store, embedding: &self.embedding,
+            graph: Some(graph), weights: Some(self.weights),
+            query_embedding: QueryEmbedding::Prepared(query_embedding),
+            prepared_arms: Some(&self.arms),
+        };
+        create_strategy(&strategy).search(&context, query, limit)
+    }
 }
 
 /// 冲突检测结果（内部使用，携带执行所需的数据）
@@ -240,11 +267,12 @@ impl MemoryManager {
             data: MemoryStoreData::default(),
             id_index: HashMap::new(),
             capacities,
-            entry_store: super::entry_store::MemoryEntryStore::open(
+            entry_store: Arc::new(super::entry_store::MemoryEntryStore::open(
                 memory_dir.join("entries.db"),
-            )?,
-            persisted: HashMap::new(),
-            vector_store,
+            )?),
+            changes: Default::default(),
+            revision: 0,
+            vector_store: Arc::new(vector_store),
             embedding,
             retrieval_weights: RetrievalWeights::from_config(&config.memory.retrieval_weights),
             dirty: false,
@@ -460,7 +488,7 @@ impl MemoryManager {
                 Ok(super::conflict::ArbitrationOutcome::ReplaceOld) => {
                     let mut inner = self.inner.write();
                     if let Some(&idx) = inner.id_index.get(&pc.old_memory_id) {
-                        if let Some(item) = inner.data.entries.get_mut(idx) {
+                        if let Some(item) = inner.entry_mut(idx) {
                             item.consolidated = true;
                         }
                     }
@@ -479,13 +507,13 @@ impl MemoryManager {
                 Ok(super::conflict::ArbitrationOutcome::MergeSupersede(merged)) => {
                     let mut inner = self.inner.write();
                     if let Some(&idx) = inner.id_index.get(&pc.new_memory_id) {
-                        if let Some(item) = inner.data.entries.get_mut(idx) {
+                        if let Some(item) = inner.entry_mut(idx) {
                             item.content = merged.clone();
                             item.timestamp = now;
                         }
                     }
                     if let Some(&idx) = inner.id_index.get(&pc.old_memory_id) {
-                        if let Some(item) = inner.data.entries.get_mut(idx) {
+                        if let Some(item) = inner.entry_mut(idx) {
                             item.consolidated = true;
                         }
                     }
@@ -603,7 +631,7 @@ impl MemoryManager {
         let mut updated = 0usize;
         for mid in memory_ids {
             if let Some(&idx) = inner.id_index.get(mid.as_str()) {
-                let entry = &mut inner.data.entries[idx];
+                let entry = inner.entry_mut(idx).unwrap();
                 if entry.episode_id.is_none() {
                     entry.episode_id = Some(episode_id.to_string());
                     updated += 1;
@@ -840,7 +868,7 @@ impl MemoryManager {
         for id in ids {
             if let Some(&idx) = inner.id_index.get(id) {
                 if idx < inner.data.entries.len() && inner.data.entries[idx].id == *id {
-                    let entry = &mut inner.data.entries[idx];
+                    let entry = inner.entry_mut(idx).unwrap();
                     bump_visit(entry, now);
                     touched = true;
                 }
@@ -892,6 +920,7 @@ impl MemoryManager {
             }
             out.push((e.id.clone(), score, grade.as_str().to_string()));
         }
+        for (id, _, _) in &out { inner.mark_changed(id); }
         if let Err(err) = inner.save_throttled() {
             tracing::warn!("[MemoryManager] 生命周期健康度持久化失败: {err}");
         }
@@ -925,6 +954,34 @@ impl MemoryManager {
             .filter(|m| !m.consolidated)
             .cloned()
             .collect())
+    }
+
+    /// Count only scalar admission evidence; stop at the requested threshold without cloning bodies.
+    pub fn count_diary_material(&self, after: f64, before: f64, limit: usize) -> usize {
+        let inner = self.inner.read();
+        let mut seen = std::collections::HashSet::new();
+        inner.data.entries.iter().filter(|item| item.timestamp >= after && item.timestamp < before
+            && super::kinds::is_diary_material(item)
+            && super::provenance::visible_to(&item.metadata, self.char_id())
+            && seen.insert(item.metadata["utterance_id"].as_str().filter(|id| !id.is_empty()).unwrap_or(&item.id)))
+            .take(limit).count()
+    }
+
+    /// 整理只读取摘要检查点，不克隆事实、原文和其他记忆正文。
+    /// 按稳定 ID 补回已离开驻留集合的检查点；no_content 也必须可恢复。
+    pub fn consolidation_summaries(&self, conversation_ids: &[String]) -> VivianResult<Vec<MemoryItem>> {
+        let (mut summaries, missing, store) = {
+            let inner = self.inner.read();
+            let summaries: Vec<_> = inner.data.entries.iter()
+                .filter(|item| super::session_summary::is_active_summary(item)).cloned().collect();
+            let missing: Vec<_> = conversation_ids.iter()
+                .map(|id| super::session_summary::summary_id(self.char_id(), id))
+                .filter(|id| !inner.id_index.contains_key(id)).collect();
+            (summaries, missing, inner.entry_store.clone())
+        };
+        summaries.extend(store.load_by_ids(&missing, None, &MemoryRetrievalFilter::default())?
+            .into_iter().filter(super::session_summary::is_active_summary));
+        Ok(summaries)
     }
 
     /// 按 ID 列表批量返回记忆（保留传入顺序，去重）。
@@ -1324,7 +1381,7 @@ impl MemoryManager {
             }
             ConflictOutcome::ReplaceOld { old_id } => {
                 if let Some(&idx) = inner.id_index.get(old_id) {
-                    if let Some(old) = inner.data.entries.get_mut(idx) {
+                    if let Some(old) = inner.entry_mut(idx) {
                         old.consolidated = true;
                     }
                 }
@@ -1340,7 +1397,7 @@ impl MemoryManager {
             ConflictOutcome::MergeSupersede { old_id, old_content } => {
                 item.content = simple_merge(old_content, content);
                 if let Some(&idx) = inner.id_index.get(old_id) {
-                    if let Some(old) = inner.data.entries.get_mut(idx) {
+                    if let Some(old) = inner.entry_mut(idx) {
                         old.consolidated = true;
                     }
                 }
@@ -1838,10 +1895,10 @@ impl MemoryManager {
             if let Some(&idx) = inner.id_index.get(&item.id) {
                 if idx < inner.data.entries.len() && inner.data.entries[idx].id == item.id {
                     if let Some(desc) = meta.description.clone() {
-                        inner.data.entries[idx].description = Some(desc.clone());
+                        inner.entry_mut(idx).unwrap().description = Some(desc.clone());
                         item.description = Some(desc);
                     }
-                    let entry = &mut inner.data.entries[idx];
+                    let entry = inner.entry_mut(idx).unwrap();
                     let mood_array: Vec<serde_json::Value> = meta
                         .mood_tags
                         .iter()
@@ -2042,7 +2099,7 @@ impl MemoryManager {
         let mut inner = self.inner.write();
         if let Some(&idx) = inner.id_index.get(id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == id {
-                inner.data.entries[idx].consolidated = true;
+                inner.entry_mut(idx).unwrap().consolidated = true;
                 inner.save_to_disk()?;
                 // 从向量存储中移除（不参与 embedding 检索）
                 if inner.vector_store.delete_by_memory_id(id) {
@@ -2066,13 +2123,13 @@ impl MemoryManager {
         let mut inner = self.inner.write();
         if let Some(&idx) = inner.id_index.get(id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == id {
-                inner.data.entries[idx].consolidated = true;
-                if let Some(obj) = inner.data.entries[idx].metadata.as_object_mut() {
+                inner.entry_mut(idx).unwrap().consolidated = true;
+                if let Some(obj) = inner.entry_mut(idx).unwrap().metadata.as_object_mut() {
                     obj.insert("summarized".to_string(), serde_json::Value::Bool(true));
                 } else {
                     let mut obj = serde_json::Map::new();
                     obj.insert("summarized".to_string(), serde_json::Value::Bool(true));
-                    inner.data.entries[idx].metadata = serde_json::Value::Object(obj);
+                    inner.entry_mut(idx).unwrap().metadata = serde_json::Value::Object(obj);
                 }
                 inner.save_to_disk()?;
             }
@@ -2092,17 +2149,16 @@ impl MemoryManager {
         let mut previous = Vec::new();
         let mut retired = Vec::new();
         for (idx, item) in inner.data.entries.iter_mut().enumerate() {
-            let mut updated = item.clone();
-            if super::conversations::refresh_derived_links(&mut updated, &valid, &owners) {
+            let Some((updated, is_retired)) = super::conversations::updated_derived_links(item, &valid, &owners) else { continue; };
+            if is_retired {
                 retired.push(item.id.clone());
             }
-            if updated.metadata != item.metadata || updated.consolidated != item.consolidated {
-                previous.push((idx, item.clone())); *item = updated;
-            }
+            previous.push((idx, item.clone())); *item = updated;
         }
         if previous.is_empty() { return Ok(()); }
+        for (_, old) in &previous { inner.mark_changed(&old.id); }
         if let Err(error) = inner.save_to_disk() {
-            for (idx, old) in previous { inner.data.entries[idx] = old; } return Err(error);
+            for (idx, old) in previous { *inner.entry_mut(idx).unwrap() = old; } return Err(error);
         }
         for id in retired { inner.vector_store.delete_by_memory_id(&id); }
         if let Err(error) = inner.vector_store.save_to() { tracing::warn!("[MemoryManager] 分组索引持久化失败: {error}"); }
@@ -2130,11 +2186,12 @@ impl MemoryManager {
         item.metadata = metadata;
         item.consolidated = false;
         super::kinds::initialize_record(&mut item);
-        if let Some(idx) = existing { inner.data.entries[idx] = item.clone(); }
+        if let Some(idx) = existing { *inner.entry_mut(idx).unwrap() = item.clone(); }
         else { inner.data.entries.push(item.clone()); inner.rebuild_index(); }
+        inner.mark_changed(&item.id);
         if let Err(error) = inner.save_to_disk() {
-            if let (Some(idx), Some(previous)) = (existing, previous) { inner.data.entries[idx] = previous; }
-            else { inner.data.entries.retain(|entry| entry.id != id); inner.rebuild_index(); }
+            if let (Some(idx), Some(previous)) = (existing, previous) { *inner.entry_mut(idx).unwrap() = previous; }
+            else { inner.data.entries.retain(|entry| entry.id != id); inner.mark_removed(&id); inner.rebuild_index(); }
             return Err(error);
         }
         inner.vector_store.delete_by_memory_id(&id);
@@ -2161,10 +2218,11 @@ impl MemoryManager {
         if !patch.is_object() {
             return Ok(());
         }
+        let search_changed = ["known_by","speaker","listener","observer_id","memory_owner","knowledge_source","index_active","record_kind","conversation_id","session_id","seq_no"].iter().any(|key|patch.get(*key).is_some());
         let mut inner = self.inner.write();
         if let Some(&idx) = inner.id_index.get(id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == id {
-                let entry = &mut inner.data.entries[idx];
+                let entry = inner.entry_mut(idx).unwrap();
                 if !entry.metadata.is_object() {
                     entry.metadata = serde_json::json!({});
                 }
@@ -2175,7 +2233,7 @@ impl MemoryManager {
                         target.insert(k.clone(), v.clone());
                     }
                 }
-                if let Err(e) = inner.save_throttled() {
+                if let Err(e) = if search_changed {inner.save_to_disk()} else {inner.save_throttled()} {
                     tracing::warn!("[MemoryManager] patch_memory_metadata 持久化失败: {e}");
                 }
             }
@@ -2198,7 +2256,7 @@ impl MemoryManager {
         let mut inner = self.inner.write();
         if let Some(&idx) = inner.id_index.get(memory_id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == memory_id {
-                let entry = &mut inner.data.entries[idx];
+                let entry = inner.entry_mut(idx).unwrap();
                 let snap = super::evidence::apply_evidence_signal(entry, source, kind, now);
                 snap.apply_to(entry);
                 if let Err(e) = inner.save_throttled() {
@@ -2219,17 +2277,21 @@ impl MemoryManager {
         let mut inner = self.inner.write();
         let mut changed = false;
         let mut archive_ids = Vec::new();
+        let mut changed_ids = Vec::new();
         for entry in inner.data.entries.iter_mut().filter(|e| !e.consolidated) {
             let before_days = entry.sub_zero_days;
             let before_date = entry.sub_zero_last_increment_date.clone();
             let (_, should_archive) = super::evidence::maybe_mark_sub_zero(entry, now);
-            changed |= before_days != entry.sub_zero_days
-                || before_date != entry.sub_zero_last_increment_date;
+            if before_days != entry.sub_zero_days || before_date != entry.sub_zero_last_increment_date {
+                changed = true;
+                changed_ids.push(entry.id.clone());
+            }
             if should_archive {
                 archive_ids.push(entry.id.clone());
             }
         }
         if changed {
+            for id in changed_ids { inner.mark_changed(&id); }
             inner.save_to_disk()?;
         }
         drop(inner);
@@ -2293,7 +2355,7 @@ impl MemoryManager {
         let mut inner = self.inner.write();
         if let Some(&idx) = inner.id_index.get(id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == id {
-                inner.data.entries[idx].open_hooks = open_hooks;
+                inner.entry_mut(idx).unwrap().open_hooks = open_hooks;
                 if let Err(e) = inner.save_throttled() {
                     tracing::warn!("[MemoryManager] update_open_hooks 持久化失败: {e}");
                 }
@@ -2313,7 +2375,7 @@ impl MemoryManager {
         let mut changed = false;
         if let Some(&idx) = inner.id_index.get(memory_id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == memory_id {
-                let entry = &mut inner.data.entries[idx];
+                let entry = inner.entry_mut(idx).unwrap();
                 // 避免同类型 hook 重复
                 if !entry.open_hooks.iter().any(|h| h.hook_type == hook.hook_type && h.is_open()) {
                     entry.open_hooks.push(hook);
@@ -2354,7 +2416,7 @@ impl MemoryManager {
         embedding_provider = inner.embedding.clone();
         if let Some(&idx) = inner.id_index.get(id) {
             if idx < inner.data.entries.len() && inner.data.entries[idx].id == id {
-                let entry = &mut inner.data.entries[idx];
+                let entry = inner.entry_mut(idx).unwrap();
                 entry.content = new_content.to_string();
                 entry.embedding = None;
             }
@@ -2403,7 +2465,7 @@ impl MemoryManager {
         if let Err(e) = inner.vector_store.save_to() {
             tracing::warn!("[MemoryManager] 向量索引重建持久化失败: {e}");
         }
-        if let Err(e) = inner.save_throttled() {
+        if let Err(e) = inner.save_to_disk() {
             tracing::warn!("[MemoryManager] replace_content_and_reindex 持久化失败: {e}");
         }
         drop(inner);
@@ -2425,6 +2487,10 @@ impl MemoryManager {
 
     pub async fn clear_all_memories(&self) -> VivianResult<()> {
         let mut inner = self.inner.write();
+        // Include rows previously unloaded from memory, too.
+        inner.entry_store.clear_all()?;
+        inner.changes = Default::default();
+        inner.revision = inner.revision.wrapping_add(1);
         inner.data.entries.clear();
         inner.id_index.clear();
         // 清空向量存储
@@ -2482,169 +2548,122 @@ impl MemoryManager {
         items
     }
 
-    pub async fn search_memories(
-        &self,
-        query: &str,
-        strategy: RetrievalStrategy,
-        limit: usize,
-    ) -> VivianResult<Vec<MemoryItem>> {
-        // Strategy search may embed over synchronous HTTP; it must yield to peer gather tasks.
+
+
+    fn recall_snapshot(&self, query: &str, strategy: RetrievalStrategy,
+        filter: Option<&MemoryRetrievalFilter>, limit: usize, query_embedding: Option<&[f32]>)
+        -> VivianResult<RecallSnapshot> {
+        let start = std::time::Instant::now();
+        let (store, vectors, embedding, weights, revision) = {
+            let inner = self.inner.read();
+            (inner.entry_store.clone(),inner.vector_store.clone(),inner.embedding.clone(),inner.retrieval_weights,inner.revision)
+        };
+        let default_filter = MemoryRetrievalFilter::default();
+        let filter = filter.unwrap_or(&default_filter);
+        let per_arm = limit.saturating_mul(4).clamp(32,128);
+        let lexical = store.search_candidates(query,&self.char_id,filter,per_arm)?;
+        let mut vector = Vec::new();
+        if matches!(strategy,RetrievalStrategy::Auto | RetrievalStrategy::Vector) {
+            if let Some(query_embedding) = query_embedding {
+                let mut fetch = per_arm;
+                loop {
+                    let hits = vectors.search(query_embedding,fetch);
+                    let exhausted = hits.len() < fetch;
+                    let ids: Vec<_> = hits.iter().map(|(_,id,_)|id.clone()).collect();
+                    let eligible = store.load_by_ids(&ids,Some(&self.char_id),filter)?;
+                    let valid: std::collections::HashSet<_> = eligible.iter().map(|item|item.id.as_str()).collect();
+                    let mut seen = std::collections::HashSet::new();
+                    vector = hits.into_iter().filter(|(_,id,_)|valid.contains(id.as_str()) && seen.insert(id.clone()))
+                        .map(|(_,id,score)|(id,score)).take(per_arm).collect();
+                    if vector.len() >= per_arm || exhausted || fetch >= per_arm*16 {break;}
+                    fetch = (fetch*2).min(per_arm*16);
+                }
+            }
+        }
+        let graph_ids = if matches!(strategy,RetrievalStrategy::Auto | RetrievalStrategy::Graph) {
+            super::relational_recall::candidate_memory_ids(&self.knowledge_graph,query,per_arm)
+        } else {Vec::new()};
+        let graph_ids = store.load_by_ids(&graph_ids,Some(&self.char_id),filter)?.into_iter().map(|item|item.id);
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<_> = lexical.iter().chain(&vector).map(|(id,_)|id.clone()).chain(graph_ids)
+            .filter(|id|seen.insert(id.clone())).take(super::search_index::MAX_CANDIDATES).collect();
+        let mut entries = store.load_by_ids(&ids,Some(&self.char_id),filter)?;
+        {
+            // Heat/evidence changes may still be throttled in memory. Overlay only
+            // selected rows and recheck visibility after any concurrent metadata edit.
+            let inner = self.inner.read();
+            for item in &mut entries {
+                if let Some(current) = inner.id_index.get(&item.id).and_then(|&i|inner.data.entries.get(i)) {
+                    *item = current.clone();
+                }
+            }
+        }
+        entries.retain(|item|super::kinds::recallable(item)
+            && super::provenance::visible_to(&item.metadata,&self.char_id) && filter.matches(item));
+        let valid: std::collections::HashSet<_> = entries.iter().map(|item|item.id.as_str()).collect();
+        let lexical = lexical.into_iter().filter(|(id,_)|valid.contains(id.as_str())).collect();
+        vector.retain(|(id,_)|valid.contains(id.as_str()));
+        tracing::debug!(candidates=entries.len(),elapsed_ms=start.elapsed().as_millis(),"记忆索引候选已按需读取");
+        Ok(RecallSnapshot {entries,vector_store:vectors,embedding,weights,revision,
+            arms:super::retriever::RecallArms {lexical,vector},entry_store:store})
+    }
+
+    fn search_cache_key(&self, query: &str, strategy: RetrievalStrategy, limit: usize) -> String {
+        let inner = self.inner.read();
+        format!("{}|{:?}|{}|{}|{}|{}", query.trim().to_lowercase(), strategy, limit,
+            inner.embedding.model_id(), inner.embedding.dimension(), inner.revision)
+    }
+
+    fn cached_search(&self, key: &str) -> Option<Vec<MemoryItem>> {
+        self.search_cache.lock().get(key)
+            .filter(|(at, _)| at.elapsed() < SEARCH_CACHE_TTL)
+            .map(|(_, items)| items.clone())
+    }
+
+    async fn prepare_recall_embedding(&self, query: &str, strategy: RetrievalStrategy) -> Option<Vec<f32>> {
+        if matches!(strategy, RetrievalStrategy::Auto | RetrievalStrategy::Vector) {
+            super::query_embedding::prepare(self.embedding(), query.to_owned()).await
+        } else { None }
+    }
+
+    pub async fn search_memories(&self, query: &str, strategy: RetrievalStrategy,
+        limit: usize) -> VivianResult<Vec<MemoryItem>> {
+        if limit == 0 { return Ok(Vec::new()); }
+        let key = self.search_cache_key(query, strategy, limit);
+        if let Some(items) = self.cached_search(&key) { return Ok(items); }
+        let embedding = self.prepare_recall_embedding(query, strategy).await;
         let memory = self.clone();
         let query = query.to_owned();
-        tokio::task::spawn_blocking(move || memory.search_memories_sync(&query, strategy, limit))
-            .await.map_err(|error| VivianError::Memory(format!("Memory search worker failed: {error}")))?
-    }
-
-    fn search_memories_sync(
-        &self,
-        query: &str,
-        strategy: RetrievalStrategy,
-        limit: usize,
-    ) -> VivianResult<Vec<MemoryItem>> {
-        // 单轮检索缓存：相同 (query, strategy, limit, model, dim) 在 5s 内返回缓存结果
-        // 避免同轮内 MemoryRetrievalStep + MemoryTool + AugmentService 重复检索
-        // 包含 model_id 和 dimension 防止向量索引重建后返回旧排名
-        let inner_snap = self.inner.read();
-        let emb_model = inner_snap.embedding.model_id().to_string();
-        let emb_dim = inner_snap.embedding.dimension();
-        drop(inner_snap);
-        let cache_key = format!(
-            "{}|{:?}|{}|{}|{}",
-            query.trim().to_lowercase(),
-            strategy,
-            limit,
-            emb_model,
-            emb_dim
-        );
-        {
-            let cache = self.search_cache.lock();
-            if let Some((ts, results)) = cache.get(&cache_key) {
-                if ts.elapsed() < SEARCH_CACHE_TTL {
-                    return Ok(results.clone());
-                }
-            }
-        }
-
-        let inner = self.inner.read();
-        if inner.data.entries.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // 旁观记忆参与检索，但在结果中降权（score * 0.5），排名低于直接参与的记忆。
-        // 已摘要（summarized）的记忆仍参与向量检索，LLM 可匹配到原始对话；
-        // 完全归档（consolidated 且非 summarized）的记忆不参与检索。
-        //
-        // 多数情况下没有任何条目被过滤掉，此时直接借用原切片，避免把整张表
-        // 深拷贝一份（条目数上万时单次检索就会复制几十 MB）。
-        let needs_filter = inner
-            .data
-            .entries
-            .iter()
-            .any(|e| !super::kinds::recallable(e) || !super::provenance::visible_to(&e.metadata, &self.char_id));
-        let all_entries: Cow<[MemoryItem]> = if needs_filter {
-            Cow::Owned(
-                inner
-                    .data
-                    .entries
-                    .iter()
-                    .filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id))
-                    .cloned()
-                    .collect(),
-            )
-        } else {
-            Cow::Borrowed(&inner.data.entries)
-        };
-
-        // 构造检索上下文
-        let ctx = RetrievalContext {
-            entries: &all_entries,
-            vector_store: &inner.vector_store,
-            embedding: &inner.embedding,
-            graph: Some(&self.knowledge_graph),
-            weights: Some(inner.retrieval_weights),
-        };
-
-        // 通过工厂函数创建策略实例（统一入口，消除重复实现）
-        let strategy_impl = create_strategy(&strategy);
-        let results = strategy_impl.search(&ctx, query, limit);
-
-        drop(inner);
-
-        // 旁观记忆降权：分数乘以 0.5 后重新排序
-        let penalized = apply_observer_penalty(results);
-
-        // 结果去重：相同内容（忽略大小写）只保留首条（排名最高）
-        let deduped = dedup_by_content(penalized);
-
-        // 写入缓存（限制缓存条数，避免内存膨胀）
-        {
-            let mut cache = self.search_cache.lock();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = memory.recall_snapshot(&query,strategy,None,limit,embedding.as_deref())?;
+            let key = format!("{}|{:?}|{}|{}|{}|{}", query.trim().to_lowercase(), strategy, limit,
+                snapshot.embedding.model_id(), snapshot.embedding.dimension(), snapshot.revision);
+            if let Some(items) = memory.cached_search(&key) { return Ok(items); }
+            let results = snapshot.search(&query, strategy, limit, embedding.as_deref(), &memory.knowledge_graph);
+            let results = dedup_by_content(apply_observer_penalty(results));
+            let mut cache = memory.search_cache.lock();
             if cache.len() >= 16 {
-                // 淘汰最旧条目
-                if let Some(oldest_key) = cache
-                    .iter()
-                    .min_by_key(|(_, (ts, _))| *ts)
-                    .map(|(k, _)| k.clone())
-                {
-                    cache.remove(&oldest_key);
-                }
+                let oldest = cache.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone());
+                if let Some(key) = oldest { cache.remove(&key); }
             }
-            cache.insert(cache_key, (std::time::Instant::now(), deduped.clone()));
-        }
-
-        Ok(deduped)
+            // The revision is part of the key: a concurrent write cannot revive a stale result.
+            cache.insert(key, (std::time::Instant::now(), results.clone()));
+            Ok(results)
+        }).await.map_err(|error| VivianError::Memory(format!("Memory search worker failed: {error}")))?
     }
 
-    /// 带结构化/元数据过滤的检索（企业级预过滤）。
-    ///
-    /// 在混合检索前按 `filter`（memory_type / 标签 / 时间窗口）对候选记忆做精确过滤，
-    /// 使调用方能定向检索特定类型、标签或时间段的记忆。其余行为与 `search_memories` 一致。
-    pub async fn search_memories_filtered(
-        &self,
-        query: &str,
-        strategy: RetrievalStrategy,
-        limit: usize,
-        filter: &MemoryRetrievalFilter,
-    ) -> VivianResult<Vec<MemoryItem>> {
-        let inner = self.inner.read();
-        if inner.data.entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        // 与 search_memories 同理：无需过滤时直接借用，省掉整表深拷贝
-        let needs_filter = inner
-            .data
-            .entries
-            .iter()
-            .any(|e| !super::kinds::recallable(e) || !super::provenance::visible_to(&e.metadata, &self.char_id) || !filter.matches(e));
-        let all_entries: Cow<[MemoryItem]> = if needs_filter {
-            Cow::Owned(
-                inner
-                    .data
-                    .entries
-                    .iter()
-                    .filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id))
-                    .filter(|e| filter.matches(e))
-                    .cloned()
-                    .collect(),
-            )
-        } else {
-            Cow::Borrowed(&inner.data.entries)
-        };
-        if all_entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        let ctx = RetrievalContext {
-            entries: &all_entries,
-            vector_store: &inner.vector_store,
-            embedding: &inner.embedding,
-            graph: Some(&self.knowledge_graph),
-            weights: Some(inner.retrieval_weights),
-        };
-        let strategy_impl = create_strategy(&strategy);
-        let results = strategy_impl.search(&ctx, query, limit);
-        drop(inner);
-        let penalized = apply_observer_penalty(results);
-        Ok(dedup_by_content(penalized))
+    pub async fn search_memories_filtered(&self, query: &str, strategy: RetrievalStrategy,
+        limit: usize, filter: &MemoryRetrievalFilter) -> VivianResult<Vec<MemoryItem>> {
+        if limit == 0 { return Ok(Vec::new()); }
+        let embedding = self.prepare_recall_embedding(query, strategy).await;
+        let memory = self.clone();
+        let query = query.to_owned();
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = memory.recall_snapshot(&query,strategy,Some(&filter),limit,embedding.as_deref())?;
+            let results = snapshot.search(&query, strategy, limit, embedding.as_deref(), &memory.knowledge_graph);
+            Ok(dedup_by_content(apply_observer_penalty(results)))
+        }).await.map_err(|error| VivianError::Memory(format!("Filtered memory search worker failed: {error}")))?
     }
 
     /// 带完整选项的检索方法（供 retrieve_memory 工具调用）。
@@ -2669,48 +2688,26 @@ impl MemoryManager {
         verifier_llm: Option<&Arc<dyn super::verifier::VerifierLlmClient>>,
         limit: usize,
     ) -> VivianResult<Vec<MemoryItem>> {
-        // Step 1~4 全是同步操作，放在同一作用域内即可直接借用条目切片，
-        // 省掉原先的整表深拷贝（条目上万时单次检索要复制几十 MB）。
-        // 这个块必须在 Step 6 之前结束：后验证会 .await，
-        // 而 RwLockReadGuard 不是 Send，不能跨 await 持有。
-        let expanded = {
-            let inner = self.inner.read();
-            if inner.data.entries.is_empty() {
-                return Ok(Vec::new());
-            }
-            // Step 1: 基础检索（扩大候选集到 limit * 3，给后续过滤留余量）
-            let candidate_limit = (limit * 3).max(10);
-            let recall_entries: Vec<_> = inner.data.entries.iter().filter(|e| super::kinds::recallable(e) && super::provenance::visible_to(&e.metadata, &self.char_id)).cloned().collect();
-            let ctx = RetrievalContext {
-                entries: &recall_entries,
-                vector_store: &inner.vector_store,
-                embedding: &inner.embedding,
-                graph: Some(&self.knowledge_graph),
-                weights: Some(inner.retrieval_weights),
-            };
-            let strategy_impl = create_strategy(&RetrievalStrategy::Auto);
-            let results = strategy_impl.search(&ctx, query, candidate_limit);
 
-            // 旁观记忆降权：分数乘以 0.5 后重新排序
-            let results = apply_observer_penalty(results);
-
-            // Episode boost：同 Episode 记忆分数 * 1.2，自然上浮
-            let results = apply_episode_boost(results);
-
-            // Step 2: 精度过滤（5 阶放松阶梯）
-            let filtered = super::precision_filter::apply_precision_filter(
-                &results,
-                criteria,
-                super::precision_filter::RELAXATION_MIN_RESULTS_DEFAULT,
-            );
-
-            // Step 3: 排除可见上下文
-            let excluded =
-                super::precision_filter::exclude_visible_context(filtered, visible_ids);
-
-            // Step 4: 上下文扩窗
-            super::retriever::expand_context(excluded, &recall_entries, max_expansion)
-        };
+        if limit == 0 { return Ok(Vec::new()); }
+        let query_embedding = self.prepare_recall_embedding(query, RetrievalStrategy::Auto).await;
+        let memory = self.clone();
+        let query_owned = query.to_owned();
+        let criteria = criteria.clone();
+        let visible_ids = visible_ids.to_vec();
+        let expanded = tokio::task::spawn_blocking(move || {
+            let snapshot = memory.recall_snapshot(&query_owned,RetrievalStrategy::Auto,None,(limit.saturating_mul(3)).max(10),query_embedding.as_deref())?;
+            let results = snapshot.search(&query_owned, RetrievalStrategy::Auto,
+                (limit.saturating_mul(3)).max(10), query_embedding.as_deref(), &memory.knowledge_graph);
+            let results = apply_episode_boost(apply_observer_penalty(results));
+            let filtered = super::precision_filter::apply_precision_filter(&results, &criteria,
+                super::precision_filter::RELAXATION_MIN_RESULTS_DEFAULT);
+            let excluded = super::precision_filter::exclude_visible_context(filtered, &visible_ids);
+            let neighbors = snapshot.entry_store.context_neighbors(&excluded,&memory.char_id,max_expansion)?;
+            let mut expanded = excluded;
+            expanded.extend(neighbors);
+            Ok::<_, VivianError>(expanded)
+        }).await.map_err(|error| VivianError::Memory(format!("Memory expansion worker failed: {error}")))??;
 
         // Step 5: 相对时间锚点
         let anchored = if apply_time_anchor {
@@ -2737,10 +2734,11 @@ impl MemoryManager {
 
         // Step 6.5: 语义去重（cosine ≥ 0.92 视为语义重复，每簇保留得分最高的一条）
         // 解决"语义相同但表述不同的记忆同时返回挤占 token"问题
-        let deduped = {
-            let inner = self.inner.read();
-            super::retriever::dedup_by_semantic(verified, inner.embedding.as_ref(), 0.92)
-        };
+
+        let embedding = self.embedding();
+        let deduped = tokio::task::spawn_blocking(move ||
+            super::retriever::dedup_by_semantic(verified, embedding.as_ref(), 0.92)
+        ).await.map_err(|error| VivianError::Memory(format!("Memory dedup worker failed: {error}")))?;
 
         // Step 6.6: 独立精排（cross-encoder reranker）
         // 精排启用且候选 > 1 时，对 top-k 候选按 query-doc 细粒度相关度重排，
@@ -3329,6 +3327,24 @@ fn infer_tags_for_content(content: &str, memory_type: &MemoryType) -> Vec<String
 }
 
 impl MemoryManagerInner {
+    fn mark_changed(&mut self, id: &str) {
+        self.changes.changed(id);
+        self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn entry_mut(&mut self, idx: usize) -> Option<&mut MemoryItem> {
+        let id = self.data.entries.get(idx)?.id.clone();
+        self.mark_changed(&id);
+        self.data.entries.get_mut(idx)
+    }
+
+    fn mark_removed(&mut self, id: &str) {
+        self.changes.removed(id);
+        self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     fn load_from_disk(&mut self) -> VivianResult<()> {
         // SQLite 是唯一条目存储，不导入旧文件或补写旧记录类别。
         let entries = self.entry_store.load_all()?;
@@ -3344,40 +3360,19 @@ impl MemoryManagerInner {
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
         self.rebuild_index();
-        self.persisted = super::entry_store::fingerprint_all(&self.data.entries);
         Ok(())
     }
 
     /// 节流间隔：距上次落盘不足此值时仅标记 dirty，不执行实际写入
     const SAVE_THROTTLE: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// 差异落盘：对比当前条目指纹与已落盘指纹，仅写入变更行、删除移除行
-    ///
-    /// 兼容旧调用点（全量保存语义），但实际 IO 为 O(变更条目) 而非 O(全量)。
+    /// 只提交已追踪的变更 ID；失败时保留待办，下一次 flush 可以重试。
     fn save_to_disk(&mut self) -> VivianResult<()> {
-        let current = super::entry_store::fingerprint_all(&self.data.entries);
-        let mut upserts: Vec<(String, MemoryItem)> = Vec::new();
-        for entry in &self.data.entries {
-            let fp = current.get(&entry.id).copied().unwrap_or(0);
-            if self.persisted.get(&entry.id).copied() != Some(fp) {
-                upserts.push((entry.id.clone(), entry.clone()));
-            }
-        }
-        let deletes: Vec<String> = self
-            .persisted
-            .keys()
-            .filter(|id| !current.contains_key(*id))
-            .cloned()
-            .collect();
-
-        if !upserts.is_empty() || !deletes.is_empty() {
-            self.entry_store.write_rows(upserts, &deletes)?;
-        }
+        self.changes.flush(&self.entry_store, &self.data.entries, &self.id_index)?;
         // version 变化时同步元数据
         if self.data.version.to_string() != self.entry_store.get_meta("version").unwrap_or_default() {
             self.entry_store.set_meta("version", &self.data.version.to_string())?;
         }
-        self.persisted = current;
         self.dirty = false;
         self.last_save_at = Some(std::time::Instant::now());
         Ok(())
@@ -3420,6 +3415,7 @@ impl MemoryManagerInner {
         let capacity = self.capacities.get(&gran).copied().unwrap_or(50);
 
         if let Some(retired) = super::kinds::retire_dialogue_window(&mut self.data.entries, &item, capacity) {
+            self.mark_changed(&retired);
             self.vector_store.delete_by_memory_id(&retired);
         }
 
@@ -3428,12 +3424,13 @@ impl MemoryManagerInner {
         // Preserve caller supplied/event timestamps. `MemoryItem::new` already assigns
         // the current time for ordinary writes, so resetting it here would destroy
         // legitimate timestamp overrides.
+        self.mark_changed(&item.id);
         self.data.entries.push(item);
-        // 超限后卸载完全归档的条目（只卸内存，磁盘行保留）
-        self.evict_archived_from_memory();
         // 条目库是规范存储：返回成功前必须提交。向量/图谱等派生索引即使稍后
         // 失败也可从这里重建，避免进程在节流窗口内退出时丢掉新记忆。
         self.save_to_disk()?;
+        // 先提交归档状态再卸载，避免尚未提交的行随内存副本一起消失。
+        self.evict_archived_from_memory();
         Ok(())
     }
 
@@ -3443,8 +3440,7 @@ impl MemoryManagerInner {
     /// （见 `search_memories` 的 `!e.consolidated || is_summarized(e)` 过滤），
     /// 留在内存里是纯浪费。
     ///
-    /// 只卸载内存副本，**磁盘行保留**——因此必须同步把这些 id 从 `persisted` 摘除，
-    /// 否则下一次 `save_to_disk` 会把"内存里没有而磁盘上有"判定为删除，造成数据丢失。
+    /// 只卸载已提交的内存副本，不生成删除待办；磁盘行保留。
     /// 卸载后如再被访问，重启时 `load_all` 会重新载入。
     fn evict_archived_from_memory(&mut self) {
         let total = self.data.entries.len();
@@ -3471,9 +3467,6 @@ impl MemoryManagerInner {
         }
 
         self.data.entries = remaining;
-        for id in &evicted {
-            self.persisted.remove(id);
-        }
         self.rebuild_index();
         tracing::info!(
             "[MemoryManager] 常驻条目 {} 超过上限 {}，已从内存卸载 {} 条完全归档记忆（磁盘保留，重启后可重新载入）",
@@ -3487,6 +3480,7 @@ impl MemoryManagerInner {
         if let Some(idx) = self.id_index.remove(id) {
             if idx < self.data.entries.len() && self.data.entries[idx].id == id {
                 self.data.entries.remove(idx);
+                self.mark_removed(id);
                 self.rebuild_index();
             }
         }
@@ -3497,6 +3491,7 @@ impl MemoryManagerInner {
         if let Some(idx) = self.id_index.remove(id) {
             if idx < self.data.entries.len() && self.data.entries[idx].id == id {
                 let item = self.data.entries.remove(idx);
+                self.mark_removed(id);
                 self.rebuild_index();
                 return Ok(Some(item));
             }
@@ -3508,6 +3503,7 @@ impl MemoryManagerInner {
     fn restore_entry(&mut self, item: MemoryItem) -> VivianResult<()> {
         let new_idx = self.data.entries.len();
         self.id_index.insert(item.id.clone(), new_idx);
+        self.mark_changed(&item.id);
         self.data.entries.push(item);
         self.save_throttled()?;
         Ok(())
@@ -3515,6 +3511,8 @@ impl MemoryManagerInner {
 
 
     fn seed_if_empty(&mut self, char_id: &str) -> VivianResult<()> {
+        // Seed upgrades are the only bulk replacement path; diff once at startup.
+        let before = super::entry_store::fingerprint_all(&self.data.entries);
         let mut bundle = super::seed::load(char_id).map_err(VivianError::Memory)?;
         let first_started_at = super::seed::load_or_create_anchor(
             &crate::utils::path::get_user_data_dir().join(super::seed::CLOCK_RELATIVE_PATH), current_timestamp())?;
@@ -3534,6 +3532,12 @@ impl MemoryManagerInner {
             self.seed_from_file(char_id);
             self.rebuild_index();
         }
+
+        let after = super::entry_store::fingerprint_all(&self.data.entries);
+        for (id, fingerprint) in &after {
+            if before.get(id) != Some(fingerprint) { self.mark_changed(id); }
+        }
+        for id in before.keys().filter(|id| !after.contains_key(*id)) { self.mark_removed(id); }
 
         // 修复：即使种子条目已存在，也可能因上次播种时嵌入服务不可用/并发超限
         // 导致向量库中缺失种子向量。这里统一补齐，确保“种子记忆注入”包含向量索引。
@@ -3925,6 +3929,7 @@ impl MemoryManagerInner {
         let steps = (non_seed - DECAY_THRESHOLD) / DECAY_STEP;
         let total_decay = (steps as f64) * DECAY_DELTA;
 
+        let mut changed_ids = Vec::new();
         for entry in &mut self.data.entries {
             if entry.id.starts_with("seed_")
                 && !entry.protected
@@ -3932,6 +3937,7 @@ impl MemoryManagerInner {
             {
                 let old = entry.importance;
                 entry.importance = (old - total_decay).max(MIN_IMPORTANCE);
+                if old != entry.importance { changed_ids.push(entry.id.clone()); }
                 if (old - entry.importance).abs() > 0.01 {
                     tracing::debug!(
                         "[seed] {} importance 衰减: {:.2} → {:.2} (非种子记忆: {})",
@@ -3940,6 +3946,7 @@ impl MemoryManagerInner {
                 }
             }
         }
+        for id in changed_ids { self.mark_changed(&id); }
     }
 
     fn granularity_counts(&self) -> HashMap<Granularity, usize> {

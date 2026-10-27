@@ -593,3 +593,47 @@ impl Default for MemoryStoreData {
         }
     }
 }
+
+/// 结构化/元数据过滤条件（企业级检索预过滤）。
+///
+/// 在混合检索前按 memory_type / 标签 / 时间窗口对候选记忆做精确过滤，
+/// 使调用方可以定向检索（如"只要重要事件""只要某标签的近期记忆"）。
+/// 所有字段均为可选；命中任一字段即参与 AND 语义（多条件同时满足）。
+#[derive(Debug, Clone, Default)]
+pub struct MemoryRetrievalFilter {
+    /// 仅保留这些 memory_type（空/None = 不限）
+    pub memory_types: Option<Vec<String>>,
+    /// 命中任一标签即可（空/None = 不限）
+    pub tags_any: Option<Vec<String>>,
+    /// 仅保留 timestamp >= time_after
+    pub time_after: Option<f64>,
+    /// 仅保留 timestamp < time_before
+    pub time_before: Option<f64>,
+}
+
+impl MemoryRetrievalFilter {
+    /// 判断一条记忆是否满足过滤条件
+    pub fn matches(&self, item: &MemoryItem) -> bool {
+        if let Some(types) = &self.memory_types {
+            if !types.iter().any(|t| t == &item.memory_type) {
+                return false;
+            }
+        }
+        if let Some(tags) = &self.tags_any {
+            if !tags.iter().any(|t| item.tags.iter().any(|it| it == t)) {
+                return false;
+            }
+        }
+        if let Some(after) = self.time_after {
+            if item.timestamp < after {
+                return false;
+            }
+        }
+        if let Some(before) = self.time_before {
+            if item.timestamp >= before {
+                return false;
+            }
+        }
+        true
+    }
+}

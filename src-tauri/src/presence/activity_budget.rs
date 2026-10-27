@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 static ACTIVE: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 pub struct ActivityPermit(String);
+pub fn is_active(char_id: &str) -> bool { ACTIVE.lock().contains(char_id) }
 pub fn try_acquire(char_id: &str) -> Option<ActivityPermit> {
     ACTIVE.lock().insert(char_id.into()).then(|| ActivityPermit(char_id.into()))
 }
@@ -19,9 +20,11 @@ mod tests {
     #[test]
     fn background_work_is_exclusive_per_character_and_released_on_drop() {
         let a = try_acquire("activity-a").unwrap();
+        assert!(is_active("activity-a"));
         assert!(try_acquire("activity-a").is_none());
         let b = try_acquire("activity-b").unwrap();
         drop(a);
+        assert!(!is_active("activity-a"));
         assert!(try_acquire("activity-a").is_some());
         drop(b);
     }

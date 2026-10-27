@@ -1,11 +1,12 @@
 //! 智能日记生成
 //!
 //! 核心流程：
-//! 1. 从多数据源聚合当日上下文（事件流、活动、情绪弧线、待续话题、关系变化）
-//! 2. 构造 Prompt（融合时间线、生活活动、情绪变化、人格基线、禁止编造规则）
-//! 3. 通过 `ModelRouter` 调用 LLM（task_type="diary"）
-//! 4. 解析 JSON 响应（容错回退到纯文本）
-//! 5. 写入 `DiaryEntry` + 更新 OngoingStory
+//! 1. 进入持久化流程，等待做梦阶段整理、联想记忆成功
+//! 2. 从多数据源聚合目标日期上下文（事件流、活动、情绪弧线、待续话题、关系变化）
+//! 3. 构造 Prompt（融合时间线、生活活动、情绪变化、人格基线、禁止编造规则）
+//! 4. 通过 `ModelRouter` 调用 LLM（task_type="diary"）
+//! 5. 解析 JSON 响应（容错回退到纯文本）
+//! 6. 写入 `DiaryEntry` + 更新 OngoingStory
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,7 @@ pub struct DailyContext {
     pub ongoing_stories: Vec<super::ongoing_stories::OngoingStory>,
     pub relationship_delta: Option<RelationshipDelta>,
     pub personality_baseline: String,
+    pub dream: Option<super::cycle::DreamContext>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -96,25 +98,25 @@ pub async fn generate_intelligent_diary(
     brain: &Brain,
     trigger_type: &str,
 ) -> VivianResult<DiaryEntry> {
-    let now = chrono::Local::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let start_of_day = now.date_naive().and_hms_opt(0, 0, 0).unwrap_or_else(|| {
-        now.date_naive().and_hms_opt(0, 0, 1).unwrap()
-    });
-    let start_ts = chrono::DateTime::<chrono::Local>::from_naive_utc_and_offset(
-        start_of_day,
-        *chrono::Local::now().offset(),
-    )
-    .timestamp();
-    let end_ts = now.timestamp();
+    let date = chrono::Local::now().date_naive();
+    super::dream::run(brain, date, trigger_type).await
+}
 
-    let ctx = collect_daily_context(brain, now.date_naive()).await;
+pub(crate) async fn write_after_dream(brain: &Brain, day: NaiveDate, trigger_type: &str, dream: &super::cycle::DreamContext) -> VivianResult<DiaryEntry> {
+    let date = day.to_string();
+    let (start_ts, next_midnight) = super::cycle::day_bounds(day)?;
+    let end_ts = chrono::Local::now().timestamp().min(next_midnight);
+    let mut ctx = collect_daily_context(brain, day).await;
+    ctx.dream = Some(dream.clone());
 
     let trigger_score = calculate_trigger_score(&ctx.interactions, Some(&ctx.mood_summary));
     let fallback_mood_tag = get_mood_tag(&ctx.mood_summary);
     let interaction_count = ctx.interactions.len();
 
     let diary_result = generate_content_via_llm(brain, &ctx).await?;
+    if diary_result.content.trim().is_empty() {
+        return Err(crate::error::VivianError::Memory("日记正文为空，保留做梦结果供重试".into()));
+    }
 
     let mood_tag = diary_result
         .mood_tag
@@ -151,6 +153,7 @@ pub async fn generate_intelligent_diary(
         relationship_delta: ctx.relationship_delta.clone(),
         mood_samples: ctx.mood_samples.clone(),
         version: 2,
+        dream: Some(dream.clone()),
     };
 
     let saved = diary::add_entry(&brain.char_id, entry)?;
@@ -203,9 +206,10 @@ pub async fn generate_intelligent_diary(
 /// 从多数据源聚合当日日记上下文
 pub(crate) async fn collect_daily_context(brain: &Brain, date: NaiveDate) -> DailyContext {
     let interactions = collect_interactions_for_date(&brain.memory, date).await;
-    let mood_summary = collect_mood_summary(brain);
-    let last_diary_summary = get_last_diary_summary(brain);
-    let cross_diary_context = build_cross_diary_context(brain);
+    let historical = date < chrono::Local::now().date_naive();
+    let mood_summary = if historical { Value::Null } else { collect_mood_summary(brain) };
+    let last_diary_summary = get_last_diary_summary(brain, date);
+    let cross_diary_context = build_cross_diary_context(brain, date);
 
     let (char_name, char_cn_name) = match brain.char_id.as_str() {
         "nana" => ("Nana", "Nana"),
@@ -215,9 +219,11 @@ pub(crate) async fn collect_daily_context(brain: &Brain, date: NaiveDate) -> Dai
     let daily_events = collect_daily_events(brain, date);
     let vivian_activities = collect_vivian_activities(brain, date);
     let mood_samples = collect_mood_samples(brain, date);
-    let lingering_thoughts = collect_lingering_thoughts(brain);
-    let ongoing_stories = super::ongoing_stories::active_stories(&brain.char_id, 2);
-    let relationship_delta = collect_relationship_delta(brain, date);
+    let lingering_thoughts = if historical { Vec::new() } else { collect_lingering_thoughts(brain) };
+    let date_key = date.to_string();
+    let ongoing_stories = super::ongoing_stories::active_stories(&brain.char_id, 2).into_iter()
+        .filter(|story| story.last_updated.as_str() <= date_key.as_str()).collect();
+    let relationship_delta = if historical { None } else { collect_relationship_delta(brain, date) };
     let personality_baseline = collect_personality_baseline(brain);
     let timeline = build_timeline(&daily_events, &vivian_activities, &interactions);
 
@@ -237,6 +243,7 @@ pub(crate) async fn collect_daily_context(brain: &Brain, date: NaiveDate) -> Dai
         ongoing_stories,
         relationship_delta,
         personality_baseline,
+        dream: None,
     }
 }
 
@@ -289,9 +296,9 @@ fn collect_vivian_activities(brain: &Brain, date: NaiveDate) -> Vec<String> {
         }
     }
 
-    let brief = brain.proactive.activity_journal().to_daily_brief();
-    if !brief.is_empty() {
-        activities.push(brief);
+    if date == chrono::Local::now().date_naive() {
+        let brief = brain.proactive.activity_journal().to_daily_brief();
+        if !brief.is_empty() { activities.push(brief); }
     }
 
     activities
@@ -478,45 +485,15 @@ fn validate_mood_tag(tag: &str) -> String {
     }
 }
 
-/// 收集自指定时间戳（exclusive）以来的交互记录
-///
-/// 用于"自上次日记生成以来"的素材统计：传入上次日记的 `created_at`，
-/// 返回该时间点之后所有"用户↔当前角色"的对话记录。无日记时传入 0.0
-/// 即可覆盖初次启动以来的全部记忆。
-pub(crate) async fn collect_interactions_since(
-    memory: &MemoryManager,
-    since: f64,
-) -> Vec<InteractionRecord> {
-    let memories = match memory.get_all_memories().await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("[DiaryGenerator] 获取记忆失败: {e}");
-            return Vec::new();
-        }
-    };
-    let filtered: Vec<MemoryItem> = memories
-        .into_iter()
-        .filter(|m| m.timestamp > since)
-        .collect();
-    extract_user_dialogue(filtered)
-}
-
 /// 获取指定日期的交互记录
 pub(crate) async fn collect_interactions_for_date(
     memory: &MemoryManager,
     date: NaiveDate,
 ) -> Vec<InteractionRecord> {
-    use chrono::TimeZone;
-    let start_of_day = date.and_hms_opt(0, 0, 0).unwrap_or_else(|| {
-        tracing::warn!("[DiaryGenerator] and_hms_opt(0,0,0) 返回 None，使用 00:00:01 兜底");
-        date.and_hms_opt(0, 0, 1).unwrap()
-    });
-    let start_ts = chrono::Local
-        .from_local_datetime(&start_of_day)
-        .single()
-        .map(|dt| dt.timestamp() as f64)
-        .unwrap_or(0.0);
-    let end_ts = start_ts + 24.0 * 3600.0;
+    let (start_ts, end_ts) = match super::cycle::day_bounds(date) {
+        Ok((start, end)) => (start as f64, end as f64),
+        Err(error) => { tracing::warn!("[DiaryGenerator] 日记日期边界无效: {error}"); return Vec::new(); }
+    };
     let memories = match memory.get_all_memories().await {
         Ok(m) => m,
         Err(_) => return Vec::new(),
@@ -538,6 +515,8 @@ pub(crate) async fn collect_interactions_for_date(
 fn extract_user_dialogue(memories: Vec<MemoryItem>) -> Vec<InteractionRecord> {
     let mut records = Vec::new();
     for mem in memories {
+        // 日记及触发计数只接受原始对话；事实、摘要和做梦联想不能冒充新的发言。
+        if crate::memory::kinds::kind(&mem) != crate::memory::kinds::RecordKind::Dialogue { continue; }
         // 排除种子/环境预设记忆（system_seed / environment_preset）：它们是角色前史与
         // 冷启动环境上下文，不是"用户↔角色"的真实对话素材；且种子无 channel/speaker
         // 元数据，混入会被误判为"用户发言"（与 commands/memory.rs 的过滤口径一致）。
@@ -672,8 +651,15 @@ pub(crate) fn collect_mood_summary(brain: &Brain) -> Value {
 }
 
 /// 获取上一篇日记的摘要文本
-pub(crate) fn get_last_diary_summary(brain: &Brain) -> String {
-    match diary::get_latest_entry(&brain.char_id) {
+pub(crate) fn preceding_diaries(mut entries: Vec<DiaryEntry>, date: NaiveDate) -> Vec<DiaryEntry> {
+    let date = date.to_string();
+    entries.retain(|entry| entry.date < date);
+    entries.sort_by(|a, b| b.date.cmp(&a.date));
+    entries
+}
+
+pub(crate) fn get_last_diary_summary(brain: &Brain, date: NaiveDate) -> String {
+    match diary::get_entries(&brain.char_id, None).map(|entries| preceding_diaries(entries, date).into_iter().next()) {
         Ok(Some(entry)) => {
             if entry.content.is_empty() {
                 "This is the first diary entry.".to_string()
@@ -687,9 +673,9 @@ pub(crate) fn get_last_diary_summary(brain: &Brain) -> String {
 }
 
 /// 构建跨日记情绪对比上下文
-pub(crate) fn build_cross_diary_context(brain: &Brain) -> String {
+pub(crate) fn build_cross_diary_context(brain: &Brain, date: NaiveDate) -> String {
     let entries = match diary::get_entries(&brain.char_id, None) {
-        Ok(e) => e,
+        Ok(entries) => preceding_diaries(entries, date),
         Err(_) => return String::new(),
     };
     if entries.len() < 2 {
@@ -708,19 +694,9 @@ pub(crate) fn build_cross_diary_context(brain: &Brain) -> String {
     };
 
     let mut parts: Vec<String> = vec!["最近几天的情绪轨迹：".to_string()];
-    let mood_sequence: Vec<&str> = recent
-        .iter()
-        .rev()
-        .map(|e| mood_labels.get(e.mood_tag.as_str()).copied().unwrap_or(e.mood_tag.as_str()))
-        .collect();
-
-    for (i, tag) in mood_sequence.iter().enumerate() {
-        if i == mood_sequence.len() - 1 {
-            parts.push(format!("→ 今天({})", tag));
-        } else {
-            let day_offset = mood_sequence.len() - 1 - i;
-            parts.push(format!("{}天前({})", day_offset, tag));
-        }
+    for entry in recent.iter().rev() {
+        let tag = mood_labels.get(entry.mood_tag.as_str()).copied().unwrap_or(entry.mood_tag.as_str());
+        parts.push(format!("{}({})", entry.date, tag));
     }
 
     parts.join(" | ")
@@ -1205,7 +1181,7 @@ fn build_prompt(ctx: &DailyContext, lang: &str) -> (String, String) {
             rel_section.push_str(&format!("\n{} {}", rel_highlight, h));
         }
         user_parts.push(rel_section);
-    } else {
+    } else if ctx.mood_summary.is_object() {
         user_parts.push(format!(
             "\n{}\n{} {:.0}/100 | {} {:.0}/100",
             relationship, rel_intimacy, intimacy, rel_trust, trust
@@ -1217,6 +1193,16 @@ fn build_prompt(ctx: &DailyContext, lang: &str) -> (String, String) {
         && ctx.last_diary_summary != "This is the first diary entry."
     {
         user_parts.push(format!("\n{}\n{}", prev_diary, ctx.last_diary_summary));
+    }
+
+    if let Some(dream) = &ctx.dream {
+        let (label, rule) = match lang_norm {
+            "en" => ("Memory organization and associations before this diary", "These are derived summaries and tentative interpretations, not new events. Verify against the day's original interactions; never turn an association into a user fact or invent a dream scene."),
+            "ja" => ("日記の前の記憶整理と連想", "以下は派生した要約と暫定的な解釈であり、新しい出来事ではない。当日の原文を優先し、連想をユーザーの事実に変えたり夢の場面を創作したりしない。"),
+            _ => ("写日记前的记忆整理与联想", "以下是派生摘要和暂时的理解，不是新增经历。以当天原始互动为准；不能把联想写成用户事实，也不要虚构梦境场景。"),
+        };
+        system_parts.push(rule.into());
+        user_parts.push(format!("{label}\n{}", serde_json::to_string(dream).unwrap_or_default()));
     }
 
     // Writing Instructions
@@ -1506,6 +1492,7 @@ mod tests {
             ongoing_stories: Vec::new(),
             relationship_delta: None,
             personality_baseline: "A warm companion.".to_string(),
+            dream: None,
         };
         let (system_prompt, user_prompt) = build_prompt(&ctx, "en");
         let prompt = format!("{}\n{}", system_prompt, user_prompt);

@@ -176,6 +176,7 @@ impl MemoryService {
             relationship_delta: None,
             mood_samples: Vec::new(),
             version: 2,
+            dream: None,
         };
 
         let saved = diary::add_entry(char_id, entry).map_err(|e| e.to_string())?;

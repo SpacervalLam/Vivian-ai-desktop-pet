@@ -97,7 +97,10 @@ impl BeliefGenerator {
     /// 写入 Mind。失败时返回空 report，不传播错误。
     pub async fn generate(&self, memory: &MemoryManager, mind: &Mind) -> VivianResult<BeliefGenerationReport> {
         let now = chrono::Utc::now().timestamp();
-        let all = memory.get_all_memories().await?;
+        let mut all = memory.get_all_memories().await?;
+        all.retain(|m| m.metadata["index_active"] != false && !m.content.trim().is_empty()
+            && crate::memory::provenance::visible_to(&m.metadata, &mind.char_id));
+        all.sort_by(|a, b| b.timestamp.total_cmp(&a.timestamp));
 
         // 取最近 Insight 和 LongTerm 作为源数据
         let insights: Vec<&MemoryItem> = all
@@ -106,7 +109,9 @@ impl BeliefGenerator {
             .collect();
         let long_terms: Vec<&MemoryItem> = all
             .iter()
-            .filter(|m| super::belief_sources::matches(&m.memory_type, &m.metadata, &m.tags, "long_term"))
+            .filter(|m| super::belief_sources::is_runtime(&m.metadata, &m.tags)
+                && (crate::memory::kinds::kind(m) == crate::memory::kinds::RecordKind::Fact
+                    || super::belief_sources::matches(&m.memory_type, &m.metadata, &m.tags, "long_term")))
             .collect();
 
         // 源数据不足时跳过（至少 3 条 Insight 或 5 条 LongTerm）
@@ -235,10 +240,20 @@ impl BeliefGenerator {
         let parsed = match parse_response(&response) {
             Some(p) => p,
             None => {
-                tracing::warn!("[BeliefGenerator] LLM 返回无法解析，跳过");
-                return Ok(BeliefGenerationReport::default());
+                return Err(crate::error::VivianError::Memory("做梦联想结果无法解析，保留原记忆供重试".into()));
             }
         };
+
+        let provided: std::collections::HashSet<String> = insights.iter().take(15).chain(long_terms.iter().take(20))
+            .map(|m| m.id.clone()).collect();
+        if parsed.beliefs.iter().any(|draft| !super::belief_sources::valid_sources(&draft.source_ids, &provided)) {
+            return Err(crate::error::VivianError::Memory("做梦联想引用了未提供的记忆，未应用本次联想".into()));
+        }
+        let fresh = memory.get_memories_by_ids(&provided.iter().cloned().collect::<Vec<_>>());
+        if all.iter().filter(|m| provided.contains(&m.id)).any(|source| !fresh.iter().any(|m|
+            m.id == source.id && m.content == source.content && m.metadata == source.metadata && m.metadata["index_active"] != false)) {
+            return Err(crate::error::VivianError::Memory("做梦联想期间来源记忆已变化，未应用本次联想".into()));
+        }
 
         let mut report = BeliefGenerationReport::default();
 
@@ -249,7 +264,7 @@ impl BeliefGenerator {
             .collect();
 
         // 写入 Belief（走合并逻辑）
-        for draft in &parsed.beliefs {
+        for draft in parsed.beliefs.iter().take(3) {
             if draft.source_ids.is_empty() {
                 tracing::debug!("[BeliefGenerator] Belief 草稿无 source_ids，丢弃：{}", draft.statement);
                 continue;
@@ -310,7 +325,7 @@ impl BeliefGenerator {
         }
 
         // 写入 Goal（先 deactivate 旧的同类，再添加新的）
-        for draft in &parsed.goals {
+        for draft in parsed.goals.iter().take(2) {
             let goal = Goal::new(
                 format!("goal_{}_{}", now, &draft.description.chars().take(8).collect::<String>()),
                 draft.description.clone(),
@@ -335,9 +350,7 @@ impl BeliefGenerator {
         }
 
         // 持久化
-        if let Err(e) = mind.persist() {
-            tracing::warn!("[BeliefGenerator] 持久化失败：{}", e);
-        }
+        mind.persist()?;
 
         tracing::info!(
             "[BeliefGenerator] {}：新建 {} / 强化 {} Belief，新增 {} Goal",

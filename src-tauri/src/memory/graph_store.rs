@@ -622,6 +622,21 @@ impl KnowledgeGraph {
         self.inner.read().entities.get(name).cloned()
     }
 
+    pub fn entity_memory_ids(&self, names: &[&str], limit: usize) -> Vec<String> {
+        let store = self.inner.read();
+        let mut ids = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for name in names {
+            if let Some(entity) = store.entities.get(*name) {
+                for id in &entity.memory_ids {
+                    if ids.len() >= limit {return ids;}
+                    if seen.insert(id.as_str()) {ids.push(id.clone());}
+                }
+            }
+        }
+        ids
+    }
+
     /// 获取实体的所有边
     pub fn get_edges(&self, entity_name: &str) -> Vec<GraphEdge> {
         let store = self.inner.read();

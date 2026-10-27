@@ -305,14 +305,21 @@ pub struct RelationalHit {
     pub edge_weight: f64,
 }
 
-/// 构建图谱检索臂
-///
-/// 流程：
-/// 1. parse_relational_query 解析查询
-/// 2. 在图谱中 fanout 遍历
-/// 3. 把图谱实体映射回记忆 ID
-///
-/// 返回的 RelationalHit 列表可作为 RRF 第三路与 BM25/Vector 融合。
+/// 从图谱中的来源和实体关联取得有界候选，正文由调用方按权限读取。
+pub fn candidate_memory_ids(graph: &Arc<KnowledgeGraph>, query: &str, limit: usize) -> Vec<String> {
+    let Some(parsed) = parse_relational_query(query) else {return Vec::new();};
+    let seeds: Vec<_> = parsed.seeds.iter().map(String::as_str).collect();
+    let fanout = graph.fanout(&seeds,&parsed.relation_types,2,limit);
+    let mut ids: Vec<_> = fanout.iter().map(|hit|hit.source_memory_id.clone()).filter(|id|!id.is_empty()).take(limit).collect();
+    let names: Vec<_> = fanout.iter().map(|hit|hit.entity_name.as_str()).chain(seeds).collect();
+    ids.extend(graph.entity_memory_ids(&names,limit));
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id|seen.insert(id.clone()));
+    ids.truncate(limit.saturating_mul(2));
+    ids
+}
+
+/// 对已选候选构建图谱检索臂，作为 RRF 第三路与词法、向量融合。
 pub fn build_relational_arm(
     graph: &Arc<KnowledgeGraph>,
     query: &str,

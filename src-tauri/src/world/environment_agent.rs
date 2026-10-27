@@ -50,6 +50,8 @@ pub struct EnvironmentAgent {
     sampling: AtomicBool,
     suppressed_until: AtomicU64,
     hints: Mutex<HintCache>,
+    last_diary_check: Mutex<HashMap<String, f64>>,
+    app: OnceLock<tauri::AppHandle>,
 }
 
 struct SamplingGuard<'a>(&'a AtomicBool);
@@ -144,6 +146,9 @@ pub fn allows_peer_contact(state: &AppState, source_id: &str, target_id: &str) -
 }
 
 impl EnvironmentAgent {
+    pub fn set_app_handle(&self, app: tauri::AppHandle) { let _ = self.app.set(app); }
+    /// An explicit tool request asks for an earlier evaluation; it grants no execution authority.
+    pub fn request_diary_check(&self, character: &str) { self.last_diary_check.lock().remove(character); }
     pub fn foreground_context(&self) -> ForegroundContext { self.foreground.lock().clone() }
 
     pub fn external_foreground(&self) -> Option<ForegroundWindowSnapshot> {
@@ -341,8 +346,32 @@ impl EnvironmentAgent {
         let user_available = idle <= config.proactive.away_threshold_seconds as f64;
         let chatting = state.session_coordinator.any_user_turn_active();
         let snap = state.world_provider.snapshot(None);
+        let Ok(permit) = self.planning.clone().try_lock_owned() else { return; };
+        // Private daily activity is eligible during Rest/Offline too. It uses this
+        // same planner/route budget and never dispatches directly from a clock rule.
+        let private_hint = if chatting { None } else {
+            let characters: Vec<_> = state.characters.read().values().cloned().collect();
+            characters.into_iter().filter(|character| *character.online.read()).find_map(|character| {
+                {
+                    let mut checked = self.last_diary_check.lock();
+                    if checked.get(&character.id).is_some_and(|last| now - last < 60.0) { return None; }
+                    checked.insert(character.id.clone(), now);
+                }
+                if crate::commands::coding_agent::CODING_AGENT.has_running_work_for(&character.id) { return None; }
+                crate::diary::set_tool_availability(&character.id, false);
+                match crate::diary::dream::candidate(&character.brain, chrono::Local::now()) {
+                    Ok(Some(candidate)) => {
+                        // At most one private planning opportunity per role per five minutes.
+                        self.last_diary_check.lock().insert(character.id.clone(), now + 240.0);
+                        Some((character.id, candidate))
+                    }
+                    Ok(None) => None,
+                    Err(error) => { tracing::warn!("[Environment] 做梦与日记资格读取失败: {error}"); None }
+                }
+            })
+        };
         // Each model invocation sees one role's permitted material, not a mix of private stores.
-        let focus_id = {
+        let focus_id = private_hint.as_ref().map(|(id, _)| id.clone()).or_else(|| {
             let obs = self.observations.lock();
             let recent_speaker = obs.policy.recent_user_turns(now).into_iter().rev()
                 .find(|turn| now-turn.at < 90.0 && roles.iter().any(|role| role.available && role.id == turn.character_id))
@@ -353,7 +382,7 @@ impl EnvironmentAgent {
                 obs.last_focus.get(&a.id).copied().unwrap_or(0.0)
                     .total_cmp(&obs.last_focus.get(&b.id).copied().unwrap_or(0.0)))
                 .map(|role| role.id.clone()))
-        };
+        });
         let Some(focus_id) = focus_id else { return; };
         let focus = state.characters.read().get(&focus_id).cloned();
         let Some(focus) = focus else { return; };
@@ -361,7 +390,6 @@ impl EnvironmentAgent {
             .into_iter().filter(|source| source.shareable).collect();
         // Reserve before consuming the observation signature. Lock contention is deferral,
         // not a terminal evaluation of an event that was never sent to a model.
-        let Ok(permit) = self.planning.clone().try_lock_owned() else { return; };
         let (events, user_turns, current_intent, epoch, input_revision) = {
             let mut inputs = self.input.drain();
             inputs.sort_by_key(|input| input.revision);
@@ -403,7 +431,7 @@ impl EnvironmentAgent {
                 event.owner.as_ref().is_none_or(|owner| owner == &focus_id)
                     && (event.stimulus != Stimulus::UserDialogue || obs.policy.recent_user_turns(now).iter()
                         .any(|turn| turn.id == event.id && turn.character_id == focus_id))).collect();
-            if events.is_empty() || !obs.policy.begin_plan(now, &roles) {
+            if private_hint.is_none() && (events.is_empty() || !obs.policy.begin_plan(now, &roles)) {
                 return;
             }
             obs.last_focus.insert(focus_id.clone(),now);
@@ -438,18 +466,18 @@ impl EnvironmentAgent {
         let state = state.clone();
         tauri::async_runtime::spawn(async move {
             let _permit = permit;
-            let messages = vec![
-                ChatMessage::system(include_str!(
-                    "../../prompts/framework/environment_agent.en.md"
-                )),
-                ChatMessage::user(
-                    json!({"scene":scene,"observations":world_observations,"activity":activity,
+            let diary_candidate = private_hint.and_then(|(_, offered)| crate::diary::dream::candidate(&focus.brain, chrono::Local::now()).ok().flatten()
+                .filter(|fresh| fresh.date == offered.date && fresh.resume == offered.resume));
+            crate::diary::set_tool_availability(&focus_id, diary_candidate.is_some());
+            if events.is_empty() && diary_candidate.is_none() { return; }
+            let plan_revision = priority.revision();
+            let observed = json!({"scene":scene,"observations":world_observations,"activity":activity,
                     "focus_character_id":focus_id,"language":language,"evidence":evidence,"user_available":user_available,
                     "user_chatting":chatting,"participants":planning_roles,"events":events,
-                    "recent_user_turns":user_turns,"current_intent":current_intent})
-                    .to_string(),
-                ),
-            ];
+                    "recent_user_turns":user_turns,"current_intent":current_intent});
+            let (system, observed) = super::environment_policy::planning_prompt(
+                include_str!("../../prompts/framework/environment_agent.en.md"), observed, diary_candidate.as_ref());
+            let messages = vec![ChatMessage::system(system), ChatMessage::user(observed.to_string())];
             let request = LLMRequest::new("environment_judge", messages)
                 .without_framework_instructions()
                 .with_temperature(0.0)
@@ -483,9 +511,12 @@ impl EnvironmentAgent {
                 && !state.is_factory_reset_in_progress()
                 && !state.is_rebuild_in_progress();
             let mut obs = agent.observations.lock();
+            let mut selected_cycle = None;
             if let Some(decision) = decision.filter(|_| {
                 permitted && obs.epoch == epoch && agent.input.revision() == input_revision
             }) {
+                selected_cycle = decision.private_activity.and_then(|selection| diary_candidate.as_ref()
+                    .filter(|candidate| selection.matches(candidate)).cloned());
                 if let Some(intent) = decision.user_intent {
                     obs.policy
                         .apply_intent(intent, chrono::Local::now().timestamp() as f64);
@@ -519,6 +550,14 @@ impl EnvironmentAgent {
             // Abstention/failure is terminal for these events, never a per-tick retry storm.
             obs.policy
                 .finish_evaluation(&events.iter().map(|e| e.id.clone()).collect::<Vec<_>>());
+            drop(obs);
+            if let Some(candidate) = selected_cycle {
+                let character = state.characters.read().get(&candidate.character_id).cloned();
+                if let Some(character) = character.filter(|character| *character.online.read()) {
+                    crate::diary::dream::spawn_selected(character.brain, candidate, priority,
+                        plan_revision, agent.app.get().cloned(), character.name);
+                }
+            }
         });
     }
 

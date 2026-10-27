@@ -1,13 +1,22 @@
 //! Beliefs learn from stored experiences, not persona seed data.
 use serde_json::Value;
 
-pub fn matches(memory_type: &str, metadata: &Value, tags: &[String], wanted: &str) -> bool {
+pub fn is_runtime(metadata: &Value, tags: &[String]) -> bool {
     if metadata.get("seed_chunk").and_then(Value::as_bool) == Some(true)
         || metadata.get("source").and_then(Value::as_str) == Some("system_seed")
         || tags.iter().any(|tag| tag == "backstory")
     {
         return false;
     }
+    true
+}
+
+pub fn valid_sources(ids: &[String], provided: &std::collections::HashSet<String>) -> bool {
+    !ids.is_empty() && ids.iter().all(|id| provided.contains(id))
+}
+
+pub fn matches(memory_type: &str, metadata: &Value, tags: &[String], wanted: &str) -> bool {
+    if !is_runtime(metadata, tags) { return false; }
     // Prefer the canonical type; fall back only for legacy records without it.
     if !memory_type.is_empty() {
         return memory_type == wanted;
