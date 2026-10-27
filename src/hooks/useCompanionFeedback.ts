@@ -10,7 +10,7 @@ import { playCompanionTone } from '../utils/companionSound';
 import { openReminderWindow } from '../utils/reminderWindow';
 
 export interface CompanionStatus {
-  quiet_reason: 'focus' | 'game' | 'game_companion' | 'quiet_hours' | 'do_not_disturb' | null;
+  quiet_reason: 'focus' | 'game_companion' | 'quiet_hours' | 'do_not_disturb' | null;
   cpu_pressure: boolean;
   memory_pressure: boolean;
   network_connected: boolean | null;

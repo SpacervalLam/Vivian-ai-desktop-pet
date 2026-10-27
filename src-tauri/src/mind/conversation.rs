@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationIntent { #[default] Silent, Greet, FollowUp, Share }
+pub enum ConversationIntent { #[default] Silent, Greet, FollowUp, Share, AskUser }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationSource { #[default] None, UserMessage, WorldObservation, SceneEvent }
+pub enum ConversationSource { #[default] None, UserMessage, WorldObservation, SceneEvent, ThoughtThread }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ThoughtSynthesisOutput {
@@ -22,8 +22,17 @@ pub struct ThoughtSynthesisOutput {
     /// Stable name for the actual point; rewording the same point keeps the same key.
     #[serde(default)] pub conversation_key: String,
     #[serde(default)] pub conversation_event_id: String,
+    #[serde(default, deserialize_with = "parse_thread_updates")]
+    pub thread_updates: Vec<super::thought_threads::ThreadUpdate>,
 }
 pub fn default_social_urge() -> f32 { 0.5 }
+
+// An invalid optional state update must not discard a valid thought or authorize speech.
+fn parse_thread_updates<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<super::thought_threads::ThreadUpdate>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_array().into_iter().flatten().take(2)
+        .filter_map(|item| serde_json::from_value(item.clone()).ok()).collect())
+}
 
 /// Prevent overlapping thought calls; cancellation releases admission too.
 pub struct ThoughtRefreshPermit(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -68,6 +77,7 @@ impl ThoughtSynthesisOutput {
         let event = events.iter().find(|event| event.id == self.conversation_event_id && event.at <= now);
         if !self.conversation_event_id.is_empty() && event.is_none() { return None; }
         let evidence = self.conversation_evidence.trim();
+        if self.conversation_intent == ConversationIntent::AskUser && self.conversation_source != ConversationSource::ThoughtThread { return None; }
         let grounded = match self.conversation_source {
             ConversationSource::None => self.conversation_intent == ConversationIntent::Greet && evidence.is_empty(),
             // Provided context and corrections decide relevance, not a ten-minute cutoff.
@@ -76,7 +86,10 @@ impl ThoughtSynthesisOutput {
             ConversationSource::WorldObservation => self.conversation_intent == ConversationIntent::Share
                 && evidence.chars().count() >= 3 && world_observations.iter().any(|text| text.contains(evidence)),
             ConversationSource::SceneEvent => evidence.chars().count() >= 3
-                && event.is_some_and(|event| event.fact.contains(evidence)),
+                && event.is_some_and(|event| event.kind != "personal_thought" && event.fact.contains(evidence)),
+            ConversationSource::ThoughtThread => matches!(self.conversation_intent, ConversationIntent::Share | ConversationIntent::AskUser)
+                && evidence.chars().count() >= 3
+                && event.is_some_and(|event| event.kind == "personal_thought" && event.fact.contains(evidence)),
         };
         grounded.then(|| ConversationOpportunity {
             intent: self.conversation_intent, source: self.conversation_source,
@@ -97,6 +110,7 @@ fn same_meaning(a: &ConversationOpportunity, b: &ConversationOpportunity) -> boo
 }
 #[derive(Debug, Default)]
 pub struct ConversationOpportunities {
+    pub threads: super::thought_threads::ThoughtThreads,
     pending: Option<ConversationOpportunity>,
     prepared: Vec<(ConversationOpportunity, String)>,
     spoken: Vec<ConversationOpportunity>,
@@ -106,6 +120,15 @@ pub struct ConversationOpportunities {
     event_sequence: u64,
 }
 impl ConversationOpportunities {
+    pub fn apply_synthesis(&mut self, output: &ThoughtSynthesisOutput,
+        grounding: &super::thought_threads::ThoughtGrounding<'_>, user_present: bool, now: f64) -> bool {
+        let mut proposal = output.validated_opportunity(grounding.user_quotes, grounding.world, grounding.scene, user_present, now);
+        let changed = self.threads.apply(&output.thread_updates, grounding, now as i64);
+        if proposal.as_ref().is_some_and(|candidate| candidate.source == ConversationSource::ThoughtThread
+            && !self.threads.permits(&candidate.event_id, candidate.intent, now as i64)) { proposal = None; }
+        self.replace(proposal);
+        changed
+    }
     pub fn replace(&mut self, proposal: Option<ConversationOpportunity>) { self.pending = proposal; }
     /// Polling an unchanged scene does nothing. Edges request thought synthesis once.
     pub fn observe_scene(&mut self, scene: ConversationScene, now: f64) -> bool {
@@ -153,7 +176,8 @@ impl ConversationOpportunities {
     pub fn fresh(&self, now: f64) -> Option<ConversationOpportunity> {
         let proposal = self.pending.as_ref()?;
         if !now.is_finite() || now < proposal.generated_at || normalize(&proposal.meaning_key).is_empty()
-            || (!proposal.event_id.is_empty() && !self.events.iter().any(|event| event.id == proposal.event_id))
+            || (proposal.source == ConversationSource::ThoughtThread && !self.threads.permits(&proposal.event_id, proposal.intent, now as i64))
+            || (proposal.source != ConversationSource::ThoughtThread && !proposal.event_id.is_empty() && !self.events.iter().any(|event| event.id == proposal.event_id))
             || self.spoken.iter().chain(&self.attempted).any(|previous| same_meaning(previous, proposal))
             || self.prepared.iter().any(|(previous, _)| same_meaning(previous, proposal)) { return None; }
         Some(proposal.clone())
@@ -162,12 +186,14 @@ impl ConversationOpportunities {
         let proposal = self.fresh(now);
         self.pending = None;
         if let Some(proposal) = &proposal {
+            if proposal.source == ConversationSource::ThoughtThread { self.threads.attempt(&proposal.event_id); }
             self.attempted.push(proposal.clone());
             if self.attempted.len() > 32 { self.attempted.remove(0); }
         }
         proposal
     }
     pub fn restore_after_failure(&mut self, proposal: ConversationOpportunity) {
+        if proposal.source == ConversationSource::ThoughtThread { self.threads.restore(&proposal.event_id); }
         self.attempted.retain(|previous| !same_meaning(previous, &proposal));
         if self.pending.is_none() { self.pending=Some(proposal); }
     }
@@ -176,9 +202,10 @@ impl ConversationOpportunities {
         self.prepared.push((proposal,text.to_owned()));
         if self.prepared.len() > 16 { self.prepared.remove(0); }
     }
-    pub fn record_delivered(&mut self, text: &str, _now: f64) {
+    pub fn record_delivered(&mut self, text: &str, now: f64) {
         if let Some(index)=self.prepared.iter().position(|(_,content)|content==text) {
             let (proposal,_)=self.prepared.remove(index);
+            if proposal.source == ConversationSource::ThoughtThread { self.threads.delivered(&proposal.event_id, proposal.intent, now as i64); }
             self.spoken.push(proposal);
             if self.spoken.len()>32 {self.spoken.remove(0);}
         }

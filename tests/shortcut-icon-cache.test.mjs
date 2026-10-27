@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+
+const bundled = await build({ entryPoints: ['src/utils/shortcutIconCache.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { ShortcutIconCache } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+let baselineRequests = 0;
+for (let i = 0; i < 8; i++) await (async () => { baselineRequests++; throw new Error('offline'); })().catch(() => null);
+assert.equal(baselineRequests, 8);
+let now = 0;
+const cache = new ShortcutIconCache(() => now);
+let requests = 0;
+const failed = async () => { requests++; throw new Error('offline'); };
+for (let i = 0; i < 8; i++) assert.equal(await cache.get('site', failed), null);
+assert.equal(requests, 1, 'remounts cannot retry within failure cooldown');
+console.log(`Icon requests for 8 failed remounts: uncached=${baselineRequests}, failure_cache=${requests}`);
+const concurrentCache = new ShortcutIconCache(() => now);
+let concurrentRequests = 0;
+assert.deepEqual(await Promise.all(Array.from({ length: 8 }, () => concurrentCache.get('site', async () => {
+  concurrentRequests++; throw new Error('offline');
+}))), Array(8).fill(null));
+assert.equal(concurrentRequests, 1, 'concurrent mounts share their request');
+now = 60_001;
+assert.equal(await cache.get('site', async () => { requests++; return 'data:image/png;base64,ok'; }), 'data:image/png;base64,ok');
+assert.equal(requests, 2, 'expired failure retries and recovers');
+now += 60_001;
+assert.equal(await cache.get('site', failed), 'data:image/png;base64,ok');
+assert.equal(requests, 2, 'successful result remains cached');
+assert.equal(await cache.get('changed-target', async () => 'different'), 'different');
+const bounded = new ShortcutIconCache(() => now, 60_000, 2);
+await bounded.get('a', async () => 'a');
+await bounded.get('b', async () => 'b');
+await bounded.get('c', async () => 'c');
+let evictedRequest = false;
+assert.equal(await bounded.get('a', async () => { evictedRequest = true; return 'new-a'; }), 'new-a');
+assert.equal(evictedRequest, true, 'cache capacity remains bounded');
+console.log('Shortcut icon cache: concurrency, failure cooldown, retry, recovery, changed targets and bounded capacity passed.');

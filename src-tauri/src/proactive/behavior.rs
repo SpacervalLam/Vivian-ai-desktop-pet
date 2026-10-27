@@ -552,9 +552,9 @@ fn build_proactive_directive(
         }
         ProactiveTrigger::Spontaneous => {
             let (s, c) = match lang_norm {
-                "en" => ("Scene: the user has been quiet for a bit. You may choose to say nothing.".to_string(), "A fresh observation, small opinion or genuine curiosity can be enough; share only when it fits the active conversation. No atmospheric monologue or question merely to get a reply. Otherwise choose DONT_NOTIFY.".to_string()),
-                "ja" => ("シーン：ユーザーが少し静か。何も言わない選択もできる。".to_string(), "新しい観察、小さな意見、自然な好奇心が今の会話に合う時だけ伝える。雰囲気の独白や返事のための質問を作らない。なければ DONT_NOTIFY。".to_string()),
-                _ => ("场景：用户安静了一会儿。你可以选择不说话。".to_string(), "新观察、小看法或自然的好奇都可以，但要贴合正在进行的交流。不凑氛围独白，也不为求回应而提问；否则选择 DONT_NOTIFY。".to_string()),
+                "en" => ("Scene: you have an optional opportunity to speak. Follow a supplied personal thought or a specific observation; you may choose to say nothing.".to_string(), "A fresh observation, small opinion or genuine curiosity can be enough; share only when it fits the active conversation. No atmospheric monologue or question merely to get a reply. Otherwise choose DONT_NOTIFY.".to_string()),
+                "ja" => ("シーン：任意で話す機会がある。提示された自分の考えや具体的な観察に従い、何も言わない選択もできる。".to_string(), "新しい観察、小さな意見、自然な好奇心が今の会話に合う時だけ伝える。雰囲気の独白や返事のための質問を作らない。なければ DONT_NOTIFY。".to_string()),
+                _ => ("场景：你有一次可选的交流机会。沿着提供的个人思绪或具体观察表达，也可以选择不说话。".to_string(), "新观察、小看法或自然的好奇都可以，但要贴合正在进行的交流。不凑氛围独白，也不为求回应而提问；否则选择 DONT_NOTIFY。".to_string()),
             };
             (s, String::new(), c)
         }

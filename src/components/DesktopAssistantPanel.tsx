@@ -7,6 +7,7 @@ import { ArrowUpRight, ChevronDown, Monitor, NotebookPen, Pencil, Plus, Rocket, 
 import { getCharacterId } from '../characterContext';
 import { isAssistantPanel } from './assistantPanels';
 import { groupShortcuts, showsGroupHeaders, shortcutGroupNames } from '../utils/shortcutGroups';
+import { ShortcutIconCache } from '../utils/shortcutIconCache';
 import './DesktopAssistantPanel.css';
 
 const showErrorToast = (error: unknown) => {
@@ -267,7 +268,7 @@ function UserQuickNotes() {
   </div>;
 }
 
-const shortcutIconCache = new Map<string, Promise<string | null>>();
+const shortcutIconCache = new ShortcutIconCache();
 function ShortcutIcon({ shortcut }: { shortcut: Shortcut }) {
   const [icon, setIcon] = useState<string | null>(null);
   const { i18n } = useTranslation();
@@ -276,14 +277,11 @@ function ShortcutIcon({ shortcut }: { shortcut: Shortcut }) {
   useEffect(() => {
     let active = true;
     const key = shortcut.id + ':' + shortcut.kind + ':' + shortcut.target;
-    let request = shortcutIconCache.get(key);
-    if (!request) {
+    const request = shortcutIconCache.get(key, () => {
       // 后端失败原因（代理不通 / 站点没有 favicon）只留在日志里，控制台这行是给人排查用的
-      request = invoke<string>('companion_shortcut_icon', { shortcutId: shortcut.id })
-        .catch((error) => { shortcutIconCache.delete(key); console.debug('[shortcut-icon]', shortcut.name, error); return null; });
-      if (shortcutIconCache.size >= 60) shortcutIconCache.delete(shortcutIconCache.keys().next().value!);
-      shortcutIconCache.set(key, request);
-    }
+      return invoke<string>('companion_shortcut_icon', { shortcutId: shortcut.id })
+        .catch((error) => { console.debug('[shortcut-icon]', shortcut.name, error); throw error; });
+    });
     void request.then(value => { if (active) setIcon(value); });
     return () => { active = false; };
   }, [shortcut.id, shortcut.kind, shortcut.target]);

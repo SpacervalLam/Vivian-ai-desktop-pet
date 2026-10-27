@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import {readFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
 import {lightPalette} from '../scripts/audit-chibi-palette.mjs';
 const report=JSON.parse(await readFile('assets/chibi/color-correction/build-report.json','utf8'));
 const luminance=rgb=>rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;
@@ -11,7 +12,25 @@ function tones(data,mask=data){
 }
 const defaultMeta=await sharp('public/chibi/nana-atlas.webp').metadata();
 const defaultTones=tones(await sharp('public/chibi/nana-atlas.webp').extract({left:0,top:0,width:defaultMeta.width/3,height:defaultMeta.height/2}).ensureAlpha().raw().toBuffer());
+// Wake is new artwork, not a colour-only edit of the archived calibration input.
+// Pin both replacement sheets and validate their full runtime frame grids separately.
+const replacementSheets={
+ 'motion/nana/nana-wake-sheet.webp':'a88bb06433dba273f3bf33c30ba2457733d03d3691db85508f5f03921c392962',
+ 'motion/vivian/vivian-wake-sheet.webp':'de3e3fdfc33e4d5311c81856129e1e816b94f0403f8a48800e8b30a2a8a78efc',
+};
+for(const [relative,expected] of Object.entries(replacementSheets)){
+ const bytes=await readFile(`public/chibi/${relative}`);
+ assert.equal(createHash('sha256').update(bytes).digest('hex'),expected,`${relative}: reviewed replacement source`);
+ const metadata=await sharp(bytes).metadata();
+ assert.equal(metadata.width,2048);assert.equal(metadata.height,1024);assert.equal(metadata.hasAlpha,true);
+ for(let frame=0;frame<8;frame++){
+  const stats=await sharp(bytes).extract({left:frame%4*512,top:Math.floor(frame/4)*512,width:512,height:512}).stats();
+  assert.equal(stats.channels[3].min,0,`${relative}/${frame}: transparent background`);
+  assert.ok(stats.channels[3].max>0,`${relative}/${frame}: nonempty frame`);
+ }
+}
 for(const item of report){
+ if(item.path in replacementSheets)continue;
  const file=`public/chibi/${item.path}`,old=`assets/chibi/color-correction/nana-${item.name}-original.webp`;
  const {data:before,info}=await sharp(old).ensureAlpha().raw().toBuffer({resolveWithObject:true}),after=await sharp(file).ensureAlpha().raw().toBuffer();
  assert.equal(after.length,before.length);const meta=await sharp(file).metadata();assert.equal(meta.width,item.cols*512);assert.equal(meta.height,item.rows*512);
@@ -50,4 +69,4 @@ for(const item of report){
 }
 assert.equal(report.length,12);
 for(const name of ['wake','busy-in','busy-loop','cast','tend-out','tend','tired'])assert.ok(report.some(r=>r.name===name),'all requested sheets are covered');
-console.log('Nana palette: 12 sheets match default colours; original alpha, silhouettes, dimensions, endpoint pixels and dark outlines preserved.');
+console.log('Nana palette: 11 calibrated sheets preserve original alpha, outlines and colours; both replacement wake sheets retain reviewed sources and 8 transparent, nonempty frames.');

@@ -171,7 +171,8 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
   const accent = riskAccent[riskLevel];
   const isCreateTool = tool === 'create_tool';
   const isCreatePlugin = tool === 'create_plugin';
-  const isCapabilityCreate = isCreateTool || isCreatePlugin;
+  const isInstallPlugin = tool === 'install_plugin';
+  const isCapabilityCreate = isCreateTool || isCreatePlugin || isInstallPlugin;
   const createArgs: CreateToolArgs = isCreateTool && args && typeof args === 'object'
     ? (args as CreateToolArgs)
     : {};
@@ -184,7 +185,7 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
     : allowAlwaysScope === 'persistent'
       ? t('tool_confirm.trust_app')
       : t('tool_confirm.allow_session');
-  const onceLabel = isCapabilityCreate ? t('tool_confirm.create_once') : t('tool_confirm.allow_once');
+  const onceLabel = isCapabilityCreate && !isInstallPlugin ? t('tool_confirm.create_once') : t('tool_confirm.allow_once');
 
   const buttonBase: React.CSSProperties = {
     flex: 1,
@@ -378,6 +379,11 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
               : t('tool_confirm.plugin_none')}
           </div>
         </div>
+      ) : isInstallPlugin ? (
+        <div style={{ marginBottom: 10 }}>
+          <div style={previewLabel}>{tool}</div>
+          <pre style={{ ...previewCode, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(args, null, 2)}</pre>
+        </div>
       ) : (
         argsText && (
           <details style={{ marginBottom: 10 }}>
@@ -424,13 +430,13 @@ const ConfirmToast: React.FC<ConfirmToastProps> = ({
         >
           {onceLabel}
         </button>
-        <button
+        {!isCapabilityCreate && <button
           type="button"
           style={{ ...buttonBase, background: 'var(--panel-selected-bg)', color: 'var(--panel-selected-text)' }}
           onClick={() => respond('allow_always')}
         >
           {alwaysLabel}
-        </button>
+        </button>}
       </div>
     </div>
   );

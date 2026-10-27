@@ -381,6 +381,9 @@ impl AppState {
                 self.tool_system.clone(),
             ),
         ));
+        self.tool_system.register_tool(Arc::new(crate::tools::builtin::plugin_advisor_tools::InstallPluginTool {
+            skills:self.skill_service.clone(),mcp:self.mcp_manager.clone(),tools:self.tool_system.clone(),
+        }));
         crate::tools::builtin::validate_confirmation_tools(&self.tool_system);
         crate::tools::custom_tools::spawn_hot_reload(
             self.tool_system.clone(),

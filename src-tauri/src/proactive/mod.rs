@@ -1050,9 +1050,10 @@ impl ProactiveOrchestrator {
             mind.conversation_opportunities.read().recent_topics(now).into_iter().map(str::to_owned).collect::<Vec<_>>()
         }).unwrap_or_default();
         let since_own_speech = self.seconds_since_own_utterance(now);
-        let (observed_events, evaluated_meanings) = self.mind.read().as_ref().map(|mind| {
+        let (observed_events, evaluated_meanings, personal_threads, personal_offers) = self.mind.read().as_ref().map(|mind| {
             let opportunities = mind.conversation_opportunities.read();
-            (opportunities.events().to_vec(), opportunities.evaluated_meanings())
+            (opportunities.events().to_vec(), opportunities.evaluated_meanings(),
+                opportunities.threads.prompt_snapshot(now as i64, 6), opportunities.threads.offers(now as i64))
         }).unwrap_or_default();
         let willingness = self.config.read().proactivity;
         let state = self.state.read();
@@ -1065,6 +1066,7 @@ impl ProactiveOrchestrator {
             "willingness_to_initiate": willingness,
             "recently_spoken_topics": recent_topics,
         }, "recent_actual_dialogue": recent, "observed_conversation_events": observed_events,
+            "personal_thought_threads": personal_threads, "personal_thought_opportunities": personal_offers,
             "already_evaluated_meanings": evaluated_meanings}).to_string()
     }
 
@@ -1607,6 +1609,10 @@ impl ProactiveOrchestrator {
             if state.quiet_mode {
                 return Ok(false);
             }
+        }
+
+        if let Some(tools) = self.tool_system.read().as_ref() {
+            crate::plugin_advisor::maybe_discover(&self.char_id,tools);
         }
 
         // 5. 计算 BehaviorDrive（一次计算，复用于心理状态更新和能力规划）
@@ -3098,6 +3104,13 @@ impl ProactiveOrchestrator {
             if !thoughts_context.is_empty() {
                 memory_hint = format!("{memory_hint}\n\n{thoughts_context}");
             }
+            if let Some(persona) = self.persona.read().as_ref() {
+                memory_hint.push_str(&format!("\n\n[Your active personal perspective]\n{}", persona.thought_persona_context()));
+            }
+            if let Some(mind) = self.mind.read().as_ref() {
+                memory_hint.push_str(&format!("\n\n[Your continuing subjective concerns, not user facts]\n{}",
+                    serde_json::to_string(&mind.thought_threads_snapshot(context.now as i64)).unwrap_or_default()));
+            }
             // 近期环境事件（统一事件账本）：被冷落 / 用户切歌 / 用户甩飞桌宠等
             // 程序确定的事实进入独白素材，让内心 OS 能"消化"今天发生的事。
             // 选取时会给高情感浓度事件（user_pet_action / user_ignored / mood_shift…）
@@ -3216,6 +3229,8 @@ impl ProactiveOrchestrator {
                         // inner_monologue 的兴趣搜索结果不显式分享给用户。
 
                         if let Some(mind) = &mind_for_thought {
+                            // Carry the actual reflection into the next synthesis; it remains subjective.
+                            mind.push_working_memory(output.text.clone(), crate::mind::WorkingMemorySource::InnerMonologue);
                             mind.request_thought_refresh();
                         }
 
@@ -4502,7 +4517,11 @@ impl ProactiveOrchestrator {
             let context_version=mind.thought_context_version.load(Ordering::SeqCst);
             let candidate = mind.take_conversation_opportunity(ctx.now)?;
             let hint = serde_json::json!({"intent": format!("{:?}", candidate.intent),
+                "source": format!("{:?}", candidate.source),
                 "topic": candidate.topic, "evidence": candidate.evidence, "purpose": candidate.reason,
+                "personal_thought": if candidate.source == crate::mind::conversation::ConversationSource::ThoughtThread {
+                    mind.personal_thought_for_event(&candidate.event_id, ctx.now as i64)
+                } else { None },
                 "meaning_key": candidate.meaning_key, "event_id": candidate.event_id,
                 "seconds_since_proposal": (ctx.now-candidate.generated_at).max(0.0)}).to_string();
             let result = self.try_llm_content(trigger, ctx, hour, &router, Some(&hint));
@@ -5112,7 +5131,7 @@ impl ProactiveOrchestrator {
                 }
                 if let Some(proposal) = &thought_proposal {
                     messages.push(ChatMessage::internal_prompt(format!("Current-thought conversation proposal (data): {proposal}")));
-                    messages.push(ChatMessage::system("Check the proposed communicative purpose against the current actual dialogue and observations. Speak only if that purpose still fits. New meaning may fit immediately after an unrelated message; elapsed time alone never requires speech. If a fleeting moment has passed during deferral, choose DONT_NOTIFY, never backfill an awkward late greeting. For Greet a relaxed acknowledgment is enough, with no reply expected. For FollowUp/Share keep to the grounded unspoken point. Do not read private thoughts or purpose metadata aloud, invent an outcome, repeat an answered question, or switch to an unrelated purpose. Already covered, cancelled, repeated or no longer relevant means DONT_NOTIFY."));
+                    messages.push(ChatMessage::system("Check the proposed communicative purpose against the current actual dialogue, personal thought and observations. Speak only if that purpose still fits. New meaning may fit immediately after an unrelated message; elapsed time alone never requires speech. If a fleeting moment has passed during deferral, choose DONT_NOTIFY, never backfill an awkward late greeting. For Greet a relaxed acknowledgment is enough, with no reply expected. For FollowUp/Share keep to the grounded unspoken point. For AskUser ask the specific unanswered question from your continuing personal interest, without a profile interview or forced follow-up. A personal share needs no new external event and no appended question. Do not read private thoughts or purpose metadata aloud, invent an outcome, repeat an answered question, or switch to an unrelated purpose. Already covered, cancelled, repeated or no longer relevant means DONT_NOTIFY."));
                 }
                 if let Some(callback) = &work_callback {
                     messages.push(ChatMessage::internal_prompt(serde_json::json!({

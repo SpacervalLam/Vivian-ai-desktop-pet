@@ -157,7 +157,7 @@ async fn observe_game(app: &tauri::AppHandle, state: &Arc<AppState>, window: &Fo
     OBSERVER.lock().report = Some((now, description.clone()));
     // Only speak in a lull. A snapshot can inform a manual reply during intense play.
     if !proactive || !state.world_provider.environment.game_input_activity().allows_comment()
-        || companion.quiet_reason(chrono::Local::now().hour(), "").is_some()
+        || companion.quiet_reason(chrono::Local::now().hour()).is_some()
         || state.playback_gate.is_playing() || state.session_coordinator.any_user_turn_active() { return; }
     {
         let mut obs = OBSERVER.lock();
@@ -174,7 +174,7 @@ async fn observe_game(app: &tauri::AppHandle, state: &Arc<AppState>, window: &Fo
         || character.think_lock.try_lock().is_err()
         || !state.world_provider.environment.game_input_activity().allows_comment() { return; }
     let (latest, _, proactive) = state.config.read().game_preferences();
-    if !proactive || latest.quiet_reason(chrono::Local::now().hour(), "").is_some() { return; }
+    if !proactive || latest.quiet_reason(chrono::Local::now().hour()).is_some() { return; }
     let _ = app.emit("companion:feedback", json!({"character_id":id,"kind":"game","content":line,"motion":"look","sound":false}));
 }
 

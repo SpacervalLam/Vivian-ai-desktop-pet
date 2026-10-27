@@ -185,15 +185,7 @@ fn ensure_config_window(window: &tauri::WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_plugin_enabled(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, key: String, enabled: bool) -> Result<(), String> {
     ensure_config_window(&window)?;
-    crate::plugins::set_plugin_enabled(&key, enabled)?;
-    if enabled {
-        if crate::plugins::is_plugin_name_trusted(&key) {
-            crate::plugins::load_one(&state.skill_service, &state.mcp_manager, &state.tool_system, &key, false).await?;
-        }
-    } else {
-        crate::plugins::unload_one(&state.skill_service, &state.mcp_manager, &state.tool_system, &key).await?;
-    }
-    Ok(())
+    crate::plugins::set_enabled(&state.skill_service, &state.mcp_manager, &state.tool_system, &key, enabled).await
 }
 
 #[tauri::command]

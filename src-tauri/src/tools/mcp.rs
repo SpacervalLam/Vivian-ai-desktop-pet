@@ -154,13 +154,13 @@ pub struct McpServerConfig {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty", serialize_with = "crate::plugin_contract::serialize_string_map")]
     pub headers: HashMap<String, String>,
     /// 命令参数
     #[serde(default)]
     pub args: Vec<String>,
     /// 环境变量
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::plugin_contract::serialize_string_map")]
     pub env: HashMap<String, String>,
     /// 工作目录
     #[serde(default)]
@@ -829,8 +829,16 @@ impl McpManager {
     /// 后续 `init_all` / 健康循环 / 插件装载流程统一连接。
     /// 返回本次落盘后处于本插件名下、待连接的 server id 列表。
     pub fn merge_plugin_servers(&self, incoming: &[McpServerConfig], plugin_name: &str) -> Vec<String> {
+        self.try_merge_plugin_servers(incoming, plugin_name).unwrap_or_else(|error| {
+            crate::plugins::push_diag_event(format!("插件 {plugin_name} MCP 配置合并失败：{error}"));
+            Vec::new()
+        })
+    }
+
+    pub(crate) fn try_merge_plugin_servers(&self, incoming: &[McpServerConfig], plugin_name: &str) -> VivianResult<Vec<String>> {
+        if incoming.is_empty() { return Ok(Vec::new()); }
         let _guard = self.config_lock.lock();
-        let overrides = match self.load_plugin_overrides() { Ok(values) => values, Err(error) => { crate::plugins::push_diag_event(error.to_string()); return Vec::new(); } };
+        let overrides = self.load_plugin_overrides()?;
         let mut configs = self.load_configs();
         let mut added = Vec::new();
         for cfg in incoming {
@@ -874,12 +882,9 @@ impl McpManager {
             }
         }
         if !added.is_empty() {
-            if let Err(e) = self.save_configs_unlocked(&configs) {
-                tracing::warn!("[McpManager] 插件 MCP 配置持久化失败: {e}");
-                return Vec::new();
-            }
+            self.save_configs_unlocked(&configs)?;
         }
-        added
+        Ok(added)
     }
 
     /// 撤销一个插件贡献的全部 MCP server（断开连接 + 注销工具 + 移除配置）。
@@ -974,14 +979,14 @@ impl McpManager {
 
     pub async fn remove_server(&self, server_id: &str) -> VivianResult<()> {
         let _operation = self.lifecycle_lock.lock().await;
-        {
+        let saved = {
             let _guard = self.config_lock.lock();
             let mut configs = self.load_configs();
             configs.retain(|c| c.id != server_id);
-            self.save_configs_unlocked(&configs)?;
-        }
+            self.save_configs_unlocked(&configs)
+        };
         self.disconnect(server_id).await;
-        Ok(())
+        saved
     }
 
     pub async fn reconnect_server(&self, server_id: &str) -> VivianResult<Vec<String>> {

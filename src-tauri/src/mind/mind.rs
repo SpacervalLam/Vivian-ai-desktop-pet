@@ -139,6 +139,9 @@ impl Mind {
             }
         };
         let current_activity = Arc::new(CurrentActivityTracker::new());
+        let mut conversation_opportunities = ConversationOpportunities::default();
+        conversation_opportunities.threads = crate::utils::fs::load_json_or_backup(&mind_dir.join("thought_threads.json")).unwrap_or_default();
+        conversation_opportunities.threads.prune(chrono::Utc::now().timestamp());
 
         Self {
             char_id: char_id.to_string(),
@@ -152,7 +155,7 @@ impl Mind {
             current_thought: Arc::new(RwLock::new(None)),
             social_urge: Arc::new(RwLock::new(0.5)),
             thought_generated_at: Arc::new(RwLock::new(0.0)),
-            conversation_opportunities: Arc::new(RwLock::new(ConversationOpportunities::default())),
+            conversation_opportunities: Arc::new(RwLock::new(conversation_opportunities)),
             thought_context_version: std::sync::atomic::AtomicU64::new(0),
             thought_refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
@@ -187,7 +190,22 @@ impl Mind {
             let json = serde_json::to_string(&*wm)?;
             crate::utils::fs::write_atomic(&self.persistence_dir.join("working_memory.json"), &json)?;
         }
+        self.save_thought_threads(&self.conversation_opportunities.write().threads)?;
         Ok(())
+    }
+
+    // Call while holding the opportunities write lock, keeping atomic saves in state order.
+    fn save_thought_threads(&self, threads: &super::thought_threads::ThoughtThreads) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.persistence_dir)?;
+        crate::utils::fs::write_atomic(&self.persistence_dir.join("thought_threads.json"), &serde_json::to_string(threads)?)
+    }
+
+    pub fn thought_threads_snapshot(&self, now: i64) -> Vec<super::thought_threads::ThoughtThread> {
+        self.conversation_opportunities.read().threads.snapshot(now, 3)
+    }
+
+    pub fn personal_thought_for_event(&self, event_id: &str, now: i64) -> Option<super::thought_threads::ThoughtThread> {
+        self.conversation_opportunities.read().threads.snapshot(now, 6).into_iter().find(|thread| thread.event_id() == event_id)
     }
 
     /// Mind 内部锁的争用探针（诊断用，非阻塞）。
@@ -344,10 +362,12 @@ impl Mind {
     /// 副作用：写入前把即将被覆盖的旧值（如非空）连同时间戳推入
     /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
     /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
-    pub fn set_current_thought(&self, thought: String, social_urge: f32,
-        opportunity: Option<ConversationOpportunity>, context_version: u64) {
+    pub fn set_current_thought(&self, output: super::conversation::ThoughtSynthesisOutput,
+        grounding: &super::thought_threads::ThoughtGrounding<'_>, user_present: bool, now: f64, context_version: u64) {
         let mut opportunities = self.conversation_opportunities.write();
         if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return; }
+        // Only the exact records offered before this request may authorize a proposal.
+        let changed = opportunities.apply_synthesis(&output, grounding, user_present, now);
         {
             let mut cur = self.current_thought.write();
             if let Some(prev) = cur.take() {
@@ -355,11 +375,15 @@ impl Mind {
                     self.push_accumulated_thought(prev);
                 }
             }
-            *cur = Some(thought);
+            *cur = Some(output.thought);
         }
-        *self.social_urge.write() = social_urge.clamp(0.0, 1.0);
+        *self.social_urge.write() = output.social_urge.clamp(0.0, 1.0);
         *self.thought_generated_at.write() = chrono::Utc::now().timestamp() as f64;
-        opportunities.replace(opportunity);
+        if changed {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                tracing::warn!(character=%self.char_id,"思绪保存失败: {error}");
+            }
+        }
     }
 
     pub fn fresh_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
@@ -367,13 +391,22 @@ impl Mind {
     }
 
     pub fn take_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
-        self.conversation_opportunities.write().take(now)
+        let mut opportunities = self.conversation_opportunities.write();
+        let candidate = opportunities.take(now);
+        if candidate.as_ref().is_some_and(|c| c.source == super::conversation::ConversationSource::ThoughtThread) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                tracing::warn!("思绪发言进度保存失败，暂不发言: {error}");
+                return None;
+            }
+        }
+        candidate
     }
 
     pub fn restore_conversation_after_failure(&self, candidate: ConversationOpportunity, context_version: u64) {
         let mut opportunities=self.conversation_opportunities.write();
         if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst)==context_version {
             opportunities.restore_after_failure(candidate);
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思绪重试进度保存失败: {error}"); }
         }
     }
 
@@ -382,7 +415,9 @@ impl Mind {
     }
 
     pub fn record_opportunity_delivered(&self, text: &str, now: f64) {
-        self.conversation_opportunities.write().record_delivered(text, now);
+        let mut opportunities = self.conversation_opportunities.write();
+        opportunities.record_delivered(text, now);
+        if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思绪投递进度保存失败: {error}"); }
     }
 
     /// 读取 social_urge 信号（0.0-1.0）
@@ -675,6 +710,16 @@ impl Mind {
             lang,
         ) {
             sections.push(activity_section);
+        }
+
+        let threads = self.conversation_opportunities.read().threads.prompt_snapshot(chrono::Utc::now().timestamp(), 3);
+        if !threads.is_empty() {
+            let label = match lang_norm {
+                "en" => "Your continuing personal thoughts (subjective, not facts about the user; answers may change them)",
+                "ja" => "続いている自分の考え（主観でありユーザーの事実ではない。回答に応じて見直す）",
+                _ => "你持续在意的事情（主观看法，不是用户事实；听到回答后可以改变）",
+            };
+            sections.push(format!("{label}\n{}", serde_json::to_string(&threads).unwrap_or_default()));
         }
 
         if sections.is_empty() {

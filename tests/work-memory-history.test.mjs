@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { transform } from 'esbuild';
 import vm from 'node:vm';
+import { mergeSidebarSessions } from '../src/components/mind-inspector/pages/sessionSidebarModel.ts';
 
 const office = (await readFile('src/components/mind-inspector/pages/CodeAgentPageNew.tsx', 'utf8')).replace(/\r\n/g, '\n');
 const start = office.indexOf('  const refreshSessions = useCallback(');
@@ -11,6 +12,7 @@ const data = Array.from({ length: 75 }, (_, i) => ({ session_id: `session-${i}`,
 let visible, requestFailure = false;
 const context = {
   useCallback: callback => callback, sessionRefresh: { current: 0 },
+  deletedSessionIds: { current: new Set() }, mergeSidebarSessions,
   activeIdRef: { current: null },
   setSessions: value => { visible = typeof value === 'function' ? value(visible ?? []) : value; },
   invoke: async (name, { sidebar }) => { assert.equal(name, 'coding_list_sessions'); assert.equal(sidebar, true); if (requestFailure) throw new Error('offline'); return [...data].reverse(); },
@@ -47,6 +49,7 @@ const deleteEnd = office.indexOf('  // 工作区管理菜单', deleteStart);
 const deleteCode = (await transform(office.slice(deleteStart, deleteEnd).replace('const deleteWorkspace', 'var deleteWorkspace'), { loader: 'tsx', format: 'cjs' })).code;
 const deleted = [];
 const deleteContext = {
+  handleDelete: async id => { deleted.push(id); },
   useCallback: callback => callback, refreshSessions: async () => [], switchSession: () => {},
   activeIdRef: { current: null }, setActiveId: () => {}, setMessages: () => {},
   setManualOrder: updater => updater(data.map(s => s.session_id)), notifyError: error => assert.fail(error),
@@ -69,6 +72,7 @@ const selectionCode = (await transform((office.slice(hydrateStart, hydrateEnd) +
 let selectedId = 'current', selectedMessages = ['current history'], rows = [];
 const pending = new Map(), failures = [];
 const selectionContext = {
+  deletedSessionIds: { current: new Set() },
   useCallback: callback => callback, sessionSelection: { current: 0 },
   switchComposerDraft: () => {},
   invoke: async (_, { sessionId }) => new Promise((resolve, reject) => pending.set(sessionId, { resolve, reject })),

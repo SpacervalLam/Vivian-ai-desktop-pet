@@ -23,6 +23,7 @@ const DERIVED_TOP_LEVEL: &[&str] = &["cache"];
 /// Character definitions, learned voice corpora and source memories must travel
 /// together; restored evidence IDs keep learned persona interpretations active.
 const AUTHORITATIVE_TOP_LEVEL: &[&str] = &[
+    "memory-history",
     "characters",
     "persona",
     "memory",
@@ -33,6 +34,7 @@ const AUTHORITATIVE_TOP_LEVEL: &[&str] = &[
 ];
 /// 已知运行期层顶层条目（无迁移价值）。
 const EPHEMERAL_TOP_LEVEL: &[&str] = &[
+    "memory-history-locks",
     // 内嵌 Python 运行时（约 280MB，新设备安装时自行释放）
     "python-libs",
     "logs",
@@ -131,6 +133,7 @@ mod tests {
     fn top_level_layers_exclude_only_derived_and_ephemeral() {
         // 派生层与运行期层不进入备份/恢复
         for name in [
+            "memory-history-locks",
             "cache",
             "python-libs",
             "logs",
@@ -149,6 +152,7 @@ mod tests {
         }
         // 权威层与未知层（含用户定制内容）必须保留
         for name in [
+            "memory-history",
             "characters",
             "companion-v2",
             "config.yaml",

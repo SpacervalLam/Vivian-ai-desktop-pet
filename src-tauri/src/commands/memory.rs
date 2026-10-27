@@ -281,6 +281,9 @@ pub async fn clear_all_memories(
     } else { None };
     let summary_serial = character.brain.chat_chain.as_ref().map(|chain| chain.conversation_archive.read().serial());
     let _summary_guard = if let Some(serial) = &summary_serial { Some(serial.lock().await) } else { None };
+    let history_character = char_id.clone();
+    tokio::task::spawn_blocking(move || crate::memory::memory_md::clear_memory_md(&history_character))
+        .await.map_err(|error| error.to_string())??;
 
     // ===== 1. 记忆-关系层（原有清空逻辑）=====
     character

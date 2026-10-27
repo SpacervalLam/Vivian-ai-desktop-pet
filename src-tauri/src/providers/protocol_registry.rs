@@ -4,16 +4,16 @@
 //! 路径表达式为 CompiledSpec，按 `provider_type` 建立索引。`factory` 创建 provider 时
 //! 先查本注册表：命中则返回 `DeclarativeProvider`（通用解释器），否则回退原生 adapter。
 //!
-//! 装载语义（对齐 `load_provider_presets` 的按需读盘）：
-//! - 每次查询重新读盘——编辑插件 JSON 后重开或重连即生效，无需重启。
+//! 装载语义：
+//! - 文件协议在插件加载时校验并提交；修改内容后必须重新信任并重载。
 //! - 插件目录按名字典序遍历，同 `provider_type` **后到覆盖先到**（用户插件可覆盖
 //!   内置 llm-providers 的协议）。
-//! - 单个协议损坏只跳过该条（不影响其余协议与插件加载）。
+//! - 新协议校验失败时保留上一次成功加载的全部运行时贡献。
 //!
 //! 内置 `chat_completions` 参考协议编译期嵌入，作为注册表的最底兜底（即使无插件
 //! 也保证注册表非空，`factory` 可始终走声明式路径验证）。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,75 +22,51 @@ use parking_lot::RwLock;
 use crate::providers::spec::{CompiledSpec, ProtocolSpec};
 
 /// 内置 chat_completions 参考协议（编译期嵌入，保证注册表兜底非空）。
-pub const BUILTIN_CHAT_COMPLETIONS_SPEC: &str = include_str!("../plugins/protocols/chat_completions.json");
+pub const BUILTIN_CHAT_COMPLETIONS_SPEC: &str =
+    include_str!("../plugins/protocols/chat_completions.json");
 
-/// 递归收集 base 目录下全部 `.json`。
-fn glob_json(base: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            glob_json(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            out.push(path);
-        }
-    }
-}
-
-/// 从单个插件目录读取清单声明的协议 glob（缺省 `protocols/*.json`）。
-///
-/// glob 仅支持「目录前缀 + 通配符」形态（如 `protocols/*.json` / `specs/**/*.json`）；
-/// 取第一个通配符之前的目录部分作为扫描根，无通配符时整串按目录（或单个文件）处理。
-fn plugin_protocol_paths(pdir: &Path) -> Vec<PathBuf> {
-    let glob = std::fs::read_to_string(pdir.join("plugin.json"))
+/// Trust and execution must enumerate exactly the same real files.
+pub(crate) fn plugin_protocol_paths(pdir: &Path) -> Vec<PathBuf> {
+    let declaration = std::fs::read_to_string(pdir.join("plugin.json"))
         .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|m| m["protocols"].as_str().map(str::to_string));
-    let sub = glob
-        .as_deref()
-        .filter(|g| crate::plugins::is_safe_manifest_path(g))
-        .map(|g| g.trim().trim_start_matches("./"))
-        .map(|g| match g.find('*') {
-            Some(i) => g[..i]
-                .trim_end_matches('/')
-                .trim_end_matches("/**")
-                .trim_end_matches('/')
-                .to_string(),
-            None => g.trim_end_matches("/*.json").trim_end_matches('/').to_string(),
-        })
-        .unwrap_or_else(|| "protocols".to_string());
-    let base = if sub.is_empty() {
-        pdir.to_path_buf()
-    } else {
-        pdir.join(sub)
-    };
-    // 无通配符且指向单个文件：仅允许插件目录内的真实文件。
-    if base.is_file() {
-        return if crate::plugins::is_safe_plugin_path(pdir, &base) {
-            vec![base]
-        } else {
-            Vec::new()
-        };
-    }
-    if !crate::plugins::is_safe_plugin_path(pdir, &base) {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    glob_json(&base, &mut out);
-    out
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|manifest| manifest["protocols"].as_str().map(str::to_string));
+    crate::plugins::protocol_paths(pdir, declaration.as_deref())
 }
 
 /// 从文件读取并编译一个 ProtocolSpec；失败返回 (路径, 原因)。
 fn compile_file(path: &Path) -> Result<CompiledSpec, (String, String)> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        (path.display().to_string(), format!("读取失败 {e}"))
-    })?;
-    let spec: ProtocolSpec = serde_json::from_str(&text).map_err(|e| {
-        (path.display().to_string(), format!("解析失败 {e}"))
-    })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| (path.display().to_string(), format!("读取失败 {e}")))?;
+    let spec: ProtocolSpec = serde_json::from_str(&text)
+        .map_err(|e| (path.display().to_string(), format!("解析失败 {e}")))?;
     CompiledSpec::compile(spec).map_err(|e| (path.display().to_string(), e))
+}
+
+/// Compile before touching the active registry, so invalid updates keep the old
+/// protocol usable. No subsequent lookup reads uncommitted files from disk.
+pub(crate) fn prepare_plugin(pdir: &Path) -> Result<Vec<Arc<CompiledSpec>>, String> {
+    plugin_protocol_paths(pdir)
+        .into_iter()
+        .map(|path| {
+            compile_file(&path)
+                .map(Arc::new)
+                .map_err(|(path, reason)| format!("协议 {path}: {reason}"))
+        })
+        .collect()
+}
+
+static FILE_PLUGINS: RwLock<BTreeMap<String, Vec<Arc<CompiledSpec>>>> =
+    RwLock::new(BTreeMap::new());
+
+pub(crate) fn replace_plugin(key: &str, specs: Vec<Arc<CompiledSpec>>) {
+    FILE_PLUGINS.write().insert(key.to_string(), specs);
+    invalidate();
+}
+
+pub(crate) fn remove_plugin(key: &str) {
+    FILE_PLUGINS.write().remove(key);
+    invalidate();
 }
 
 /// 全量装载协议注册表（按 provider_type 索引；后到覆盖先到）。
@@ -109,35 +85,10 @@ pub fn load_all() -> HashMap<String, Arc<CompiledSpec>> {
         }
     }
 
-    // 2. 插件目录（信任门禁：未信任插件的协议不注册）
-    let root = crate::plugins::plugins_dir();
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return map;
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join("plugin.json").exists())
-        .collect();
-    dirs.sort();
-    for pdir in dirs {
-        if !crate::plugins::is_plugin_dir_trusted(&pdir) {
-            continue;
-        }
-        for path in plugin_protocol_paths(&pdir) {
-            match compile_file(&path) {
-                Ok(compiled) => {
-                    tracing::info!(
-                        "[Protocols] 注册声明式协议 {} → provider_type={}",
-                        compiled.spec.id,
-                        compiled.spec.provider_type
-                    );
-                    map.insert(compiled.spec.provider_type.clone(), Arc::new(compiled));
-                }
-                Err((p, reason)) => {
-                    tracing::warn!("[Protocols] 跳过协议 {p}: {reason}");
-                }
-            }
+    // Only committed runtime contributions participate, in directory-key order.
+    for specs in FILE_PLUGINS.read().values() {
+        for spec in specs {
+            map.insert(spec.spec.provider_type.clone(), spec.clone());
         }
     }
     map
@@ -147,8 +98,7 @@ pub fn load_all() -> HashMap<String, Arc<CompiledSpec>> {
 // 运行时注册表：惰性装载的文件协议缓存 + JS 插件动态覆盖层
 // ============================================================================
 
-/// 文件协议注册表缓存（None = 待装载）。invalidate 后下次查询重新读盘，
-/// 支持运行时装载插件带来的 `protocols/*.json` 热更新。
+/// Cache of committed file contributions; invalidation never rediscovers disk files.
 static REGISTRY: RwLock<Option<Arc<HashMap<String, Arc<CompiledSpec>>>>> = RwLock::new(None);
 
 /// JS 插件贡献的动态协议（provider_type → spec），叠加在文件协议之上。
@@ -162,14 +112,13 @@ fn dynamic_specs() -> &'static RwLock<HashMap<String, Arc<CompiledSpec>>> {
     DYNAMIC.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// 文件协议注册表（惰性装载；每次失效后首次查询重新读盘）。
+/// Lazily merge the committed protocol snapshots with the built-in fallback.
 fn file_specs() -> Arc<HashMap<String, Arc<CompiledSpec>>> {
     if let Some(m) = REGISTRY.read().clone() {
         return m;
     }
-    let m = Arc::new(load_all());
-    *REGISTRY.write() = Some(m.clone());
-    m
+    let mut registry = REGISTRY.write();
+    registry.get_or_insert_with(|| Arc::new(load_all())).clone()
 }
 
 /// 失效文件协议缓存（运行时插件装载/卸载后由 js_host 调用）。
@@ -232,10 +181,7 @@ mod tests {
         let types = replace_dynamic_specs(vec![CompiledSpec::compile(spec).unwrap()]);
         assert!(types.contains(&"dyn_test_overlay_type".to_string()));
         assert!(spec_for("dyn_test_overlay_type").is_some());
-        assert_eq!(
-            spec_for("dyn_test_overlay_type").unwrap().spec.id,
-            "dyn-t"
-        );
+        assert_eq!(spec_for("dyn_test_overlay_type").unwrap().spec.id, "dyn-t");
         // 内置兜底不受动态层影响
         assert!(spec_for("chat_completions").is_some());
 

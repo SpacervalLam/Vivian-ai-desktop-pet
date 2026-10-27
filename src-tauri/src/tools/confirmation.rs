@@ -325,6 +325,9 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
                 },
             )
         }
+        "install_plugin" => {
+            (ConfirmationRisk::High, format!("将安装并信任插件「{}」v{}；可能执行代码或启动 MCP 服务。请审核来源、固定版本、依赖和完整代码，仅授权本次内容。",args["preview"]["name"].as_str().unwrap_or("?"),args["preview"]["version"].as_str().unwrap_or("?")))
+        }
         "create_plugin" => {
             // 插件创建确认：预览卡片展示各贡献点概要（MCP 命令行与工具脚本
             // 全文由前端卡片渲染——那是 shell 级敏感点，必须逐条可见）

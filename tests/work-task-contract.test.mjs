@@ -59,6 +59,9 @@ const tokenSource = await readFile('src-tauri/src/utils/token_estimate.rs', 'utf
 const directory = await mkdtemp(path.join(tmpdir(), 'vivian-work-task-contract-'));
 try {
   await writeFile(path.join(directory, 'lib.rs'), `#![allow(dead_code, unused_imports)]
+#[path=${JSON.stringify(path.resolve('src-tauri/src/provider_preset_updates.rs').replaceAll('\\', '/'))}] pub mod provider_preset_updates;
+// This fixture isolates work settlement; the advisor's persisted context is tested in the desktop crate.
+pub mod plugin_advisor { pub fn context(_:&str)->String {String::new()} }
 pub mod types { pub mod response {
   use serde::{Serialize, Deserialize};
   #[derive(Debug, Clone, Serialize, Deserialize)] pub struct MessageToolCall { pub id:String, pub name:String, pub arguments:serde_json::Value }
@@ -228,6 +231,7 @@ parking_lot="0.12"
 once_cell="1"
 tracing="0.1"
 tempfile="3"
+uuid={version="1",features=["v4"]}
 tokio={version="1",features=["macros","rt-multi-thread","sync","time"]}
 `);
   const result = spawnSync('cargo', ['test', '--offline', '--quiet', '--manifest-path', path.join(directory, 'Cargo.toml'),

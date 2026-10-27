@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import PluginInstallPanel from './PluginInstallPanel';
+import PluginSuggestionsPanel from './PluginSuggestionsPanel';
 import SkillsManager, { type SkillEntry } from './SkillsManager';
 
 /** 插件清单条目（对齐后端 plugins::PluginInventoryEntry） */
@@ -233,6 +234,7 @@ const PluginsPanel: React.FC = () => {
         </div>
       )}
 
+      <PluginSuggestionsPanel onInstalled={refresh} />
       <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
       {error && <div role="alert" style={{ fontSize: 13, color: '#E53935' }}>{error}</div>}
       {plugins === null ? (

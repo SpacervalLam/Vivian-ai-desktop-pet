@@ -122,7 +122,7 @@ fn approval_key(tool: &str, ctx: &ToolUseContext) -> ApprovalKey {
 
 /// 检查工具是否已被本次会话放行
 fn is_session_allowed(tool: &str, ctx: &ToolUseContext) -> bool {
-    if tool == "create_tool" { return false; }
+    if crate::plugin_advisor_contract::needs_concrete_preview(tool) { return false; }
     SESSION_ALLOWED_TOOLS.read().contains(&approval_key(tool, ctx))
 }
 
@@ -247,7 +247,7 @@ fn compact_text_page(mut data: Value, max_chars: usize) -> Option<Value> {
 }
 
 fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationResponse, ctx: &ToolUseContext) {
-    if response != ConfirmationResponse::AllowAlways || tool == "create_tool" {
+    if response != ConfirmationResponse::AllowAlways || crate::plugin_advisor_contract::needs_concrete_preview(tool) {
         return;
     }
     if tool == "open_application" {
@@ -429,12 +429,22 @@ pub async fn execute_tool_use(
         record: Some(tool_system.observability.start_call(&name, arguments.clone())),
         trace: ExecutionTrace { phase: "lookup", cache_hit: false },
     };
+    let recommendation = (name == "install_plugin").then(||arguments["recommendationId"].as_str().map(str::to_string)).flatten();
     let outcome = std::panic::AssertUnwindSafe(execute_tool_use_inner(
         tool_name, arguments, tool_system, context, can_use_tool, &mut observed.trace, resolved,
     )).catch_unwind().await;
     let result = outcome.unwrap_or_else(|_| ToolResult::standard_error(
         "Tool pipeline panicked", Some("ToolExecutionPanic"), None));
     observed.finish(&result);
+    if result.error.as_deref() == Some("UserDenied") {
+        if let Some(id) = recommendation { let _ = crate::plugin_advisor::dismiss(&context.char_id,&id); }
+    }
+    if context.is_work_agent() && result.error.as_deref() == Some("ToolNotFound") {
+        crate::plugin_advisor::observe_missing_tool(&context.char_id,&context.session_id,&name);
+    }
+    if crate::brain::work_contract::execution_succeeded(result.success,result.data.as_ref()) {
+        crate::plugin_advisor::observe_success(&context.char_id,&name,tool_system);
+    }
     result
 }
 
@@ -640,7 +650,7 @@ async fn execute_tool_use_inner(
     }
 
     // Evolution still requires its concrete preview even after sandbox approval.
-    action_confirmed &= tool_name != "create_tool";
+    action_confirmed &= !crate::plugin_advisor_contract::needs_concrete_preview(tool_name);
 
     // 3.5 PreToolUse Hook 拦截（外部脚本可 deny 阻止执行）
     trace.phase = "pre_hook";
@@ -708,6 +718,12 @@ async fn execute_tool_use_inner(
             );
         }
 
+        // Package-specific review cannot be replaced by FullControl, allow rules,
+        // a previous sandbox approval, or session-wide AllowAlways.
+        let permission = if crate::plugin_advisor_contract::needs_concrete_preview(tool_name) {
+            super::types::PermissionResult::ask("请审核本次能力创建/安装的完整内容后确认")
+        } else { permission };
+
         if permission.requires_confirmation() && !action_confirmed && !is_session_allowed(tool_name, context) {
             if context.subagent_depth > 0 && !is_session_allowed(tool_name, context) {
                 return ToolResult::standard_error("子任务需要新的用户授权，请交回主智能体确认。", Some("ParentApprovalRequired"), None);
@@ -715,7 +731,7 @@ async fn execute_tool_use_inner(
             // 能力进化事件（create_tool）例外：宿主的 can_use_tool 回调
             // （如编程侧的 coding_sandbox_confirm）不适用——新工具创建必须经
             // 用户预览卡片授权，无论发起方是陪伴侧还是工作智能体
-            let evolution_gate = tool_name == "create_tool";
+            let evolution_gate = crate::plugin_advisor_contract::needs_concrete_preview(tool_name);
             if let Some(cb) = &can_use_tool {
                 if !evolution_gate {
                     if !cb(tool_name, &validated_args) {
@@ -1075,6 +1091,35 @@ mod paged_budget_tests {
 #[cfg(test)]
 mod initiative_confirmation_tests {
     use super::*;
+
+    struct PreviewFixture { name: &'static str, calls: Arc<std::sync::atomic::AtomicUsize> }
+    #[async_trait::async_trait]
+    impl crate::tools::types::Tool for PreviewFixture {
+        fn name(&self) -> &str { self.name }
+        fn description(&self) -> &str { "preview fixture" }
+        fn parameters_schema(&self) -> Value { serde_json::json!({"type":"object"}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> crate::tools::types::ValidationResult { crate::tools::types::ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> crate::tools::types::PermissionResult { crate::tools::types::PermissionResult::allow() }
+        async fn call(&self, _: Value, _: &ToolUseContext) -> ToolResult { self.calls.fetch_add(1,std::sync::atomic::Ordering::Relaxed);ToolResult::standard_success("executed",None) }
+        fn is_read_only(&self) -> bool { false }
+        fn risk(&self) -> crate::tools::types::ToolRiskTier { crate::tools::types::ToolRiskTier::Shell }
+        fn category(&self) -> crate::tools::types::ToolCategory { crate::tools::types::ToolCategory::System }
+    }
+    #[tokio::test]
+    async fn plugin_advisor_concrete_previews_cannot_be_replaced_by_callbacks_or_session_grants() {
+        for name in crate::plugin_advisor_contract::PREVIEW_TOOLS {
+            let system = ToolSystem::new(); let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            system.register_tool(Arc::new(PreviewFixture { name, calls:calls.clone() }));
+            let ctx = ToolUseContext { access_level:Some(AgentAccessLevel::FullControl),..Default::default() }.with_agent_kind("work").with_char_id("preview-fixture").with_session_id("preview-fixture");
+            SESSION_ALLOWED_TOOLS.write().insert(approval_key(name,&ctx));
+            let result = execute_tool_use(name,serde_json::json!({}),&system,&ctx,Some(Arc::new(|_,_|true))).await;
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed),0,"{name}");
+            assert_eq!(result.error.as_deref(),Some("PermissionRequired"),"{name}: {:?}",result.error);
+            remember_confirmation(name,&serde_json::json!({}),ConfirmationResponse::AllowAlways,&ctx);
+            assert!(!is_session_allowed(name,&ctx));
+            SESSION_ALLOWED_TOOLS.write().remove(&approval_key(name,&ctx));
+        }
+    }
 
     #[tokio::test]
     async fn rejected_command_never_reaches_execution() {

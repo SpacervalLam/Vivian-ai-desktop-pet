@@ -74,6 +74,7 @@ pub mod session_query_tools;
 pub mod terminal_tools;
 /// 生图：文生图 + 参考图引导，结果落盘并回传。
 pub mod image_gen_tool;
+pub mod plugin_advisor_tools;
 
 /// 注册所有内置工具到工具系统
 pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
@@ -191,6 +192,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(show_widget_tool::ShowWidgetTool::new()),
         // 技能激活（按名称获取目录化技能正文，按需加载不常驻上下文）
         Arc::new(skill_tools::UseSkillTool::new()),
+        Arc::new(plugin_advisor_tools::PluginAdvisorTool),
         // 技能创建（智能体自主沉淀可复用技能，写入即注册，自进化闭环）
         Arc::new(skill_tools::CreateSkillTool::new()),
         // 技能召回（按自然语言 BM25 检索名称/描述/关键词，返回候选供 use_skill 加载正文）

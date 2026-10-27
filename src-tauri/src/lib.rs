@@ -62,6 +62,9 @@ pub mod pet_controller;
 pub mod pipeline;
 pub mod plugins;
 pub mod plugin_contract;
+pub mod plugin_advisor_contract;
+pub mod plugin_advisor;
+pub mod provider_preset_updates;
 pub mod desktop_contract;
 pub mod plugin_contributions;
 pub mod presence;
@@ -589,6 +592,10 @@ pub fn run() {
             commands::plugins::delete_skill,
             commands::plugins::validate_skill,
             commands::plugins::list_provider_presets,
+            commands::provider_presets::provider_preset_update_info,
+            commands::provider_presets::provider_preset_update_status,
+            commands::provider_presets::start_provider_preset_update,
+            commands::provider_presets::stop_provider_preset_update,
             stickers::list_stickers,
             stickers::set_sticker_frequency,
             stickers::get_sticker_data_url,
@@ -600,6 +607,8 @@ pub fn run() {
             commands::plugins::set_plugin_enabled,
             commands::plugins::inspect_plugin_package,
             commands::plugins::install_plugin_package,
+            commands::plugin_advisor::plugin_advisor_state,
+            commands::plugin_advisor::plugin_advisor_action,
             commands::plugins::delete_plugin,
             commands::git::git_repo_status,
             commands::git::git_list_branches,
@@ -801,6 +810,7 @@ pub fn run() {
             // 初始化 Windows Job Object（KILL_ON_JOB_CLOSE 兜底）
             // 必须在任何子进程启动前完成，确保所有子进程都能被绑定
             crate::utils::job_object::init();
+            crate::memory::git_history::start_runtime(crate::utils::path::get_user_data_dir());
 
             // 完整性级别自检：宿主一旦被拖成 Low IL（沙箱派生逻辑曾经误改主令牌），
             // 进程自己升不回去，写 %APPDATA%\vivian 全部 ACCESS_DENIED——配置保存、
@@ -1062,9 +1072,10 @@ pub fn run() {
                                         let world_provider = instance.brain.world_provider.clone();
                                         let lang = lang_code.to_string();
                                         let conversation_context = instance.brain.proactive.thought_conversation_context(false);
+                                        let persona_context = instance.brain.persona.thought_persona_context();
                                         tauri::async_runtime::spawn(async move {
                                             crate::mind::thought_synthesis::refresh_current_thought(
-                                                &mind, &router, &world_provider, &lang, &conversation_context,
+                                                &mind, &router, &world_provider, &lang, &conversation_context, &persona_context,
                                             ).await;
                                         });
                                     }

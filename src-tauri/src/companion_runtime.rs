@@ -30,8 +30,7 @@ pub fn quiet_reason(state: &AppState) -> Option<&'static str> {
     if crate::companion_quiet::active() { return Some("do_not_disturb"); }
     let config = state.config.read().get_all().companion;
     if config.game_companion && crate::game_companion::active() { return Some("game_companion"); }
-    let (process, _, _) = state.world_provider.companion_observation();
-    config.quiet_reason(chrono::Local::now().hour(), &process)
+    config.quiet_reason(chrono::Local::now().hour())
 }
 
 pub fn tick(app: &tauri::AppHandle) {

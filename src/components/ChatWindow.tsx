@@ -4718,7 +4718,7 @@ const ChatWindow: React.FC = () => {
                   const isUser = r.role === 'user';
                   const sourceLabel = r.source === 'group'
                     ? t('chat.search_source_group')
-                    : r.character_name;
+                    : (charRemarks[r.character_id] || r.character_name);
                   const sourceColor = r.source === 'group'
                     ? '#5ac8fa'
                     : presenceDisplay(r.character_id).color;
@@ -4766,7 +4766,7 @@ const ChatWindow: React.FC = () => {
                             <path d="M14 17c1-2 3-3 5-3s4 1 4 4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
                           </svg>
                         ) : (
-                          <span style={{ fontSize: 14 }}>{r.character_name.slice(0, 1)}</span>
+                          <span style={{ fontSize: 14 }}>{sourceLabel.slice(0, 1)}</span>
                         )}
                       </div>
                       {/* 内容区 */}
@@ -4820,6 +4820,7 @@ const ChatWindow: React.FC = () => {
 
                 {/* 在线角色列表 */}
                 {onlineCharacters.map((c) => {
+                  const displayName = charRemarks[c.id] || c.name;
                   return (
                     <button
                       key={c.id}
@@ -4838,11 +4839,11 @@ const ChatWindow: React.FC = () => {
                       onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
                     >
                       <div style={{ position: 'relative', flexShrink: 0 }}>
-                        <ContactAvatar characterId={c.id} name={c.name} />
+                        <ContactAvatar characterId={c.id} name={displayName} />
                         <UnreadBadge count={unreadCounts[c.id] ?? 0} />
                       </div>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--wx-text)' }}>{c.name}</div>
+                        <div style={{ fontSize: 15, fontWeight: 500, color: 'var(--wx-text)' }}>{displayName}</div>
                         <div style={{
                           fontSize: 12, color: 'var(--wx-text-secondary)', marginTop: 2,
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',

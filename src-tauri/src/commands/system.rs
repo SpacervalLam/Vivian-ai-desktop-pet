@@ -102,6 +102,7 @@ const MEMORY_RESET_PATHS: &[&str] = &[
     "companion-v2/user_facts.json", "companion-v2/user_model.json", "user_model.json", "companion-v2/research",
 ];
 const SHARED_MEMORY_RESET_PATHS: &[&str] = &[
+    "memory-history", "memory-history-locks",
     "memory", "history", "psychology", "mind", "proactive", "user_facts.json",
     "user_model.json", "companion-v2/user_model.json",
     "common/memory", "common/diary/diaries.json", "diary/diaries.json",
@@ -259,12 +260,16 @@ mod reset_tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, "old user knowledge").unwrap();
         }
+        let git_objects = root.join("memory-history/characters/nana/repository.git/objects");
+        std::fs::create_dir_all(&git_objects).unwrap();
+        std::fs::write(git_objects.join("old-note"), "private history").unwrap();
 
         sweep_factory_reset_dir(root).unwrap();
         assert!(root.join("characters").exists());
         std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
         sweep_factory_reset_dir(root).unwrap();
         assert!(!root.join("characters/nana/memory").exists());
+        assert!(!root.join("memory-history").exists());
         assert!(!root.join(FACTORY_RESET_MARKER).exists());
         for name in ["characters/nana/companion-v2/user_model.json", "characters/vivian/user_model.json", "companion-v2/user_model.json"] {
             assert!(!root.join(name).exists());

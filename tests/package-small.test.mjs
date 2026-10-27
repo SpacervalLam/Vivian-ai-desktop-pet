@@ -17,7 +17,6 @@ try {
   put('dist/assets/MemoryWindow-current.js', 'current room');
   put('dist/assets/MemoryWindow-current.css', 'current styles');
   put('src-tauri/windows/resource-packages.nsh', 'current resources');
-  put('plugins/3d-apartment/plugin.json', JSON.stringify({ version: '1.1.0' }));
   put('release/resource-packs.json', '[]');
   const published = put('release/Vivian_1.0.1_x64-small-setup.exe', 'keep published installer');
   const setup = put('src-tauri/target/release/bundle/nsis/Vivian_1.0.1_x64-setup.exe', 'stale installer');
@@ -34,6 +33,18 @@ try {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /does not embed the current room assets/);
   assert.equal(readFileSync(published, 'utf8'), 'keep published installer');
+  put('src-tauri/target/release/vivian.exe', 'MemoryWindow-current.js MemoryWindow-current.css');
+  put('release/Vivian-3D-Apartment-1.1.0.zip', 'old apartment package');
+  const future = new Date(Date.now() + 60000);
+  utimesSync(setup, future, future);
+  result = spawnSync(process.execPath, [script, '--collect-only'], { cwd: root, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const archive = spawnSync('python', ['-c', 'import json,sys; from zipfile import ZipFile; print(json.dumps(ZipFile(sys.argv[1]).namelist()))', join(root, 'release/Vivian_1.0.1_x64-setup.zip')], { encoding: 'utf8' });
+  assert.equal(archive.status, 0, archive.stderr);
+  assert.deepEqual(JSON.parse(archive.stdout), ['Vivian_1.0.1_x64-small-setup.exe', 'checksums.json', '安装说明.txt']);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'release/checksums.json'), 'utf8')).map(item => item.name), ['Vivian_1.0.1_x64-small-setup.exe']);
+  assert.doesNotMatch(readFileSync(join(root, 'release/安装说明.txt'), 'utf8'), /3D 公寓|APARTMENT/);
+
   console.log('Packaging: stale installers and stale embedded room assets cannot overwrite a published installer.');
 } finally {
   assert.equal(dirname(resolve(root)), resolve(tmpdir()));

@@ -31,6 +31,10 @@ const EDGE_TTS_URL: &str = "wss://speech.platform.bing.com/consumer/speech/synth
 const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 const CHROMIUM_FULL_VERSION: &str = "143.0.3650.75";
 const CHROMIUM_MAJOR_VERSION: &str = "143";
+const VOICE_LIST_SUCCESS_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const VOICE_LIST_FAILURE_TTL: Duration = Duration::from_secs(60);
+static VOICE_LIST_CACHE: crate::utils::async_ttl_cache::AsyncTtlCache<Vec<VoiceInfo>> =
+    crate::utils::async_ttl_cache::AsyncTtlCache::new();
 
 /// Edge-TTS 语音列表（中文、英文、日语，不含方言）
 ///
@@ -411,6 +415,7 @@ impl EdgeTtsBackend {
 
         let response = client
             .get(&url)
+            .timeout(Duration::from_secs(5))
             .header("Origin", EDGE_ORIGIN)
             .header("User-Agent", format!(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
@@ -544,21 +549,17 @@ impl TtsBackend for EdgeTtsBackend {
     }
 
     async fn list_voices(&self, _config: &TtsConfig) -> VivianResult<Vec<VoiceInfo>> {
-        let client = crate::network::http_client::get_global_client();
-        match EdgeTtsBackend::fetch_voices_from_api(&client).await {
-            Ok(voices) => Ok(voices),
-            Err(e) => {
-                tracing::warn!("[TTS] 从 API 获取语音列表失败，使用内置列表: {}", e);
-                Ok(EDGE_VOICES
-                    .iter()
-                    .map(|(id, name, lang)| VoiceInfo {
-                        id: id.to_string(),
-                        name: name.to_string(),
-                        language: lang.to_string(),
-                    })
-                    .collect())
+        Ok(VOICE_LIST_CACHE.get_or_init(|| async {
+            let client = crate::network::http_client::get_global_client();
+            match EdgeTtsBackend::fetch_voices_from_api(&client).await {
+                Ok(voices) if !voices.is_empty() => (voices, VOICE_LIST_SUCCESS_TTL),
+                Ok(_) => (fallback_voices(), VOICE_LIST_FAILURE_TTL),
+                Err(e) => {
+                    tracing::warn!("[TTS] 从 API 获取语音列表失败，使用内置列表: {}", e);
+                    (fallback_voices(), VOICE_LIST_FAILURE_TTL)
+                }
             }
-        }
+        }).await)
     }
 
     async fn health_check(&self, _config: &TtsConfig) -> bool {
@@ -568,6 +569,12 @@ impl TtsBackend for EdgeTtsBackend {
             .await
             .is_ok()
     }
+}
+
+fn fallback_voices() -> Vec<VoiceInfo> {
+    EDGE_VOICES.iter().map(|(id, name, lang)| VoiceInfo {
+        id: id.to_string(), name: name.to_string(), language: lang.to_string(),
+    }).collect()
 }
 
 /// 解析 audio.metadata 消息中的 WordBoundary 列表

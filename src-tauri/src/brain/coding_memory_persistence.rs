@@ -3,7 +3,16 @@ use parking_lot::Mutex;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, LazyLock, OnceLock, Weak};
+
+type CommitObserver = fn(&Path, Option<&str>, &str, &str);
+static COMMIT_OBSERVER: OnceLock<CommitObserver> = OnceLock::new();
+
+pub fn set_commit_observer(observer: CommitObserver) { let _ = COMMIT_OBSERVER.set(observer); }
+
+fn observe_commit(path: &Path, before: Option<&str>, after: &str, reason: &str) {
+    if let Some(observer) = COMMIT_OBSERVER.get() { observer(path, before, after, reason); }
+}
 
 static WRITES: LazyLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -109,7 +118,10 @@ pub fn update(
     if expected.is_some_and(|expected| snapshot != expected) {
         return Err("项目记忆在提炼期间已变化，请重试".into());
     }
-    crate::utils::fs::write_atomic(path, &edit(current.as_deref())).map_err(|e| e.to_string())
+    let body = edit(current.as_deref());
+    crate::utils::fs::write_atomic(path, &body).map_err(|e| e.to_string())?;
+    observe_commit(path, current.as_deref(), &body, "work_memory_update");
+    Ok(())
 }
 
 /// Entries and their replay receipt are one atomic commit, even on stale replay.
@@ -140,6 +152,7 @@ pub fn commit_once(
             super::coding_memory_records::job_marker(id)
         );
         crate::utils::fs::write_atomic(path, &body).map_err(|e| e.to_string())?;
+        observe_commit(path, current.as_deref(), &body, "work_memory_extract");
         Ok(true)
     })
 }

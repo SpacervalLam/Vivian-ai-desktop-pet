@@ -172,6 +172,7 @@ impl CompanionPrompt {
         if let Some(index) = parts.deferred_tools_section.as_deref().filter(|s| !s.trim().is_empty()) {
             prompt.push("deferred_tools", index, Generation, Main, 0);
         }
+        prompt.push("capability_suggestions", crate::plugin_advisor::context(&parts.char_id), World, Context, 2);
         if !parts.presence_state.is_empty() {
             prompt.push("presence_guide", build_presence_guide(&parts.presence_state), Generation, Main, 1);
         }

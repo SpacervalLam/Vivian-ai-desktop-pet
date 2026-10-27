@@ -24,6 +24,7 @@ pub mod evidence;
 pub mod event_log;
 pub mod filter;
 pub mod graph_store;
+pub mod git_history;
 pub mod hooks;
 pub mod ivf_index;
 pub mod llm_enricher;

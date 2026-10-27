@@ -30,6 +30,19 @@ pub mod sqlite;
 pub mod storage;
 #[path = "../src/memory/types.rs"]
 pub mod types;
+#[path = "../src/memory/user_model.rs"]
+pub mod user_model;
+#[path = "../src/memory/memory_md.rs"]
+pub mod memory_md;
+#[path = "../src/memory/git_history.rs"]
+pub mod git_history;
+pub mod brain { pub use crate::coding_memory_persistence; }
+pub mod memory { pub use crate::types; }
+pub mod pipeline { pub mod prompt_modules {
+    pub fn normalize_lang(lang: &str) -> &'static str {
+        match lang { "en" => "en", "ja" => "ja", _ => "zh" }
+    }
+} }
 #[path = "../src/persona/example_library.rs"]
 pub mod example_library;
 pub mod persona { pub use crate::example_library; }
@@ -43,12 +56,21 @@ pub mod notebook { pub mod collected {
 } }
 
 pub mod utils {
+    pub mod job_object {
+        pub fn assign_process(_: isize) -> bool { false }
+    }
     pub mod path {
         pub fn get_user_data_dir() -> std::path::PathBuf {
             panic!("explicit isolated paths required")
         }
         pub fn get_character_data_dir(_: &str) -> std::path::PathBuf {
             panic!("explicit isolated paths required")
+        }
+        pub fn get_companion_data_dir(_: &str) -> std::path::PathBuf {
+            panic!("explicit isolated paths required")
+        }
+        pub fn ensure_dir(path: &std::path::Path) -> std::io::Result<()> {
+            std::fs::create_dir_all(path)
         }
     }
     pub use crate::{assets, fs, sqlite};

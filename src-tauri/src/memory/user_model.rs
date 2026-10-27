@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::error::VivianResult;
@@ -45,6 +45,26 @@ const PROJECT_ACTIVE_THRESHOLD: f64 = 0.70;
 /// 项目激活降到休眠状态的阈值
 #[allow(dead_code)]
 const PROJECT_DORMANT_THRESHOLD: f64 = 0.15;
+
+fn independent_evidence_id(id: &str) -> bool {
+    !id.trim().is_empty() && id != "realtime"
+}
+
+fn independent_evidence_count(ids: &[String]) -> u32 {
+    ids.iter().filter(|id| independent_evidence_id(id))
+        .collect::<std::collections::HashSet<_>>().len() as u32
+}
+
+fn same_scope(a: &str, b: &str) -> bool {
+    let normalize = |s: &str| if s.trim().is_empty() { "global".to_string() } else { s.trim().to_string() };
+    normalize(a) == normalize(b)
+}
+
+fn incompatible_values(key: &str, old: &str, new: &str) -> bool {
+    old != new && (matches!(key, "engineering_vs_research" | "stated_goal")
+        || old.strip_prefix("avoid_") == Some(new)
+        || new.strip_prefix("avoid_") == Some(old))
+}
 
 // ============================================================================
 // 核心枚举
@@ -135,6 +155,8 @@ pub struct CandidateTrait {
     pub category: UserTraitCategory,
     pub key: String,
     pub value: String,
+    #[serde(default)]
+    pub scope: String,
     /// 当前置信度 [0.0, 1.0]
     pub confidence: f64,
     /// 证据记忆 ID 列表
@@ -274,6 +296,9 @@ pub struct UserModel {
     pub projects: Vec<UserProject>,
     /// 最后更新时间
     pub updated_at: f64,
+    /// Watermark for incremental decay; absent in older files.
+    #[serde(default)]
+    pub last_maintained_at: f64,
 }
 
 impl UserModel {
@@ -284,6 +309,7 @@ impl UserModel {
             goals: Vec::new(),
             projects: Vec::new(),
             updated_at: crate::memory::types::current_timestamp(),
+            last_maintained_at: 0.0,
         }
     }
 
@@ -418,7 +444,14 @@ impl UserModel {
         strength: f64,
     ) {
         let now = crate::memory::types::current_timestamp();
-        if let Some(t) = self.traits.iter_mut().find(|t| t.key == key) {
+        let mut evidence_ids = evidence_ids.to_vec();
+        evidence_ids.retain(|id| independent_evidence_id(id));
+        evidence_ids.sort();
+        evidence_ids.dedup();
+        if evidence_ids.is_empty() { return; }
+        if let Some(t) = self.traits.iter_mut().find(|t| t.category == UserTraitCategory::Value
+            && t.key == key && same_scope(&t.scope, "global")) {
+            if evidence_ids.iter().all(|id| t.evidence_ids.contains(id)) { return; }
             if !meaning.trim().is_empty() {
                 t.meaning = meaning.trim().to_string();
             }
@@ -432,17 +465,18 @@ impl UserModel {
                     t.related_topics.push(rt.trim().to_string());
                 }
             }
-            for eid in evidence_ids {
+            for eid in &evidence_ids {
                 if !t.evidence_ids.contains(eid) {
                     t.evidence_ids.push(eid.clone());
-                    t.evidence_count += 1;
                 }
             }
+            t.evidence_count = independent_evidence_count(&t.evidence_ids);
             t.confidence = (t.confidence + strength * 0.1).min(0.95);
             t.importance = (t.importance + strength * 0.08).min(1.0);
             t.updated_at = now;
             if t.lifecycle != TraitLifecycle::Contradicted {
-                t.lifecycle = if t.evidence_count >= STABILITY_MIN_EVIDENCE_COUNT {
+                t.lifecycle = if t.evidence_count >= STABILITY_MIN_EVIDENCE_COUNT
+                    && now - t.created_at >= STABILITY_MIN_SPAN_DAYS * 86400.0 {
                     TraitLifecycle::Stable
                 } else {
                     TraitLifecycle::Active
@@ -555,6 +589,7 @@ impl UserModel {
 /// 不调用 LLM——强证据更新基于规则匹配，弱证据进入候选池。
 pub struct UserModelManager {
     inner: RwLock<UserModel>,
+    save_lock: Mutex<()>,
     store_path: PathBuf,
     /// 角色 ID（用于持久化路径隔离）
     pub char_id: String,
@@ -567,6 +602,7 @@ impl UserModelManager {
         let model = Self::load_from_disk(&store_path).unwrap_or_else(|_| UserModel::empty());
         Self {
             inner: RwLock::new(model),
+            save_lock: Mutex::new(()),
             store_path,
             char_id: char_id.to_string(),
         }
@@ -591,6 +627,34 @@ impl UserModelManager {
 
     // ── 强证据在线更新 ──
 
+    /// Observe only an actual user utterance, identified by its immutable history ID.
+    /// Scoped/temporary wording without an explicit host scope stays in history
+    /// and normal extraction rather than becoming a global personality claim.
+    pub fn observe_user_message(&self, input: &str, message_id: &str, scope: &str) {
+        self.observe_user_message_at(input, message_id, scope, crate::memory::types::current_timestamp());
+    }
+
+    pub fn observe_user_message_at(&self, input: &str, message_id: &str, scope: &str, observed_at: f64) {
+        if !observed_at.is_finite() || observed_at <= 0.0 { return; }
+        let lower = input.to_lowercase();
+        if scope.trim().is_empty() && ["这次", "今天", "暂时", "这个项目", "本项目", "仅在", "只在",
+            "this time", "today", "for now", "this project", "今回", "このプロジェクト"]
+            .iter().any(|term| lower.contains(term)) { return; }
+        for evidence in detect_strong_evidence(input) {
+            let scope = if evidence.scope.is_empty() { scope } else { &evidence.scope };
+            if evidence.is_contradiction {
+                self.apply_contradicting_evidence(&evidence.key, scope, message_id, evidence.strength);
+            } else {
+                self.apply_strong_evidence_at(evidence.category, &evidence.key, &evidence.value,
+                    scope, message_id, evidence.strength, observed_at);
+            }
+        }
+        for evidence in detect_weak_evidence(input) {
+            self.add_candidate_evidence(evidence.category, &evidence.key, &evidence.value,
+                scope, message_id, evidence.strength);
+        }
+    }
+
     /// 添加强证据并更新 Trait
     ///
     /// 由 AutoExtractor 在检测到强表达时调用。
@@ -604,32 +668,57 @@ impl UserModelManager {
         memory_id: &str,
         strength: f64,
     ) {
-        let mut model = self.inner.write();
-        let now = crate::memory::types::current_timestamp();
+        self.apply_strong_evidence_at(category, key, value, scope, memory_id, strength,
+            crate::memory::types::current_timestamp());
+    }
 
+    fn apply_strong_evidence_at(&self, category: UserTraitCategory, key: &str, value: &str,
+        scope: &str, memory_id: &str, strength: f64, now: f64) {
+        if !independent_evidence_id(memory_id) { return; }
+        let mut model = self.inner.write();
+
+        if model.traits.iter().any(|t| t.category == category && t.key == key && t.value == value
+            && same_scope(&t.scope, scope) && t.evidence_ids.iter().any(|id| id == memory_id)) { return; }
+        let newer_conflict = model.traits.iter().any(|prior| prior.category == category
+            && prior.key == key && same_scope(&prior.scope, scope)
+            && incompatible_values(key, &prior.value, value) && prior.updated_at > now);
+        for prior in &mut model.traits {
+            if prior.category == category && prior.key == key && same_scope(&prior.scope, scope)
+                && incompatible_values(key, &prior.value, value) && prior.updated_at <= now {
+                prior.lifecycle = TraitLifecycle::Contradicted;
+                prior.contradiction_count += 1;
+                prior.updated_at = now;
+            }
+        }
         // 查找是否已有匹配的 trait
         if let Some(existing) = model
             .traits
             .iter_mut()
-            .find(|t| t.category == category && t.key == key)
+            .find(|t| t.category == category && t.key == key && t.value == value
+                && same_scope(&t.scope, scope))
         {
+            if existing.evidence_ids.iter().any(|id| id == memory_id) { return; }
             // 更新现有 trait
             existing.value = value.to_string();
             existing.confidence = (existing.confidence + strength * 0.3).min(1.0);
             existing.importance = (existing.importance + strength * 0.1).min(1.0);
             if !existing.evidence_ids.contains(&memory_id.to_string()) {
                 existing.evidence_ids.push(memory_id.to_string());
-                existing.evidence_count += 1;
+                existing.evidence_count = independent_evidence_count(&existing.evidence_ids);
             }
-            existing.updated_at = now;
+            let current = now >= existing.updated_at;
+            existing.created_at = existing.created_at.min(now);
+            existing.updated_at = existing.updated_at.max(now);
             if !scope.is_empty() {
                 existing.scope = scope.to_string();
             }
-            existing.lifecycle = if existing.evidence_count >= STABILITY_MIN_EVIDENCE_COUNT {
-                TraitLifecycle::Stable
-            } else {
-                TraitLifecycle::Active
-            };
+            if newer_conflict { existing.lifecycle = TraitLifecycle::Contradicted; }
+            else if current {
+                existing.lifecycle = if existing.evidence_count >= STABILITY_MIN_EVIDENCE_COUNT
+                    && existing.updated_at - existing.created_at >= STABILITY_MIN_SPAN_DAYS * 86400.0 {
+                    TraitLifecycle::Stable
+                } else { TraitLifecycle::Active };
+            }
         } else {
             // 创建新 trait
             model.traits.push(UserTrait {
@@ -643,7 +732,7 @@ impl UserModelManager {
                 scope: scope.to_string(),
                 evidence_ids: vec![memory_id.to_string()],
                 related_topics: Vec::new(),
-                lifecycle: TraitLifecycle::Active,
+                lifecycle: if newer_conflict { TraitLifecycle::Contradicted } else { TraitLifecycle::Active },
                 created_at: now,
                 updated_at: now,
                 evidence_count: 1,
@@ -651,7 +740,7 @@ impl UserModelManager {
             });
         }
 
-        model.updated_at = now;
+        model.updated_at = model.updated_at.max(now);
         drop(model);
         self.save_inner();
     }
@@ -660,13 +749,16 @@ impl UserModelManager {
     pub fn apply_contradicting_evidence(
         &self,
         key: &str,
+        scope: &str,
         memory_id: &str,
         strength: f64,
     ) {
+        if !independent_evidence_id(memory_id) { return; }
         let mut model = self.inner.write();
         let now = crate::memory::types::current_timestamp();
 
-        if let Some(trait_) = model.traits.iter_mut().find(|t| t.key == key) {
+        if let Some(trait_) = model.traits.iter_mut().find(|t| t.key == key && same_scope(&t.scope, scope)) {
+            if trait_.evidence_ids.iter().any(|id| id == memory_id) { return; }
             trait_.confidence = (trait_.confidence - strength * 0.5).max(0.0);
             trait_.contradiction_count += 1;
             trait_.updated_at = now;
@@ -721,30 +813,34 @@ impl UserModelManager {
         category: UserTraitCategory,
         key: &str,
         value: &str,
+        scope: &str,
         memory_id: &str,
         strength: f64,
     ) {
+        if !independent_evidence_id(memory_id) { return; }
         let mut model = self.inner.write();
         let now = crate::memory::types::current_timestamp();
 
         if let Some(candidate) = model
             .candidate_traits
             .iter_mut()
-            .find(|c| c.category == category && c.key == key && c.value == value)
+            .find(|c| c.category == category && c.key == key && c.value == value && same_scope(&c.scope, scope))
         {
+            if candidate.evidence_ids.iter().any(|id| id == memory_id) { return; }
             // 更新现有候选
             candidate.confidence = (candidate.confidence + strength * 0.15).min(1.0);
             if !candidate.evidence_ids.contains(&memory_id.to_string()) {
                 candidate.evidence_ids.push(memory_id.to_string());
             }
             candidate.last_observed_at = now;
-            candidate.observation_count += 1;
+            candidate.observation_count = independent_evidence_count(&candidate.evidence_ids);
         } else {
             // 创建新候选
             model.candidate_traits.push(CandidateTrait {
                 category,
                 key: key.to_string(),
                 value: value.to_string(),
+                scope: scope.to_string(),
                 confidence: strength.min(1.0),
                 evidence_ids: vec![memory_id.to_string()],
                 first_observed_at: now,
@@ -905,32 +1001,47 @@ impl UserModelManager {
     pub fn maintain(&self) {
         let mut model = self.inner.write();
         let now = crate::memory::types::current_timestamp();
+        // Called after real turns; one persisted pass per day is enough. Decay
+        // covers only time not accounted for by the previous maintenance pass.
+        if now - model.last_maintained_at < 86400.0 { return; }
+        let previous = model.last_maintained_at;
         let mut promoted = Vec::new();
 
         // 处理候选 Trait
-        model.candidate_traits.retain(|c| {
-            let days_since_last = (now - c.last_observed_at) / 86400.0;
+        model.candidate_traits.retain_mut(|c| {
+            c.observation_count = independent_evidence_count(&c.evidence_ids);
+            let decay_from = previous.max(c.last_observed_at + 7.0 * 86400.0);
+            if now > decay_from {
+                c.confidence *= CANDIDATE_DECAY_FACTOR.powf((now - decay_from) / (7.0 * 86400.0));
+            }
 
             // 达到提升阈值且证据充分 → 提升为稳定 trait
             if c.confidence >= CANDIDATE_PROMOTION_THRESHOLD
                 && c.observation_count >= STABILITY_MIN_EVIDENCE_COUNT
+                && c.last_observed_at - c.first_observed_at >= STABILITY_MIN_SPAN_DAYS * 86400.0
             {
                 promoted.push(c.clone());
                 return false; // 从候选池移除
             }
 
-            // 长时间无证据 → 衰减
-            if days_since_last > 7.0 {
-                let decayed = c.confidence * CANDIDATE_DECAY_FACTOR.powf(days_since_last / 7.0);
-                // 不能直接修改 retain 中的 & 引用，用 clone 判断
-                decayed < 0.1
-            } else {
-                true
-            }
+            c.confidence >= 0.1
         });
 
         // 将提升的候选加入稳定 trait
         for candidate in promoted {
+            if let Some(existing) = model.traits.iter_mut().find(|t| t.category == candidate.category
+                && t.key == candidate.key && t.value == candidate.value && same_scope(&t.scope, &candidate.scope)) {
+                // A speculative candidate must not revive an explicitly disputed judgment.
+                if existing.lifecycle == TraitLifecycle::Contradicted { continue; }
+                for id in &candidate.evidence_ids {
+                    if !existing.evidence_ids.contains(id) { existing.evidence_ids.push(id.clone()); }
+                }
+                existing.evidence_count = independent_evidence_count(&existing.evidence_ids);
+                existing.confidence = existing.confidence.max(candidate.confidence);
+                existing.updated_at = existing.updated_at.max(candidate.last_observed_at);
+                existing.lifecycle = TraitLifecycle::Stable;
+                continue;
+            }
             let time_span_days = (candidate.last_observed_at - candidate.first_observed_at) / 86400.0;
             let stability = if time_span_days >= STABILITY_MIN_SPAN_DAYS {
                 (time_span_days / 90.0).min(1.0) * 0.5 + 0.5
@@ -945,7 +1056,7 @@ impl UserModelManager {
                 confidence: candidate.confidence,
                 stability,
                 importance: (candidate.confidence * 0.7 + 0.3).min(1.0),
-                scope: String::new(),
+                scope: candidate.scope,
                 evidence_ids: candidate.evidence_ids,
                 related_topics: Vec::new(),
                 lifecycle: TraitLifecycle::Stable,
@@ -969,6 +1080,7 @@ impl UserModelManager {
         }
 
         model.updated_at = now;
+        model.last_maintained_at = now;
         drop(model);
         self.save_inner();
     }
@@ -988,6 +1100,9 @@ impl UserModelManager {
     }
 
     fn save_inner(&self) {
+        // Collect after acquiring the disk gate so a delayed old save cannot
+        // overwrite a newer snapshot from another background turn.
+        let _save = self.save_lock.lock();
         let serialized = { serde_json::to_string_pretty(&*self.inner.read()) };
         if let Ok(data) = serialized {
             if let Some(parent) = self.store_path.parent() {
@@ -1239,10 +1354,163 @@ fn classify_preference(captured: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    fn isolated_manager() -> (tempfile::TempDir, super::UserModelManager) {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = super::UserModelManager {
+            inner: super::RwLock::new(super::UserModel::empty()),
+            save_lock: super::Mutex::new(()),
+            store_path: dir.path().join("user_model.json"), char_id: "test".into(),
+        };
+        (dir, manager)
+    }
+
+    #[test]
+    fn independent_scopes_and_multiple_technologies_keep_their_own_evidence() {
+        let (_dir, manager) = isolated_manager();
+        for (value, scope, id) in [("rust", "project:a", "a1"), ("python", "project:b", "b1"),
+            ("python", "project:a", "a2")] {
+            manager.apply_strong_evidence(UserTraitCategory::Preference, "technology", value, scope, id, 0.85);
+        }
+        let model = manager.read();
+        assert_eq!(model.traits.len(), 3);
+        assert_eq!(model.traits[0].scope, "project:a");
+        assert_eq!(model.traits[0].evidence_ids, ["a1"]);
+        assert_eq!(model.traits[1].evidence_ids, ["b1"]);
+    }
+
+    #[test]
+    fn replay_is_idempotent_and_legacy_placeholder_is_not_independent_support() {
+        let (_dir, manager) = isolated_manager();
+        manager.observe_user_message("我喜欢 Rust", "utterance-1", "");
+        let before = serde_json::to_value(&*manager.read()).unwrap();
+        manager.observe_user_message("我喜欢 Rust", "utterance-1", "global");
+        assert_eq!(serde_json::to_value(&*manager.read()).unwrap(), before);
+        manager.observe_user_message("我喜欢 Rust", "realtime", "");
+        assert_eq!(serde_json::to_value(&*manager.read()).unwrap(), before);
+        manager.observe_user_message("我喜欢 Rust", "utterance-2", "");
+        manager.observe_user_message("我喜欢 Rust", "utterance-3", "");
+        let model = manager.read();
+        assert_eq!(model.traits[0].evidence_count, 3);
+        assert_eq!(model.traits[0].lifecycle, TraitLifecycle::Active, "three immediate messages do not prove a stable habit");
+    }
+
+    #[test]
+    fn temporary_wording_stays_out_of_global_profile_but_explicit_scope_is_retained() {
+        let (_dir, manager) = isolated_manager();
+        manager.observe_user_message("这个项目我喜欢 Python", "scoped-message", "");
+        assert!(manager.read().traits.is_empty());
+        manager.observe_user_message("这个项目我喜欢 Python", "scoped-message", "project:a");
+        assert_eq!(manager.read().traits[0].scope, "project:a");
+        assert_eq!(manager.read().traits[0].evidence_ids, ["scoped-message"]);
+    }
+
+    #[test]
+    fn explicit_dislike_supersedes_only_the_same_scope_and_can_be_corrected_again() {
+        let (_dir, manager) = isolated_manager();
+        for scope in ["project:a", "project:b"] {
+            manager.apply_strong_evidence(UserTraitCategory::Preference, "technology", "rust", scope, "one", 0.85);
+        }
+        manager.apply_strong_evidence(UserTraitCategory::Preference, "technology", "avoid_rust", "project:a", "two", 0.9);
+        assert_eq!(manager.read().traits[0].lifecycle, TraitLifecycle::Contradicted);
+        assert_eq!(manager.read().traits[1].lifecycle, TraitLifecycle::Active);
+        manager.apply_strong_evidence(UserTraitCategory::Preference, "technology", "rust", "project:a", "three", 0.85);
+        assert_eq!(manager.read().traits[0].lifecycle, TraitLifecycle::Active);
+        assert_eq!(manager.read().traits[2].lifecycle, TraitLifecycle::Contradicted);
+    }
+
+    #[test]
+    fn candidates_deduplicate_sources_and_keep_scopes() {
+        let (_dir, manager) = isolated_manager();
+        for _ in 0..3 {
+            manager.add_candidate_evidence(UserTraitCategory::Preference, "tool", "rust", "project:a", "same", 0.85);
+        }
+        manager.add_candidate_evidence(UserTraitCategory::Preference, "tool", "rust", "project:b", "other", 0.85);
+        manager.maintain();
+        let model = manager.read();
+        assert!(model.traits.is_empty());
+        assert_eq!(model.candidate_traits.len(), 2);
+        assert_eq!(model.candidate_traits[0].observation_count, 1);
+        assert_eq!(model.candidate_traits[0].confidence, 0.85);
+    }
+
+    #[test]
+    fn maintenance_preserves_valuable_candidates_and_decays_only_new_elapsed_time() {
+        let (_dir, manager) = isolated_manager();
+        let now = current_timestamp();
+        for (value, confidence) in [("valuable", 0.6), ("empty", 0.05)] {
+            manager.add_candidate_evidence(UserTraitCategory::Preference, "tool", value, "", value, confidence);
+        }
+        { let mut model = manager.inner.write();
+          for candidate in &mut model.candidate_traits {
+              candidate.first_observed_at = now - 8.0 * 86400.0;
+              candidate.last_observed_at = now - 8.0 * 86400.0;
+          }
+        }
+        manager.maintain();
+        let confidence = manager.read().candidate_traits[0].confidence;
+        assert_eq!(manager.read().candidate_traits.len(), 1);
+        assert_eq!(manager.read().candidate_traits[0].value, "valuable");
+        assert!(confidence < 0.6 && confidence > 0.59);
+        manager.maintain();
+        assert_eq!(manager.read().candidate_traits[0].confidence, confidence);
+    }
+
+    #[test]
+    fn promotion_requires_independent_history_and_keeps_project_scope() {
+        let (_dir, manager) = isolated_manager();
+        for id in ["one", "two", "three"] {
+            manager.add_candidate_evidence(UserTraitCategory::Preference, "tool", "rust", "project:a", id, 0.85);
+        }
+        manager.inner.write().candidate_traits[0].first_observed_at -= 20.0 * 86400.0;
+        manager.maintain();
+        let model = manager.read();
+        assert!(model.candidate_traits.is_empty());
+        assert_eq!(model.traits[0].scope, "project:a");
+        assert_eq!(model.traits[0].evidence_count, 3);
+        assert_eq!(model.traits[0].lifecycle, TraitLifecycle::Stable);
+    }
+
+    #[test]
+    fn old_serialized_models_default_new_scope_and_watermark_without_inventing_sources() {
+        let raw = r#"{"traits":[],"candidate_traits":[{"category":"preference","key":"tool","value":"rust","confidence":0.9,"evidence_ids":["realtime"],"first_observed_at":0,"last_observed_at":0,"observation_count":3}],"goals":[],"projects":[],"updated_at":0}"#;
+        let model: UserModel = serde_json::from_str(raw).unwrap();
+        assert_eq!(model.last_maintained_at, 0.0);
+        assert_eq!(model.candidate_traits[0].scope, "");
+        assert_eq!(independent_evidence_count(&model.candidate_traits[0].evidence_ids), 0);
+    }
+
+    #[test]
+    fn delayed_background_sources_and_replays_cannot_undo_a_newer_correction() {
+        let (_dir, manager) = isolated_manager();
+        let now = current_timestamp();
+        manager.observe_user_message_at("我喜欢 Rust", "one", "", now - 30.0);
+        manager.observe_user_message_at("我不用 Rust", "three", "", now - 10.0);
+        manager.observe_user_message_at("我喜欢 Rust", "two-delayed", "", now - 20.0);
+        assert_eq!(manager.read().traits[0].lifecycle, TraitLifecycle::Contradicted);
+        assert_eq!(manager.read().traits[1].lifecycle, TraitLifecycle::Active);
+        manager.observe_user_message_at("我喜欢 Rust", "four", "", now);
+        manager.observe_user_message_at("我不用 Rust", "three", "", now - 10.0);
+        assert_eq!(manager.read().traits[0].lifecycle, TraitLifecycle::Active);
+        assert_eq!(manager.read().traits[1].lifecycle, TraitLifecycle::Contradicted);
+        assert_eq!(manager.read().traits[0].updated_at, now);
+    }
+
+    #[test]
+    fn global_concept_merge_does_not_overwrite_project_traits_or_reinforce_replayed_evidence() {
+        let (_dir, manager) = isolated_manager();
+        manager.apply_strong_evidence(UserTraitCategory::Value, "autonomy", "low", "project:a", "local", 0.8);
+        manager.merge_concept("autonomy", "high", "", &[], &["global".into()], 0.8);
+        assert_eq!(manager.read().traits.len(), 2);
+        assert_eq!(manager.read().traits[0].value, "low");
+        let before = serde_json::to_value(&manager.read().traits).unwrap();
+        manager.merge_concept("autonomy", "high", "", &[], &["global".into()], 0.8);
+        assert_eq!(serde_json::to_value(&manager.read().traits).unwrap(), before);
+    }
+
     #[test]
     fn blocked_model_read_returns_timeout_and_recovers_after_release() {
         let manager = std::sync::Arc::new(UserModelManager {
-            inner: RwLock::new(UserModel::empty()),
+            inner: RwLock::new(UserModel::empty()), save_lock: Mutex::new(()),
             store_path: std::path::PathBuf::new(), char_id: "test".into(),
         });
         let write = manager.inner.write();
@@ -1266,15 +1534,15 @@ mod tests {
         let (send, receive) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let manager = UserModelManager {
-                inner: RwLock::new(UserModel::empty()),
+                inner: RwLock::new(UserModel::empty()), save_lock: Mutex::new(()),
                 store_path: worker_root.join("user_model.json"), char_id: "test".into(),
             };
             manager.apply_strong_evidence(UserTraitCategory::Value, "test", "v", "", "m1", 0.9);
-            manager.apply_contradicting_evidence("test", "m2", 0.5);
+            manager.apply_contradicting_evidence("test", "", "m2", 0.5);
             let weak = detect_weak_evidence("其实是之前用的一个live2d模型改的，因为感觉live2d不太好用");
             assert!(!weak.is_empty());
             for evidence in weak {
-                manager.add_candidate_evidence(evidence.category, &evidence.key, &evidence.value, "m3", evidence.strength);
+                manager.add_candidate_evidence(evidence.category, &evidence.key, &evidence.value, "", "m3", evidence.strength);
             }
             manager.upsert_project("project", "description", vec!["rust".into()], "start", ProjectStatus::Active);
             manager.relate_memory_to_project("project", "m4");
@@ -1368,10 +1636,11 @@ mod tests {
         use crate::memory::types::current_timestamp;
         let now = current_timestamp();
 
-        let mut candidate = CandidateTrait {
+        let candidate = CandidateTrait {
             category: UserTraitCategory::Preference,
             key: "test".to_string(),
             value: "value".to_string(),
+            scope: String::new(),
             confidence: 0.85,
             evidence_ids: vec!["mem1".to_string(), "mem2".to_string(), "mem3".to_string()],
             first_observed_at: now - 86400.0 * 20.0, // 20 days ago

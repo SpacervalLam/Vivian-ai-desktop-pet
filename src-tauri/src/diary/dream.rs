@@ -184,6 +184,10 @@ impl CycleWork for Brain {
                 "text":b.statement.chars().take(240).collect::<String>()})
                 }),
         );
+        drop(beliefs);
+        material.extend(self.mind.thought_threads_snapshot(chrono::Utc::now().timestamp()).into_iter()
+            .filter(|thread| thread.created_at < before && thread.updated_at >= after && thread.updated_at < before)
+            .map(|thread| json!({"kind":"private_thought_thread","subjective":true,"thread":thread})));
         Ok(DreamContext { report, material })
     }
     async fn diary(

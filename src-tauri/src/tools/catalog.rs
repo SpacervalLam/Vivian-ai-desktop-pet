@@ -90,6 +90,10 @@ impl<T> ToolCatalog<T> {
             .map(|entry| &entry.value)
     }
 
+    pub fn find_owned(&self, name: &str, owner: &str) -> Option<&T> {
+        self.entries.get(name).filter(|entry|entry.owner.as_deref() == Some(owner)).map(|entry|&entry.value)
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.entries.values().map(|entry| &entry.value)
     }

@@ -1248,12 +1248,10 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             let router = self.router.clone();
             let hook_judge = self.hook_judge.clone();
             let dynamic_profile = self.dynamic_profile.clone();
-            let user_model = self.user_model.clone();
             let user_emotion = final_state.user_emotion.clone();
             let ai_emotion = self.emotion_bridge.get_current_emotion().emotion;
             // 普通用户存原文；仅跨角色内部传输解析前缀，API 身份说明由独立元数据提供。
-            let (raw_input_for_memory, speaker, _) = self.parse_speaker_prefix(user_input);
-            let is_cross_character = speaker != "user";
+            let (raw_input_for_memory, _, _) = self.parse_speaker_prefix(user_input);
             let user_input_owned = raw_input_for_memory;
             let response_clone = response.clone();
             let count = self.invoke_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1269,13 +1267,11 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
                     router,
                     hook_judge,
                     dynamic_profile,
-                    user_model,
                     &user_input_owned,
                     &response_clone,
                     &user_emotion,
                     &ai_emotion,
                     count,
-                    is_cross_character,
                 )
                 .await;
             });
@@ -1400,6 +1396,17 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         if !final_state.is_command && final_state.should_respond && !skip_dialogue_write
             && !final_state.metadata.get("skip_memory_save").and_then(serde_json::Value::as_bool).unwrap_or(false)
             && self.parse_speaker_prefix(user_input).1 == "user" {
+            // The profile uses the same immutable source ID as history and extraction.
+            // Internal directives, observed character speech and skipped memory writes
+            // never reach this path. Disk work stays off the response executor.
+            if let Some(source) = extraction_sources.iter().find(|source|
+                source.role == "user" && source.metadata["speaker"] == "user").cloned() {
+                let profile = self.user_model.clone();
+                tokio::task::spawn_blocking(move || {
+                    profile.observe_user_message_at(&source.content, &source.id, "", source.timestamp);
+                    profile.maintain();
+                });
+            }
             self.auto_extractor.enqueue_sources(extraction_sources);
         }
 
@@ -1455,13 +1462,11 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         router: Arc<ModelRouter>,
         hook_judge: Arc<HookJudge>,
         dynamic_profile: Arc<DynamicBehaviorProfile>,
-        user_model: Arc<UserModelManager>,
         user_input: &str,
         response: &AiResponse,
         user_emotion: &str,
         ai_emotion: &str,
         invoke_count: u64,
-        is_cross_character: bool,
     ) {
         let serial = conversation_archive.read().serial();
         let summary_guard = serial.lock().await;
@@ -1532,54 +1537,6 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
         // Durable extraction runs independently; this path handles retention and profile updates.
         // 结构化画像在主流程独立更新；AutoExtractor 继续负责长期记忆。
         let clean_ai_text = MemorySavingRunnable::strip_json_if_any(&response.text);
-
-        // 2.5.5 用户认知模型：强证据检测与弱证据积累
-        // 在非跨角色对话时，从用户输入中检测偏好/工作方式/兴趣/目标等信号
-        // 强证据直接更新 UserTrait，弱证据进入候选池等待批量归纳
-        if !is_cross_character {
-            use crate::memory::user_model::{detect_strong_evidence, detect_weak_evidence};
-
-            // 强证据检测
-            let strong_evidence = detect_strong_evidence(user_input);
-            for ev in &strong_evidence {
-                if ev.is_contradiction {
-                    user_model.apply_contradicting_evidence(&ev.key, "realtime", ev.strength);
-                } else {
-                    user_model.apply_strong_evidence(
-                        ev.category,
-                        &ev.key,
-                        &ev.value,
-                        &ev.scope,
-                        "realtime",
-                        ev.strength,
-                    );
-                }
-            }
-            if !strong_evidence.is_empty() {
-                tracing::debug!(
-                    "[BrainChatChain] 用户认知模型：检测到 {} 条强证据",
-                    strong_evidence.len()
-                );
-            }
-
-            // 弱证据检测（进入候选池）
-            let weak_evidence = detect_weak_evidence(user_input);
-            for ev in &weak_evidence {
-                user_model.add_candidate_evidence(
-                    ev.category,
-                    &ev.key,
-                    &ev.value,
-                    "realtime",
-                    ev.strength,
-                );
-            }
-            if !weak_evidence.is_empty() {
-                tracing::debug!(
-                    "[BrainChatChain] 用户认知模型：检测到 {} 条弱证据（进入候选池）",
-                    weak_evidence.len()
-                );
-            }
-        }
 
         // 2.6 Open Hooks 闭环判定：用本轮对话检查所有未闭环钩子
         // 走 memory 路由，LLM 判断是否满足闭环条件；失败仅 warn 不阻塞

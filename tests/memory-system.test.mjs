@@ -326,9 +326,14 @@ ${systemSource.slice(sweepStart, sweepEnd)}
     let root = std::env::temp_dir().join(format!("seed-reset-{}",uuid::Uuid::new_v4()));
     let clock = root.join(crate::memory::seed::CLOCK_RELATIVE_PATH);
     let first = crate::memory::seed::load_or_create_anchor(&clock,2_000_000_000.0).unwrap();
+    let private_history = root.join("memory-history/characters/vivian/repository.git/objects/old-note");
+    std::fs::create_dir_all(private_history.parent().unwrap()).unwrap();
+    std::fs::write(&private_history,"old private memory").unwrap();
     sweep_factory_reset_dir(&root).unwrap(); assert!(clock.exists());
+    assert!(private_history.exists(),"history is preserved before an explicit reset");
     std::fs::write(root.join(FACTORY_RESET_MARKER), "1").unwrap();
     sweep_factory_reset_dir(&root).unwrap(); assert!(!clock.exists());
+    assert!(!root.join("memory-history").exists(),"reset also forgets Git objects and queued snapshots");
     let second = crate::memory::seed::load_or_create_anchor(&clock,first+86400.0).unwrap();
     assert_eq!(second-first,86400.0);
     let mut before = crate::memory::seed::load("vivian").unwrap(); before.anchor_to(first).unwrap();

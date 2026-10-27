@@ -48,6 +48,85 @@
 /// 保留读侧尾部截断仅作手工编辑文件等旁路场景的安全网）。
 pub const MEMORY_MD_MAX_CHARS: usize = 2000;
 
+// All in-process note writers share the same short commit lock. No lock is
+// held while a model is running. Weak entries do not retain retired characters.
+fn note_transaction<T>(path: &std::path::Path, edit: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use std::sync::{Arc, LazyLock, Weak};
+    use parking_lot::Mutex;
+    static WRITES: LazyLock<Mutex<std::collections::HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(Default::default()));
+    let key = path_key(path);
+    let lock = {
+        let mut writes = WRITES.lock();
+        writes.retain(|_, lock| lock.strong_count() > 0);
+        writes.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let lock = Arc::new(Mutex::new(()));
+            writes.insert(key, Arc::downgrade(&lock));
+            lock
+        })
+    };
+    let _commit = lock.lock();
+    edit()
+}
+
+fn path_key(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    { std::path::PathBuf::from(path.to_string_lossy().to_lowercase()) }
+    #[cfg(not(windows))]
+    { path.to_path_buf() }
+}
+
+fn read_note(path: &std::path::Path) -> Result<Option<String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 memory.md 失败：{error}")),
+    }
+}
+
+fn note_revision(content: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    // Missing and empty are different revisions: deletion must stay deleted.
+    hash.update([u8::from(content.is_some())]);
+    if let Some(content) = content { hash.update(content.as_bytes()); }
+    format!("{:x}", hash.finalize())
+}
+
+pub fn read_memory_md_snapshot(char_id: &str) -> Result<(Option<String>, String), String> {
+    if char_id.trim().is_empty() { return Err("缺少角色 ID".into()); }
+    let content = read_note(&memory_md_path(char_id))?;
+    let revision = note_revision(content.as_deref());
+    Ok((content, revision))
+}
+
+fn commit_note_revision(path: &std::path::Path, expected_revision: &str, content: &str) -> Result<(), String> {
+    note_transaction(path, || {
+        let current = read_note(path)?;
+        if note_revision(current.as_deref()) != expected_revision {
+            return Err("memory.md 在读取后已变化，已保留当前笔记，请重新读取再整理".into());
+        }
+        if current.as_deref() == Some(content) { return Ok(()); }
+        crate::utils::fs::write_atomic(path, content).map_err(|e| format!("写入 memory.md 失败：{e}"))?;
+        super::git_history::record_runtime_path(path, current.as_deref(), content, "note_tool_rewrite");
+        Ok(())
+    })
+}
+
+fn commit_note(path: &std::path::Path, expected: Option<&str>, content: &str) -> Result<(), String> {
+    note_transaction(path, || {
+        let current = read_note(path)?;
+        if expected.is_some_and(|snapshot| current.as_deref() != Some(snapshot)) {
+            return Err("memory.md 在整理期间已变化，已保留当前笔记，请重新整理".into());
+        }
+        if current.as_deref() == Some(content) { return Ok(()); }
+        crate::utils::fs::write_atomic(path, content).map_err(|e| format!("写入 memory.md 失败：{e}"))?;
+        super::git_history::record_runtime_path(path, current.as_deref(), content,
+            if expected.is_some() { "note_consolidation" } else { "note_rewrite" });
+        Ok(())
+    })
+}
+
 /// 增量整理触发阈值：**待整理区**非空行数达到该值就跑一次增量整理。
 ///
 /// 阈值远低于全量压缩阈值：增量路径的 LLM 输入仅为新增沉淀，高频触发成本低，
@@ -108,7 +187,8 @@ pub fn read_memory_md_raw(char_id: &str) -> Option<String> {
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        // Preserve exact bytes for optimistic commits, including whitespace.
+        Some(text)
     }
 }
 
@@ -158,7 +238,7 @@ pub fn tidy_need_for_text(text: &str) -> TidyNeed {
 ///
 /// 重写结果超过 [`MEMORY_MD_MAX_CHARS`] 时**拒绝**而非静默截断——
 /// 全文重写的正文结构由调用方组织，截断会破坏其语义；调用方应精简后重试。
-fn compose_memory_md(body: &str) -> Result<String, String> {
+pub(super) fn compose_memory_md(body: &str) -> Result<String, String> {
     let mut content = MEMORY_MD_HEADER.to_string();
     let body = body.trim();
     if !body.is_empty() {
@@ -188,8 +268,21 @@ pub fn write_memory_md(char_id: &str, body: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         crate::utils::path::ensure_dir(parent).map_err(|e| format!("创建记忆目录失败：{e}"))?;
     }
-    crate::utils::fs::write_atomic(&path, &content)
-        .map_err(|e| format!("写入 memory.md 失败：{e}"))
+    commit_note(&path, None, &content)
+}
+
+/// Publish model output only if the exact input snapshot is still current.
+pub fn write_memory_md_checked(char_id: &str, expected: &str, body: &str) -> Result<(), String> {
+    if char_id.trim().is_empty() { return Err("缺少角色 ID".into()); }
+    let content = compose_memory_md(body)?;
+    commit_note(&memory_md_path(char_id), Some(expected), &content)
+}
+
+/// The note tool carries the revision returned by its preceding read.
+pub fn write_memory_md_revision(char_id: &str, expected_revision: &str, body: &str) -> Result<(), String> {
+    if char_id.trim().is_empty() { return Err("缺少角色 ID".into()); }
+    let content = compose_memory_md(body)?;
+    commit_note_revision(&memory_md_path(char_id), expected_revision, &content)
 }
 
 /// 追加一段内容到 memory.md（不存在则带说明头创建，按日期分节）。
@@ -213,28 +306,52 @@ pub fn append_memory_md(char_id: &str, body: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         crate::utils::path::ensure_dir(parent).map_err(|e| format!("创建记忆目录失败：{e}"))?;
     }
-    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
-    if content.trim().is_empty() {
-        content = MEMORY_MD_HEADER.to_string();
-    }
-    if !content.ends_with('\n') {
-        content.push('\n');
-    }
-    content.push_str(&format!(
-        "\n## {}\n",
-        chrono::Local::now().format("%Y-%m-%d %H:%M")
-    ));
-    content.push_str(body);
-    content.push('\n');
+    append_note(&path, body)
+}
 
-    let (evicted, content) = enforce_char_budget(content);
-    if evicted > 0 {
-        tracing::info!(
-            "[memory_md] 追加后超上限，已驱逐最旧的 {evicted} 个分节（优先驱逐未整理的日期分节）"
-        );
-    }
-    crate::utils::fs::write_atomic(&path, &content)
-        .map_err(|e| format!("写入 memory.md 失败：{e}"))
+fn append_note(path: &std::path::Path, body: &str) -> Result<(), String> {
+    note_transaction(path, || {
+        let previous = read_note(path)?;
+        let mut content = previous.clone().unwrap_or_default();
+        if content.trim().is_empty() {
+            content = MEMORY_MD_HEADER.to_string();
+        }
+        if !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!(
+            "\n## {}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M")
+        ));
+        content.push_str(body);
+        content.push('\n');
+
+        let (evicted, content) = enforce_char_budget(content);
+        if evicted > 0 {
+            tracing::info!(
+                "[memory_md] 追加后超上限，已驱逐最旧的 {evicted} 个分节（优先驱逐未整理的日期分节）"
+            );
+        }
+        crate::utils::fs::write_atomic(path, &content)
+            .map_err(|e| format!("写入 memory.md 失败：{e}"))?;
+        super::git_history::record_runtime_path(path, previous.as_deref(), &content, "note_append");
+        Ok(())
+    })
+}
+
+/// Explicit forgetting removes the live note, its queued copies and this
+/// character's independent Git object database while other characters remain.
+pub fn clear_memory_md(char_id: &str) -> Result<(), String> {
+    if char_id.trim().is_empty() { return Err("缺少角色 ID".into()); }
+    let path = memory_md_path(char_id);
+    note_transaction(&path, || {
+        super::git_history::forget_runtime_path(&path)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    })
 }
 
 /// 把文件切成「已整理正文」与「待整理沉淀」两区（文件头剥离）。
@@ -574,6 +691,66 @@ fn push_unique(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tool_revision_tracks_exact_bytes_and_distinguishes_missing_from_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        let absent = note_revision(None);
+        assert_ne!(absent, note_revision(Some("")));
+        std::fs::write(&path, "").unwrap();
+        assert!(commit_note_revision(&path, &absent, "- stale").is_err());
+        let empty = note_revision(Some(""));
+        let first = compose_memory_md("- 第一条约定").unwrap();
+        commit_note_revision(&path, &empty, &first).unwrap();
+        let revision = note_revision(Some(&first));
+        append_note(&path, "- 新补充").unwrap();
+        assert!(commit_note_revision(&path, &revision, &first).is_err());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("新补充"));
+    }
+    #[test]
+    fn model_commit_rejects_an_intervening_append_and_preserves_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        let old = compose_memory_md("## 相处约定\n- 原有约定").unwrap();
+        commit_note(&path, None, &old).unwrap();
+        append_note(&path, "- 不要提前发布").unwrap();
+        let current = std::fs::read_to_string(&path).unwrap();
+        assert!(commit_note(&path, Some(&old), &compose_memory_md("- 整理后的旧约定").unwrap()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        let rewritten = compose_memory_md("- 原有约定\n- 不要提前发布").unwrap();
+        commit_note(&path, Some(&current), &rewritten).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rewritten);
+    }
+
+    #[test]
+    fn exact_snapshot_checks_whitespace_removal_and_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        let old = compose_memory_md("- 约定").unwrap();
+        commit_note(&path, None, &old).unwrap();
+        std::fs::write(&path, format!("{old}\n")).unwrap();
+        assert!(commit_note(&path, Some(&old), "changed").is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(commit_note(&path, Some(&old), "changed").is_err());
+        assert!(!path.exists(), "a deleted note must not be resurrected by stale model output");
+        assert!(append_note(dir.path(), "- new").is_err(), "read failures must not become an empty note");
+    }
+
+    #[test]
+    fn concurrent_appends_preserve_each_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        std::thread::scope(|threads| {
+            for i in 0..12 {
+                let path = &path;
+                threads.spawn(move || append_note(path, &format!("- 独立约定 {i:02}")).unwrap());
+            }
+        });
+        let current = std::fs::read_to_string(&path).unwrap();
+        for i in 0..12 { assert_eq!(current.matches(&format!("- 独立约定 {i:02}")).count(), 1); }
+        assert!(current.chars().count() <= MEMORY_MD_MAX_CHARS);
+    }
+
     use super::*;
 
     fn sample_file() -> String {

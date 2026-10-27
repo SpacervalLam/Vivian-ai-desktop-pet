@@ -10,7 +10,6 @@ pub struct CompanionConfig {
     pub quiet_hours: bool,
     pub quiet_start: u32,
     pub quiet_end: u32,
-    pub game_quiet: bool,
     pub game_companion: bool,
     pub game_processes: Vec<String>,
     pub sound: bool,
@@ -34,7 +33,7 @@ pub struct DesktopShortcut {
 impl Default for CompanionConfig {
     fn default() -> Self {
         Self { do_not_disturb: false, hourly_chime: false, focus_mode: false, quiet_hours: false,
-            quiet_start: 23, quiet_end: 7, game_quiet: true, game_companion: false,
+            quiet_start: 23, quiet_end: 7, game_companion: true,
             game_processes: vec!["League of Legends.exe".into(), "GenshinImpact.exe".into()],
             sound: true, resource_feedback: true, network_feedback: false, clipboard_hint: true, weather_feedback: false,
             music_feedback: false, shortcuts: vec![
@@ -52,17 +51,13 @@ impl CompanionConfig {
         true
     }
 
-    pub fn quiet_reason(&self, hour: u32, process: &str) -> Option<&'static str> {
+    pub fn quiet_reason(&self, hour: u32) -> Option<&'static str> {
         if self.focus_mode { return Some("focus"); }
         let start = self.quiet_start.min(23);
         let end = self.quiet_end.min(23);
         let inside = if start < end { hour >= start && hour < end }
             else if start > end { hour >= start || hour < end } else { false };
         if self.quiet_hours && inside { return Some("quiet_hours"); }
-        if self.game_quiet && !process.is_empty() && !crate::game_policy::shared_host(process) && self.game_processes.iter()
-            .any(|p| !p.trim().is_empty() && crate::game_policy::same_process(p, process)) {
-            return Some("game");
-        }
         None
     }
 }
@@ -111,13 +106,14 @@ mod tests {
     #[test]
     fn learned_games_survive_restart_without_duplicates_or_launcher_entries() {
         let mut config = CompanionConfig::default();
+        config.game_companion = false;
         assert!(!config.remember_game("NewGame.exe"), "disabled mode cannot grow the table");
         config.game_companion = true;
         assert!(config.remember_game("NewGame.exe"));
         assert!(!config.remember_game("newgame"));
         assert!(!config.remember_game("STEAM.EXE"));
         assert!(config.remember_game("javaw.exe"));
-        assert_eq!(config.quiet_reason(12, "javaw"), None, "a shared runtime name alone cannot silence unrelated apps");
+        assert_eq!(config.quiet_reason(12), None);
         let restored: CompanionConfig = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
         assert!(crate::game_policy::known_game("newgame.EXE", &restored.game_processes));
         assert_eq!(restored.game_processes.iter().filter(|p| crate::game_policy::same_process(p, "newgame")).count(), 1);
@@ -136,16 +132,29 @@ mod tests {
         assert!(changes.observe(1)); // Sequence wrap is still a change.
     }
     #[test]
-    fn quiet_state_survives_serialization_and_old_configs_default_to_off() {
+    fn quiet_state_survives_serialization_and_game_companionship_defaults_on() {
         let old: CompanionConfig = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(!old.do_not_disturb);
-        assert!(!old.game_companion);
+        assert!(old.game_companion);
         for enabled in [true, false] {
             let config = CompanionConfig { do_not_disturb: enabled, ..Default::default() };
             let saved = serde_json::to_value(config).unwrap();
             let loaded: CompanionConfig = serde_json::from_value(saved).unwrap();
             assert_eq!(loaded.do_not_disturb, enabled);
         }
+    }
+    #[test]
+    fn retired_game_quiet_is_ignored_and_manual_game_opt_out_survives_reload() {
+        for game_quiet in [true, false] {
+            let legacy: CompanionConfig = serde_json::from_value(serde_json::json!({"game_quiet": game_quiet})).unwrap();
+            assert!(legacy.game_companion);
+            assert_eq!(legacy.quiet_reason(12), None);
+            assert!(serde_json::to_value(&legacy).unwrap().get("game_quiet").is_none());
+        }
+        let disabled: CompanionConfig = serde_json::from_value(serde_json::json!({"game_companion":false})).unwrap();
+        assert!(!disabled.game_companion);
+        let reloaded: CompanionConfig = serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert!(!reloaded.game_companion);
     }
     #[test]
     fn shortcuts_gained_groups_without_breaking_saved_configs() {
@@ -173,22 +182,20 @@ mod tests {
         assert!(seeds.iter().all(|item| !item.group.is_empty()), "seed shortcuts ship grouped");
     }
     #[test]
-    fn quiet_windows_and_only_the_actual_foreground_game() {
+    fn quiet_windows_and_focus_mode() {
         let mut c = CompanionConfig { quiet_hours: true, ..Default::default() };
-        assert_eq!(c.quiet_reason(23, ""), Some("quiet_hours"));
-        assert_eq!(c.quiet_reason(6, ""), Some("quiet_hours"));
-        assert_eq!(c.quiet_reason(7, ""), None);
-        assert_eq!(c.quiet_reason(12, "genshinimpact.EXE"), Some("game"));
-        assert_eq!(c.quiet_reason(12, "GenshinImpact"), Some("game"));
-        assert_eq!(c.quiet_reason(12, "GenshinImpact.exe.bak"), None);
+        assert_eq!(c.quiet_reason(23), Some("quiet_hours"));
+        assert_eq!(c.quiet_reason(6), Some("quiet_hours"));
+        assert_eq!(c.quiet_reason(7), None);
+        assert_eq!(c.quiet_reason(12), None);
         c.focus_mode = true;
-        assert_eq!(c.quiet_reason(12, ""), Some("focus"));
+        assert_eq!(c.quiet_reason(12), Some("focus"));
         c.focus_mode = false;
         c.quiet_start = 9; c.quiet_end = 17;
-        assert_eq!(c.quiet_reason(9, ""), Some("quiet_hours"));
-        assert_eq!(c.quiet_reason(17, ""), None);
+        assert_eq!(c.quiet_reason(9), Some("quiet_hours"));
+        assert_eq!(c.quiet_reason(17), None);
         c.quiet_start = 17;
-        assert_eq!(c.quiet_reason(17, ""), None);
+        assert_eq!(c.quiet_reason(17), None);
     }
     #[test]
     fn hourly_dedup_suspend_and_clock_changes() {

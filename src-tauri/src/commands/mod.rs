@@ -26,6 +26,8 @@ pub mod ollama;
 pub mod persona;
 pub mod pet_reaction;
 pub mod plugins;
+pub mod provider_presets;
+pub mod plugin_advisor;
 pub mod presence;
 pub mod proactive;
 pub mod rag;

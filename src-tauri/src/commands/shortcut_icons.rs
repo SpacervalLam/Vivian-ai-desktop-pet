@@ -257,12 +257,16 @@ async fn best_icon(client: &Client, target: &Url, deadline: Instant) -> Result<S
 }
 
 pub async fn website(target: &str, proxy_url: Option<&str>) -> Result<String, String> {
+    website_with_budget(target, proxy_url, TOTAL_BUDGET).await
+}
+
+async fn website_with_budget(target: &str, proxy_url: Option<&str>, budget: Duration) -> Result<String, String> {
+    let deadline = Instant::now() + budget;
     let url = parse_website(target)?;
     let clients = build_clients(proxy_url);
     if clients.is_empty() {
         return Err("无法创建网络客户端".into());
     }
-    let deadline = Instant::now() + TOTAL_BUDGET;
     // 两条路由并发跑，谁先取到用谁：代理关掉时直连立刻返回，代理开着时也不吃亏。
     // select_ok 要求每路都是 Result，所以把路由名一起塞进 Ok/Err 里；Client 内部是 Arc，
     // 直接 move 进 future，免得 future 去借用外面这个 Vec。
@@ -278,13 +282,18 @@ pub async fn website(target: &str, proxy_url: Option<&str>) -> Result<String, St
             })
         })
         .collect();
-    match select_ok(routes).await {
-        Ok(((route, icon), _)) => {
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), select_ok(routes)).await {
+        Ok(Ok(((route, icon), _))) => {
             tracing::debug!(target: "shortcut_icon", %url, route = %route, "website_icon_resolved");
             Ok(icon)
         }
-        Err((route, error)) => {
+        Ok(Err((route, error))) => {
             let summary = format!("{route}: {error}");
+            tracing::warn!(target: "shortcut_icon", %url, error = %summary, "website_icon_unavailable");
+            Err(summary)
+        }
+        Err(_) => {
+            let summary = format!("网站图标获取超时（总预算 {} 毫秒）", budget.as_millis());
             tracing::warn!(target: "shortcut_icon", %url, error = %summary, "website_icon_unavailable");
             Err(summary)
         }
@@ -351,6 +360,37 @@ pub fn application(_target: &str) -> Result<String, String> { Err("Application i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn total_budget_cancels_a_stalled_http_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let started = Instant::now();
+        let error = website_with_budget(&format!("http://{address}"), None, Duration::from_millis(50)).await.unwrap_err();
+        server.abort();
+        assert!(error.contains("总预算"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1), "must not wait for the 6-second per-request timeout");
+    }
+
+    #[tokio::test]
+    async fn fast_favicon_still_returns_inside_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n").await.unwrap();
+        });
+        let icon = website_with_budget(&format!("http://{address}"), None, Duration::from_secs(2)).await.unwrap();
+        server.await.unwrap();
+        assert!(icon.starts_with("data:image/png;base64,"));
+    }
 
     #[test]
     fn normalize_target_adds_scheme() {

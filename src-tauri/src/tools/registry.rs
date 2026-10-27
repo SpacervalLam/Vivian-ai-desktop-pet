@@ -29,7 +29,7 @@ use super::types::{Tool, ToolCategory, ToolDefinition, ToolScene};
 /// 字段与 system prompt 工具清单）以及 `tool_search` 的检索域都不包含它们；
 /// 执行层另有硬门兜底（防幻觉盲调 / 历史重放）。轻量沉淀（create_skill）
 /// 不在名单内，陪伴侧可直接使用。
-pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &["create_tool", "create_plugin", "delete_plugin"];
+pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &["create_tool", "create_plugin", "delete_plugin", "install_plugin"];
 
 /// 判断工具是否为工作智能体专属工具
 pub fn is_work_agent_only(name: &str) -> bool {
@@ -446,6 +446,10 @@ impl ToolSystem {
         let removed = self.catalog.write().remove(name, Some(owner));
         if removed { self.cache.invalidate(name); }
         removed
+    }
+
+    pub(crate) fn find_owned_tool(&self, name: &str, owner: &str) -> Option<Arc<dyn Tool>> {
+        self.catalog.read().find_owned(name, owner).cloned()
     }
 
     /// 注销工具

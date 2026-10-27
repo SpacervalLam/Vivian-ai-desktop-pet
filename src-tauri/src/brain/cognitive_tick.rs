@@ -340,9 +340,10 @@ impl CognitiveTickRunner {
                     let world_provider = Arc::clone(&brain.world_provider);
                     let lang = lang_code_from_config(&brain.config);
                     let conversation_context = brain.proactive.thought_conversation_context(context.is_user_chatting);
+                    let persona_context = brain.persona.thought_persona_context();
                     tauri::async_runtime::spawn(async move {
                         crate::mind::thought_synthesis::refresh_current_thought(
-                            &mind, &router, &world_provider, &lang, &conversation_context,
+                            &mind, &router, &world_provider, &lang, &conversation_context, &persona_context,
                         )
                         .await;
                     });

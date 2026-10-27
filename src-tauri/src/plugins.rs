@@ -59,6 +59,10 @@
 
 pub mod js_host;
 pub mod package;
+mod dependencies;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -103,6 +107,9 @@ struct PluginManifest {
     /// 云端嵌入服务预设数据文件（相对插件目录）
     #[serde(default)]
     embeddings: Option<String>,
+    /// Protocol files use the same expansion for trust and runtime registration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocols: Option<String>,
     /// JS 插件入口 glob（相对插件目录，如 ["js/*.js"] 或 ["js"]）。
     /// 声明后由 js_host 创建独立 JS 运行时装载（ctx.skill/tool/provider/mcp 贡献面）
     #[serde(default)]
@@ -116,7 +123,7 @@ struct PluginRequirements {
     #[serde(default)]
     commands: Vec<String>,
     /// Required plugin directory keys and minimum versions (empty = any version).
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::plugin_contract::serialize_string_map")]
     plugins: HashMap<String, String>,
 }
 
@@ -418,27 +425,20 @@ pub fn set_plugin_enabled(key: &str, enabled: bool) -> Result<(), String> {
 }
 
 fn missing_requirements(pdir: &Path, manifest: &PluginManifest) -> Vec<String> {
-    let mut missing = Vec::new();
-    for command in &manifest.requirements.commands {
-        let direct = Path::new(command);
-        let found = if direct.is_absolute() { direct.is_file() } else if command.contains('/') || command.contains('\\') {
-            is_safe_manifest_path(command) && pdir.join(command).is_file() && is_safe_plugin_path(pdir, &pdir.join(command))
-        } else {
-            let extensions = if cfg!(windows) { vec!["", ".exe", ".cmd", ".bat", ".com"] } else { vec![""] };
-            std::env::var_os("PATH").is_some_and(|value|std::env::split_paths(&value).any(|dir|extensions.iter().any(|ext|dir.join(format!("{command}{ext}")).is_file())))
-        };
-        if !found { missing.push(format!("缺少运行命令：{command}")); }
-    }
-    for (key, minimum) in &manifest.requirements.plugins {
-        if !valid_plugin_dir_name(key) { missing.push(format!("依赖插件目录名无效：{key}")); continue; }
-        let root = plugins_dir().join(key);
-        let available = read_manifest(&root).ok().is_some_and(|(_, dependency)| {
-            is_plugin_enabled(key) && trust_status_of(key, &cached_fingerprint(&root, &dependency)) == "trusted"
-                && (minimum.is_empty() || parse_version(&dependency.version).zip(parse_version(minimum)).is_some_and(|(actual,min)|actual >= min))
-        });
-        if !available { missing.push(format!("需要已启用且受信的插件：{key} >= {minimum}")); }
-    }
-    missing
+    dependencies::missing(pdir, manifest)
+}
+
+fn inactive_plugins() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static INACTIVE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    INACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_inactive(key: &str) -> bool {
+    inactive_plugins().lock().unwrap().contains_key(key)
+}
+
+fn ordered_plugin_dirs() -> (Vec<PathBuf>, Vec<String>) {
+    dependencies::ordered_dirs()
 }
 
 // ============================================================================
@@ -496,16 +496,10 @@ fn save_trust_store(store: &TrustStore) -> Result<(), String> {
 /// 指纹（保守方向的误报可接受：重新信任一次即可）。
 ///
 /// 清单文本取 serde_json 序列化结果（按结构体字段序，与文件中的键顺序无关），
-/// 重排 JSON 键不会误报；值变更会。协议 glob 不在类型化清单字段中
-/// （protocol_registry 从原始 JSON 读取 `protocols` 键），单独取出参与哈希。
+/// 重排 JSON 键不会误报；值变更会。协议声明与实际加载文件均参与哈希。
 fn manifest_fingerprint(pdir: &Path, manifest: &PluginManifest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_string(manifest).unwrap_or_default().as_bytes());
-    let protocols_glob = std::fs::read_to_string(pdir.join("plugin.json"))
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|v| v["protocols"].as_str().map(str::to_string))
-        .unwrap_or_else(|| "protocols".to_string());
     let mut paths: Vec<PathBuf> = Vec::new();
     for pattern in &manifest.skills {
         paths.extend(glob_files(pdir, pattern));
@@ -516,7 +510,7 @@ fn manifest_fingerprint(pdir: &Path, manifest: &PluginManifest) -> String {
     for pattern in &manifest.js {
         paths.extend(glob_js_files(pdir, pattern));
     }
-    paths.extend(glob_json_files(pdir, &protocols_glob));
+    paths.extend(protocol_paths(pdir, manifest.protocols.as_deref()));
     if let Some(rel) = manifest.providers.as_deref() {
         if is_safe_manifest_path(rel) {
             let path = pdir.join(rel);
@@ -669,18 +663,39 @@ pub(crate) fn is_plugin_dir_trusted(pdir: &Path) -> bool {
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or_default();
-    if !is_plugin_enabled(key) { return false; }
+    if !is_plugin_enabled(key) || is_inactive(key) {
+        return false;
+    }
     match read_manifest(pdir) {
-        Ok((_, manifest)) => missing_requirements(pdir, &manifest).is_empty() && trust_status_of(key, &cached_fingerprint(pdir, &manifest)) == "trusted",
+        Ok((_, manifest)) => {
+            missing_requirements(pdir, &manifest).is_empty()
+                && dependencies::runtime_missing(&manifest).is_empty()
+                && trust_status_of(key, &manifest_fingerprint(pdir, &manifest)) == "trusted"
+        }
         Err(_) => false,
     }
 }
 
-/// 判断插件名（manifest.name 或目录 key）当前是否有受信插件在册。
+/// 判断 MCP 来源命名空间（manifest.name）是否已授权且依赖可用。
 ///
 /// MCP init_all 的连接门禁：持久化配置里带 `source_plugin` 的 server 只在
 /// 其来源插件受信时才自动连接；来源插件缺失/未信任则跳过。
 pub fn is_plugin_name_trusted(name: &str) -> bool {
+    let active = contrib_snapshots()
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, snapshot)| snapshot.name == name)
+        .map(|(key, snapshot)| (key.clone(), snapshot.clone()))
+        .collect::<Vec<_>>();
+    for (key, snapshot) in active {
+        if is_plugin_enabled(&key)
+            && !is_inactive(&key)
+            && dependencies::runtime_missing_for(&snapshot.dependencies).is_empty()
+        {
+            return true;
+        }
+    }
     let dir = plugins_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return false;
@@ -690,16 +705,9 @@ pub fn is_plugin_name_trusted(name: &str) -> bool {
         if !pdir.is_dir() || !pdir.join("plugin.json").exists() {
             continue;
         }
-        let key = pdir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        if key == name {
-            return is_plugin_dir_trusted(&pdir);
-        }
-        if let Ok((manifest_name, manifest)) = read_manifest(&pdir) {
+        if let Ok((manifest_name, _)) = read_manifest(&pdir) {
             if manifest_name == name {
-                return is_plugin_enabled(key) && missing_requirements(&pdir, &manifest).is_empty() && trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) == "trusted";
+                return is_plugin_dir_trusted(&pdir);
             }
         }
     }
@@ -716,10 +724,17 @@ pub fn is_plugin_name_trusted(name: &str) -> bool {
 /// 单个插件已注册贡献的内存快照（目录 key → 快照）
 #[derive(Debug, Default, Clone)]
 struct PluginContribSnapshot {
+    fingerprint: String,
+    /// Identity and dependency contract at commit time, independent of disk edits.
+    name: String,
+    version: String,
+    dependencies: HashMap<String, String>,
     /// 已注册技能的完整命名空间名（如 `my-plugin/skill_a`）
     skills: Vec<String>,
     /// 已注册工具名
     tools: Vec<String>,
+    /// Approved definitions retained between startup preparation and registration.
+    tool_definitions: std::sync::Arc<Vec<CustomToolDef>>,
     /// 已注册 MCP server id
     mcp_ids: Vec<String>,
     /// JS 运行时是否已装载（JS 贡献由 js_host 自管，这里只记归属）
@@ -733,6 +748,18 @@ fn contrib_snapshots() -> &'static Mutex<HashMap<String, PluginContribSnapshot>>
 
 fn read_snapshot(key: &str) -> Option<PluginContribSnapshot> {
     contrib_snapshots().lock().unwrap().get(key).cloned()
+}
+
+pub(crate) fn plugin_owning_tool(tool: &str, system: &ToolSystem) -> Option<(String,String)> {
+    contrib_snapshots().lock().unwrap().iter().find_map(|(_, snapshot)| {
+        let owned = system.find_owned_tool(tool,&format!("plugin:{}",snapshot.name)).is_some()
+            || snapshot.mcp_ids.iter().any(|id|system.find_owned_tool(tool,&format!("mcp:{id}")).is_some());
+        owned.then(||(snapshot.name.clone(),snapshot.fingerprint.clone()))
+    })
+}
+
+pub(crate) fn loaded_plugin_fingerprint(name: &str) -> Option<String> {
+    contrib_snapshots().lock().unwrap().values().find(|s|s.name == name).map(|s|s.fingerprint.clone()).filter(|s|!s.is_empty())
 }
 
 /// 整体替换快照（装载成功后调用）
@@ -870,94 +897,108 @@ fn expanded_tools(pdir: &Path, patterns: &[String]) -> Vec<CustomToolDef> {
 
 /// 简化 glob：展开插件目录下 `*.json` 一层或递归两种模式（工具定义文件）。
 fn glob_json_files(base: &Path, pattern: &str) -> Vec<PathBuf> {
+    resource_files(base, pattern, "json")
+}
+
+/// One enumerator for declarations, fingerprints and execution. Literal
+/// directories recurse; globs retain their normal separator-aware semantics.
+fn resource_files(base: &Path, pattern: &str, extension: &str) -> Vec<PathBuf> {
     if !is_safe_manifest_path(pattern) {
-        tracing::warn!("[Plugins] 拒绝越界工具路径声明: {}", pattern);
         return Vec::new();
     }
-    let pattern = pattern.trim().trim_start_matches("./");
-    let (dir_part, suffix_glob) = match pattern.rsplit_once('/') {
-        Some((d, s)) => (d.to_string(), s.to_string()),
-        None => (String::new(), pattern.to_string()),
+    let normalized = pattern.trim().replace('\\', "/");
+    let normalized = normalized.strip_prefix("./").unwrap_or(&normalized);
+    let literal = base.join(normalized);
+    let directory = literal.is_dir();
+    let Ok(matcher) = glob::Pattern::new(normalized) else {
+        return Vec::new();
     };
-    let recursive = suffix_glob == "**" || suffix_glob.is_empty();
-    if suffix_glob != "*.json" && !recursive {
-        return Vec::new();
-    }
-    let root = if dir_part.is_empty() {
-        base.to_path_buf()
+    let root = if directory {
+        literal
     } else {
-        base.join(dir_part)
+        let mut root = base.to_path_buf();
+        for part in normalized.split('/') {
+            if part.contains(['*', '?', '[']) {
+                break;
+            }
+            root.push(part);
+        }
+        if root.is_file() {
+            return if root.extension().and_then(|s| s.to_str()) == Some(extension)
+                && is_safe_plugin_path(base, &root)
+            {
+                vec![root]
+            } else {
+                Vec::new()
+            };
+        }
+        root
     };
-    if !root.is_dir() || !is_safe_plugin_path(base, &root) {
-        return Vec::new();
-    }
-    fn collect(base: &Path, dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
+    let wildcard = normalized
+        .split('/')
+        .position(|part| part.contains(['*', '?', '[']));
+    let recursive = directory
+        || normalized.split('/').any(|part| part == "**")
+        || wildcard.is_some_and(|index| normalized.split('/').skip(index).count() > 1);
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..Default::default()
+    };
+    fn collect(
+        base: &Path,
+        dir: &Path,
+        recursive: bool,
+        seen: &mut std::collections::HashSet<PathBuf>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        if !is_safe_plugin_path(base, dir) {
+            return;
+        }
+        let Ok(real) = std::fs::canonicalize(dir) else {
+            return;
+        };
+        if !seen.insert(real) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
+            if !is_safe_plugin_path(base, &path) {
+                continue;
+            }
             if path.is_dir() {
                 if recursive {
-                    if is_safe_plugin_path(base, &path) {
-                        collect(base, &path, recursive, out);
-                    }
+                    collect(base, &path, true, seen, out);
                 }
-            } else if path.extension().and_then(|e| e.to_str()) == Some("json")
-                && is_safe_plugin_path(base, &path)
-            {
+            } else if path.is_file() {
                 out.push(path);
             }
         }
     }
     let mut out = Vec::new();
-    collect(base, &root, recursive, &mut out);
+    collect(base, &root, recursive, &mut Default::default(), &mut out);
+    out.retain(|path| {
+        path.extension().and_then(|s| s.to_str()) == Some(extension)
+            && (directory
+                || path
+                    .strip_prefix(base)
+                    .is_ok_and(|rel| matcher.matches_path_with(rel, options)))
+    });
     out.sort();
+    out.dedup();
     out
+}
+
+pub(crate) fn protocol_paths(pdir: &Path, declaration: Option<&str>) -> Vec<PathBuf> {
+    glob_json_files(pdir, declaration.unwrap_or("protocols"))
 }
 
 /// 简化 glob：展开插件 JS 入口（`js/*.js` 一层或 `js` / `js/**` 整目录递归）。
 fn glob_js_files(base: &Path, pattern: &str) -> Vec<PathBuf> {
-    if !is_safe_manifest_path(pattern) {
-        tracing::warn!("[Plugins] 拒绝越界 JS 路径声明: {}", pattern);
-        return Vec::new();
-    }
-    let pattern = pattern.trim().trim_start_matches("./");
-    let (dir_part, suffix_glob) = match pattern.rsplit_once('/') {
-        Some((d, s)) => (d.to_string(), s.to_string()),
-        None => (String::new(), pattern.to_string()),
-    };
-    let recursive = suffix_glob == "**" || suffix_glob.is_empty();
-    if suffix_glob != "*.js" && !recursive {
-        return Vec::new();
-    }
-    let root = if dir_part.is_empty() {
-        base.to_path_buf()
-    } else {
-        base.join(dir_part)
-    };
-    if !root.is_dir() || !is_safe_plugin_path(base, &root) {
-        return Vec::new();
-    }
-    fn collect(base: &Path, dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if recursive {
-                    if is_safe_plugin_path(base, &path) {
-                        collect(base, &path, recursive, out);
-                    }
-                }
-            } else if path.extension().and_then(|e| e.to_str()) == Some("js")
-                && is_safe_plugin_path(base, &path)
-            {
-                out.push(path);
-            }
-        }
-    }
-    let mut out = Vec::new();
-    collect(base, &root, recursive, &mut out);
-    out.sort();
-    out
+    resource_files(base, pattern, "js")
 }
 
 /// 读取插件的 JS 入口（manifest `js` glob 展开为文件列表）。
@@ -1062,10 +1103,10 @@ pub fn load_provider_presets() -> Vec<ProviderPresetData> {
         let Ok((name, manifest)) = read_manifest(&pdir) else {
             continue;
         };
-        if !is_plugin_enabled(&dir_key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
+        if !is_plugin_enabled(&dir_key) || is_inactive(&dir_key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
         // 信任门禁：未信任插件的供应商预设不合并（内置插件豁免）
         if !BUILTIN_PLUGIN_DIRS.contains(&dir_key.as_str())
-            && trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
+            && trust_status_of(&dir_key, &manifest_fingerprint(&pdir, &manifest)) != "trusted"
         {
             continue;
         }
@@ -1174,9 +1215,9 @@ pub fn load_embedding_provider_presets() -> Vec<EmbeddingProviderPresetData> {
     for pdir in dirs {
         let key = pdir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
         let Ok((name, manifest)) = read_manifest(&pdir) else { continue };
-        if !is_plugin_enabled(key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
+        if !is_plugin_enabled(key) || is_inactive(key) || !missing_requirements(&pdir, &manifest).is_empty() { continue; }
         if !BUILTIN_PLUGIN_DIRS.contains(&key)
-            && trust_status_of(key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
+            && trust_status_of(key, &manifest_fingerprint(&pdir, &manifest)) != "trusted"
         {
             continue;
         }
@@ -1216,11 +1257,20 @@ const AUTHORING_PLUGIN_SKILL: &str =
 
 /// 解析 "major.minor.patch" 版本号（解析失败返回 None，视为不可比较）
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
-    let mut it = v.trim().split('.');
-    let major = it.next()?.parse().ok()?;
-    let minor = it.next().unwrap_or("0").parse().unwrap_or(0);
-    let patch = it.next().unwrap_or("0").parse().unwrap_or(0);
-    Some((major, minor, patch))
+    let parts: Vec<_> = v.trim().split('.').collect();
+    if parts.is_empty()
+        || parts.len() > 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts.get(1).unwrap_or(&"0").parse().ok()?,
+        parts.get(2).unwrap_or(&"0").parse().ok()?,
+    ))
 }
 
 /// 播种单个内置插件的通用实现：不存在或磁盘版本落后时写入完整文件集。
@@ -1335,9 +1385,37 @@ pub fn ensure_builtin_plugins() {
 pub fn upsert_provider_preset(
     preset: ProviderPresetData,
 ) -> Result<(ProviderPresetData, String, bool), String> {
+    let _write = provider_data_lock().lock().unwrap();
     // 确保插件文件存在（不存在则播种、版本过旧则升级——之后统一在其上修改）
     ensure_builtin_plugins();
     upsert_provider_preset_at(&plugins_dir().join(BUILTIN_PLUGIN_DIR), preset)
+}
+
+fn provider_data_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(||Mutex::new(()))
+}
+
+pub fn builtin_provider_presets() -> Result<Vec<ProviderPresetData>, String> {
+    ensure_builtin_plugins();
+    let path = plugins_dir().join(BUILTIN_PLUGIN_DIR).join("providers.json");
+    serde_json::from_str(&std::fs::read_to_string(path).map_err(|error|error.to_string())?).map_err(|error|error.to_string())
+}
+
+/// A long-running verification must not overwrite a preset edited meanwhile.
+pub fn upsert_provider_preset_if_unchanged(preset: ProviderPresetData, expected: &serde_json::Value) -> Result<(ProviderPresetData, String, bool), String> {
+    let _write = provider_data_lock().lock().unwrap();
+    ensure_builtin_plugins();
+    upsert_provider_preset_if_unchanged_at(&plugins_dir().join(BUILTIN_PLUGIN_DIR),preset,expected)
+}
+
+fn upsert_provider_preset_if_unchanged_at(dir: &Path, preset: ProviderPresetData, expected: &serde_json::Value) -> Result<(ProviderPresetData, String, bool), String> {
+    let rows: Vec<ProviderPresetData> = serde_json::from_str(&std::fs::read_to_string(dir.join("providers.json")).map_err(|error|error.to_string())?).map_err(|error|error.to_string())?;
+    let current = rows.into_iter().find(|row|row.id == preset.id).ok_or("预设已被删除，请刷新后重试")?;
+    if serde_json::to_value(&current).map_err(|error|error.to_string())? != *expected {
+        return Err("预设在核对期间被其他操作修改，请刷新后重试".into());
+    }
+    upsert_provider_preset_at(dir, preset)
 }
 
 /// 更新或新增内置 llm-providers 插件中的云端嵌入预设。
@@ -1457,6 +1535,7 @@ pub fn upsert_embedding_model_preset(
 
 /// 从内置供应商插件删除一条 LLM 或嵌入预设；删除的是预设元数据，不触碰凭据。
 pub fn remove_provider_preset(kind: &str, id: &str) -> Result<(String, String), String> {
+    let _write = provider_data_lock().lock().unwrap();
     ensure_builtin_plugins();
     let id = id.trim();
     if id.is_empty() {
@@ -1553,11 +1632,18 @@ fn upsert_provider_preset_at(
     // 写回（美化格式，与播种数据风格一致）
     let new_content = serde_json::to_string_pretty(&rows)
         .map_err(|e| format!("序列化 providers.json 失败: {e}"))?;
-    std::fs::write(&providers_path, new_content)
+    crate::utils::fs::write_atomic(&providers_path, &new_content)
         .map_err(|e| format!("写 {} 失败: {e}", providers_path.display()))?;
 
     // 递增清单版本（磁盘版本高于内置版本 → 播种不会覆盖本次修改）
-    let new_version = bump_plugin_version(&dir.join("plugin.json"))?;
+    let new_version = match bump_plugin_version(&dir.join("plugin.json")) {
+        Ok(version) => version,
+        Err(error) => {
+            crate::utils::fs::write_atomic(&providers_path,&content)
+                .map_err(|restore|format!("{error}；恢复预设失败：{restore}"))?;
+            return Err(error);
+        }
+    };
 
     Ok((preset, new_version, is_new))
 }
@@ -1578,7 +1664,7 @@ fn bump_plugin_version(manifest_path: &Path) -> Result<String, String> {
     manifest["version"] = serde_json::Value::String(new_version.clone());
     let new_content = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("序列化 plugin.json 失败: {e}"))?;
-    std::fs::write(manifest_path, new_content)
+    crate::utils::fs::write_atomic(manifest_path, &new_content)
         .map_err(|e| format!("写 plugin.json 失败: {e}"))?;
     Ok(new_version)
 }
@@ -1615,7 +1701,9 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                     .to_string();
                 let enabled = is_plugin_enabled(&key);
                 let trust = trust_status_of(&key, &fingerprint);
-                let requirements = missing_requirements(&pdir, &manifest);
+                let mut requirements = missing_requirements(&pdir, &manifest);
+                requirements.extend(dependencies::runtime_missing(&manifest));
+                requirements.sort(); requirements.dedup();
                 let snapshot = read_snapshot(&key);
                 let js_missing = !manifest.js.is_empty() && !js_host::is_loaded(&key);
                 let tools_missing = snapshot.as_ref().is_some_and(|snap|expanded_tools(&pdir, &manifest.tools).iter().any(|t|!snap.tools.contains(&t.name)));
@@ -1629,7 +1717,7 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
                 out.push(PluginInventoryEntry {
                     enabled,
                     requirements,
-                    capability_kind: crate::plugin_contributions::contribution_kind(!manifest.tools.is_empty() || !manifest.mcp_servers.is_empty() || !manifest.js.is_empty(), manifest.providers.is_some() || manifest.embeddings.is_some(), !manifest.skills.is_empty()).into(),
+                    capability_kind: crate::plugin_contributions::contribution_kind(!manifest.tools.is_empty() || !manifest.mcp_servers.is_empty() || !manifest.js.is_empty(), manifest.providers.is_some() || manifest.embeddings.is_some() || !protocol_paths(&pdir, manifest.protocols.as_deref()).is_empty(), !manifest.skills.is_empty()).into(),
                     skills: skill_names,
                     tools: tool_names,
                     mcp_servers: server_ids,
@@ -1685,140 +1773,57 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
 /// [`load_all_tools`]——它依赖 `register_builtin_tools` 先完成（防影子化
 /// 校验才有效），时点在 initialize()。
 pub fn load_all(skill_service: &SkillService, mcp_manager: &McpManager) -> PluginLoadReport {
-    let dir = plugins_dir();
-    if !dir.exists() {
-        // 首次运行创建目录，用户放入插件即生效（下次启动装载）
-        let _ = std::fs::create_dir_all(&dir);
-        return PluginLoadReport::default();
-    }
-    let mut report = PluginLoadReport::default();
-
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(err) => {
-            tracing::warn!("[Plugins] 读取插件目录 {} 失败: {err}", dir.display());
-            return report;
-        }
+    let _ = std::fs::create_dir_all(plugins_dir());
+    inactive_plugins().lock().unwrap().clear();
+    invalidate_fingerprint_cache();
+    let (directories, skipped) = ordered_plugin_dirs();
+    let mut report = PluginLoadReport {
+        skipped,
+        ..Default::default()
     };
-    // 目录名排序保证装载顺序稳定（glob 冲突时先到先得）
-    let mut plugin_dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    plugin_dirs.sort();
-
-    for pdir in plugin_dirs {
-        if !pdir.join("plugin.json").exists() {
+    for directory in directories {
+        let key = directory.file_name().unwrap().to_string_lossy();
+        if !is_plugin_enabled(&key) {
             continue;
         }
-        let manifest = match read_manifest(&pdir) {
-            Ok((_, m)) => m,
-            Err((name, reason)) => {
-                report.skipped.push(format!("{name}: {reason}"));
+        match lifecycle::prepare(&key, false)
+            .and_then(|prepared| lifecycle::start(prepared, skill_service, mcp_manager))
+        {
+            Ok(loaded) => {
+                report.plugins.extend(loaded.plugins);
+                report.skills.extend(loaded.skills);
+                report.mcp_servers.extend(loaded.mcp_servers);
+                report.protocols.extend(loaded.protocols);
+                report.skipped.extend(loaded.skipped);
+            }
+            Err(error) => report.skipped.push(format!("{key}: {error}")),
+        }
+    }
+    // Remember enabled dependents blocked at startup, including after restarting
+    // with their dependency disabled. They can recover when it becomes available.
+    if let Ok(entries) = std::fs::read_dir(plugins_dir()) {
+        for entry in entries.flatten() {
+            let pdir = entry.path();
+            let key = entry.file_name().to_string_lossy().into_owned();
+            if !valid_plugin_dir_name(&key)
+                || !is_plugin_enabled(&key)
+                || read_snapshot(&key).is_some()
+            {
                 continue;
             }
-        };
-        let plugin_name = manifest.name.clone();
-        let dir_key = pdir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-
-        if !is_plugin_enabled(&dir_key) { continue; }
-        let missing = missing_requirements(&pdir, &manifest);
-        if !missing.is_empty() { report.skipped.push(format!("{plugin_name}: {}", missing.join("；"))); continue; }
-        // 信任门禁：未信任/清单已变更的插件不装载任何贡献（MCP 声明会执行
-        // 本地命令、工具会执行 PowerShell——投放文件不等于授权执行）
-        let fingerprint = cached_fingerprint(&pdir, &manifest);
-        let trust = trust_status_of(&dir_key, &fingerprint);
-        if trust != "trusted" {
-            report.skipped.push(format!(
-                "{plugin_name}: 未信任（{trust}），技能/工具/MCP 未装载——请在设置 → 插件页信任后重载"
-            ));
-            continue;
-        }
-
-        // 贡献点 1：技能（glob 展开相对插件目录，命名空间注册，同名原子替换幂等）
-        let mut registered_skills = Vec::new();
-        for (skill_name, description, keywords, body) in expanded_skills(&pdir, &plugin_name, &manifest.skills) {
-            skill_service.replace_or_register(
-                crate::skills::Skill::global(skill_name.clone(), description, body)
-                    .with_keywords(keywords),
-            );
-            report.skills.push(skill_name.clone());
-            registered_skills.push(skill_name);
-        }
-
-        // 贡献点 2：MCP servers（按插件归属合并，用户手配优先）
-        let added = mcp_manager.merge_plugin_servers(&manifest.mcp_servers, &plugin_name);
-        report.mcp_servers.extend(added.iter().cloned());
-
-        // 记录贡献快照（更新/卸载时按快照撤销，防旧版本贡献残留）
-        store_snapshot(
-            &dir_key,
-            PluginContribSnapshot {
-                skills: registered_skills,
-                tools: read_snapshot(&dir_key).map(|s| s.tools).unwrap_or_default(),
-                mcp_ids: added,
-                js: read_snapshot(&dir_key).map(|s| s.js).unwrap_or(false),
-            },
-        );
-
-        report.plugins.push(plugin_name.clone());
-        tracing::info!(
-            "[Plugins] 装载插件 {} v{}（{}）：{} 条技能声明、{} 条工具声明、{} 个 MCP server 声明",
-            plugin_name,
-            manifest.version,
-            manifest.description,
-            manifest.skills.len(),
-            manifest.tools.len(),
-            manifest.mcp_servers.len()
-        );
-    }
-
-    // 贡献点 5：JS 插件（boa 宿主装载，ctx.provider 贡献动态协议，
-    // ctx.skill / ctx.mcp 贡献在此注册进 SkillService / McpManager；
-    // ctx.tool 贡献的工具注册在 [`load_all_tools`]——须等内置工具注册完成，
-    // 防影子化校验才有效）
-    let js_report = js_host::load_all_js();
-    report.protocols.extend(js_report.protocols);
-    for (plugin, full_name, description, body) in &js_report.skills {
-        skill_service.replace_or_register(crate::skills::Skill::global(
-            full_name.clone(),
-            description.clone(),
-            body.clone(),
-        ));
-        report.skills.push(full_name.clone());
-        // 把 JS 技能并入对应插件快照（技能按命名空间前缀撤销，此处补记全名）
-        if let Some(key) = js_report.plugin_keys.get(plugin) {
-            let mut snap = read_snapshot(key).unwrap_or_default();
-            if !snap.skills.contains(full_name) {
-                snap.skills.push(full_name.clone());
-            }
-            snap.js = true;
-            store_snapshot(key, snap);
-        }
-    }
-    for (plugin, config) in &js_report.mcp {
-        let added = mcp_manager.merge_plugin_servers(std::slice::from_ref(config), plugin);
-        report.mcp_servers.extend(added.iter().cloned());
-        if let Some(key) = js_report.plugin_keys.get(plugin) {
-            let mut snap = read_snapshot(key).unwrap_or_default();
-            for id in &added {
-                if !snap.mcp_ids.contains(id) {
-                    snap.mcp_ids.push(id.clone());
+            if let Ok((_, manifest)) = read_manifest(&pdir) {
+                if let Some(dependency) = manifest.requirements.plugins.keys().min() {
+                    if !missing_requirements(&pdir, &manifest).is_empty()
+                        || !dependencies::runtime_missing(&manifest).is_empty()
+                    {
+                        inactive_plugins()
+                            .lock()
+                            .unwrap()
+                            .insert(key, Some(dependency.clone()));
+                    }
                 }
             }
-            snap.js = true;
-            store_snapshot(key, snap);
         }
-    }
-    // JS 工具（ctx.tool）不在此注册：load_all 阶段 ToolSystem 尚未注册内置
-    // 工具，防影子化校验无效——统一延后到 [`load_all_tools`]
-    for skip in &js_report.skipped {
-        report.skipped.push(format!("js: {skip}"));
     }
     set_last_report(&report);
     report
@@ -1831,23 +1836,14 @@ pub fn load_all(skill_service: &SkillService, mcp_manager: &McpManager) -> Plugi
 /// 自建工具在本函数之后装载，与插件工具同名时自建覆盖插件（一等公民优先）。
 /// 返回 `plugin/tool` 形式的展示名列表。
 pub fn load_all_tools(tool_system: &ToolSystem) -> Vec<String> {
-    let dir = plugins_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
     let mut loaded: Vec<String> = Vec::new();
     let mut all_registered: Vec<String> = Vec::new();
-    let mut plugin_dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
-    plugin_dirs.sort();
+    let (plugin_dirs, _) = ordered_plugin_dirs();
     for pdir in plugin_dirs {
         if !pdir.is_dir() || !pdir.join("plugin.json").exists() {
             continue;
         }
-        let Ok((plugin_name, manifest)) = read_manifest(&pdir) else {
+        let Ok((_, manifest)) = read_manifest(&pdir) else {
             continue;
         };
         // 信任门禁：与 load_all 同一规则（未信任插件的工具不注册）
@@ -1856,28 +1852,21 @@ pub fn load_all_tools(tool_system: &ToolSystem) -> Vec<String> {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        if !is_plugin_enabled(&dir_key) || !missing_requirements(&pdir, &manifest).is_empty() || trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted" {
-            tracing::warn!(
-                "[Plugins] 插件 {plugin_name} 未信任（清单可能已变更），工具未注册"
-            );
+        let Some(snapshot) = read_snapshot(&dir_key) else {
+            continue;
+        };
+        let plugin_name = snapshot.name.clone();
+        if read_snapshot(&dir_key).is_none()
+            || !is_plugin_enabled(&dir_key)
+            || !missing_requirements(&pdir, &manifest).is_empty()
+            || trust_status_of(&dir_key, &cached_fingerprint(&pdir, &manifest)) != "trusted"
+        {
+            tracing::warn!("[Plugins] 插件 {plugin_name} 未信任（清单可能已变更），工具未注册");
             continue;
         }
         let mut registered_names = Vec::new();
-        let defs = expanded_tools(&pdir, &manifest.tools);
-        // AST 审计批量过检（一个 PS 进程处理本插件全部工具；不可用即整批拒绝）
-        let scripts: Vec<String> = defs.iter().map(|d| d.script.clone()).collect();
-        let audits = match crate::tools::ps_audit::audit_scripts_blocking(&scripts) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("[Plugins] 插件 {plugin_name} 工具审计不可用，全部跳过: {e}");
-                push_diag_event(format!(
-                    "插件 {plugin_name} 工具审计子系统不可用，{n} 个工具被跳过: {e}",
-                    n = scripts.len()
-                ));
-                continue;
-            }
-        };
-        for (def, audit) in defs.into_iter().zip(audits) {
+        let defs = snapshot.tool_definitions;
+        for def in defs.iter().cloned() {
             if tool_system.has_tool(&def.name) {
                 tracing::warn!(
                     "[Plugins] 插件 {} 工具「{}」与已注册工具重名，跳过",
@@ -1888,14 +1877,6 @@ pub fn load_all_tools(tool_system: &ToolSystem) -> Vec<String> {
                     "插件 {plugin_name} 工具「{}」与已注册工具重名，跳过（不得影子化）",
                     def.name
                 ));
-                continue;
-            }
-            if let Some(summary) = audit.summary() {
-                tracing::warn!(
-                    "[Plugins] 插件 {plugin_name} 工具「{}」审计未通过，跳过: {}",
-                    def.name,
-                    summary.replace('\n', " | ")
-                );
                 continue;
             }
             let name = def.name.clone();
@@ -1940,7 +1921,12 @@ pub fn load_all_tools(tool_system: &ToolSystem) -> Vec<String> {
             continue;
         };
         tool_system.register_tool_with_owner(
-            std::sync::Arc::new(js_host::JsPluginTool::new(plugin.clone(), name.clone(), description, params)),
+            std::sync::Arc::new(js_host::JsPluginTool::new(
+                plugin.clone(),
+                name.clone(),
+                description,
+                params,
+            )),
             Some(format!("plugin:{plugin}")),
         );
         loaded.push(format!("{plugin}/{name}"));
@@ -2020,13 +2006,9 @@ async fn unload_contributions(
         skill_names.sort();
         skill_names.dedup();
         for name in skill_names.iter().rev() {
-            removed_skills.extend(skill_service.remove_by_prefix(name));
+            if skill_service.remove_exact(name) { removed_skills.push(name.clone()); }
         }
-        let owners = if ns == dir_name {
-            vec![format!("plugin:{ns}")]
-        } else {
-            vec![format!("plugin:{ns}"), format!("plugin:{dir_name}")]
-        };
+        let owners = vec![format!("plugin:{}",snap.name)];
         for name in &snap.tools {
             for owner in &owners {
                 if tool_system.unregister_tool_if_owner(name, owner) {
@@ -2035,13 +2017,14 @@ async fn unload_contributions(
             }
         }
         for id in &snap.mcp_ids {
-            if mcp_manager.remove_server(id).await.is_ok() {
-                removed_servers.push(id.clone());
-            }
+            let owned = mcp_manager.load_configs().into_iter().any(|config|config.id == *id && config.source_plugin.as_deref() == Some(snap.name.as_str()));
+            if owned && mcp_manager.remove_server(id).await.is_ok() { removed_servers.push(id.clone()); }
         }
+        removed_servers.extend(mcp_manager.remove_plugin_servers(&snap.name).await);
     }
 
     // ---- 磁盘展开撤销（无快照的历史装载兜底，幂等）----
+    if snap.is_some() { return; }
     if ns != dir_name {
         removed_skills.extend(skill_service.remove_by_prefix(&format!("{ns}/")));
     }
@@ -2091,213 +2074,51 @@ pub async fn load_one(
     authorized: bool,
 ) -> Result<PluginLoadReport, String> {
     let _operation = lifecycle_lock().lock().await;
-    invalidate_fingerprint_cache();
-    let pdir = plugins_dir().join(key);
-    if !valid_plugin_dir_name(key) {
-        return Err(format!("插件目录名非法（仅允许字母/数字/-/_）: {key}"));
-    }
-    if !pdir.is_dir() {
-        return Err(format!("插件目录不存在: {}", pdir.display()));
-    }
-    let (plugin_name, manifest) = read_manifest(&pdir)
-        .map_err(|(_, reason)| format!("插件 {key} 清单不可用: {reason}"))?;
-    let fingerprint = cached_fingerprint(&pdir, &manifest);
-
-    // 信任门禁：授权装载在成功后写入信任；普通重载要求已信任且清单未变更
-    let trust = trust_status_of(key, &fingerprint);
-    if !authorized && trust != "trusted" {
-        return Err(format!(
-            "插件 {key} 未信任或清单已变更（{0}），请先在设置 → 插件页信任后重载",
-            trust
-        ));
-    }
-
-    if !is_plugin_enabled(key) { return Err("插件已禁用，请先启用".into()); }
-    let missing = missing_requirements(&pdir, &manifest);
-    if !missing.is_empty() { return Err(missing.join("；")); }
-    let defs = expanded_tools(&pdir, &manifest.tools);
-    let scripts: Vec<String> = defs.iter().map(|d| d.script.clone()).collect();
-    let scripts_clone = scripts.clone();
-    let audits = tokio::task::spawn_blocking(move || {
-        crate::tools::ps_audit::audit_scripts_blocking(&scripts_clone)
-    })
-    .await
-    .map_err(|e| format!("审计任务执行失败: {e}"))?
-    .map_err(|e| format!("工具脚本审计不可用: {e}"))?;
-    for (def, audit) in defs.iter().zip(&audits) {
-        if let Some(summary) = audit.summary() { return Err(format!("插件工具 {} 脚本审计未通过：{summary}", def.name)); }
-    }
-    // The user has approved this exact fingerprint; JS checks must see it now.
-    if authorized { record_trust(key, &fingerprint)?; invalidate_fingerprint_cache(); }
-    // 重载语义：先撤销旧贡献（含 manifest 已损坏的情况——尽力按目录布局卸载）
-    unload_contributions(skill_service, mcp_manager, tool_system, &pdir).await;
-
-    let mut report = PluginLoadReport::default();
-    report.plugins.push(plugin_name.clone());
-
-    // 技能：命名空间注册（幂等）
-    let mut registered_skills = Vec::new();
-    for (skill_name, description, keywords, body) in
-        expanded_skills(&pdir, &plugin_name, &manifest.skills)
-    {
-        skill_service.replace_or_register(
-            crate::skills::Skill::global(skill_name.clone(), description, body)
-                .with_keywords(keywords),
-        );
-        report.skills.push(skill_name.clone());
-        registered_skills.push(skill_name);
-    }
-
-    // 工具：防影子化（重载路径上旧贡献已卸载，has_tool 命中的只可能是
-    // 内置/自建/其他插件的工具）+ AST 审计批量过检
-    let mut registered_tools = Vec::new();
-    for (def, audit) in defs.into_iter().zip(audits) {
-        if tool_system.has_tool(&def.name) {
-            tracing::warn!(
-                "[Plugins] 插件 {} 工具「{}」与已注册工具重名，跳过",
-                plugin_name,
-                def.name
-            );
-            push_diag_event(format!(
-                "插件 {plugin_name} 工具「{}」与已注册工具重名，跳过（不得影子化）",
-                def.name
-            ));
-            continue;
-        }
-        if let Some(summary) = audit.summary() {
-            return Err(format!(
-                "插件 {plugin_name} 工具「{}」脚本审计未通过：{}",
-                def.name,
-                summary.replace('\n', " | ")
-            ));
-        }
-        let name = def.name.clone();
-        tool_system.register_tool_with_owner(
-            std::sync::Arc::new(DynamicTool::new(def)),
-            Some(format!("plugin:{plugin_name}")),
-        );
-        report.tools.push(name.clone());
-        registered_tools.push(name);
-    }
-
-    // MCP：合并（归属标记）后逐个连接
-    let mut added = mcp_manager.merge_plugin_servers(&manifest.mcp_servers, &plugin_name);
-    let config_by_id: HashMap<String, McpServerConfig> = mcp_manager
-        .load_configs()
-        .into_iter()
-        .map(|c| (c.id.clone(), c))
-        .collect();
-    for id in &added {
-        let Some(config) = config_by_id.get(id).cloned() else { continue };
-        match mcp_manager.add_server(config).await {
-            Ok(tools) => {
-                tracing::info!(
-                    "[Plugins] 插件 {} 的 MCP server [{}] 已连接，注册 {} 个工具",
-                    plugin_name,
-                    id,
-                    tools.len()
-                );
-                report.mcp_servers.push(id.clone());
-            }
-            Err(e) => {
-                report.skipped.push(format!("MCP {id}: {e}"));
-                tracing::warn!("[Plugins] 插件 {} 的 MCP server [{}] 连接失败: {e}", plugin_name, id)
-            }
-        }
-    }
-
-    // JS 贡献：装载（或重载）该插件的 JS 运行时，重建动态协议注册表
-    let js_report = js_host::reload_one(key);
-    report.protocols.extend(js_report.protocols);
-    for (_plugin, full_name, description, body) in &js_report.skills {
-        skill_service.replace_or_register(crate::skills::Skill::global(
-            full_name.clone(),
-            description.clone(),
-            body.clone(),
-        ));
-        report.skills.push(full_name.clone());
-        registered_skills.push(full_name.clone());
-    }
-    for (_plugin, config) in &js_report.mcp {
-        let merged = mcp_manager.merge_plugin_servers(std::slice::from_ref(config), &plugin_name);
-        if let Some(loaded) = merged.first().cloned() {
-            // 合并成功即归属本插件，无论连接成败都记入快照（卸载时按 id 撤销）
-            if !added.contains(&loaded) {
-                added.push(loaded.clone());
-            }
-            if let Some(cfg) = mcp_manager
-                .load_configs()
-                .into_iter()
-                .find(|c| c.id == loaded)
-            {
-                match mcp_manager.add_server(cfg).await {
-                    Ok(_) => report.mcp_servers.push(loaded.clone()),
-                    Err(e) => tracing::warn!(
-                        "[Plugins] 插件 {} 的 JS MCP server [{}] 连接失败: {e}",
-                        plugin_name,
-                        loaded
-                    ),
-                }
-            }
-        }
-    }
-    // JS 工具：注册进 ToolSystem（执行路由回插件 worker），防影子化同文件工具
-    for (plugin, name, description, schema) in &js_report.tools {
-        if tool_system.has_tool(name) {
-            tracing::warn!(
-                "[Plugins] 插件 {} 的 JS 工具「{}」与已注册工具重名，跳过",
-                plugin,
-                name
-            );
-            continue;
-        }
-        let Some(params) = crate::tools::custom_tools::sanitize_parameters(schema) else {
-            tracing::warn!(
-                "[Plugins] 插件 {} 的 JS 工具「{}」参数 schema 非 object，跳过",
-                plugin,
-                name
-            );
-            continue;
-        };
-        tool_system.register_tool_with_owner(
-            std::sync::Arc::new(js_host::JsPluginTool::new(
-                plugin.clone(),
-                name.clone(),
-                description.clone(),
-                params,
-            )),
-            Some(format!("plugin:{plugin_name}")),
-        );
-        report.tools.push(name.clone());
-        registered_tools.push(name.clone());
-    }
-    for skip in &js_report.skipped {
-        report.skipped.push(format!("js: {skip}"));
-    }
-
-    // 装载成功 → 原子替换贡献快照 + 写入信任（授权路径）
-    store_snapshot(
-        key,
-        PluginContribSnapshot {
-            skills: registered_skills,
-            tools: registered_tools,
-            mcp_ids: added,
-            js: !js_report.plugins.is_empty(),
-        },
-    );
-
-
-    tracing::info!(
-        "[Plugins] 插件 {} v{} 已装载：{} 条技能、{} 个工具、{} 个 MCP server、{} 个 JS 协议",
-        plugin_name,
-        manifest.version,
-        report.skills.len(),
-        report.tools.len(),
-        report.mcp_servers.len(),
-        report.protocols.len()
-    );
+    let report =
+        lifecycle::load_locked(skill_service, mcp_manager, tool_system, key, authorized).await?;
+    lifecycle::reconcile(skill_service, mcp_manager, tool_system).await;
     set_last_report(&report);
     Ok(report)
+}
+
+pub async fn set_enabled(
+    skills: &SkillService,
+    mcp: &McpManager,
+    tools: &ToolSystem,
+    key: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let _operation = lifecycle_lock().lock().await;
+    let pdir = plugins_dir().join(key);
+    if !valid_plugin_dir_name(key) || !pdir.is_dir() || !is_safe_plugin_path(&plugins_dir(), &pdir)
+    {
+        return Err("插件目录不存在或越界".into());
+    }
+    set_plugin_enabled(key, enabled)?;
+    if enabled {
+        let (_, manifest) = read_manifest(&pdir).map_err(|(_, error)| error)?;
+        if trust_status_of(key, &manifest_fingerprint(&pdir, &manifest)) == "trusted" {
+            lifecycle::load_locked(skills, mcp, tools, key, false).await?;
+            lifecycle::reconcile(skills, mcp, tools).await;
+        }
+    } else {
+        lifecycle::stop_tree(skills, mcp, tools, key).await;
+    }
+    Ok(())
+}
+
+pub async fn create_plugin(
+    draft: &PluginDraft,
+    skills: &SkillService,
+    mcp: &McpManager,
+    tools: &ToolSystem,
+) -> Result<(PathBuf, PluginLoadReport), String> {
+    let _operation = lifecycle_lock().lock().await;
+    let owned_draft = draft.clone();
+    let directory = tokio::task::spawn_blocking(move ||write_plugin_files(&owned_draft)).await.map_err(|error|error.to_string())??;
+    let report = lifecycle::load_locked(skills, mcp, tools, &draft.name, true).await?;
+    lifecycle::reconcile(skills, mcp, tools).await;
+    Ok((directory, report))
 }
 
 /// 卸载单个插件的运行时贡献（不动磁盘文件；重启后按目录重新装载）。
@@ -2315,9 +2136,7 @@ pub async fn unload_one(
     if BUILTIN_PLUGIN_DIRS.contains(&key) {
         return Err(format!("内置插件 {key} 不可卸载（它是播种体系的一部分）"));
     }
-    unload_contributions(skill_service, mcp_manager, tool_system, &pdir).await;
-    js_host::unload_one(key);
-    drop_snapshot(key);
+    lifecycle::stop_tree(skill_service, mcp_manager, tool_system, key).await;
     Ok(())
 }
 
@@ -2330,7 +2149,10 @@ pub async fn delete_plugin(
 ) -> Result<(), String> {
     let _operation = lifecycle_lock().lock().await;
     let pdir = plugins_dir().join(key);
-    let plugin_name = read_manifest(&pdir).map(|(name,_)|name).unwrap_or_else(|_|key.to_string());
+    let plugin_name = read_manifest(&pdir)
+        .map(|(name, _)| name)
+        .unwrap_or_else(|_| key.to_string());
+    let loaded_name = read_snapshot(key).map(|snapshot| snapshot.name);
     if !valid_plugin_dir_name(key) || !pdir.is_dir() {
         return Err(format!("插件目录不存在: {key}"));
     }
@@ -2339,13 +2161,25 @@ pub async fn delete_plugin(
             "内置插件 {key} 不可删除——改内置的正确方式是复制为新插件再改"
         ));
     }
-    unload_contributions(skill_service, mcp_manager, tool_system, &pdir).await;
-    js_host::unload_one(key);
-    drop_snapshot(key);
+    if !is_safe_plugin_path(&plugins_dir(), &pdir) {
+        return Err("插件目录越界".into());
+    }
+    lifecycle::stop_tree(skill_service, mcp_manager, tool_system, key).await;
     std::fs::remove_dir_all(&pdir)
         .map_err(|e| format!("删除插件目录 {} 失败: {e}", pdir.display()))?;
-    mcp_manager.clear_plugin_overrides(key, None).map_err(|e|e.to_string())?;
-    if plugin_name != key { mcp_manager.clear_plugin_overrides(&plugin_name,None).map_err(|e|e.to_string())?; }
+    mcp_manager
+        .clear_plugin_overrides(key, None)
+        .map_err(|e| e.to_string())?;
+    if plugin_name != key {
+        mcp_manager
+            .clear_plugin_overrides(&plugin_name, None)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(name) = loaded_name.filter(|name| name != &plugin_name && name != key) {
+        mcp_manager
+            .clear_plugin_overrides(&name, None)
+            .map_err(|e| e.to_string())?;
+    }
     tracing::info!("[Plugins] 插件 {key} 已删除");
     Ok(())
 }
@@ -2867,6 +2701,35 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    #[test]
+    fn provider_preset_update_detects_concurrent_edits_and_keeps_disk_intact() {
+        let dir = test_plugin_dir();
+        let original = std::fs::read_to_string(dir.join("providers.json")).unwrap();
+        let row: ProviderPresetData = serde_json::from_str::<Vec<ProviderPresetData>>(&original).unwrap().remove(0);
+        let expected = serde_json::to_value(&row).unwrap();
+        let mut modified = row.clone(); modified.default_model = "concurrent".into();
+        let text = serde_json::to_string(&vec![modified]).unwrap();
+        std::fs::write(dir.join("providers.json"), &text).unwrap();
+        assert!(upsert_provider_preset_if_unchanged_at(&dir,row.clone(),&expected).unwrap_err().contains("其他操作修改"));
+        assert_eq!(std::fs::read_to_string(dir.join("providers.json")).unwrap(),text);
+        std::fs::write(dir.join("providers.json"), &original).unwrap();
+        let (_,version,_) = upsert_provider_preset_if_unchanged_at(&dir,row,&expected).unwrap();
+        assert_eq!(version,"1.2.4");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn provider_preset_update_rolls_back_when_manifest_commit_fails() {
+        let dir = test_plugin_dir();
+        let original = std::fs::read_to_string(dir.join("providers.json")).unwrap();
+        let mut row: ProviderPresetData = serde_json::from_str::<Vec<ProviderPresetData>>(&original).unwrap().remove(0);
+        row.default_model = "new".into();
+        std::fs::write(dir.join("plugin.json"), "invalid JSON").unwrap();
+        assert!(upsert_provider_preset_at(&dir,row).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("providers.json")).unwrap(),original);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

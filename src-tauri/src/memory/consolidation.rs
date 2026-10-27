@@ -318,17 +318,12 @@ impl MemoryConsolidator {
             let entries = entries.trim();
             if !entries.is_empty() {
                 let merged = memory_md::merge_entries(&regions.consolidated_body, entries);
-                match memory_md::write_memory_md(&self.char_id, &merged) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "[MemoryConsolidator] memory.md 增量整理完成：已并入 {pending_lines} 行待整理沉淀"
-                        );
-                        return Ok(true);
-                    }
-                    // 并入后超预算 → 回落全量压缩（它才有权精简正文）
-                    Err(e) => {
-                        tracing::info!("[MemoryConsolidator] 增量并入后超预算（{e}），转全量压缩");
-                    }
+                // Only budget overflow needs a second model call. A concurrent
+                // edit must fail immediately, preserving the newer source.
+                if memory_md::compose_memory_md(&merged).is_ok() {
+                    memory_md::write_memory_md_checked(&self.char_id, &existing, &merged)?;
+                    tracing::info!("[MemoryConsolidator] memory.md 增量整理完成：已并入 {pending_lines} 行待整理沉淀");
+                    return Ok(true);
                 }
             } else {
                 tracing::info!(
@@ -354,7 +349,7 @@ impl MemoryConsolidator {
             return Err("整理 LLM 返回空内容（已保留原笔记）".into());
         }
         // write_memory_md 内部校验预算上限，超限返回 Err → 保留原文件不写
-        memory_md::write_memory_md(&self.char_id, &rewritten)?;
+        memory_md::write_memory_md_checked(&self.char_id, &existing, &rewritten)?;
         Ok(true)
     }
 

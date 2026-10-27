@@ -1,5 +1,7 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/utils/async_ttl_cache.rs"]
+pub mod async_ttl_cache;
 #[path = "../src/world/desktop_state.rs"]
 pub mod desktop_state;
 #[path = "../src/pipeline/presentation_grounding.rs"]
@@ -42,6 +44,10 @@ pub mod coding_memory_queue;
 pub mod desktop_contract;
 #[path = "../src/plugin_contract.rs"]
 pub mod plugin_contract;
+#[path = "../src/provider_preset_updates.rs"]
+pub mod provider_preset_updates;
+#[path = "../src/plugin_advisor_contract.rs"]
+pub mod plugin_advisor_contract;
 #[path = "../src/pipeline/inline_tag_scanner.rs"]
 pub mod inline_tag_scanner;
 #[path = "../src/utils/action_text.rs"]

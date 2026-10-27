@@ -24,8 +24,9 @@
 //! 原生 provider_type 白名单在 factory 层拦截，JS 插件不能劫持原生协议。
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -60,7 +61,7 @@ pub struct JsLoadReport {
 
 /// 宿主单例：目录 key → 该插件的 JS 运行时 + 插件名 → 目录 key 反查表。
 struct Host {
-    runtimes: HashMap<String, JsRuntime>,
+    runtimes: HashMap<String, Arc<JsRuntime>>,
     by_name: HashMap<String, String>,
 }
 
@@ -70,7 +71,14 @@ fn host() -> &'static Mutex<Host> {
     HOST.get_or_init(|| Mutex::new(Host::empty()))
 }
 
-pub fn is_loaded(key: &str) -> bool { host().lock().unwrap().runtimes.contains_key(key) }
+pub fn is_loaded(key: &str) -> bool {
+    host()
+        .lock()
+        .unwrap()
+        .runtimes
+        .get(key)
+        .is_some_and(|rt| rt.is_alive())
+}
 
 impl Host {
     fn empty() -> Self {
@@ -84,19 +92,38 @@ impl Host {
 /// 调用某插件 ctx.tool 注册的处理函数（工具执行入口）。
 ///
 /// 由 JsPluginTool 适配器的 `call` 调用；插件名 → 运行时经宿主反查表定位。
-pub fn call_plugin_tool(plugin: &str, tool_name: &str, args: serde_json::Value) -> Result<String, String> {
-    let h = host().lock().unwrap();
-    let Some(key) = h.by_name.get(plugin) else {
-        return Err(format!("插件 {plugin} 未装载 JS 运行时（可能未信任或已卸载）"));
-    };
-    let Some(rt) = h.runtimes.get(key) else {
-        return Err(format!("插件 {plugin} 的 JS 运行时不存在"));
+pub fn call_plugin_tool(
+    plugin: &str,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> Result<String, String> {
+    let rt = {
+        let h = host().lock().unwrap();
+        let key = h
+            .by_name
+            .get(plugin)
+            .ok_or_else(|| format!("插件 {plugin} 未装载 JS 运行时（可能未信任或已卸载）"))?;
+        h.runtimes
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("插件 {plugin} 的 JS 运行时不存在"))?
     };
     rt.call_tool(tool_name, args)
 }
 
+fn name_for_key(host: &Host, key: &str) -> String {
+    host.by_name
+        .iter()
+        .find(|(_, value)| value.as_str() == key)
+        .map(|(name, _)| name.clone())
+        .unwrap_or_else(|| key.to_string())
+}
+
 /// 把一条 JS Provider 贡献编译为 CompiledSpec（失败告警并跳过该条）。
-fn compile_provider(plugin: &str, reg: &crate::providers::js_runtime::JsProviderReg) -> Option<CompiledSpec> {
+fn compile_provider(
+    plugin: &str,
+    reg: &crate::providers::js_runtime::JsProviderReg,
+) -> Option<CompiledSpec> {
     let spec = match serde_json::from_value::<ProtocolSpec>(reg.spec.clone()) {
         Ok(s) => s,
         Err(e) => {
@@ -140,7 +167,7 @@ fn collect_contributions(
     let mut names: Vec<&String> = host.runtimes.keys().collect();
     names.sort();
     for key in names {
-        let plugin = host.by_name.get(key).cloned().unwrap_or_else(|| key.clone());
+        let plugin = name_for_key(host, key);
         for c in host.runtimes[key].contributions() {
             match c {
                 JsContribution::Provider(reg) => {
@@ -157,8 +184,7 @@ fn collect_contributions(
                     skills.push((plugin.clone(), full, reg.description, reg.body));
                 }
                 JsContribution::Mcp(reg) => {
-                    match serde_json::from_value::<crate::tools::mcp::McpServerConfig>(reg.config)
-                    {
+                    match serde_json::from_value::<crate::tools::mcp::McpServerConfig>(reg.config) {
                         Ok(mut config) => {
                             if config.id.is_empty() {
                                 config.id = reg.id.clone();
@@ -196,6 +222,7 @@ fn rebuild_dynamic(host: &Host) -> Vec<String> {
 }
 
 /// 读取插件目录的 JS 入口（manifest `js` glob 展开），返回 (插件名, 源文件集)。
+#[cfg(test)]
 fn entry_sources(pdir: &std::path::Path) -> Option<(String, Vec<JsSourceFile>)> {
     let (name, files) = crate::plugins::js_plugin_entry(pdir)?;
     let sources: Vec<JsSourceFile> = files
@@ -213,159 +240,199 @@ fn entry_sources(pdir: &std::path::Path) -> Option<(String, Vec<JsSourceFile>)> 
     }
 }
 
-/// 装载单个插件到宿主（替换旧运行时），返回贡献计数。
-fn mount(host: &mut Host, pdir: &std::path::Path, report: &mut JsLoadReport) {
+/// A new worker is fully evaluated and validated before replacing an old one.
+pub(super) struct PreparedJs {
+    key: String,
+    name: String,
+    runtime: Option<Arc<JsRuntime>>,
+    pub report: JsLoadReport,
+}
+
+pub(super) fn prepare_one(pdir: &std::path::Path) -> Result<PreparedJs, String> {
     let key = pdir
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
-    // 重载语义：先关旧运行时（幂等），并清理指向旧 key 的 by_name 映射
-    if let Some(old) = host.runtimes.remove(&key) {
-        old.shutdown();
-        host.by_name.retain(|_, v| *v != key);
-    }
-    let Some((name, sources)) = entry_sources(pdir) else {
-        return; // 未声明 JS 或入口为空：非 JS 插件，正常路径
+    let (name, manifest) = super::read_manifest(pdir).map_err(|(_, error)| error)?;
+    let mut prepared = PreparedJs {
+        key: key.clone(),
+        name: name.clone(),
+        runtime: None,
+        report: JsLoadReport::default(),
     };
-    // 信任门禁：与 plugins::load_all 同一规则（JS 是可执行代码，门禁同强度）
-    if !crate::plugins::is_plugin_dir_trusted(pdir) {
-        report
-            .skipped
-            .push(format!("{name}: 未信任，JS 未装载——请在设置 → 插件页信任后重载"));
+    if manifest.js.is_empty() {
+        return Ok(prepared);
+    }
+    let (_, files) = super::js_plugin_entry(pdir).ok_or("JS 声明没有匹配到入口文件")?;
+    let sources = files
+        .into_iter()
+        .map(|path| {
+            let source = std::fs::read_to_string(&path)
+                .map_err(|error| format!("读取 {} 失败: {error}", path.display()))?;
+            Ok(JsSourceFile { path, source })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let runtime = Arc::new(JsRuntime::new(
+        pdir.to_path_buf(),
+        name.clone(),
+        manifest.version,
+        false,
+    ));
+    runtime.reload_with(sources)?;
+    for contribution in runtime.contributions() {
+        match contribution {
+            JsContribution::Tool(reg) => {
+                if !crate::tools::custom_tools::is_valid_tool_name(&reg.name) {
+                    return Err(format!("JS 工具名无效：{}", reg.name));
+                }
+                let schema = crate::tools::custom_tools::sanitize_parameters(&reg.parameters)
+                    .ok_or_else(|| format!("JS 工具 {} 参数 schema 必须为 object", reg.name))?;
+                prepared
+                    .report
+                    .tools
+                    .push((name.clone(), reg.name, reg.description, schema));
+            }
+            JsContribution::Skill(reg) => {
+                if !crate::skills::is_valid_skill_name(&reg.name) || reg.name.contains('/') {
+                    return Err(format!("JS 技能名无效：{}", reg.name));
+                }
+                prepared.report.skills.push((
+                    name.clone(),
+                    format!("{name}/{}", reg.name),
+                    reg.description,
+                    reg.body,
+                ));
+            }
+            JsContribution::Mcp(reg) => {
+                let mut config: crate::tools::mcp::McpServerConfig =
+                    serde_json::from_value(reg.config)
+                        .map_err(|error| format!("JS MCP {} 配置无效: {error}", reg.id))?;
+                if config.id.is_empty() {
+                    config.id = reg.id.clone();
+                }
+                if config.name.is_empty() {
+                    config.name = reg.id;
+                }
+                config.validate().map_err(|error| error.to_string())?;
+                prepared.report.mcp.push((name.clone(), config));
+            }
+            JsContribution::Provider(reg) => {
+                let spec = compile_provider(&name, &reg)
+                    .ok_or_else(|| format!("JS 协议 {} 编译失败", reg.provider_type))?;
+                prepared
+                    .report
+                    .protocols
+                    .push(spec.spec.provider_type.clone());
+            }
+        }
+    }
+    prepared.report.plugins.push(name.clone());
+    prepared.report.plugin_keys.insert(name, key);
+    prepared.runtime = Some(runtime);
+    Ok(prepared)
+}
+
+fn install_prepared(
+    host: &mut Host,
+    prepared: PreparedJs,
+) -> (JsLoadReport, Option<Arc<JsRuntime>>) {
+    let old = host.runtimes.remove(&prepared.key);
+    host.by_name.retain(|_, key| key != &prepared.key);
+    if let Some(runtime) = prepared.runtime {
+        host.by_name.insert(prepared.name, prepared.key.clone());
+        host.runtimes.insert(prepared.key, runtime);
+    }
+    (prepared.report, old)
+}
+
+pub(super) fn commit_one(prepared: PreparedJs) -> JsLoadReport {
+    let (report, old) = {
+        let mut h = host().lock().unwrap();
+        let result = install_prepared(&mut h, prepared);
+        rebuild_dynamic(&h);
+        result
+    };
+    if let Some(old) = old {
+        old.shutdown();
+    }
+    report
+}
+
+/// Used by local-host tests; production preparation never holds the host lock.
+#[cfg(test)]
+fn mount(host: &mut Host, pdir: &std::path::Path, report: &mut JsLoadReport) {
+    if !super::is_plugin_dir_trusted(pdir) {
+        report.skipped.push("插件未信任".into());
         return;
     }
-    let version = std::fs::read_to_string(pdir.join("plugin.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| "1.0.0".to_string());
-    let rt = JsRuntime::new(pdir.to_path_buf(), name.clone(), version, false);
-    match rt.reload_with(sources) {
-        Ok(_count) => {
-            let contribs = rt.contributions();
-            let mut plugin_skills = Vec::new();
-            let mut plugin_mcp = Vec::new();
-            let mut plugin_tools = Vec::new();
-            for c in &contribs {
-                match c {
-                    JsContribution::Tool(reg) => {
-                        if reg.name.is_empty() {
-                            tracing::warn!("[JsHost] 插件 {name} 的 ctx.tool 贡献缺 name，跳过");
-                            continue;
-                        }
-                        plugin_tools.push((
-                            name.clone(),
-                            reg.name.clone(),
-                            reg.description.clone(),
-                            reg.parameters.clone(),
-                        ));
-                    }
-                    JsContribution::Skill(reg) => {
-                        if !reg.name.is_empty() {
-                            plugin_skills.push((
-                                name.clone(),
-                                format!("{}/{}", reg.namespace, reg.name),
-                                reg.description.clone(),
-                                reg.body.clone(),
-                            ));
-                        }
-                    }
-                    JsContribution::Mcp(reg) => {
-                        if let Ok(mut config) =
-                            serde_json::from_value::<crate::tools::mcp::McpServerConfig>(
-                                reg.config.clone(),
-                            )
-                        {
-                            if config.id.is_empty() {
-                                config.id = reg.id.clone();
-                            }
-                            if config.name.is_empty() {
-                                config.name = reg.id.clone();
-                            }
-                            plugin_mcp.push((name.clone(), config));
-                        } else {
-                            report.skipped.push(format!(
-                                "{name}: ctx.mcp 贡献 `{}` 配置不合法，已跳过",
-                                reg.id
-                            ));
-                        }
-                    }
-                    JsContribution::Provider(_) => {} // rebuild_dynamic 统计
-                }
+    match prepare_one(pdir) {
+        Ok(prepared) => {
+            let (loaded, old) = install_prepared(host, prepared);
+            if let Some(old) = old {
+                old.shutdown();
             }
-            report.skills.extend(plugin_skills);
-            report.mcp.extend(plugin_mcp);
-            report.tools.extend(plugin_tools);
-            report.plugin_keys.insert(name.clone(), key.clone());
-            // 关键修复：登记 插件名 -> 目录 key 映射（by_name 查找入口）。
-            // 必须在此处插入——下一行起 name/key 会被 move 走。
-            host.by_name.insert(name.clone(), key.clone());
-            tracing::info!(
-                "[JsHost] 插件 {name} 的 JS 已装载（{} 条贡献）",
-                contribs.len()
-            );
-            report.plugins.push(name);
-            host.runtimes.insert(key, rt);
+            *report = loaded;
         }
-        Err(e) => {
-            report.skipped.push(format!("{name}: {e}"));
-            rt.shutdown();
-        }
+        Err(error) => report.skipped.push(error),
     }
 }
 
-/// 启动路径：全量装载所有声明了 JS 的插件，重建动态协议注册表。
-///
-/// 由 `plugins::load_all`（AppState 构造期）调用；幂等——旧运行时全部关闭重建。
 pub fn load_all_js() -> JsLoadReport {
     let mut report = JsLoadReport::default();
-    let root = crate::plugins::plugins_dir();
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return report;
+    let old = {
+        let mut h = host().lock().unwrap();
+        h.by_name.clear();
+        std::mem::take(&mut h.runtimes)
     };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join("plugin.json").exists())
-        .collect();
-    dirs.sort();
-
-    let mut h = host().lock().unwrap();
-    for (_, rt) in h.runtimes.drain() {
-        rt.shutdown();
+    for runtime in old.into_values() {
+        runtime.shutdown();
     }
-    h.by_name.clear();
-    for pdir in dirs {
-        mount(&mut h, &pdir, &mut report);
+    for pdir in super::ordered_plugin_dirs().0 {
+        let key = pdir.file_name().unwrap().to_string_lossy();
+        if !super::is_plugin_dir_trusted(&pdir) {
+            continue;
+        }
+        let loaded = reload_one(&key);
+        report.plugins.extend(loaded.plugins);
+        report.protocols.extend(loaded.protocols);
+        report.skills.extend(loaded.skills);
+        report.tools.extend(loaded.tools);
+        report.mcp.extend(loaded.mcp);
+        report.plugin_keys.extend(loaded.plugin_keys);
+        report.skipped.extend(loaded.skipped);
     }
-    report.protocols = rebuild_dynamic(&h);
-    // 文件协议缓存一并失效（运行时装载的插件可能同时带 protocols/*.json）
-    protocol_registry::invalidate();
     report
 }
 
-/// 运行时装载（或重载）单个插件的 JS（`plugins::load_one` 联动入口）。
-///
-/// 插件未声明 JS 时等价于卸载该插件的 JS 贡献（重载语义）。
 pub fn reload_one(key: &str) -> JsLoadReport {
-    let mut report = JsLoadReport::default();
-    let pdir = crate::plugins::plugins_dir().join(key);
-    let mut h = host().lock().unwrap();
-    mount(&mut h, &pdir, &mut report);
-    report.protocols = rebuild_dynamic(&h);
-    protocol_registry::invalidate();
-    report
+    let pdir = super::plugins_dir().join(key);
+    let result = if super::is_plugin_dir_trusted(&pdir) {
+        prepare_one(&pdir)
+    } else {
+        Err(format!("插件 {key} 未信任或依赖不可用"))
+    };
+    match result {
+        Ok(prepared) => commit_one(prepared),
+        Err(error) => JsLoadReport {
+            skipped: vec![error],
+            ..Default::default()
+        },
+    }
 }
 
-/// 卸载单个插件的 JS 运行时贡献（`plugins::unload_one` / `delete_plugin` 联动）。
 pub fn unload_one(key: &str) {
-    let mut h = host().lock().unwrap();
-    if let Some(old) = h.runtimes.remove(key) {
+    let old = {
+        let mut h = host().lock().unwrap();
+        let old = h.runtimes.remove(key);
+        h.by_name.retain(|_, value| value != key);
+        rebuild_dynamic(&h);
+        old
+    };
+    if let Some(old) = old {
         old.shutdown();
     }
-    h.by_name.retain(|_, v| v.as_str() != key);
-    rebuild_dynamic(&h);
+    protocol_registry::remove_plugin(key);
 }
 
 /// 收集当前全部运行时捕获的 ctx.tool 贡献（启动工具注册入口用）。
@@ -379,7 +446,7 @@ pub fn captured_tools() -> Vec<(String, String, String, String, Value)> {
     keys.sort();
     let mut out = Vec::new();
     for key in keys {
-        let plugin = h.by_name.get(key).cloned().unwrap_or_else(|| key.clone());
+        let plugin = name_for_key(&h, key);
         for c in h.runtimes[key].contributions() {
             if let JsContribution::Tool(reg) = c {
                 if reg.name.is_empty() {
@@ -419,7 +486,13 @@ pub struct JsPluginTool {
 impl JsPluginTool {
     pub fn new(plugin: String, name: String, description: String, parameters: Value) -> Self {
         let hint: String = description.chars().take(30).collect();
-        Self { plugin, name, description, parameters, hint }
+        Self {
+            plugin,
+            name,
+            description,
+            parameters,
+            hint,
+        }
     }
 }
 
@@ -457,9 +530,11 @@ impl Tool for JsPluginTool {
         match tokio::task::spawn_blocking(move || call_plugin_tool(&plugin, &name, args)).await {
             Ok(Ok(text)) => ToolResult::success(serde_json::json!({ "output": text })),
             Ok(Err(e)) => ToolResult::standard_error(&e, Some("JsPluginTool"), None),
-            Err(e) => {
-                ToolResult::standard_error(&format!("JS 工具任务执行失败: {e}"), Some("JsPluginTool"), None)
-            }
+            Err(e) => ToolResult::standard_error(
+                &format!("JS 工具任务执行失败: {e}"),
+                Some("JsPluginTool"),
+                None,
+            ),
         }
     }
 
@@ -493,6 +568,102 @@ impl Tool for JsPluginTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_js_reload_checks_content_again_inside_the_fingerprint_cache_ttl() {
+        assert!(
+            std::env::var_os("VIVIAN_TEST_DATA_DIR").is_some(),
+            "Use the isolated extension test runner"
+        );
+        let key = format!("fresh-{}", uuid::Uuid::new_v4().simple());
+        let pdir = super::super::plugins_dir().join(&key);
+        std::fs::create_dir_all(pdir.join("js")).unwrap();
+        std::fs::write(
+            pdir.join("plugin.json"),
+            serde_json::json!({"name":key,"version":"1","js":["js/*.js"]}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            pdir.join("js/main.js"),
+            "ctx.tool('value','fixture',{type:'object'},function(){return 'approved';});",
+        )
+        .unwrap();
+        super::super::authorize_plugin_for_tests(&pdir);
+        let (_, manifest) = super::super::read_manifest(&pdir).unwrap();
+        super::super::cached_fingerprint(&pdir, &manifest);
+        commit_one(prepare_one(&pdir).unwrap());
+        std::fs::write(
+            pdir.join("js/main.js"),
+            "ctx.tool('value','fixture',{type:'object'},function(){return 'changed';});",
+        )
+        .unwrap();
+        let report = reload_one(&key);
+        let output = call_plugin_tool(&key, "value", serde_json::json!({})).unwrap();
+        unload_one(&key);
+        std::fs::remove_dir_all(&pdir).unwrap();
+        super::super::invalidate_fingerprint_cache();
+        assert!(!report.skipped.is_empty());
+        assert_eq!(output, "approved");
+    }
+
+    #[test]
+    fn extension_blocked_plugin_does_not_hold_the_global_host_lock() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let first = format!("lock-a-{}", uuid::Uuid::new_v4().simple());
+        let second = format!("lock-b-{}", uuid::Uuid::new_v4().simple());
+        let make_runtime = |name: &str| {
+            let runtime = Arc::new(JsRuntime::new(
+                std::env::temp_dir(),
+                name.into(),
+                "1".into(),
+                false,
+            ));
+            runtime
+                .reload_with(vec![JsSourceFile {
+                    path: PathBuf::from("fixture.js"),
+                    source: "ctx.tool('value','fixture',{type:'object'},function(){return 'ok';});"
+                        .into(),
+                }])
+                .unwrap();
+            runtime
+        };
+        let first_runtime = make_runtime(&first);
+        let second_runtime = make_runtime(&second);
+        {
+            let mut h = host().lock().unwrap();
+            h.by_name.insert(first.clone(), first.clone());
+            h.runtimes.insert(first.clone(), first_runtime.clone());
+            h.by_name.insert(second.clone(), second.clone());
+            h.runtimes.insert(second.clone(), second_runtime);
+        }
+        let (paused, release) = first_runtime.pause_for_test();
+        paused.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (queued, waiting) = channel();
+        first_runtime.notify_next_tool_for_test(queued);
+        let name = first.clone();
+        let first_call =
+            std::thread::spawn(move || call_plugin_tool(&name, "value", serde_json::json!({})));
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (finished, completed) = channel();
+        let name = second.clone();
+        let second_call = std::thread::spawn(move || {
+            let result = call_plugin_tool(&name, "value", serde_json::json!({}));
+            let _ = finished.send(result);
+        });
+        let result = completed.recv_timeout(Duration::from_secs(1));
+        let _ = release.send(());
+        first_call.join().unwrap().unwrap();
+        second_call.join().unwrap();
+        unload_one(&first);
+        unload_one(&second);
+        assert_eq!(
+            result
+                .expect("Another plugin must execute while the first worker is blocked")
+                .unwrap(),
+            "ok"
+        );
+    }
 
     /// 构造临时 JS 插件目录（plugin.json 声明 js 入口 + 一个贡献 acme 协议的脚本）
     fn acme_plugin_dir() -> PathBuf {
@@ -566,7 +737,10 @@ mod tests {
         // 注册表可按 provider_type 查到（动态层优先于文件层）
         let spec = protocol_registry::spec_for("acme").expect("动态协议应可查询");
         assert_eq!(spec.spec.id, "acme");
-        assert_eq!(spec.spec.request.message_format, crate::providers::spec::MessageFormat::ChatCompletions);
+        assert_eq!(
+            spec.spec.request.message_format,
+            crate::providers::spec::MessageFormat::ChatCompletions
+        );
 
         // 清理全局动态层（测试隔离）
         protocol_registry::replace_dynamic_specs(Vec::new());
@@ -597,7 +771,11 @@ mod tests {
         let mut report = JsLoadReport::default();
         crate::plugins::authorize_plugin_for_tests(&dir);
         mount(&mut h, &dir, &mut report);
-        assert!(report.skipped.is_empty(), "JS 装载不应失败: {:?}", report.skipped);
+        assert!(
+            report.skipped.is_empty(),
+            "JS 装载不应失败: {:?}",
+            report.skipped
+        );
         rebuild_dynamic(&h);
         let spec = protocol_registry::spec_for("acme").expect("acme 动态协议应可查询");
 
@@ -629,7 +807,8 @@ mod tests {
                 }
             }
             let captured = String::from_utf8_lossy(&buf[..read]).to_string();
-            let resp_body = r#"{"choices":[{"message":{"content":"hello from acme"},"finish_reason":"stop"}]}"#;
+            let resp_body =
+                r#"{"choices":[{"message":{"content":"hello from acme"},"finish_reason":"stop"}]}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 resp_body.len(),
@@ -676,12 +855,27 @@ mod tests {
             captured_lower.contains("authorization: bearer sk-acme-test"),
             "应按 spec 鉴权声明发送 Bearer 头，实际: {captured}"
         );
-        assert!(captured.contains(r#""model":"acme-1""#), "model 占位符应替换");
+        assert!(
+            captured.contains(r#""model":"acme-1""#),
+            "model 占位符应替换"
+        );
         // 键序无关断言：serde_json 默认 BTreeMap（字母序），不保证 role 在前
-        assert!(captured.contains(r#""messages":"#), "messages 字段应存在: {captured}");
-        assert!(captured.contains(r#""role":"user""#), "user 角色应存在: {captured}");
-        assert!(captured.contains(r#""content":"hi""#), "消息内容应存在: {captured}");
-        assert!(captured.contains(r#""stream":false"#), "非流式调用 stream=false");
+        assert!(
+            captured.contains(r#""messages":"#),
+            "messages 字段应存在: {captured}"
+        );
+        assert!(
+            captured.contains(r#""role":"user""#),
+            "user 角色应存在: {captured}"
+        );
+        assert!(
+            captured.contains(r#""content":"hi""#),
+            "消息内容应存在: {captured}"
+        );
+        assert!(
+            captured.contains(r#""stream":false"#),
+            "非流式调用 stream=false"
+        );
 
         // 清理
         protocol_registry::replace_dynamic_specs(Vec::new());

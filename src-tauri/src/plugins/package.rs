@@ -131,11 +131,45 @@ fn preview_staged(staged: &StagedPackage) -> Result<serde_json::Value, String> {
         "missing_requirements":missing_requirements(&staged.plugin,&manifest),
         "skills":manifest.skills,"tools":manifest.tools,"mcp_servers":manifest.mcp_servers,"js":manifest.js,
         "requirements":manifest.requirements,
+        "protocols":manifest.protocols,"providers":manifest.providers,"embeddings":manifest.embeddings,
+        "protocol_sources":crate::providers::protocol_registry::plugin_protocol_paths(&staged.plugin).into_iter().map(|path|serde_json::json!({"path":path.strip_prefix(&staged.plugin).unwrap_or(&path).to_string_lossy(),"source":std::fs::read_to_string(&path).unwrap_or_default()})).collect::<Vec<_>>(),
         "tool_definitions":expanded_tools(&staged.plugin,&manifest.tools),
         "js_sources":manifest.js.iter().flat_map(|pattern|glob_js_files(&staged.plugin,pattern)).map(|path|serde_json::json!({"path":path.strip_prefix(&staged.plugin).unwrap_or(&path).to_string_lossy(),"source":std::fs::read_to_string(path).unwrap_or_default()})).collect::<Vec<_>>()}))
 }
 
 pub fn inspect(source: &Path) -> Result<serde_json::Value, String> { preview_staged(&stage(source)?) }
+
+/// Strict discovery check. It reads code for review; never evaluates JS or starts MCP.
+pub fn inspect_recommendation(source: &Path) -> Result<serde_json::Value, String> {
+    let staged = stage(source)?;
+    let raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(staged.plugin.join("plugin.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    crate::plugin_advisor_contract::validate_manifest(&raw)?;
+    let (_, manifest) = read_manifest(&staged.plugin).map_err(|(_,e)|e)?;
+    let mut review_files = Vec::new();
+    for (patterns,kind) in [(&manifest.skills,"skill"),(&manifest.tools,"tool"),(&manifest.js,"js")] {
+      for pattern in patterns {
+        let files = match kind { "js" => glob_js_files(&staged.plugin,pattern), "tool" => glob_json_files(&staged.plugin,pattern), _ => glob_files(&staged.plugin,pattern) };
+        if files.is_empty() { return Err(format!("清单引用的文件不存在：{pattern}")); }
+        review_files.extend(files);
+      }
+    }
+    for path in [&manifest.providers,&manifest.embeddings,&manifest.protocols].into_iter().flatten() {
+        if path.contains("..") { return Err("数据文件路径不可越界".into()); }
+        if !path.contains('*') && !staged.plugin.join(path).exists() { return Err(format!("清单引用的数据不存在：{path}")); }
+        if !path.contains('*') && staged.plugin.join(path).is_file() { review_files.push(staged.plugin.join(path)); }
+    }
+    review_files.extend(crate::providers::protocol_registry::plugin_protocol_paths(&staged.plugin));
+    review_files.sort();review_files.dedup();
+    let total:u64=review_files.iter().map(|path|std::fs::metadata(path).map(|m|m.len()).unwrap_or(u64::MAX)).try_fold(0u64,|a,b|a.checked_add(b)).ok_or("审核文件过大")?;
+    if total > 1024*1024 || review_files.len() > 256 { return Err("候选超过交互审核上限（256 个贡献文件 / 1 MiB），请拆分插件后检查".into()); }
+    let mut preview = preview_staged(&staged)?;
+    let mut missing = missing_requirements(&staged.plugin,&manifest);
+    missing.extend(dependencies::runtime_missing(&manifest));
+    preview["missing_requirements"] = serde_json::json!(missing);
+    preview["inspection"] = serde_json::json!("structure_only_no_code_executed");
+    preview["data_and_guidance"] = serde_json::json!(review_files.iter().filter(|path|path.extension().and_then(|e|e.to_str()) != Some("js")).map(|path|serde_json::json!({"path":path.strip_prefix(&staged.plugin).unwrap_or(path).to_string_lossy(),"content":std::fs::read_to_string(path).unwrap_or_default()})).collect::<Vec<_>>());
+    Ok(preview)
+}
 
 pub async fn install(source: PathBuf, expected_fingerprint: String, skills: &SkillService, mcp: &McpManager, tools: &ToolSystem) -> Result<serde_json::Value, String> {
     let mut staged = tokio::task::spawn_blocking(move ||stage(&source)).await.map_err(|e|e.to_string())??;
@@ -148,8 +182,7 @@ pub async fn install(source: PathBuf, expected_fingerprint: String, skills: &Ski
     let existed = destination.exists();
     if existed {
         if !is_safe_plugin_path(&plugins_dir(), &destination) { return Err("已安装插件目录越界".into()); }
-        unload_contributions(skills, mcp, tools, &destination).await;
-        js_host::unload_one(key); drop_snapshot(key);
+        lifecycle::stop_tree(skills, mcp, tools, key).await;
         if let Err(error) = std::fs::rename(&destination, &backup) {
             drop(operation);
             let _ = load_one(skills,mcp,tools,key,false).await;
@@ -178,6 +211,21 @@ pub async fn install(source: PathBuf, expected_fingerprint: String, skills: &Ski
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_advisor_review_requires_explicit_api_and_existing_files_without_executing_code() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("js")).unwrap();
+        let manifest = serde_json::json!({"api":1,"name":"review-fixture","version":"1","js":["js/*.js"]});
+        std::fs::write(source.path().join("plugin.json"),manifest.to_string()).unwrap();
+        assert!(inspect_recommendation(source.path()).is_err());
+        std::fs::write(source.path().join("js/main.js"),"throw new Error('must never run while inspecting');").unwrap();
+        let preview = inspect_recommendation(source.path()).unwrap();
+        assert_eq!(preview["inspection"],"structure_only_no_code_executed");
+        assert!(preview["js_sources"][0]["source"].as_str().unwrap().contains("must never run"));
+        let mut foreign = manifest; foreign.as_object_mut().unwrap().remove("api");
+        std::fs::write(source.path().join("plugin.json"),foreign.to_string()).unwrap();
+        assert!(inspect_recommendation(source.path()).unwrap_err().contains("api: 1"));
+    }
     #[test]
     fn extension_package_paths_reject_windows_and_zip_escape_forms() {
         for path in ["../outside", "/outside", "C:/outside", "foo:stream", "CON.txt", "folder/../outside", "folder/trailing."] { assert!(!safe_relative(Path::new(path)), "{path}"); }

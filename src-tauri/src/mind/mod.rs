@@ -43,6 +43,7 @@ pub mod mind;
 pub mod reasoning_trace;
 pub mod temporal_context;
 pub mod thought_synthesis;
+pub mod thought_threads;
 pub mod user_cognition;
 pub mod user_goals;
 pub mod working_memory;

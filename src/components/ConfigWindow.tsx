@@ -1,10 +1,11 @@
 import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, sectionTitleStyle } from './settings/SettingsFields';
-import { ROUTING_TASKS, ROUTING_TIERS, NON_LLM_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
+import { ROUTING_TASKS, ROUTING_TIERS, NON_LLM_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, invalidateProviderPresetsCache, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
 export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
 import StickerSettings from './stickers/StickerSettings';
 import OptionalResourceSettings from './settings/OptionalResourceSettings';
 import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
 import LlmProbeResults from './settings/LlmProbeResults';
+import ProviderPresetUpdater, { type UpdateJob } from './settings/ProviderPresetUpdater';
 import { runProbeBatch, type ProbeResult } from './settings/llmProbe';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -802,6 +803,20 @@ const ConfigWindow: React.FC = () => {
   useEffect(() => { contentRef.current?.scrollTo({ top: 0 }); }, [activeTab]);
   // 供应商预设（模型名 datalist 建议）：内置兜底 + llm-providers 插件贡献合并
   const allProviderPresets = useProviderPresets();
+  useEffect(() => {
+    let alive = true;
+    let refreshed = '';
+    const subscription = listen<UpdateJob>('provider-presets:update', ({ payload }) => {
+      const completed = payload.items.filter(item => item.status === 'updated' || item.status === 'verified');
+      const signature = `${payload.id}:${completed.map(item => item.id).join('|')}`;
+      // Keep suggestions current on routing/work-model pages while the LLM page is unmounted.
+      if (alive && completed.length && signature !== refreshed) {
+        refreshed = signature;
+        invalidateProviderPresetsCache();
+      }
+    }).catch(() => undefined);
+    return () => { alive = false; void subscription.then(unlisten => unlisten?.()); };
+  }, []);
   // 主 LLM 未配置时显示初始配置引导弹窗
   const [setupGuideOpen, setSetupGuideOpen] = useState(false);
   const [config, setConfig] = useState<ConfigObject>({});
@@ -930,12 +945,6 @@ const ConfigWindow: React.FC = () => {
   const [llmTestResults, setLlmTestResults] = useState<
     Record<string, ProbeResult>
   >({});
-
-  // 供应商预设核对：一键激活的状态提示（成功=已发出指令、失败=发送错误）
-  const [presetVerifying, setPresetVerifying] = useState(false);
-  const [presetVerifyNotice, setPresetVerifyNotice] = useState<
-    { text: string; error?: boolean } | null
-  >(null);
 
   const get = <T extends ConfigValue>(path: string, fallback: T): T => {
     const parts = path.split('.');
@@ -2337,18 +2346,6 @@ const ConfigWindow: React.FC = () => {
     await invoke('set_config', { key: 'network.timeout', value: timeout });
   };
 
-  // Run verification in a dedicated work session, without companion conversation history.
-  const handleVerifyProviderPresets = async () => {
-    if (presetVerifying) return;
-    setPresetVerifying(true);
-    try {
-      const paths = await invoke<{plugins_dir:string}>('plugin_paths');
-      const session = await invoke<{session_id:string}>('coding_new_session', {charId:getCharacterId(),workingDirectory:`${paths.plugins_dir}/llm-providers`,mode:'standard'});
-      await invoke('coding_send_message',{sessionId:session.session_id,message:'请先使用 use_skill 激活 llm-providers/verify-provider-presets，再联网核对官方 API 文档，更新供应商预设与逐模型、逐协议的思考开关、强度、预算能力及官方来源。保留未核实资料，不修改用户密钥、模型路由或应用源代码。'});
-      setPresetVerifyNotice({text:t('config.update_presets_sent')});
-    } catch(e) {setPresetVerifyNotice({text:t('config.update_presets_failed',{error:String(e)}),error:true});} finally {setPresetVerifying(false);}
-  };
-
   // ===== LLM 一键检测 =====
   // 收集测试目标：主 LLM 配置 + 工作智能体模型预置 + 路由矩阵全部任务
   // （读取当前 UI 值，含未保存的修改）
@@ -3151,60 +3148,8 @@ const ConfigWindow: React.FC = () => {
       case 'ai':
         return (
           <>
-            {/* 标题行右侧：「更新预设」一键激活核对流程（指令发给活跃角色，进度在聊天窗口） */}
-            <div
-              style={{
-                ...sectionTitleStyle,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: 10,
-              }}
-            >
-              <span style={{ flexShrink: 0 }}>{t('config.section_ai')}</span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                {presetVerifyNotice && (
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: presetVerifyNotice.error ? '#f44336' : 'var(--panel-text-secondary)',
-                      fontWeight: 500,
-                      textAlign: 'right',
-                      lineHeight: 1.4,
-                    }}
-                  >
-                    {presetVerifyNotice.text}
-                  </span>
-                )}
-                <button
-                  onClick={handleVerifyProviderPresets}
-                  disabled={presetVerifying}
-                  title={t('config.update_presets_btn')}
-                  style={{
-                    flexShrink: 0,
-                    padding: '4px 12px',
-                    border: '1px solid var(--panel-border)',
-                    borderRadius: 6,
-                    background: 'var(--panel-bg-active)',
-                    color: 'var(--panel-text)',
-                    fontSize: 11,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    fontFamily: 'inherit',
-                    whiteSpace: 'nowrap',
-                    transition: 'border-color 0.15s ease',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--panel-accent)';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.borderColor = 'var(--panel-border)';
-                  }}
-                >
-                  {t('config.update_presets_btn')}
-                </button>
-              </span>
-            </div>
+            <div style={sectionTitleStyle}>{t('config.section_ai')}</div>
+            <ProviderPresetUpdater charId={getCharacterId()} />
             <ProviderSelector pathPrefix="ai" get={get} setNested={setNested} t={t} />
             <datalist id="ai-model-suggestions">
               {(allProviderPresets.find(

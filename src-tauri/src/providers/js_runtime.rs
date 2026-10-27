@@ -17,21 +17,22 @@
 //!   （`Arc<Mutex<Vec<JsContribution>>>`），宿主侧据此注册 provider / tool / skill。
 //! - **生命周期**：`ctx.on('load'|'start'|'stop'|'dispose', fn)` 注册回调，
 //!   由 worker 在对应时机按序触发。
-//! - **工具处理函数**：`ctx.tool(name, desc, schema, handler)` 当前仅捕获声明
-//!   （未注册进 ToolSystem，执行链路未接通）；`handler` 暂存于 worker 侧
-//!   `__handlers` 全局对象，待执行链路接通后启用。
-//! - **HMR**：宿主可选派生 watcher 线程轮询插件目录 mtime，变化时自动重载。
+//! - **工具处理函数**：`ctx.tool` 经 JsPluginTool 注册进 ToolSystem，调用通过
+//!   消息通道回到对应 worker；等待期间不占用全局宿主锁。
+//! - **重载与取消**：显式重载先构造新 worker，再提交替换；VM 指令批次之间
+//!   检查截止时间和取消标记，取消后丢弃运行时上下文。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::future::Future;
 
 use boa_engine::native_function::NativeFunction;
 use boa_engine::object::{JsObject, ObjectInitializer};
 use boa_engine::property::Attribute;
-use boa_engine::{js_string, Context, JsArgs, JsValue, Source};
+use boa_engine::{js_string, Context, JsArgs, JsValue, Script, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -100,6 +101,8 @@ struct HostState {
     logs: Mutex<Vec<String>>,
     last_error: Mutex<Option<String>>,
     version: Mutex<String>,
+    #[cfg(test)]
+    queued_tool: Mutex<Option<Sender<()>>>,
 }
 
 /// 单条 JS 源脚本（插件目录下一个 `.js` 文件）.
@@ -142,6 +145,8 @@ enum Cmd {
     Shutdown {
         respond: Sender<()>,
     },
+    #[cfg(test)]
+    Pause { entered: Sender<()>, release: std::sync::mpsc::Receiver<()> },
 }
 
 /// 宿主侧对外句柄（内部命令通道 + 共享注册表）.
@@ -156,6 +161,9 @@ pub struct JsRuntime {
 struct Worker {
     ctx: Context,
     shared: Arc<HostState>,
+    alive: Arc<AtomicBool>,
+    deadline: Instant,
+    disposing: bool,
     /// 工具处理函数：tool name → callable JsValue。
     tool_handlers: JsObject,
     /// 生命周期回调：event 名 → callable JsValue。
@@ -185,7 +193,7 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
 const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Worker {
-    fn new(shared: Arc<HostState>) -> Self {
+    fn new(shared: Arc<HostState>, alive: Arc<AtomicBool>) -> Self {
         let mut ctx = Context::default();
         {
             let limits = ctx.runtime_limits_mut();
@@ -204,9 +212,29 @@ impl Worker {
             events.clone(),
             Attribute::WRITABLE | Attribute::CONFIGURABLE,
         );
-        Worker { ctx, shared, tool_handlers, events }
+        Worker { ctx, shared, alive, deadline:Instant::now()+LOAD_TIMEOUT, disposing:false, tool_handlers, events }
     }
 
+    /// Yield between VM instruction batches so shutdown and deadlines also stop
+    /// an executing JS loop. A cancelled context is discarded with its worker.
+    fn evaluate(&mut self, source: &str) -> Result<JsValue, String> {
+        let script = Script::parse(Source::from_bytes(source), None, &mut self.ctx)
+            .map_err(|error| error.to_string())?;
+        let mut execution = Box::pin(script.evaluate_async_with_budget(&mut self.ctx, 4096));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        loop {
+            if (!self.disposing && !self.alive.load(Ordering::Relaxed))
+                || Instant::now() >= self.deadline
+            {
+                self.alive.store(false, Ordering::Relaxed);
+                return Err("JS 执行已取消或超时，运行时已关闭".into());
+            }
+            if let std::task::Poll::Ready(result) = execution.as_mut().poll(&mut context) {
+                return result.map_err(|error| error.to_string());
+            }
+        }
+    }
     /// 注入 `ctx` 宿主对象与 `module.exports` 兼容面。
     fn inject_host(&mut self, namespace: &str) -> Result<(), String> {
         let ns = namespace.to_string();
@@ -448,7 +476,8 @@ impl Worker {
         let Some(obj) = handler.as_object() else {
             return Ok(());
         };
-        obj.call(&JsValue::undefined(), &[], &mut self.ctx)
+        self.ctx.register_global_property(js_string!("__plugin_lifecycle"),obj,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        self.evaluate("__plugin_lifecycle()")
             .map(|_| ())
             .map_err(|e| format!("生命周期 {} 回调异常: {e}", event.as_str()))
     }
@@ -482,7 +511,7 @@ impl Worker {
         self.inject_host(namespace)?;
 
         for f in &files {
-            if let Err(e) = self.ctx.eval(Source::from_bytes(f.source.as_bytes())) {
+            if let Err(e) = self.evaluate(&f.source) {
                 let msg = format!("求值 {} 失败: {e}", f.path.display());
                 tracing::error!("[JsRuntime] {msg}");
                 *self.shared.last_error.lock().unwrap() = Some(msg.clone());
@@ -503,21 +532,31 @@ impl Worker {
     ) -> bool {
         match cmd {
             Cmd::Load { files, respond } => {
+                self.deadline = Instant::now()+LOAD_TIMEOUT;
                 let r = self.load(files, namespace);
                 let _ = respond.send(r);
             }
             Cmd::CallTool { name, args, respond } => {
+                self.deadline = Instant::now()+CALL_TOOL_TIMEOUT;
                 let r = self.call_tool(&name, &args);
                 let _ = respond.send(r);
             }
             Cmd::Shutdown { respond } => {
+                self.disposing = true;
+                self.deadline = Instant::now()+Duration::from_secs(1);
+                let _ = self.fire_lifecycle(Lifecycle::Stop);
                 let _ = self.fire_lifecycle(Lifecycle::Dispose);
                 let _ = respond.send(());
                 self.shared.last_error.lock().unwrap().take();
                 return false; // 退出循环
             }
+            #[cfg(test)]
+            Cmd::Pause { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
         }
-        true
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// 在 worker 线程内调用 ctx.tool 注册的处理函数。
@@ -538,7 +577,9 @@ impl Worker {
         };
         let arg_val = JsValue::from_json(args, &mut self.ctx)
             .map_err(|e| format!("js 工具参数反序列化失败: {e}"))?;
-        match fn_obj.call(&JsValue::undefined(), &[arg_val], &mut self.ctx) {
+        self.ctx.register_global_property(js_string!("__plugin_call"),fn_obj,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        self.ctx.register_global_property(js_string!("__plugin_arg"),arg_val,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        match self.evaluate("__plugin_call(__plugin_arg)") {
             Ok(result) => {
                 if result.as_object().is_some_and(|object|boa_engine::object::builtins::JsPromise::from_object(object).is_ok()) {
                     return Err("JS 工具处理函数必须同步返回；外部 I/O 请通过 MCP 或声明式工具注册，不能返回 Promise".into());
@@ -570,6 +611,8 @@ impl Drop for JsRuntime {
 }
 
 impl JsRuntime {
+    pub fn is_alive(&self) -> bool { self.alive.load(Ordering::Relaxed) }
+
     /// 新建宿主。`dir` 为待装载 JS 插件的根目录（递归扫描 `*.js`）；
     /// `namespace` 用于技能命名空间（`<namespace>/<skill>`）；`watch=true` 启动
     /// HMR watcher 线程（文件 mtime 变化自动触发重载）。
@@ -585,10 +628,11 @@ impl JsRuntime {
         std::thread::Builder::new()
             .name(format!("js-plugin-{namespace}"))
             .spawn(move || {
-                let mut worker = Worker::new(shared_w);
+                let mut worker = Worker::new(shared_w,alive_w.clone());
                 loop {
                     match rx.recv() {
                         Ok(cmd) => {
+                            if !alive_w.load(Ordering::Relaxed) && !matches!(&cmd,Cmd::Shutdown { .. }) { break; }
                             if !worker.handle_cmd(cmd, &ns_w) {
                                 break;
                             }
@@ -596,7 +640,7 @@ impl JsRuntime {
                         Err(_) => break,
                     }
                 }
-                let _ = alive_w;
+                alive_w.store(false,Ordering::Relaxed);
             })
             .expect("failed to spawn js worker thread");
 
@@ -648,8 +692,8 @@ impl JsRuntime {
     /// 调用 ctx.tool 注册的处理函数（worker 线程内同步求值）。
     ///
     /// 应答超时（[`CALL_TOOL_TIMEOUT`]）或 worker 已作废（装载超时/关闭后）
-    /// 返回 Err。注意：超时只能「放弃等待」，已卡住的 worker 无法中断——
-    /// 引擎的循环/递归上限使其理论上不会发生；真发生了由重载插件回收。
+    /// 返回 Err。worker 在 VM 指令批次之间检查取消和截止时间；超时后
+    /// 丢弃整个 Context，不再处理排队的调用。引擎原生操作不支持抢占。
     pub fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
         if !self.alive.load(Ordering::Relaxed) {
             return Err(format!("js worker 已关闭，无法调用工具 {name}（请重载插件）"));
@@ -659,6 +703,8 @@ impl JsRuntime {
         self.tx
             .send(cmd)
             .map_err(|e| format!("js worker 已关闭: {e}"))?;
+        #[cfg(test)]
+        if let Some(queued) = self.shared.queued_tool.lock().unwrap().take() { let _ = queued.send(()); }
         match respond_rx.recv_timeout(CALL_TOOL_TIMEOUT) {
             Ok(result) => result,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -697,6 +743,19 @@ impl JsRuntime {
         let _ = self.tx.send(Cmd::Shutdown { respond: tx });
         self.alive.store(false, Ordering::Relaxed);
     }
+
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&self) -> (std::sync::mpsc::Receiver<()>, Sender<()>) {
+        let (entered, waiting) = channel();
+        let (release, released) = channel();
+        self.tx.send(Cmd::Pause { entered, release:released }).unwrap();
+        (waiting,release)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notify_next_tool_for_test(&self, queued: Sender<()>) {
+        *self.shared.queued_tool.lock().unwrap() = Some(queued);
+    }
 }
 
 /// 递归收集目录下全部 `.js` 文件.
@@ -725,6 +784,27 @@ fn collect_js(dir: &PathBuf) -> Vec<JsSourceFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_shutdown_interrupts_running_js_and_releases_the_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(JsRuntime::new(directory.path().to_path_buf(),"cancel".into(),"1".into(),false));
+        runtime.reload_with(vec![JsSourceFile { path:directory.path().join("main.js"),source:"ctx.tool('busy','busy',{type:'object'},function(){ctx.log('info','entered-busy');let sum=0;for(let i=0;i<999999;i++){for(let j=0;j<999999;j++){sum+=Math.sqrt(j);}}return sum;});".into() }]).unwrap();
+        let weak = Arc::downgrade(&runtime.shared);
+        let calling = runtime.clone();
+        let call = std::thread::spawn(move ||calling.call_tool("busy",serde_json::json!({})));
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while !runtime.logs().iter().any(|line|line.contains("entered-busy")) {
+            assert!(Instant::now()<deadline,"Worker did not enter the handler");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        runtime.shutdown(); assert!(call.join().unwrap().is_err()); drop(runtime);
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while weak.upgrade().is_some() {
+            assert!(Instant::now()<deadline,"Cancelled worker retained its context");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     #[test]
     fn extension_api_version_and_async_handler_failures_are_explicit() {

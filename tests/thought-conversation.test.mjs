@@ -37,6 +37,8 @@ if (opportunityStart < 0 || opportunityEnd <= opportunityStart) throw new Error(
 
 await writeFile(path.join(dir, 'src/lib.rs'), `#![allow(dead_code)]
 #[path="${source('mind/conversation.rs')}"] mod conversation;
+#[path="${source('mind/thought_threads.rs')}"] mod thought_threads;
+#[cfg(test)] #[path="${path.join(root, 'tests/fixtures/personal-thought-tests.rs').replaceAll('\\', '/')}"] mod personal_thought_tests;
 #[path="${source('proactive/triggers.rs')}"] mod triggers;
 #[path="${source('proactive/generation_retry.rs')}"] mod generation_retry;
 #[path="${source('world/interaction_guidance.rs')}"] mod interaction_guidance;

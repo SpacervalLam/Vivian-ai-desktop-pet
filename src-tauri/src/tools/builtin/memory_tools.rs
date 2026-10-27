@@ -1375,7 +1375,7 @@ impl Tool for MemoryMdTool {
         "View or manually tidy your long-term memory notes (memory.md). \
          Daily sedimentation is automatic (the system writes after each reply) — you do NOT need to call this to record things. \
          Use only when the user explicitly asks to view or tidy the notes. \
-         Actions: \"read\" (view), \"rewrite\" (full rewrite to merge/deduplicate/trim, must stay concise)."
+         Actions: \"read\" (current notes), \"history\" (local versions), \"read_version\" (historical content), \"rewrite\" (concise full rewrite using the current read revision)."
     }
 
     fn description_in(&self, lang: &str) -> &str {
@@ -1383,7 +1383,7 @@ impl Tool for MemoryMdTool {
             "zh" => "查看或手动整理你的长期记忆笔记（memory.md）。\
                 日常沉淀由系统在每轮回复后自动完成，**不需要调用本工具来记录**。\
                 仅在用户明确要求查看或整理笔记时使用。\
-                action：\"read\" 查看当前笔记 / \"rewrite\" 全文重写（合并去重、删过时，需精简）。",
+                action：\"read\" 查看当前笔记 / \"history\" 查看本地历史 / \"read_version\" 读取旧版本 / \"rewrite\" 基于当前版本精简重写。",
             "ja" => "長期メモ（memory.md）の表示・手動整理。\
                 日常の追記はシステムが毎回の返信後に自動で行うため、記録のために本ツールを呼ぶ必要はない。\
                 ユーザーが明示的に見たい・整理したいと言った時だけ使用。\
@@ -1406,12 +1406,20 @@ impl Tool for MemoryMdTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["read", "rewrite"],
+                    "enum": ["read", "rewrite", "history", "read_version"],
                     "description": "read=view notes, rewrite=full rewrite to merge/deduplicate/trim (must stay concise)"
                 },
                 "content": {
                     "type": "string",
                     "description": "The full rewritten note body (markdown). Required for rewrite."
+                },
+                "expected_revision": {
+                    "type": "string",
+                    "description": "For rewrite, first read the notes and pass the exact revision returned by read."
+                },
+                "revision": {
+                    "type": "string",
+                    "description": "For read_version, pass a commit ID returned by history. history lists recent local Git snapshots."
                 }
             },
             "required": ["action"]
@@ -1425,12 +1433,20 @@ impl Tool for MemoryMdTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["read", "rewrite"],
+                        "enum": ["read", "rewrite", "history", "read_version"],
                         "description": "read=查看 / rewrite=全文重写（合并去重、删过时，需精简）"
                     },
                     "content": {
                         "type": "string",
                         "description": "重写后的完整笔记正文（markdown）。rewrite 必填。"
+                    },
+                    "expected_revision": {
+                        "type": "string",
+                        "description": "rewrite 必填：先 read，再原样传入 read 返回的 revision，避免覆盖新增约定。"
+                    },
+                    "revision": {
+                        "type": "string",
+                        "description": "history 查看最近的本地 Git 历史；read_version 必填 history 返回的 commit，以读取该版本。"
                     }
                 },
                 "required": ["action"]
@@ -1440,12 +1456,20 @@ impl Tool for MemoryMdTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["read", "rewrite"],
+                        "enum": ["read", "rewrite", "history", "read_version"],
                         "description": "read=表示 / rewrite=全文リライト（重複排除・整理、簡潔に）"
                     },
                     "content": {
                         "type": "string",
                         "description": "リライト後の全文（markdown）。rewrite では必須。"
+                    },
+                    "expected_revision": {
+                        "type": "string",
+                        "description": "rewrite 必須：先に read し、返された revision をそのまま渡す。"
+                    },
+                    "revision": {
+                        "type": "string",
+                        "description": "history で履歴を表示。read_version では history が返す commit を指定する。"
                     }
                 },
                 "required": ["action"]
@@ -1456,13 +1480,21 @@ impl Tool for MemoryMdTool {
 
     async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if !matches!(action, "read" | "rewrite") {
-            return ValidationResult::failure("action 必须是 read/rewrite 之一（日常记录由系统自动完成，本工具不提供 append）", 2);
+        if !matches!(action, "read" | "rewrite" | "history" | "read_version") {
+            return ValidationResult::failure("action 必须是 read/rewrite/history/read_version 之一", 2);
+        }
+        if action == "read_version" && input.get("revision").and_then(Value::as_str).is_none_or(|revision|
+            revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit())) {
+            return ValidationResult::failure("read_version 必须携带 history 返回的 commit", 2);
         }
         if action == "rewrite" {
             let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.trim().is_empty() {
                 return ValidationResult::failure("rewrite 时 content 不能为空", 2);
+            }
+            if input.get("expected_revision").and_then(Value::as_str).is_none_or(|revision|
+                revision.len() != 64 || !revision.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return ValidationResult::failure("rewrite 必须携带 read 返回的 expected_revision，请先读取笔记", 2);
             }
         }
         ValidationResult::success(None)
@@ -1490,24 +1522,28 @@ impl Tool for MemoryMdTool {
         let path = crate::memory::memory_md::memory_md_path(&context.char_id);
 
         match action {
-            "read" => match crate::memory::memory_md::read_memory_md_raw(&context.char_id) {
-                Some(md) => ToolResult::standard_success(
+            "read" => match crate::memory::memory_md::read_memory_md_snapshot(&context.char_id) {
+                Ok((Some(md), revision)) => ToolResult::standard_success(
                     &format!("当前长期记忆笔记全文：\n{md}"),
                     Some(json!({
                         "path": path.display().to_string(),
                         "content": md,
+                        "revision": revision,
                     })),
                 ),
-                None => ToolResult::standard_success(
+                Ok((None, revision)) => ToolResult::standard_success(
                     "长期记忆笔记还是空的。值得记的相处约定/承诺/教训/梗会在每轮回复后由系统自动沉淀。",
                     Some(json!({
                         "path": path.display().to_string(),
                         "content": "",
+                        "revision": revision,
                     })),
                 ),
+                Err(error) => ToolResult::standard_error(&error, None, None),
             },
             "rewrite" => {
-                match crate::memory::memory_md::write_memory_md(&context.char_id, content) {
+                let revision = args.get("expected_revision").and_then(Value::as_str).unwrap_or("");
+                match crate::memory::memory_md::write_memory_md_revision(&context.char_id, revision, content) {
                     Ok(()) => ToolResult::standard_success(
                         &format!(
                             "长期记忆笔记已重写为 {} 行。",
@@ -1516,6 +1552,17 @@ impl Tool for MemoryMdTool {
                         Some(json!({ "path": path.display().to_string() })),
                     ),
                     Err(e) => ToolResult::standard_error(&e, None, None),
+                }
+            }
+            "history" | "read_version" => {
+                let revision = if action == "read_version" { args.get("revision").and_then(Value::as_str) } else { None };
+                let character = context.char_id.clone();
+                let revision = revision.map(str::to_owned);
+                match tokio::task::spawn_blocking(move ||
+                    crate::memory::git_history::runtime_character_versions(&character, revision.as_deref())).await {
+                    Ok(Ok(data)) => ToolResult::standard_success("已读取本地记忆历史。恢复历史内容前先 read 当前笔记，再使用当前 expected_revision 执行 rewrite。", Some(data)),
+                    Ok(Err(error)) => ToolResult::standard_error(&error, None, None),
+                    Err(error) => ToolResult::standard_error(&error.to_string(), None, None),
                 }
             }
             _ => ToolResult::standard_error("未知 action", None, None),

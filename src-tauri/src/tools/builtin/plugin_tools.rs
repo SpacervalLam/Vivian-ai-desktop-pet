@@ -587,7 +587,7 @@ impl Tool for CreatePluginTool {
                     },
                     "embeddings": {
                         "type": "array",
-                        "description": "云端嵌入供应商预设：完整 camelCase 行，含 id/provider/endpoint/model/dimension，可选 recommendedFor/verifiedSource",
+                        "description": "厂商级云端嵌入预设：id/provider/endpoint/models:[{model,dimension,maxBatch?,dimensions?}]，可选 recommendedFor/verifiedSource",
                         "items": { "type": "object" }
                     }
                 },
@@ -631,7 +631,7 @@ impl Tool for CreatePluginTool {
         PermissionResult::ask("创建插件需要用户授权：预览卡片将展示全部 MCP 命令行与工具脚本")
     }
 
-    async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
         let name = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -678,33 +678,15 @@ impl Tool for CreatePluginTool {
             },
         };
 
-        // 1. 原子落盘（全量校验内建）
-        let dir = match crate::plugins::write_plugin_files(&draft) {
-            Ok(d) => d,
-            Err(e) => return ToolResult::standard_error(&e, None, None),
-        };
-        // 2. 立即装载（含卸载旧贡献 + 连接新增 MCP server）。
-        //    authorized=true：本工具走 High risk + 用户预览卡片授权，装载即写入
-        //    信任指纹（用户已在卡片上确认过插件内容，无需再到设置页信任一次）
-        let report = match crate::plugins::load_one(
-            &self.skill_service,
-            &self.mcp_manager,
-            &self.tool_system,
-            &draft.name,
-            true,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return ToolResult::standard_error(
-                    &format!("插件已落盘但装载失败: {e}（可在设置 → 插件页排查后重载）"),
-                    None,
-                    None,
-                )
-            }
+        // File replacement and runtime commit share the plugin lifecycle lock.
+        let (dir, report) = match crate::plugins::create_plugin(
+            &draft, &self.skill_service, &self.mcp_manager, &self.tool_system,
+        ).await {
+            Ok(result) => result,
+            Err(error) => return ToolResult::standard_error(&error, None, None),
         };
 
+        crate::plugin_advisor::created(&context.char_id,&context.session_id,&draft.name);
         ToolResult::standard_success(
             &format!(
                 "插件「{}」v{} 已创建并装载（{}）：{} 条技能、{} 个工具、{} 个 MCP server、{} 条 LLM 预设、{} 条嵌入预设。\

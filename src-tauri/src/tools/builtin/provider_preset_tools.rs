@@ -259,7 +259,10 @@ impl Tool for UpdateProviderPresetTool {
         }
     }
 
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        if let Err(error) = crate::commands::provider_presets::guard_write(ctx,"upsert","llm",input["id"].as_str().unwrap_or("")) {
+            return ValidationResult::failure(error,2);
+        }
         // 结构校验交给 parse_preset（与执行路径同源，避免两套规则漂移）
         match parse_preset(input) {
             Ok(_) => ValidationResult::success(None),
@@ -272,7 +275,7 @@ impl Tool for UpdateProviderPresetTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let verified_source = args
             .get("verifiedSource")
             .and_then(|v| v.as_str())
@@ -286,7 +289,9 @@ impl Tool for UpdateProviderPresetTool {
             Err(e) => return ToolResult::standard_error("预设参数不合法", Some(&e), None),
         };
 
-        match crate::plugins::upsert_provider_preset(preset) {
+        let result = crate::commands::provider_presets::upsert_scoped(ctx,&args)
+            .and_then(|scoped|match scoped { Some(result) => Ok(result), None => crate::plugins::upsert_provider_preset(preset) });
+        match result {
             Ok((row, version, is_new)) => {
                 let summary = format!(
                     "供应商预设 {} 已{}（插件版本 {version}，核对日期 {}）；重开设置窗口生效",
@@ -485,10 +490,13 @@ impl Tool for ManageProviderPresetTool {
             "additionalProperties":false
         })
     }
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
         let action = input.get("action").and_then(Value::as_str).unwrap_or("");
         let kind = input.get("kind").and_then(Value::as_str).unwrap_or("");
         let id = input.get("id").and_then(Value::as_str).unwrap_or("").trim();
+        if let Err(error) = crate::commands::provider_presets::guard_write(ctx,action,kind,id) {
+            return ValidationResult::failure(error,2);
+        }
         if !matches!(action, "upsert" | "delete") || !matches!(kind, "llm" | "embedding") || id.is_empty() {
             return ValidationResult::failure("action/kind/id 不合法", 2);
         }
@@ -507,10 +515,13 @@ impl Tool for ManageProviderPresetTool {
             PermissionResult::allow()
         }
     }
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let action = args.get("action").and_then(Value::as_str).unwrap_or("");
         let kind = args.get("kind").and_then(Value::as_str).unwrap_or("");
         let id = args.get("id").and_then(Value::as_str).unwrap_or("");
+        if let Err(error) = crate::commands::provider_presets::guard_write(ctx,action,kind,id) {
+            return ToolResult::standard_error(&error,None,None);
+        }
         if action == "delete" {
             return match crate::plugins::remove_provider_preset(kind, id) {
                 Ok((id, version)) => ToolResult::standard_success(
@@ -522,7 +533,11 @@ impl Tool for ManageProviderPresetTool {
         }
         if kind == "llm" {
             let verified_source = args.get("verifiedSource").and_then(Value::as_str).map(str::to_string);
-            match parse_preset(&args).and_then(|mut p| { p.verified_source = verified_source; crate::plugins::upsert_provider_preset(p) }) {
+            let result = crate::commands::provider_presets::upsert_scoped(ctx,&args).and_then(|scoped|match scoped {
+                Some(result) => Ok(result),
+                None => parse_preset(&args).and_then(|mut p| { p.verified_source = verified_source; crate::plugins::upsert_provider_preset(p) }),
+            });
+            match result {
                 Ok((row, version, is_new)) => ToolResult::standard_success(
                     &format!("LLM 预设 {} 已{}（插件版本 {version}）", row.id, if is_new {"新增"} else {"更新"}),
                     Some(json!({"action":"upsert","kind":"llm","id":row.id,"isNew":is_new,"version":version})),

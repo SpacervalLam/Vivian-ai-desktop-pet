@@ -429,6 +429,22 @@ impl PersonaEngine {
         self.self_profile.render(crate::memory::types::current_timestamp())
     }
 
+    /// Personal perspective for private thinking, including edited interests and learned preferences.
+    /// Keep each section independently bounded so an oversized identity cannot crowd out interests.
+    pub(crate) fn thought_persona_context(&self) -> String {
+        use prompt_render::CharacterSection;
+        let config = self.config_with_card_overlay();
+        let lang = self.get_language();
+        let mut parts = Vec::new();
+        for section in [CharacterSection::Identity, CharacterSection::Personality, CharacterSection::Interests] {
+            let text = prompt_render::resolve_section(&config, section, &lang);
+            parts.push(format!("[{}]\n{}", section.as_key(), text.chars().take(800).collect::<String>()));
+        }
+        if let Some(learned) = self.evolution.render(&lang) { parts.push(learned.chars().take(400).collect()); }
+        parts.push(self.private_self_context().chars().take(400).collect());
+        parts.join("\n\n")
+    }
+
     pub fn dialogue_preferences(&self) -> String {
         let config = self.config_with_card_overlay();
         let mut preferences = prompt_render::render_dialogue_preferences(&config, *self.current_scene_mode.read());

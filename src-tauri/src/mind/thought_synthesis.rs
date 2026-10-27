@@ -39,15 +39,16 @@ fn thought_output_schema() -> serde_json::Value {
                 "maximum": 1.0,
                 "description": "Current desire for contact; this score alone never authorizes speech. conversation_intent decides whether to speak."
             },
-            "conversation_intent": { "type": "string", "enum": ["silent", "greet", "follow_up", "share"] },
-            "conversation_source": { "type": "string", "enum": ["none", "user_message", "world_observation", "scene_event"] },
+            "conversation_intent": { "type": "string", "enum": ["silent", "greet", "follow_up", "share", "ask_user"] },
+            "conversation_source": { "type": "string", "enum": ["none", "user_message", "world_observation", "scene_event", "thought_thread"] },
             "conversation_topic": { "type": "string", "description": "A specific topic worth sharing now, or empty string" },
             "conversation_reason": { "type": "string", "description": "Short communicative purpose explaining why this point fits now; time elapsed alone is insufficient" },
             "conversation_key": { "type": "string", "description": "Stable semantic identity of the point, reused for paraphrases; do not encode the clock or a random id" },
             "conversation_event_id": { "type": "string", "description": "Id of the provided scene event motivating this turn, or empty string; never invent one" },
-            "conversation_evidence": { "type": "string", "description": "Exact short quote from a recent user message or observable world fact; empty for a simple greeting or silence" }
+            "conversation_evidence": { "type": "string", "description": "Exact short quote from the provided source, including a personal_thought record for thought_thread; empty for greeting or silence" },
+            "thread_updates": super::thought_threads::update_schema()
         },
-        "required": ["thought", "social_urge", "conversation_intent", "conversation_source", "conversation_topic", "conversation_evidence", "conversation_reason", "conversation_key", "conversation_event_id"],
+        "required": ["thought", "social_urge", "conversation_intent", "conversation_source", "conversation_topic", "conversation_evidence", "conversation_reason", "conversation_key", "conversation_event_id", "thread_updates"],
         "additionalProperties": false
     })
 }
@@ -226,6 +227,8 @@ fn extract_text_from_possible_json(raw: &str) -> String {
 
 /// LLM 合成所需的上下文数据
 pub struct ThoughtContext<'a> {
+    pub character_id: &'a str,
+    pub persona_context: &'a str,
     /// 工作记忆 Top-3 条目（source tag + content）
     pub working_memory_top: Vec<(WorkingMemorySource, &'a str)>,
     pub dominant_emotion: (EmotionLabel, f64),
@@ -397,14 +400,18 @@ pub async fn synthesize_with_llm(
         crate::pipeline::prompt_modules::tone_rule(language, "current_thought")
     );
     let messages = vec![
-        ChatMessage::system(format!("{system_prompt}\n{}", super::COGNITIVE_EVIDENCE_RULES)),
-        ChatMessage::user(format!("{user_prompt}\n{}", ctx.conversation_context)),
+        ChatMessage::system(format!("{system_prompt}\n{}\n{}", super::COGNITIVE_EVIDENCE_RULES,
+            include_str!("../../prompts/framework/personal_thought.en.md"))),
+        ChatMessage::user(format!("{}\n{user_prompt}\n{}",
+            serde_json::json!({"character_perspective":ctx.persona_context}), ctx.conversation_context)),
     ];
 
     let result = router
         .generate(
             LLMRequest::new("inner_monologue", messages)
                 .with_usage_tag("current_thought")
+                .with_character_id(ctx.character_id.to_string())
+                .with_max_tokens(1800)
                 .with_json_schema(thought_output_schema()),
         )
         .await?;
@@ -438,6 +445,7 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
                     conversation_reason: parsed.conversation_reason.chars().take(160).collect(),
                     conversation_key: parsed.conversation_key.chars().take(100).collect(),
                     conversation_event_id: parsed.conversation_event_id.chars().take(100).collect(),
+                    thread_updates: parsed.thread_updates.into_iter().take(2).collect(),
                 });
             }
         }
@@ -463,6 +471,7 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
         conversation_reason: String::new(),
         conversation_key: String::new(),
         conversation_event_id: String::new(),
+        thread_updates: Vec::new(),
     })
 }
 
@@ -550,6 +559,7 @@ pub async fn refresh_current_thought(
     world_provider: &Arc<WorldStateProvider>,
     language: &str,
     conversation_context: &str,
+    persona_context: &str,
 ) {
     let Some(_permit) = super::conversation::ThoughtRefreshPermit::acquire(&mind.thought_refresh_in_flight) else {
         mind.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -582,6 +592,8 @@ pub async fn refresh_current_thought(
     world_brief.active_goals = mind.user_goals.active_briefs(3);
 
     let ctx = ThoughtContext {
+        character_id: &mind.char_id,
+        persona_context,
         working_memory_top: top_refs,
         dominant_emotion: emotion.dominant(),
         deficient_need: needs.most_deficient(),
@@ -612,11 +624,15 @@ pub async fn refresh_current_thought(
             let world_observations: Vec<&str> = [world_brief.weather_desc.as_deref(),
                 world_brief.foreground_title.as_deref(), world_brief.music_desc.as_deref()]
                 .into_iter().flatten().collect();
-            let events: Vec<super::conversation::ConversationEvent> =
+            let mut events: Vec<super::conversation::ConversationEvent> =
                 serde_json::from_value(conversation_data["observed_conversation_events"].clone()).unwrap_or_default();
-            let opportunity = output.validated_opportunity(&user_quotes, &world_observations, &events,
-                world_brief.user_presence == UserPresence::Present, snapshot_at);
-            mind.set_current_thought(output.thought, output.social_urge, opportunity, context_version);
+            events.extend(serde_json::from_value::<Vec<super::conversation::ConversationEvent>>(
+                conversation_data["personal_thought_opportunities"].clone()).unwrap_or_default());
+            let reflections: Vec<&str> = top_entries.iter().filter(|(source, _, _)| *source == WorkingMemorySource::InnerMonologue)
+                .map(|(_, text, _)| text.as_str()).collect();
+            let grounding = super::thought_threads::ThoughtGrounding { persona: persona_context,
+                user_quotes: &user_quotes, world: &world_observations, scene: &events, reflections: &reflections };
+            mind.set_current_thought(output, &grounding, world_brief.user_presence == UserPresence::Present, snapshot_at, context_version);
         }
         Err(e) => {
             tracing::debug!("[thought_synthesis] LLM 合成失败: {}", e);

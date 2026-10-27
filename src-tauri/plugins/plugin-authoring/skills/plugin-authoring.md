@@ -39,7 +39,7 @@ description: 当要创建或修改 vivian 插件、维护 LLM/嵌入 Provider �
 
 **providers**：供应商预设行（字段 camelCase：id / providerType / endpoint / defaultModel / mainModels / contextWindow / consoleUrl / protocols…）。同 id 按插件目录名字典序先到保留（内置 llm-providers 的预设 id 受保护，其他插件同 id 声明会被跳过）。
 
-**embeddings**：云端嵌入预设行（字段 camelCase：id / provider / endpoint / model / dimension / recommendedFor / verifiedSource）。端点应为 base URL，由运行时统一补 `/embeddings`；不在插件中保存 API Key。
+**embeddings**：厂商级云端嵌入预设行（字段 camelCase：id / provider / endpoint / models:[{model, dimension, maxBatch?, dimensions?}] / recommendedFor / verifiedSource）。端点应为 base URL，由运行时统一补 `/embeddings`；不在插件中保存 API Key。这里使用 models 数组，区别于 manage_provider_preset 单模型更新的 model/dimension 参数。
 
 维护内置 `llm-providers` 的单条预设时不要调用 `create_plugin`：先 `list_provider_presets`，核对官方文档后使用 `manage_provider_preset`。陪伴智能体可直接完成这类结构化维护；创建或整体替换自建插件则委派工作智能体调用 `create_plugin`，删除整个自建插件委派其调用 `delete_plugin`。后两者都必须由用户确认。
 
@@ -54,10 +54,12 @@ description: 当要创建或修改 vivian 插件、维护 LLM/嵌入 Provider �
 ## 装载语义
 
 - 落盘即装载：`create_plugin` 成功后技能/工具下一轮可用，MCP server 立即连接。失败会明确说"已落盘但装载失败"。
-- 手工编辑插件目录（用户直接改文件）后：设置 → 插件页点「重载」，或重启应用。
+- 手工编辑插件目录后，内容指纹变化需要在设置 → 插件页重新审核并信任，再装载；普通重载或重启不会代替授权。
 - 卸载撤销运行时贡献但保留文件；删除两者都移除。
 
 ## 失败排查
+
+能力发现使用 plugin_advisor：先 list 盘点真实缺口，record_gap 仅记录通用能力描述（不含路径、账号或密钥），search 查找公开候选，inspect 检查固定提交的包结构、依赖、脚本、JS 与协议源文。没有合适候选可 propose_build，先讨论是否值得自建。候选不是授权；安装必须用 install_plugin 的具体预览确认，创建必须用 create_plugin 的具体预览确认，每一包单独批准，不通过命令或写文件绕过用户拒绝。DSH/npm 包不是 Vivian 插件，不能凭同名认定兼容。安装/装载成功后仍需真实调用验证，缺账号或依赖时明确标注未验证。
 
 - 装载失败提示"清单不可用"：plugin.json 解析失败——检查 JSON 语法与字段类型。
 - 工具没出现在列表：大概率重名被跳过（防影子化），或脚本含黑名单片段。
