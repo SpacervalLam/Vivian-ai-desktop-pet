@@ -145,18 +145,12 @@ impl MemoryRetrievalStep {
             parts.push(format!("Intent: {}", state.intent));
         }
 
-        let recent: Vec<String> = state
-            .messages
-            .iter()
-            .rev()
-            .take(4)
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if !recent.is_empty() {
-            parts.push(format!("Recent conversation:\n{}", recent.join("\n")));
+        // A resolved query already names its subject. Only unresolved references
+        // need dialogue history; unrelated long answers must not steer recall.
+        if state.resolved_user_input.trim().is_empty()
+            && crate::pipeline::message_context::retrieval_needs_context(&state.user_input) {
+            let recent = crate::pipeline::message_context::recent_retrieval_context(&state.messages);
+            if !recent.is_empty() { parts.push(format!("Recent conversation:\n{recent}")); }
         }
 
         parts.join("\n\n")

@@ -24,6 +24,45 @@ pub fn is_short_followup(input: &str) -> bool {
         && text.chars().all(|c| c.is_ascii_alphanumeric() || c.is_whitespace() || ".-/，,、零一二三四五六七八九十百千万两半分钟小时天周个月年秒个次步以内左右大约".contains(c))
 }
 
+/// Retrieval may borrow history to resolve a reference, but a self-contained
+/// topic must not be diluted by unrelated previous answers or tool output.
+pub fn retrieval_needs_context(input: &str) -> bool {
+    if is_short_followup(input) { return true; }
+    let text = input.trim().to_lowercase();
+    if ["它", "他们", "她们", "这个", "那个", "哪些", "刚才", "刚刚", "之前说的", "上次", "前几次",
+        "前面提到", "你说的", "我说的", "提到的", "这件事", "那件事", "同样的", "继续聊", "接着说", "再说点",
+        "それ", "その", "あれ", "あの", "これ", "この", "さっき", "前回", "続き"]
+        .iter().any(|cue| text.contains(cue)) { return true; }
+    // Token boundaries avoid treating "it" in "Git" or "this" in "thistle"
+    // as a reference. Chinese/Japanese references do not have word boundaries.
+    text.split(|c: char| !c.is_ascii_alphabetic()).any(|word| {
+        ["it", "its", "they", "them", "their", "this", "that", "these", "those", "earlier", "previously"].contains(&word)
+    })
+}
+
+/// A small, role-attributed dialogue window shared by recall and query rewriting.
+/// Host notes, tool receipts and mirror events do not displace actual utterances.
+/// JSON keeps quoted speaker-like prefixes inside the original text field.
+pub fn recent_retrieval_context(history: &[ChatMessage]) -> String {
+    let recent: Vec<_> = history.iter().rev().filter(|message| {
+        matches!(message.role.as_str(), "user" | "assistant") && !message.content.trim().is_empty()
+            && message.meta.as_ref().is_none_or(|meta| meta.source.is_memory_eligible())
+    }).take(4).collect();
+    if recent.is_empty() { return String::new(); }
+    let rows: Vec<_> = recent.into_iter().rev().map(|message| {
+        let context = message.meta.as_ref().and_then(|meta| meta.communication.as_ref());
+        serde_json::json!({
+            "role": message.role,
+            "speaker": context.and_then(|c| c.speaker.as_deref()),
+            "listener": context.and_then(|c| c.listener.as_deref()),
+            "knowledge_source": context.and_then(|c| c.knowledge_source.as_deref()),
+            "text": message.content.chars().take(600).collect::<String>(),
+            "truncated": message.content.chars().nth(600).is_some(),
+        })
+    }).collect();
+    serde_json::Value::Array(rows).to_string()
+}
+
 pub fn split_prompt_context<'a>(prompt: &'a str, user_input: &str, language: &str) -> PromptContext<'a> {
     let Some(after_open) = prompt.trim_start().strip_prefix(STATIC_OPEN) else {
         return PromptContext { system: prompt.trim(), dynamic: None };
