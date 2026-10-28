@@ -29,6 +29,8 @@ jobs:
     env:
       CARGO_BUILD_JOBS: 1
       VIVIAN_TEST_OFFLINE: '0'
+      # Unit tests do not ship the locally generated encrypted resource bundle.
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
