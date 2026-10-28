@@ -207,10 +207,11 @@ tao = { path = "vendor/tao" }
 tempfile = "3"
 
 [profile.release]
-# Prefer a smaller distribution without changing panic/unwind behavior.
+# Keep size optimization while bounding LLVM memory on 16 GB Windows hosts.
+# A single fat-LTO unit exhausts memory as the desktop/tool surface grows.
 opt-level = "s"
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 overflow-checks = false
 strip = "symbols"
 
