@@ -529,7 +529,12 @@ async fn execute_tool_use_inner(
             Some("type") => dependencies.push("type_text"),
             _ => {},
         }
-        if arguments.get("observe_after").and_then(Value::as_bool).unwrap_or(true) { dependencies.push("take_screenshot"); }
+        dependencies.push("computer_state");
+        if arguments.get("observe_after").and_then(Value::as_bool).unwrap_or(true)
+            && arguments.get("include_screenshot").and_then(Value::as_bool).unwrap_or(true) { dependencies.push("take_screenshot"); }
+    } else if tool_name == "computer_state" && arguments.get("action").and_then(Value::as_str)==Some("observe")
+        && arguments.get("include_screenshot").and_then(Value::as_bool).unwrap_or(true) {
+        dependencies.push("take_screenshot");
     } else if matches!(tool_name, "spawn_teammate" | "ralph") {
         dependencies.push("work_delegate");
     }

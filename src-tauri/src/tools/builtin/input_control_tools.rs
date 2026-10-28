@@ -1,6 +1,6 @@
 //! 输入控制工具 - 鼠标点击、键盘快捷键、文本输入
 //!
-//! 通过 PowerShell P/Invoke 调用 user32.dll 模拟鼠标与键盘输入。
+//! 使用持久原生执行器；兼容旧工具的屏幕物理坐标。
 //!
 //! 注意：这些工具具有破坏性（is_destructive = true），需要权限确认。
 
@@ -13,60 +13,17 @@ use crate::tools::types::{
 };
 
 
-async fn run_ps_async(script: &str) -> Result<String, String> {
-    super::desktop_runtime::run_input(script).await
-}
-
-/// user32 P-Invoke 类型定义片段
-const USER32_TYPES: &str = r#"
-Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class U{[DllImport("user32.dll")]public static extern bool SetCursorPos(int x,int y);[DllImport("user32.dll")]public static extern void mouse_event(int dwFlags,int dx,int dy,int cButtons,int dwExtraInfo);[DllImport("user32.dll")]public static extern void keybd_event(byte bVk,byte bScan,int dwFlags,int dwExtraInfo);}';
-"#;
-
-// mouse_event 标志
-const MOUSEEVENTF_LEFTDOWN: i32 = 0x0002;
-const MOUSEEVENTF_LEFTUP: i32 = 0x0004;
-const MOUSEEVENTF_RIGHTDOWN: i32 = 0x0008;
-const MOUSEEVENTF_RIGHTUP: i32 = 0x0010;
-
-/// 把键名解析为 VK 码
-fn key_to_vk(key: &str) -> Option<u8> {
-    let lower = key.to_lowercase();
-    let vk = match lower.as_str() {
-        // 字母
-        "a" => 0x41, "b" => 0x42, "c" => 0x43, "d" => 0x44, "e" => 0x45,
-        "f" => 0x46, "g" => 0x47, "h" => 0x48, "i" => 0x49, "j" => 0x4A,
-        "k" => 0x4B, "l" => 0x4C, "m" => 0x4D, "n" => 0x4E, "o" => 0x4F,
-        "p" => 0x50, "q" => 0x51, "r" => 0x52, "s" => 0x53, "t" => 0x54,
-        "u" => 0x55, "v" => 0x56, "w" => 0x57, "x" => 0x58, "y" => 0x59, "z" => 0x5A,
-        // 数字
-        "0" => 0x30, "1" => 0x31, "2" => 0x32, "3" => 0x33, "4" => 0x34,
-        "5" => 0x35, "6" => 0x36, "7" => 0x37, "8" => 0x38, "9" => 0x39,
-        // 控制键
-        "enter" | "return" => 0x0D,
-        "escape" | "esc" => 0x1B,
-        "backspace" => 0x08,
-        "tab" => 0x09,
-        "space" => 0x20,
-        "ctrl" | "control" => 0x11,
-        "alt" => 0x12,
-        "shift" => 0x10,
-        "win" | "meta" => 0x5B,
-        "up" => 0x26,
-        "down" => 0x28,
-        "left" => 0x25,
-        "right" => 0x27,
-        "home" => 0x24,
-        "end" => 0x23,
-        "pageup" => 0x21,
-        "pagedown" => 0x22,
-        "delete" | "del" => 0x2E,
-        "insert" => 0x2D,
-        "f1" => 0x70, "f2" => 0x71, "f3" => 0x72, "f4" => 0x73,
-        "f5" => 0x74, "f6" => 0x75, "f7" => 0x76, "f8" => 0x77,
-        "f9" => 0x78, "f10" => 0x79, "f11" => 0x7A, "f12" => 0x7B,
-        _ => return None,
+async fn native_action(args: Value, action: &str, ctx: &ToolUseContext) -> ToolResult {
+    let mut args=args;
+    args["action"]=json!(action);
+    let mut action=match serde_json::from_value::<crate::desktop_native::Action>(args) {
+        Ok(action)=>action, Err(error)=>return ToolResult::error(error.to_string()),
     };
-    Some(vk)
+    action.absolute_coordinates=true;
+    if let Err(error)=action.validate() {return ToolResult::error(error);}
+    match crate::desktop_native::request(format!("{}:{}",ctx.char_id,ctx.session_id),crate::desktop_native::Request::Perform(action),super::desktop_runtime::config()).await {
+        Ok(reply)=>ToolResult::success(reply.data),Err(error)=>ToolResult::error(error),
+    }
 }
 
 // ===== click_mouse =====
@@ -174,39 +131,7 @@ impl Tool for ClickMouseTool {
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-        let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-        let button = args.get("button").and_then(|v| v.as_str()).unwrap_or("left");
-
-        let (down, up) = match button {
-            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-        };
-
-        let single = format!(
-            "[U]::mouse_event({},0,0,0,0); [U]::mouse_event({},0,0,0,0);",
-            down, up
-        );
-        // double 执行两次左键点击序列
-        let body = if button == "double" {
-            format!("{} {}", single, single)
-        } else {
-            single
-        };
-        let script = format!(
-            "{}; if (-not [U]::SetCursorPos({},{})) {{ throw 'Cannot move cursor' }}; {}",
-            USER32_TYPES.trim(),
-            x,
-            y,
-            body
-        );
-        match run_ps_async(&script).await {
-            Ok(_) => ToolResult::standard_success(
-                "已点击鼠标",
-                Some(json!({ "x": x, "y": y, "button": button })),
-            ),
-            Err(e) => ToolResult::standard_error("点击鼠标失败", Some(&e), None),
-        }
+        native_action(args,"click",_ctx).await
     }
 
     fn is_read_only(&self) -> bool {
@@ -322,17 +247,8 @@ impl Tool for HotkeyTool {
             Some(k) if !k.is_empty() => k.to_string(),
             _ => return ValidationResult::failure("keys 是必填项", 2),
         };
-        for part in keys.split('+') {
-            let part = part.trim();
-            if part.is_empty() {
-                return ValidationResult::failure("keys 格式错误：'+' 两侧不能为空", 2);
-            }
-            if key_to_vk(part).is_none() {
-                return ValidationResult::failure(
-                    format!("不支持的键名: {}（支持字母/数字/控制键如 enter/escape/up/f1）", part),
-                    500,
-                );
-            }
+        if let Err(error)=crate::desktop_native::parse_keys(&keys) {
+            return ValidationResult::failure(error,2);
         }
         ValidationResult::success(Some(input.clone()))
     }
@@ -342,33 +258,7 @@ impl Tool for HotkeyTool {
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let keys_str = args.get("keys").and_then(|v| v.as_str()).unwrap_or("");
-        let keys: Vec<String> = keys_str
-            .split('+')
-            .map(|s| s.trim().to_string())
-            .collect();
-
-        let vks: Vec<u8> = keys.iter().filter_map(|k| key_to_vk(k)).collect();
-
-        let mut down_script = String::new();
-        let mut up_script = String::new();
-
-        for vk in &vks {
-            down_script.push_str(&format!("[U]::keybd_event({},0,0,0); ", vk));
-        }
-        for vk in vks.iter().rev() {
-            up_script.push_str(&format!("[U]::keybd_event({},0,2,0); ", vk));
-        }
-
-        let script = format!("{}; {} {}", USER32_TYPES.trim(), down_script, up_script);
-
-        match run_ps_async(&script).await {
-            Ok(_) => ToolResult::standard_success(
-                &format!("已按下快捷键 {}", keys.join(" + ")),
-                Some(json!({ "keys": keys })),
-            ),
-            Err(e) => ToolResult::standard_error("快捷键失败", Some(&e), None),
-        }
+        native_action(args,"key",_ctx).await
     }
 
     fn is_read_only(&self) -> bool {
@@ -420,13 +310,13 @@ impl Tool for TypeTextTool {
     }
 
     fn description(&self) -> &str {
-        "Simulate typing a piece of text via the keyboard. text: the text to type (Chinese supported, pasted via clipboard)."
+        "Simulate typing a piece of text via the keyboard. text: the text to type (Unicode supported without changing the clipboard)."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "通过键盘模拟输入一段文本。text：要输入的文本（支持中文，通过剪贴板粘贴）。",
-            "ja" => "キーボードでテキストの入力をシミュレートする。text：入力するテキスト（中国語対応、クリップボード経由で貼り付け）。",
+            "zh" => "通过键盘模拟输入一段文本。text：要输入的文本（支持中文，不修改剪贴板）。",
+            "ja" => "キーボードでテキストの入力をシミュレートする。text：入力するテキスト（Unicode 対応、クリップボードを変更しない）。",
             _ => self.description(),
         }
     }
@@ -482,26 +372,7 @@ impl Tool for TypeTextTool {
     }
 
     async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        // 用剪贴板粘贴的方式输入（支持中文）
-        let escaped = text.replace('\'', "''");
-        let script = format!(
-            r#"Set-Clipboard -Value '{}';
-Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class U{{[DllImport("user32.dll")]public static extern void keybd_event(byte bVk,byte bScan,int dwFlags,int dwExtraInfo);}}';
-[U]::keybd_event(0x11,0,0,0);
-[U]::keybd_event(0x56,0,0,0);
-[U]::keybd_event(0x56,0,2,0);
-[U]::keybd_event(0x11,0,2,0);
-"#,
-            escaped
-        );
-        match run_ps_async(&script).await {
-            Ok(_) => ToolResult::standard_success(
-                "已输入文本",
-                Some(json!({ "text": text, "length": text.chars().count() })),
-            ),
-            Err(e) => ToolResult::standard_error("输入文本失败", Some(&e), None),
-        }
+        native_action(args,"type",_ctx).await
     }
 
     fn is_read_only(&self) -> bool {

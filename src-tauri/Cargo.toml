@@ -1,6 +1,6 @@
 [package]
 name = "vivian"
-version = "1.0.3"
+version = "1.0.4"
 description = "Vivian AI Desktop Pet"
 authors = ["Vivian"]
 edition = "2021"
@@ -149,6 +149,11 @@ windows = { version = "0.61", features = [
     "Win32_Security_Cryptography",
     # 用户活动检测: GetLastInputInfo / GetTickCount
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Accessibility",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_Graphics_Direct3D11", "Win32_Graphics_Direct3D", "Win32_Graphics_Dxgi_Common",
+    "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Graphics_DirectX",
     "Win32_System_SystemInformation",
     # 系统睡眠/唤醒感知: PowerRegisterSuspendResumeNotification
     "Win32_System_Power",

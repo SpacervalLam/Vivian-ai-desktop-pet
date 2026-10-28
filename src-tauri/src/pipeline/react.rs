@@ -583,6 +583,7 @@ impl ReactLoop {
             let body = crate::pipeline::context_compress::truncate_tool_result(&tool_result_to_message_body(r));
             self.messages.push(ChatMessage::tool_result(body, tc_id));
         }
+        self.messages.extend(results.iter().filter_map(ToolCallResult::image_message));
         self.all_results.extend(results.clone());
         self.all_tool_names.extend(calls.iter().map(|c| c.name.clone()));
         results

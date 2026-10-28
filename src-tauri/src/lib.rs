@@ -66,6 +66,7 @@ pub mod plugin_advisor_contract;
 pub mod plugin_advisor;
 pub mod provider_preset_updates;
 pub mod desktop_contract;
+pub mod desktop_native;
 pub mod plugin_contributions;
 pub mod presence;
 pub mod proactive;

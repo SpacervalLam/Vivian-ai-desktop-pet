@@ -46,6 +46,10 @@ async fn wait(
     panic!("Timed out waiting for browser state: {last:?}");
 }
 async fn smoke(app: tauri::AppHandle, base: String) {
+    if std::env::var_os("VIVIAN_BROWSER_COMPUTER_ONLY").is_some() {
+        computer_smoke(&app,&base).await;
+        EXIT_CODE.store(0,std::sync::atomic::Ordering::Relaxed);app.exit(0);return;
+    }
     println!("Checking navigation and profile isolation...");
     let state = wait(&app, |s| s.tabs.first().is_some_and(|t| !t.loading)).await;
     let first = state.active.unwrap();
@@ -843,6 +847,32 @@ async fn agent_lifecycle(app: &tauri::AppHandle, base: &str, first: &str) {
     .unwrap()
     .contains("one"));
 }
+async fn computer_smoke(app:&tauri::AppHandle,base:&str){
+    use serde_json::json;
+    wait(app,|s|s.tabs.first().is_some_and(|t|!t.loading)).await;
+    let created=browser_tool(app,"browser_open_tab",json!({"url":format!("{base}/computer")}),15000).await.unwrap();
+    let created:serde_json::Value=serde_json::from_str(&created).unwrap();
+    let id=created["tab_id"].as_str().unwrap();
+    wait(app,|s|s.tabs.iter().any(|t|t.id==id && !t.loading && t.title=="computer fixture")).await;
+    let tabs=browser_tool(app,"browser_tabs",json!({}),10000).await.unwrap();assert!(tabs.contains(id));
+    let snapshot=browser_tool(app,"browser_snapshot",json!({"tab_id":id}),10000).await.unwrap();
+    let index=|label:&str|snapshot.lines().find(|line|line.contains(label) && line.trim_start().starts_with('[')).and_then(|line|line.split('[').nth(1)).and_then(|s|s.split(']').next()).unwrap_or_else(||panic!("Missing {label}: {snapshot}")).parse::<u64>().unwrap();
+    let select=index("Choice");let hover=index("Hover target");
+    let receipt=browser_tool(app,"browser_select_option",json!({"tab_id":id,"index":select,"value":"b"}),10000).await.unwrap();
+    let receipt:serde_json::Value=serde_json::from_str(&receipt).unwrap();
+    assert_eq!(receipt["operation_completed"],true);assert_eq!(receipt["observation"]["success"],true);
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#chosen"}),10000).await.unwrap().contains("selected-b"));
+    let hovered=browser_tool(app,"browser_hover",json!({"tab_id":id,"index":hover}),10000).await.unwrap();
+    assert!(hovered.contains("operation_completed"));
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#hovered"}),10000).await.unwrap().contains("hover-confirmed"));
+    let image=browser_tool(app,"browser_screenshot",json!({"tab_id":id}),10000).await.unwrap();
+    let image:serde_json::Value=serde_json::from_str(&image).unwrap();assert!(image["image_png_base64"].as_str().unwrap().starts_with("iVBOR"));
+    browser_tool(app,"browser_select_tab",json!({"tab_id":id}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_hover",json!({"tab_id":id,"index":hover}),10000).await.is_err(),"tab selection requires a fresh snapshot");
+    browser_tool(app,"browser_close_tab",json!({"tab_id":id}),10000).await.unwrap();
+    assert!(!browser_tool(app,"browser_tabs",json!({}),10000).await.unwrap().contains(id));
+    println!("PASS: native browser tabs/open/select/close, direct screenshot pixels, select-option, trusted hover, post-action observation and fresh-snapshot binding");
+}
 fn main() {
     let directory =
         std::env::temp_dir().join(format!("vivian-browser-smoke-{}", uuid::Uuid::new_v4()));
@@ -875,6 +905,7 @@ fn main() {
             "/extension" => "<title>extension-base</title>",
             "/account" if input.contains("login-session=synthetic-session") => "<title>fixture account</title><main><p>Logged in as fixture-user</p><label for=comment>Comment</label><input id=comment oninput=\"document.getElementById('typed').textContent=this.value\" onkeydown=\"if(event.key==='Enter')document.getElementById('key').textContent='native-enter'\"><input type=password value=synthetic-password><textarea name=api_key>synthetic-api-key</textarea><p id=typed></p><p id=key></p></main><script>globalThis.vivianCreatePage=()=>()=>({text:'forged page result'});globalThis.vivianPageSessions=new Map()</script>",
             "/account" => "<title>login required</title><main>Please log in</main>",
+            "/computer" => "<title>computer fixture</title><main><label for=choice>Choice</label><select id=choice onchange=\"document.getElementById('chosen').textContent='selected-'+this.value\"><option value=a>A</option><option value=b>B</option></select><button onpointerover=\"document.getElementById('hovered').textContent='hover-confirmed'\">Hover target</button><p id=chosen></p><p id=hovered></p></main>",
             _ => "<title>empty</title>empty",
         };
             // Exceed the snapshot label budget to catch redaction after truncation.

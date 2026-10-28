@@ -1,5 +1,6 @@
 //! Platform-independent desktop operation settings and coordinate contract.
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -118,5 +119,29 @@ mod tests {
         assert_eq!(config.user_idle_ms,DesktopConfig::default().user_idle_ms);
         let bounded=DesktopConfig {user_idle_ms:0,max_yield_wait_ms:u64::MAX,operation_timeout_ms:0}.bounded();
         assert_eq!((bounded.user_idle_ms,bounded.max_yield_wait_ms,bounded.operation_timeout_ms),(250,30000,1000));
+    }
+}
+
+pub fn verify_observation(observation:&serde_json::Value,verify:&serde_json::Value)->serde_json::Value{
+    let property=verify["property"].as_str().unwrap_or("");
+    let actual=if property=="window_title"{observation["window"].get("title").cloned()}else{
+        let matches=observation["accessibility"]["elements"].as_array().map(|items|items.iter().filter(|item|item["automation_id"]==verify["automation_id"]).collect::<Vec<_>>()).unwrap_or_default();
+        if matches.len()!=1{return json!({"passed":false,"reason":"Expected exactly one control with that automation_id","matches":matches.len()});}
+        if matches[0]["password"]==true{return json!({"passed":false,"reason":"Password values are not read or verified"});}
+        matches[0].get(property).filter(|v|!v.is_null()).cloned()
+    };
+    let passed=actual.as_ref().is_some_and(|actual|if verify["contains"]==true{actual.as_str().zip(verify["expected"].as_str()).is_some_and(|(a,b)|a.contains(b))}else{actual==&verify["expected"]});
+    json!({"passed":passed,"property":property,"actual":actual,"expected":verify["expected"],"scope":"requested_postcondition_only"})
+}
+#[cfg(test)] mod verification_tests{
+    use super::*;
+    use serde_json::json;
+    #[test]fn verification_rejects_missing_ambiguous_and_password_values(){
+        let verify=json!({"property":"value","automation_id":"query","expected":"hello"});
+        assert_eq!(verify_observation(&json!({}),&verify)["passed"],false);
+        let control=json!({"automation_id":"query","value":"hello","password":false});
+        assert_eq!(verify_observation(&json!({"accessibility":{"elements":[control.clone()]}}),&verify)["passed"],true);
+        assert_eq!(verify_observation(&json!({"accessibility":{"elements":[control.clone(),control]}}),&verify)["passed"],false);
+        assert_eq!(verify_observation(&json!({"accessibility":{"elements":[{"automation_id":"query","value":"hello","password":true}]}}),&verify)["passed"],false);
     }
 }

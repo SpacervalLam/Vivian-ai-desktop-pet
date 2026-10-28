@@ -394,6 +394,22 @@ fn restore_input_surface(h: &HostRef, id: &str) -> Result<(), String> {
     }
     apply_bounds(h).map_err(|e| e.to_string())
 }
+fn park_render_surface(h:&HostRef,id:&str)->Result<(),String>{
+    let (controller,parent)={
+        let mut host=h.borrow_mut();let parent=host.parked_hwnd;
+        let tab=host.tabs.get_mut(id).ok_or("Tab closed")?;
+        let mut visible=BOOL::default();
+        unsafe{tab.controller.IsVisible(&mut visible)}.map_err(|e|e.to_string())?;
+        if visible.as_bool(){return Ok(());}
+        tab.input_parked=true;(tab.controller.clone(),parent)
+    };
+    unsafe{
+        controller.SetParentWindow(parent).map_err(|e|e.to_string())?;
+        controller.SetBounds(RECT{left:0,top:0,right:1280,bottom:900}).map_err(|e|e.to_string())?;
+        controller.SetIsVisible(true).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
 impl Drop for FocusEmulation {
     fn drop(&mut self) {
         if !self.active {
@@ -513,22 +529,40 @@ async fn run(
     session: &str,
 ) -> Result<String, String> {
     ready(app, op).await?;
+    if name == "browser_tabs" {
+        return main(app,op,|h| {
+            let h=h.borrow();
+            Ok(json!({"tabs":h.state.tabs.iter().map(|t|json!({"id":t.id,"title":t.title,"url":t.url,"loading":t.loading,"active":h.state.active.as_deref()==Some(&t.id)})).collect::<Vec<_>>()}).to_string())
+        }).await;
+    }
+    if matches!(name,"browser_select_tab"|"browser_close_tab") {
+        let id=args["tab_id"].as_str().filter(|s|!s.is_empty()).ok_or("tab_id is required")?.to_string();
+        let close=name=="browser_close_tab";
+        let key=session.to_string();
+        return main(app,op,move |h|{
+            if h.borrow().tab(&id).is_none(){return Err("Tab has closed; list tabs again".into());}
+            operate(&h,if close{BrowserRequest::Close{id:id.clone()}}else{BrowserRequest::Select{id:id.clone()}})?;
+            h.borrow_mut().selections.remove(&key);
+            Ok(json!({"tab_id":id,"operation_completed":true,"goal_verified":false,"next_step":"Read browser_snapshot before input"}).to_string())
+        }).await;
+    }
     if name == "browser_task_tab" {
         return task(app, op, args, false).await;
     }
     if name == "browser_open_tab" {
         let url = http_url(args.get("url").and_then(Value::as_str).ok_or("缺少 url")?)?;
-        main(app, op, move |h| {
+        let id=main(app, op, move |h| {
             operate(
                 &h,
                 BrowserRequest::NewTab {
                     input: url,
                     private: false,
                 },
-            )
+            )?;
+            h.borrow().state.active.clone().ok_or("New tab is unavailable".into())
         })
         .await?;
-        return Ok("已在内嵌浏览器打开页面，请手动完成登录。".into());
+        return Ok(json!({"tab_id":id,"operation_completed":true,"goal_verified":false,"next_step":"Read browser_snapshot; login challenges require the user"}).to_string());
     }
     let key = session.to_string();
     let explicit = args
@@ -536,7 +570,7 @@ async fn run(
         .and_then(Value::as_str)
         .map(str::to_owned);
     let snapshot = name == "browser_snapshot";
-    let needs_snapshot = matches!(name, "browser_click" | "browser_type" | "browser_press");
+    let needs_snapshot = matches!(name, "browser_click" | "browser_type" | "browser_press" | "browser_hover" | "browser_select_option");
     let id = main(app, op, move |h| {
         let h = h.borrow();
         let selection = h.selections.get(&key);
@@ -564,6 +598,27 @@ async fn run(
         Ok(id)
     })
     .await?;
+    if name == "browser_screenshot" {
+        // Hidden/background controllers have no composited capture surface.
+        // Temporarily render under the existing invisible parent, without selecting
+        // the tab or changing the OS foreground window, then restore its layout.
+        let mut surface=FocusEmulation{app:app.clone(),id:id.clone(),active:true};
+        let key=id.clone();
+        main(app,op,move |h|park_render_surface(&h,&key)).await?;
+        let key=id.clone();
+        let read_generation=main(app,op,move |h|Ok(h.borrow().tabs.get(&key).ok_or("Tab closed")?.generation)).await?;
+        let image=cdp(app,op,&id,"Page.captureScreenshot",json!({"format":"png","fromSurface":true,"captureBeyondViewport":false})).await?;
+        let data=image["data"].as_str().filter(|s|!s.is_empty() && s.len()<=24*1024*1024).ok_or("Browser screenshot unavailable or too large")?;
+        let key=id.clone();
+        main(app,op,move |h|{
+            if h.borrow().tabs.get(&key).is_none_or(|t|t.generation!=read_generation){return Err("Page navigated during capture; observe again".into());}
+            Ok(())
+        }).await?;
+        let key=id.clone();
+        main(app,op,move |h|restore_input_surface(&h,&key)).await?;
+        surface.active=false;
+        return Ok(json!({"tab_id":id,"image_png_base64":data,"coordinate_space":"viewport_css_pixels","untrusted":true}).to_string());
+    }
     if name == "browser_bilibili_history" {
         let key = id.clone();
         let url = main(app, op, move |h| {
@@ -669,7 +724,11 @@ async fn run(
     } else {
         None
     };
-    let result = if name == "browser_press" {
+    let result = if name == "browser_hover" {
+        let target=page(app,op,&id,session,"browser_hover_target",args).await?;
+        cdp(app,op,&id,"Input.dispatchMouseEvent",json!({"type":"mouseMoved","x":target["x"],"y":target["y"]})).await?;
+        json!({"text":"Pointer moved to the observed element"})
+    } else if name == "browser_press" {
         let key = args.get("key").and_then(Value::as_str).ok_or("缺少 key")?;
         let (code, vk) = match key {
             "Enter" => ("Enter", 13),
@@ -719,6 +778,7 @@ async fn run(
                 | "browser_scroll"
                 | "browser_wait"
                 | "browser_extract"
+                | "browser_select_option"
         ) {
             return Err("未知浏览器工具".into());
         }
@@ -727,6 +787,7 @@ async fn run(
     if let Some(guard) = focus.as_mut() {
         // Wait for restoration before releasing TOOL_LOCK: a queued fire-and-forget
         // disable can otherwise overtake the next tool's enable/key dispatch.
+        let restored=async {
         cdp(
             app,
             op,
@@ -737,6 +798,11 @@ async fn run(
         .await?;
         let target = id.clone();
         main(app, op, move |h| restore_input_surface(&h, &target)).await?;
+            Ok::<(),String>(())
+        }.await;
+        if let Err(error)=restored {
+            return Ok(json!({"tab_id":id,"operation_completed":true,"goal_verified":false,"action_result":page_text(result),"observation":{"success":false,"error":error,"next_step":"Observe again; do not replay input"}}).to_string());
+        }
         guard.active = false;
     }
     if snapshot {
@@ -752,6 +818,20 @@ async fn run(
             Ok(())
         })
         .await?;
+    }
+    if matches!(name,"browser_click"|"browser_type"|"browser_press"|"browser_hover"|"browser_select_option"|"browser_scroll") {
+        // Execute input once. A failing observation keeps the action receipt and
+        // explicitly asks for another read, never a replay of the mutation.
+        let observation=async {
+            settled(app,op,&id,0).await?;
+            let tab=id.clone();
+            let generation=main(app,op,move |h|Ok(h.borrow().tabs.get(&tab).ok_or("Tab closed")?.generation)).await?;
+            let view=page(app,op,&id,session,"browser_snapshot",&json!({})).await?;
+            let key=session.to_string();let tab=id.clone();
+            main(app,op,move |h|{let mut h=h.borrow_mut();if h.tabs.get(&tab).ok_or("Tab closed")?.generation!=generation{return Err("Page navigated during observation; snapshot again".into());}h.selections.insert(key,(tab,generation));Ok(())}).await?;
+            Ok::<_,String>(page_text(view))
+        }.await;
+        return Ok(json!({"tab_id":id,"operation_completed":true,"goal_verified":false,"action_result":page_text(result),"observation":match observation{Ok(text)=>json!({"success":true,"text":text,"untrusted":true}),Err(error)=>json!({"success":false,"error":error,"next_step":"Observe again; do not replay input"})}}).to_string());
     }
     Ok(format!("Browser tab: {id}\n{}", page_text(result)))
 }

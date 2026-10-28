@@ -84,6 +84,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(system_ops::CloseApplicationTool::new()),
         Arc::new(system_ops::TakeScreenshotTool::new()),
         Arc::new(computer_action::ComputerActionTool),
+        Arc::new(computer_action::ComputerStateTool),
         // 扩展系统工具
         Arc::new(extended_system_ops::OpenUrlTool::new()),
         Arc::new(extended_system_ops::GetActiveWindowTool::new()),

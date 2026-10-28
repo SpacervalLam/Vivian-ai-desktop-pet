@@ -1945,9 +1945,7 @@ fn parse_screen_inspection_args(args: &Value) -> Result<ScreenshotOptions, Strin
             return Err("question requires analysis and must contain 1–500 characters".into());
         }
     }
-    if !options.analyze && !options.save && !options.copy_to_clipboard {
-        return Err("Select at least one screenshot output: analyze, save or copy_to_clipboard".into());
-    }
+    // Raw pixels are always an output, including analyze=false without disk I/O.
     Ok(options)
 }
 
@@ -1974,6 +1972,7 @@ mod screen_inspection_tests {
         assert!(!options.copy_to_clipboard);
         for outputs in [
             json!({"analyze":false,"save":true}),
+            json!({"analyze":false}),
             json!({"analyze":false,"copy_to_clipboard":true}),
             json!({"analyze":true,"save":true,"copy_to_clipboard":true}),
         ] {
@@ -1995,7 +1994,6 @@ mod screen_inspection_tests {
         for args in [
             json!({"region":{"x":0,"y":0,"width":1,"height":20}}),
             json!({"region":{"x":0,"y":0,"width":20,"height":20.5}}),
-            json!({"analyze":false}),
             json!({"save":"yes"}),
             json!({"unknown":true}),
             json!({"analyze":false,"save":true,"question":"Read this"}),
@@ -2089,7 +2087,10 @@ impl Tool for TakeScreenshotTool {
             Ok(parsed) => parsed,
             Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
         };
-        let vision = if options.analyze {
+        // Work models receive the actual pixels. A separate vision description is
+        // optional there; companion chat keeps its existing textual fallback.
+        let analyze = options.analyze && (context.agent_kind != "work" || args.get("analyze").is_some());
+        let vision = if analyze {
             let app_handle = match APP_HANDLE.read().clone() {
                 Some(h) => h,
                 None => {
@@ -2158,6 +2159,11 @@ impl Tool for TakeScreenshotTool {
             Ok(bytes) => bytes,
             Err(error) => return ToolResult::standard_error(&error, Some("InvalidScreenInspection"), None),
         };
+        let model_image = crate::brain::coding_agent::CodingImage {
+            media_type: "image/png".into(),
+            data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_bytes),
+            name: Some("desktop-observation.png".into()),
+        };
 
         let output_path = if options.save {
             match crate::screen_capture::save_selected_png(&png_bytes).await {
@@ -2169,6 +2175,9 @@ impl Tool for TakeScreenshotTool {
         };
         let mut data = json!({
             "region": options.region,
+            "desktop_bounds": {"left":frame.left,"top":frame.top,"width":frame.width,"height":frame.height},
+            "coordinate_space": "physical_virtual_desktop",
+            "pixels_attached": true,
             "output_path": output_path,
             "in_clipboard": false,
             "analyzed": false,
@@ -2192,7 +2201,9 @@ impl Tool for TakeScreenshotTool {
                 ),
             }
         }
-        ToolResult::standard_success("截屏完成", Some(data))
+        let mut result = ToolResult::standard_success("截屏完成（原始像素已附加）", Some(data));
+        result.images = Some(vec![model_image]);
+        result
     }
 
     fn is_read_only(&self) -> bool {

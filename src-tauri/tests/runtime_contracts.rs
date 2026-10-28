@@ -42,6 +42,8 @@ pub mod coding_memory_records;
 pub mod coding_memory_queue;
 #[path = "../src/desktop_contract.rs"]
 pub mod desktop_contract;
+#[path = "../src/desktop_native/mod.rs"]
+pub mod desktop_native;
 #[path = "../src/plugin_contract.rs"]
 pub mod plugin_contract;
 #[path = "../src/provider_preset_updates.rs"]

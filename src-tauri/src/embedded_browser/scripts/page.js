@@ -575,6 +575,29 @@ globalThis.vivianCreatePage = () => {
     };
   }
 
+  function selectOptionAction(args) {
+    const el = elementOrThrow(numberArg(args, 'index'));
+    if (el.tagName !== 'SELECT' || el.disabled) throw new ActionError('bad-target', 'Target must be an enabled native select control.');
+    if (typeof args.value !== 'string') throw new ActionError('bad-args', 'value must be a string.');
+    const choices = Array.from(el.options).filter(option => option.value === args.value && !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled));
+    if (choices.length !== 1) throw new ActionError('bad-target', 'Expected exactly one enabled option with that value.');
+    el.value = args.value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return withPageDelta('Selected the requested option; inspect the resulting state.');
+  }
+
+  function hoverTargetAction(args) {
+    const el = elementOrThrow(numberArg(args, 'index'));
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const rect = el.getBoundingClientRect();
+    const x = Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2));
+    const y = Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2));
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || (hit !== el && !el.contains(hit))) throw new ActionError('obscured-target', 'Element is covered; read a fresh snapshot.');
+    return { x, y };
+  }
+
   async function clickAction(args) {
     const index = numberArg(args, 'index');
     const el = elementOrThrow(index);
@@ -730,6 +753,8 @@ globalThis.vivianCreatePage = () => {
   async function runAction(action, args) {
     switch (action) {
       case 'browser_snapshot': return snapshotAction(args);
+      case 'browser_select_option': return selectOptionAction(args);
+      case 'browser_hover_target': return hoverTargetAction(args);
       case 'browser_click': return clickAction(args);
       case 'browser_type': return typeAction(args);
       case 'browser_press': return pressAction(args);

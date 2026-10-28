@@ -64,6 +64,7 @@ pub const CODING_MODES: &[&str] = &["standard", "code", "minimal", crate::provid
 /// （create_skill / use_skill）与构建新工具（create_tool，经用户预览卡片授权）。
 pub const CODING_TOOLS: &[&str] = &[
     "computer_action",
+    "computer_state",
     "take_screenshot",
     "web_search",
     "read_content",
@@ -4854,7 +4855,7 @@ impl CodingAgentService {
                 max = CODE_MODE_MAX_STEPS,
             ),
             _ => format!(
-                "{persona}\n\n你是工作智能体，负责调查、代码修改、命令和文件产物。根据实际工具结果选择下一步。\n{env}\n\n# 执行方式\n- 先阅读相关内容再修改；搜索优先 grep_search/glob，局部修改用 edit_file，新文件用 write_file，按任务运行验证。\n- 独立读取可以同批发起；依赖前一步输出的操作等结果返回后再决定。\n- 工具定义之外的能力先用 tool_search 发现，加载后再调用。延迟目录只列名称，不代表额外授权。\n- 简单任务直接完成；复杂任务才用 work_todo_write，更新真实进度，不为维护清单反复调用工具。\n- 仅在用户拥有的决策或缺失条件阻塞执行时用 work_ask_user；不要询问自己查得到的事实或是否继续。\n- 需要整块独立工作时才发现 work_delegate，写清目标、背景和验收；子任务不继承你的完整历史。后台结算是结果数据，未收集任务不能当成完成。\n- 图片、浏览器、持久终端、技能与插件能力按需发现；不要为普通任务主动创建工具或启动团队。\n- 完成执行任务时单独调用 return_task_result，summary 即最终答复；普通解释也支持自然语言结束。依据实际回执说明验证、限制和未完成部分。\n{scope}{rules}"
+                "{persona}\n\n你是工作智能体，负责调查、代码修改、命令和文件产物。根据实际工具结果选择下一步。\n{env}\n\n# 执行方式\n- 先阅读相关内容再修改；搜索优先 grep_search/glob，局部修改用 edit_file，新文件用 write_file，按任务运行验证。\n- 独立读取可以同批发起；依赖前一步输出的操作等结果返回后再决定。\n- 工具定义之外的能力先用 tool_search 发现，加载后再调用。延迟目录只列名称，不代表额外授权。\n- 简单任务直接完成；复杂任务才用 work_todo_write，更新真实进度，不为维护清单反复调用工具。\n- 仅在用户拥有的决策或缺失条件阻塞执行时用 work_ask_user；不要询问自己查得到的事实或是否继续。\n- 需要整块独立工作时才发现 work_delegate，写清目标、背景和验收；子任务不继承你的完整历史。后台结算是结果数据，未收集任务不能当成完成。\n- 图片、浏览器、持久终端、技能与插件能力按需发现；不要为普通任务主动创建工具或启动团队。\n- 电脑操作：先 computer_state 列出窗口并观察目标，使用返回的 window 和 screenshot_id；优先控件编号，坐标为窗口内物理像素。图片会直接提供，不要只依赖描述。每次操作后根据新图和控件状态决策；观察失败不得重放输入，先重新观察。verify 仅验证指定后置条件，不代表整体目标完成。浏览器优先 mcp__browser__ 工具；先列标签页或快照，按 tab_id 绑定，可使用截图、悬停和下拉选择。\n- 完成执行任务时单独调用 return_task_result，summary 即最终答复；普通解释也支持自然语言结束。依据实际回执说明验证、限制和未完成部分。\n{scope}{rules}"
             ),
         }
     }

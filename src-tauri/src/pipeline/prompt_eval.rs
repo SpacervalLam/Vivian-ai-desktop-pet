@@ -231,7 +231,7 @@ async fn configured_post_execution_reply_smoke() {
                 else { json!({"success":true,"message":if confirmed {"已读回确认目标壁纸配置。"} else {"壁纸切换请求已提交。"},
                     "data":{"workshop_id":"1906762609","title":"天气之子","changed":if confirmed {json!(true)} else {Value::Null},
                         "command_sent":true,"verification_status":if confirmed {"verified_configuration"} else {"unverifiable"},"desktop_visual_observed":false}}) };
-            let result = crate::tools::tool_call_manager::ToolCallResult {
+            let result = crate::tools::tool_call_manager::ToolCallResult { images: None,
                 success:!denied,result:Some(payload),tool_name:"wallpaper_set".into(),arguments:json!({"workshop_id":"1906762609"}),
                 tool_call_id:format!("fixture-{case}"),error:denied.then(|| "PermissionDenied".into()),
                 status:if denied {crate::tools::tool_call_manager::ToolCallStatus::Error} else {crate::tools::tool_call_manager::ToolCallStatus::Success},

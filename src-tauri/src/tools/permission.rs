@@ -172,7 +172,10 @@ const EQUIVALENCE_CLUSTERS: &[&[&str]] = &[
         "screenshot_analyze",
         "get_active_window",
         "get_foreground_app_context",
+        "computer_state",
+        "browser_screenshot",
     ],
+    &["computer_action", "click_mouse", "hotkey", "type_text"],
     // 浏览器任意脚本（两个工具都能在已登录会话里跑 JS）
     &["browser_eval_js", "browser_task_tab"],
 ];
@@ -1065,6 +1068,7 @@ mod tests {
     fn equivalence_clusters_reference_known_tools() {
         // 与本仓库 `tools/builtin/**` 里 `fn name()` 的返回值对齐
         const KNOWN: &[&str] = &[
+            "computer_state", "computer_action", "click_mouse", "hotkey", "type_text", "browser_screenshot",
             "glob", "read_image", "terminal_send", "pwsh_persistent",
             "read_file",
             "write_file",
