@@ -41,6 +41,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Fetch pinned sqlite-vec extension
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'sqlite-vec-0.1.9.tar.gz'
+          Invoke-WebRequest -Uri 'https://github.com/asg017/sqlite-vec/releases/download/v0.1.9/sqlite-vec-0.1.9-loadable-windows-x86_64.tar.gz' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '51581189D52066B4DFC6631F6D7A3EAB7DEDC2260656AB09CA97AB3FB8165983') { throw 'sqlite-vec archive checksum mismatch' }
+          New-Item -ItemType Directory -Force -Path src-tauri/vendor/sqlite-vec | Out-Null
+          tar -xzf $archive -C src-tauri/vendor/sqlite-vec
+          if ($LASTEXITCODE -ne 0) { throw 'sqlite-vec extraction failed' }
+          if ((Get-FileHash -LiteralPath src-tauri/vendor/sqlite-vec/vec0.dll -Algorithm SHA256).Hash -ne 'FCF98662A7AD9DCE394B96A88F91032047823831B951C76636787C312A6476E6') { throw 'sqlite-vec DLL checksum mismatch' }
       - run: npm ci
       - run: npm run test:rust
       - run: npm test
