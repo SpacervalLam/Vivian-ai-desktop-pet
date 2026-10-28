@@ -18,7 +18,7 @@ for (const directory of directories) {
     const source = await readFile(path.join(root, file), 'utf8');
     const requiresDesktop = source.includes('@test-environment live-desktop');
     if (requiresDesktop !== live) continue;
-    if (frontend && /spawnSync\(['"](?:cargo|rustc)['"]/.test(source)) continue;
+    if (frontend && /spawnSync\s*\(\s*['"](?:cargo|rustc)['"]/.test(source)) continue;
     files.push(file);
   }
 }

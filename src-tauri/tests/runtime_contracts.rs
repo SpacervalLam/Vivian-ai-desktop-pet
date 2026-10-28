@@ -91,6 +91,8 @@ pub mod entity_extract;
 pub mod graph_store;
 #[path = "../src/utils/fs.rs"]
 pub mod fs;
+#[path = "../src/utils/sqlite.rs"]
+pub mod sqlite;
 #[path = "../src/brain/scheduler.rs"]
 pub mod scheduler;
 #[path = "../src/brain/reminder_delivery.rs"]
@@ -102,14 +104,12 @@ pub mod brain {
     pub use crate::{reminder_delivery, interruption_controller};
 }
 pub mod utils {
-    pub use crate::fs;
+    pub use crate::{fs, sqlite};
     pub mod path {
         pub fn get_user_data_dir() -> std::path::PathBuf {
             panic!("Runtime contract tests must supply isolated persistence paths")
         }
     }
-    #[path = "../../src/utils/sqlite.rs"]
-    pub mod sqlite;
     pub mod watchdog {
         pub fn register(_: &str, _: f64, _: Option<()>) {}
         pub fn beat(_: &str) {}
