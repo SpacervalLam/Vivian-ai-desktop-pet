@@ -294,8 +294,18 @@ export interface TrunkField {
   readonly count: number;
 }
 
-/** 所有已创建的干场。`blenderTrunks` 靠它把 GLB 派发下去。 */
-export const trunkFields: TrunkField[] = [];
+// A global array of fields retains their meshes, parents and entire old districts.
+// Weak keys let an unmounted scene and its field/mesh cycles be collected together.
+const trunkFieldGroups = new WeakMap<THREE.Object3D, TrunkField>();
+
+export function collectTrunkFields(root: THREE.Object3D): TrunkField[] {
+  const fields = new Set<TrunkField>();
+  root.traverse(object => {
+    const field = trunkFieldGroups.get(object);
+    if (field) fields.add(field);
+  });
+  return [...fields];
+}
 
 const TRUNK_UP = new THREE.Vector3(0, 1, 0);
 function trunkHash(seed: number, salt: number): number {
@@ -316,6 +326,7 @@ export function createTrunkField(): TrunkField {
     build(name, color) {
       const group = new THREE.Group();
       group.name = name;
+      trunkFieldGroups.set(group, field);
       const material = toon(color, { map: trunkBarkTexture() });
       for (const variant of ['sakura', 'green'] as const) {
         const list = specs.filter((s) => s.variant === variant);
@@ -371,7 +382,6 @@ export function createTrunkField(): TrunkField {
       mesh.userData.trunkAsset = true;
     },
   };
-  trunkFields.push(field);
   return field;
 }
 

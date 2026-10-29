@@ -875,6 +875,15 @@ async fn send_message_stream_impl(
         schedule_close(&state, brain.clone(), instance.think_lock.clone(), &char_id, &message, &reply_text);
     }
 
+    // Capture the completed public turn while its session and generation lock are
+    // still owned. Releasing them first can attach the exchange to the next turn.
+    if !is_whisper && channel_str == "direct" && !state.is_generation_cancelled(&char_id) {
+        if let Ok(response) = &result {
+            state.world_provider.environment.record_user_exchange(
+                &char_id, &conv.id, message.trim(), response.text.trim());
+        }
+    }
+
     // 清理流式回调（避免非流式调用误触发）
     brain.set_stream_emitter(None);
     // 重置消息渠道标记为默认值
@@ -994,8 +1003,6 @@ async fn send_message_stream_impl(
                 let speaker_id = char_id.clone();
                 let user_msg_full = message.trim().to_string();
                 let agent_reply_full = response.text.trim().to_string();
-                // Only public direct exchanges are input to internal intent orchestration.
-                state.world_provider.environment.record_user_exchange(&speaker_id, &user_msg_full, &agent_reply_full);
                 // Link observations to the actual adjacent turn pair; never invent source IDs.
                 let observed_sources = brain.dialogue.get_all_history().ok().and_then(|history| {
                     history.windows(2).rev().find(|pair| {

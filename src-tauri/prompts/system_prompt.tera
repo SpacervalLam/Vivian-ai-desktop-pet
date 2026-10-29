@@ -66,6 +66,7 @@ __SYSTEM_PROMPT_DYNAMIC_BOUNDARY__
 {# ── Layer 2: Current Mind（当前心智）── 紧随身份，最先入脑 ── #}
 {% if mind %}{{ mind }}{% endif %}
 {% if working_memory %}{{ working_memory }}{% endif %}
+{% if topic_window %}{{ topic_window }}{% endif %}
 {% if self_state %}{{ self_state }}{% endif %}
 {% if background_tasks %}{{ background_tasks }}{% endif %}
 {% if emotion %}

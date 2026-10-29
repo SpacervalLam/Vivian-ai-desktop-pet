@@ -1,12 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { trunkFields, type TrunkVariant } from './foliage';
+import { collectTrunkFields, type TrunkVariant } from './foliage';
 import { apartmentAssetUrl } from '../apartmentAssets';
 
 /**
  * 把 Blender 出的树干几何装进各模块的干场。
  *
- * 分工：`plugins/3d-apartment/tools/trees/build_trunks.py` 出几何，`foliage.trunkFields` 铺实例，
+ * 分工：`plugins/3d-apartment/tools/trees/build_trunks.py` 出几何，`foliage` 铺实例，
  * 这里只负责**异步换几何**。样板是 `blenderVehicles.ts`：载入前先用程序化回退
  * （`foliage` 的 `unitTrunkGeometry`，带锥度 + 根部外扩的旋转体），载入后替换 ——
  * 场景在这期间是可看的，GLB 拿不到也不会退回一根光秃秃的圆柱。
@@ -42,13 +42,14 @@ function nominalSize(object: THREE.Object3D): { h: number; r: number } {
   return { h, r };
 }
 
-export function loadBlenderTrunks(): () => void {
+export function loadBlenderTrunks(scene: THREE.Scene): () => void {
   let disposed = false;
+  const fields = collectTrunkFields(scene);
   const geometries = new Set<THREE.BufferGeometry>();
 
   for (const variant of ['sakura', 'green'] as const) {
     // 没有哪个模块用到这个变体就不去取 —— 别为几棵不存在的树付一次请求。
-    if (!trunkFields.some((f) => f.wants(variant))) continue;
+    if (!fields.some((f) => f.wants(variant))) continue;
     new GLTFLoader().load(
       apartmentAssetUrl(SOURCE[variant]),
       (gltf) => {
@@ -89,7 +90,7 @@ export function loadBlenderTrunks(): () => void {
         geometry.computeBoundingSphere();
         if (disposed) { geometry.dispose(); return; }
         geometries.add(geometry);
-        for (const field of trunkFields) field.install(variant, geometry);
+        for (const field of fields) field.install(variant, geometry);
       },
       undefined,
       (error) => {
@@ -102,6 +103,7 @@ export function loadBlenderTrunks(): () => void {
 
   return () => {
     disposed = true;
+    fields.length = 0;
     geometries.forEach((g) => g.dispose());
     geometries.clear();
   };

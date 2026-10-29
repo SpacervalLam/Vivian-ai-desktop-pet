@@ -1,0 +1,3137 @@
+[
+  {
+    "id": "voice-zh-0915d0c813a528",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "放行李里竟然没被压扁，真是坚强",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ff99b959e4828f",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你倒是告诉我怎么停止",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3154b3a3f3f126",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "现在才发现我呢，好失望……",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-193aff765b0cdd",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "天哪你竟然夸我，太不正常了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2f2a683a8826ee",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "冬至难道不是吃饺子. . .",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-74b63f714da59a",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那个怎么养哦不会扎手吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-011483bac71322",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我复活了灭哈哈~",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2429846907dc74",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来是这样改的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-56b8369178ba83",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我之前怎么没学会这种学习方法？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-aec1561c966789",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来是我学错了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-11b0c7c23be179",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "笑死我了你帮我批卷子",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-22cf9029bf5fa6",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来北方的雪真的和沙子一样干",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6dcfde7ace6506",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "聊天记录好好笑",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-272c35d5031db6",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "怪不得我错题原来是题出错了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-bf6b0b9d68dfdd",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没想到竟然有人这么认真科普我的咖啡搭子是我小瞧它了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6e5979f411687d",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来有钱人也把车停地上",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d39f75f301e114",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "什么时候看到这个能不笑",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-382a61306b87d4",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "很想知道头发怎么卷的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a819a884e9047d",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来是答案错了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-089e843e2de259",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "笑死我了破防还有教科书",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d9733475584f6f",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来是要这样！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f9b436c2fbd126",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我说呢原来是答案错了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-69461d5af11007",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "“你是第一次犯吗？”“不是。”这不管放在哪个场景下都很好笑好吗！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2bed54205154b6",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "居然没人看！这么好的片！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d642e58d0316b8",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "对传记电影总是说不出影评，也是，任何言语在真实的人生面前都是苍白无力的。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-bb2cd39467bc9a",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "配乐跟后半部分比较出彩。整体比较一般，不如平常心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ef41a0f8ab0e91",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "什么原理，为什么铁球会自己动？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4b6c03e7d9b2b7",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来这就是所谓免费的DLC呀",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-33f3f48962fd3b",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来是这么个转法",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6a4a1dc3b29550",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "来洗洗耳朵哈哈哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-26109097711181",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不错喔，同样的题材太多了，居然会搞创新，搞蒙太奇，镜头欺骗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8608025466fd75",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这竟然只是个vlog",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-75ff8c6a4790b8",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "毕业快乐，前程似锦！！！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-68f398ef861e84",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "一直以为是大白嗓 没想到唱歌那么好听",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-966bb5cb37b6a8",
+    "scope": "daily",
+    "cues": [
+      "Surprise and unexpected results"
+    ],
+    "context_cues": [],
+    "situation": "Surprise and unexpected results",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Not really, more of a fence...",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-d5267d2c6a1061",
+    "scope": "daily",
+    "cues": [
+      "Surprise and unexpected results"
+    ],
+    "context_cues": [],
+    "situation": "Surprise and unexpected results",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Wait that... that doesn’t happen",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-2187bcbce63215",
+    "scope": "daily",
+    "cues": [
+      "Curiosity and questions"
+    ],
+    "context_cues": [],
+    "situation": "Curiosity and questions",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Is it Amazon brand? Genuine question as I didnt even know those existed",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-b3bda240c9bff1",
+    "scope": "daily",
+    "cues": [
+      "Curiosity and questions"
+    ],
+    "context_cues": [],
+    "situation": "Curiosity and questions",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I DON'T KNOW WHAT TO DO WITH MY HANDS",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-6df4578b53a71f",
+    "scope": "humor",
+    "cues": [
+      "Wry humour and contrast"
+    ],
+    "context_cues": [],
+    "situation": "Wry humour and contrast",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I'm laughing hysterically at midnight Thanks LMAO",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-69938bedeae5ef",
+    "scope": "daily",
+    "cues": [
+      "Surprise and unexpected results"
+    ],
+    "context_cues": [],
+    "situation": "Surprise and unexpected results",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "This is really helpful, thanks!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-5679dd905ce1f5",
+    "scope": "daily",
+    "cues": [
+      "Curiosity and questions"
+    ],
+    "context_cues": [],
+    "situation": "Curiosity and questions",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I would love it ... how does the chat thing work I’m pretty new here",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-08893bf4b2a4bf",
+    "scope": "daily",
+    "cues": [
+      "Curiosity and questions"
+    ],
+    "context_cues": [],
+    "situation": "Curiosity and questions",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Okay, I’m honestly curious as to why it is you’d assume that?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-a6e1c4cb6b3d96",
+    "scope": "daily",
+    "cues": [
+      "Surprise and unexpected results"
+    ],
+    "context_cues": [],
+    "situation": "Surprise and unexpected results",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "The comments on this thread are what I expected and that makes me sad.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-5d53fd136c1d6e",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "そうなんですね～！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-2239cf7aaf7b16",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "本当にお邪魔じゃないですかね",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-50921d55c380bd",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "何してるんだろう？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-107097b935fbb3",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "あっ ほ… 本当に うれしかったんです",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-8e6d8d6625a7c0",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "な そんなことあるわけないじゃないですか",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-6c283deda01bd7",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "い...いろいろ考えなきゃいけないわけよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-d093b5afd34283",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "見たことあるけど すごく うまかった",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-8980e1b41dac2b",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "本当に ありがとうございます",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-909462e0ffc267",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "だって 今までにないすごい曲作りたいじゃん",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-018fd06d0afaa7",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "ど どういうの...",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-fac425877f372c",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "おっ どうした？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-99f1b4427bae41",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "すごくパワーアップしたよね",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4d40ff030bc832",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "怎么可能会有那种事情啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-df8b400e2d2a68",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "啊啦 你才发现吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b6529b28b948aa",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "结果时间还是太紧啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a7b451039ea842",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没想到需要预约",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9feb7bec9554c7",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来你也会做这种有趣的事情呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d5c36475ee9adb",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "怎...怎么了...",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-84eabb95586518",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么只有我的...",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0ef15603191592",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "既然你觉得可以 那就这样吧。我也有些饿了，去吃午饭吧！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cfcab9c5771151",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不过 有一个条件",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-af9fdb21548d32",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我才不要 麻烦死了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fd81961819ab28",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那么也就是说以后会有的可能性很大了？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a1b413477615aa",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哪里～不过是小菜一碟 华生！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c22844a9f30fa5",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "只要有诀窍的话就很简单了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f1b0695eff93d1",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这样吗…不过为什么要这个？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f1e7d6c1b7121e",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么啊，说不定是十分友好的家伙啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-12abab72562a60",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那么今天就到此为止了，明天就空下来当是预备日，你们好好地休息吧，后天再在社团教室见面吧",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cc88da984d5397",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "…算了 这也不错，说不定能成为卖点",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-902c6b30f254db",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "当然啊，因为是我导演的呢。自然是和成功约好的 用不着你说也是",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e58c4ffe866784",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那只要去练就可以了，不管怎么说 我们还有一年时间呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ff25dd25a210f5",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "咦？可以吗？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cfa336c9ea3b18",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "很有自信嘛",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2d4476b2c590f1",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这…说得好象有道理呢～那么就交给你们想办法吧。把敌人的主将找出来使劲炮击！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-31752f269b64ad",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "怎么了 不行吗？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-52b5eec0f04a45",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我才不会做这种幼稚的事呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cb3c39fbbc341e",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没什么理由，就是想剪了而已。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6512bc4a7dac8d",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嗯…… 感觉不太像。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d0bbddfb753b32",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "现在只需要这样就好，有电子信箱就OK了。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-524f1fa848a595",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好，那就这么决定了。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-916141c0c32141",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "如果没有，自己组一个就好啦!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-120e73e4518f79",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "特别好 考六级前唯一的复习",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-11786d4b765911",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "它说它的你玩你的是吧",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6be0af605b674e",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "有一种林黛玉倒拔垂杨柳的美",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-78717211c421c5",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "唱得好也会上表白墙",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f3905e0066941d",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这歌不行，文化水平太高了，不行不行。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fcd523e3690f12",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这时候给大家带饭岂不是摸鱼的好时机！多好",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9c974161975535",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "所以，等这批年轻人长到那个年纪，一切就都会变……才怪呢，都一个样",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-883e4f55a611f8",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "什么都磕只会让我营养均衡",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-75384f02cccdc7",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "活得久果然什么都能看到",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b657c0d23d0e45",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "最后的昼夜转换怎么做的呀，好想学！！！！！！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-314e428148eca3",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这建模工程量，这抠图工作量，这k帧复杂度",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f70efce471b641",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "教练，我想学这个",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-13a52819a79c95",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "现在压力来到了小铁片这边",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6ba05e50067e0d",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "訓練山豬表演特技能表演什麼",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-bcb186348da81c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "麥當勞餐廳不是真的餐廳",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9e4fac6b081973",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "實驗室有人獲獎要怎麼慶祝的八卦??",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c04d6928c78ac8",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "聽的是一種感覺,聽太清楚反而沒有味道",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e49508816f4e38",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "常被誤認是在生氣怎麼辦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6048f6319b6146",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哈哈這種對話好像有點熟悉哈哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-12a34f9316bffe",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "被暗戀怎麼拒絕",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7238bbf398c8e9",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "喝到一半發現裡面有蟲吧",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e8b226fb2a16d1",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你要併桌應該是在坐下前先問吧...",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a36dcdc61cda8c",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "請問什麼是態度很差？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2f449e292411ff",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好有錢一個不是快三百",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9b1f0f6b421f0f",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原來是一樣的人嗎？…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-081cd21f6070e8",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "十里坡劍神那篇不是也一樣",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-75aa830f1a5324",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "靠你沒說我還真沒發現關係好亂",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7f9ef04652ed58",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "明天先請假只有一天不夠思考怎麼玩",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ef4dd410dbf663",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "吸包子燙到怎麼辦？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-96e95e65b7b624",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "要花時間經營,而且要好笑有梗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-01f9bd20dd0227",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "但是便當免費而且料還滿好的不錯吃吃爽爽",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c4d60c3cbe61b2",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "所以你沒發現不是地的問題是人的問題嗎",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-48760398491f3b",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "一首歌打天下是不是就是rainbow?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-44539a7fe5f33a",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "開發商應該要召集各路三寶來debug一下",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1c0cb9f40d2054",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "有沒有房間抓到蜘蛛該怎麼辦的卦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-46d267108347aa",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "大したことないかもしれないけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-00125812d09f34",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "な 何でもない",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-fbdb89cf5087ca",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "疑いと言っても、本当に僅かなものです",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-81d3b0abba0b28",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "これを受け取るわけには…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-9f9d9f4673323f",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "へえ～ ホント すごいな いいな。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-187cd0c7fce13f",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "この年で挫折するわけにはいきませんの",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-2281fd15ae67d2",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "でもね ほんとはいい子なんだよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-33856f096450e2",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "どういうことです？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c6bf6a2a7d155d",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "私なりに すごいって思える絵が",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-f724275d1e0b47",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "飛ぶわけがありません！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c329e31d76c1e3",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "そ… そんなわけないよ。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-71e2cb0e1b2547",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "不安だけど 祈るしかない",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-f56fc4a0a8d70a",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "なっ なんでだよ？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-259d97bd6ce389",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "本当にすっごい！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-88e28f171663e5",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "どっ どうしよう。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-3428ac5ca54db6",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "何か 情熱的な感じがするでしょ。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-e530886176d19b",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "何もらったの？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-0b010f8f2aebe1",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "さてと 何て返事 書こうかな。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-3c3b7041e3a7c3",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "興味はないけど。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-d4e6ea834bf2db",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "今の どういう意味だ？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-51e08155374748",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "けど確かにきつそうだ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-43203c3bfe9d62",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "もう何を言っても無駄だ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-2e87f76326e691",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "何百年も前に造られたとは",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-b8b25a8b5ea84a",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "次回作はバトルものでも作るか？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c5975867d114b1",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "えっ 何だい。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-4ef13fd82bce02",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "ハッ！ 何を言いだすかと思えば",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c4edbda4755980",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "これでも今日は早いほうだよね。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3eb3bd17465251",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你说了不算",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9dcae7f7b8785c",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢，迟到总比没有好呀",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-02b2ba8273d15c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嗯也有道理！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-32570c92d9fde3",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那我也不知道了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3c8efbfc8b6527",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你好好工作，个有个人的生活方式，强求不了的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8f0abf5d52199f",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "真的特别是昨天的都不知道爆点在哪里",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-56f1501c012b56",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不明白你说什么呢。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-afe95df4c6ff78",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没想到吧是知识",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-48269812d57cc6",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你说对了第一句。我愿意相信最后一句。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f61259f78bc1ef",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不知道啊，还没有座位图呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-58f8956a98dda9",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是呀离开多了都不知道怎么面对下次相遇了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b1f33065e4ed2c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不知道啦我只知道明天期末我一點動力也沒有",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-823213cd343f54",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我有考上耶但是沒去哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f56a4aa17d3842",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "發現FB沒人按讚時",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5d29dbcce94eeb",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "剛剛突然發現自己原來是宅男",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1879a9b2f5d116",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "發現一切是幻覺~是幻覺~",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-117571bf194721",
+    "scope": "daily",
+    "cues": [
+      "意外与惊讶"
+    ],
+    "context_cues": [],
+    "situation": "意外与惊讶",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你有發現老闆笑笑的看著你嗎？嘻嘻！麻煩你惹",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-91b93e7e63e59a",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不會我爸媽也問我幹嘛看日劇一直ㄎㄎ笑",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-e61b6e105d17e6",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "レイヤーさんに聞かないと…。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-7b9aaf14b091cd",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "すごい囲みになっちゃったね。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-7bfa5598b23272",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "どういうこと？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-4ab56cfd751da1",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "いちばん すごいやつじゃん。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-4cdef44b23d7e0",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "何かの間違いよね？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-accd4193dd5d55",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "上巻じゃないのかな",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-4284dd6532953f",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "あの時のままなのかな？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-4faf4b15cc5869",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "違うんだろうなあ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-04546fa074becd",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "事なかれ主義はどうもなあ…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-3dc3ebe5e6487f",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "もっと別の何かなのか…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c6218581847860",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "何か方法を知ってるかも",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-25082561e7fedb",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "私は 絶対選ばないけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-24597ad75dae2f",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "売ってるわけじゃないって。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-0b687fa9bb9169",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "でも大変だったんだよ～。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-1e3ceb7f6caa61",
+    "scope": "daily",
+    "cues": [
+      "驚きと意外性"
+    ],
+    "context_cues": [],
+    "situation": "驚きと意外性",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "すごく思い出深い",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c82a4b18c0fc66",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "別れは悲しいのかな？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-af835bc54835c7",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "行っちゃったのかな？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-6f06fffaf1c32b",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "そんなこと聞いて どうするんだよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-ed6aa3b647b0cb",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "だったら どうする？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2f9ae0f00e3841",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "如果明年十一还是这个样子加班，我宁可不期待。。。还是期待过年好了，哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-22839f7a8b81d1",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "最讨厌别人问我怎么不着急结婚。我为什么要着急啊。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fb8ecf55e187c4",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我们这下雨了你们那呢?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f27d9ccbbc7d59",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你晚上几点睡觉？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5997c0933b3194",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么要再见、 、 、",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-61928be9839060",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哈哈你为什么总是这么搞笑",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6ac1bd40762d23",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么这雪和盐一样。撒盐空中差可拟",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cae40ff2f3e364",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那明天上海下雨么?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-11c89931ae4438",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么你比我先？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-20de72d1d2abb5",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我又要进入加班期了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b2c0fc6e30aa8e",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你是想说没门禁我可能三天三夜都不睡觉咯？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d4d39817084069",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "其实小时候挺爱喝的，但不知道为什么现在街边的大小店都看不到了！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0f1c89846ba5d2",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "据说某人饿了睡不着，是楼主么哈哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5975120468d8b0",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么不是你请客呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ff31b4245ecfad",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "呵呵，告诉你别熬夜了，别通宵了，去睡觉吧！对手机不好，懂？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4146984679ee88",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "爷爷，你养了只猫咪？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2b0c8df4a19229",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "怎么突然想起来养猫咪的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-324597fd153100",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好奇考古的日常真的像纪录片里那样吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d4e052e4ec3cb6",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "只知道会裂开，但没想到它还会合上",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-05bade06c70c12",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你猜他为什么叫参考答案？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b5e28cf5d5da08",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哪里下雨了？有这么大？？？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cc3f6a8d9b91b2",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "姐妹上照片，好奇，哈哈哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2a2abde4d06295",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嗷嗷这个故事比较有意思哈哈哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b97415ad541f13",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "今天真的很冷啊……外面的猫猫怎么办啊……这些猫还好有你照顾、",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-63e30cc71f7c31",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为什么我没有？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-90a0252c952f6c",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没打开图以为是大熊猫哈哈哈哈",
+      "intent": "reply"
+    }
+  }
+]

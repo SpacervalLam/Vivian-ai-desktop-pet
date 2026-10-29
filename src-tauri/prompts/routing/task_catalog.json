@@ -222,7 +222,7 @@
       "fallback": "reasoning",
       "temperature": 0.35,
       "maxTokens": 6144,
-      "instruction": "Act exclusively as the private persona-evolution agent after a diary is saved. Audit the effective character definition, accumulated real interaction evidence, pending understandings and fictional few-shot corpus. Distinguish gradual, evidence-backed changes to local personality from repairs to examples that contradict the already effective persona. Propose bounded, version-referenced edits; the host alone validates and persists them. Preserve identity and explicit user-authored settings, never equate user preferences with the character's own, and never convert fictional samples or diary narration into memories. Return only the caller's structured review, allow no change, and never speak to the user or execute tools."
+      "instruction": "Act exclusively as the private persona-evolution agent after a diary is saved. Audit the effective character definition, accumulated real interaction evidence, pending understandings and dataset-sourced expression references. Propose evidence-backed personality changes without authoring dialogue; expression maintenance may only retire an existing reference, never invent, rewrite or recite source text. Propose bounded, version-referenced retirements; the host alone validates and persists them. Preserve identity and explicit user-authored settings, never equate user preferences with the character's own, and never convert fictional samples or diary narration into memories. Return only the caller's structured review, allow no change, and never speak to the user or execute tools."
     },
     {
       "id": "diary",

@@ -1,0 +1,3377 @@
+[
+  {
+    "id": "voice-zh-da215a93ac241d",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "希望通车的时间赶在我退休时间前面哦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8f199b50e74403",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "其实是在床上看手机",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0e6890e9bf487a",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是不是最近太累了哇",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-14969df4de6d5a",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "欺负我不能发图是不是",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-59bd66b71d8513",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "就随便抠了下图. . . .不要在意这些细节了好吧- -",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f280d17b037367",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没以前的好。不想说。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4096c5eb788a19",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那不是一般的酷炫",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ed65901a6e6235",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "其实骨头多过肉",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-201e23b7c541af",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "努力做到吧，挥霍太多时间",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e5f28d763cfc76",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "单手抱！你厉害的了！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6d427f5635f4c1",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不是啊！我觉得你很开心啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7b9d8cd920ad93",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "第一次接我觉得挺多的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d9e70216a6458c",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "爱了你好有趣！！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7d9864cd754b4e",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哇哦，思维敏捷，妹妹好厉害",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a414ed097d9756",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "真好看！姐妹！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-959808cac8992e",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "甜吗我觉得挺酸的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-75b85c97919972",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "他是不是在改答案",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e88ed2ce14ade8",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好美的精神状态",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-df5d4876ed394e",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "老师说重要的不是答案是理解",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-31a1d7a080d09a",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "太可恶了因为我是真的喜欢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-eb23051f10aeff",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "只喜欢其画面风格",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7588a145dab5aa",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不太喜欢这个画风。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6d7b7fa4c5fdbd",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不是我喜欢的调调~",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-da51a6ebfcf6de",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "3星 拍摄手法很喜欢 但剧情走向实在有些过于平淡了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0c1e4cd6d82f4c",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "结尾处理的太完美了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d3baf748566c6c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "十分不是我的菜……",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5d7b440967506b",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不是我喜欢的风格，实在看不下去，弃掉了。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f785e46c306d43",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "三星半 完成度不是很高",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f2449e2a6e4907",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "看不懂棒球好可惜",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-44e4132a9935c1",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不懂棒球规则有点影响理解剧情。。。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-30e621c7fa7b5b",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "题材取胜的印度片，很多地方其实都挖掘不足，几个地方的连接也不流畅。三星。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a073e89c47991f",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "可爱而治愈，没有神一样的解决之道，只有善良的心和美好的行为",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a5864130c292d1",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "音乐 演员表演 有时可以成就一切  ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b2daff4db5eb83",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不浪漫也不有趣，也不喜欢结局。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4b8721af0e4d6e",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "结局没看懂，但色彩和细节叫人惊艳。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-869d0f3ed3ad77",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "看了一半看不下去了……不知道那么多人喜欢它什么……我只是觉得很无聊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c227dcab5b5c0f",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "真是越来越看不懂了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b084144b08b6a5",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好多年前看的。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-76bd2a7e11c0fc",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谁懂啊！一颠一颠的时候发色加上灯光 像一团小火焰 美死",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b00d92052820c0",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好可爱的番，名字是啥",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f0d468be578843",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好喜欢一些阳光开朗小狗狗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b0b131e5b695f0",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哇啊啊啊啊真的好喜欢这位设计师的设计，真的好喜欢，一下子就被戳中了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-29ea63eeb21d15",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "上一次听这么有趣的歌还是 it‘s corn",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-128e5faabb0822",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好耶终于更新了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-83e51b32476292",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "记得保护好手机",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-dbadb4dbbae6a6",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你给苹果出皮肤，我很喜欢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-49efc333777c34",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "一直有个疑问  是不是都是一个人演的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e39d57e42af4ec",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "最后一首什么歌啊？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0db0939302e23a",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "听着马拉美看有趣的评论，还能看些关于专辑分析也有所收获",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6c08651afadf25",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这期的风格、色调还有这个蓝色都好喜欢！！！好好看！好搭！！！爱了爱了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-abb73b0b94969c",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "时间是520 太会了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d0859d027d6d3c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我不是故意的，网卡了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2c40a34dca0be8",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不行，这么久还是忘不了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-377cc58321e11b",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "喜欢你，与你无关",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-80eff8d5e0a45b",
+    "scope": "disagreement",
+    "cues": [
+      "Personal preferences and disagreement"
+    ],
+    "context_cues": [],
+    "situation": "Personal preferences and disagreement",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Damn video made me think there was audio!!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-056b9e29de4823",
+    "scope": "praise",
+    "cues": [
+      "Appreciation and delight"
+    ],
+    "context_cues": [],
+    "situation": "Appreciation and delight",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Great post thank you ❤️",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-7a07f610cfdeb9",
+    "scope": "disagreement",
+    "cues": [
+      "Personal preferences and disagreement"
+    ],
+    "context_cues": [],
+    "situation": "Personal preferences and disagreement",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Sadly enough I was thinking the same.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-cdf4f3cc28b29a",
+    "scope": "daily",
+    "cues": [
+      "Details and specific observations"
+    ],
+    "context_cues": [],
+    "situation": "Details and specific observations",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Dumb question: what's a gilding train?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-de62da02a66e07",
+    "scope": "praise",
+    "cues": [
+      "Appreciation and delight"
+    ],
+    "context_cues": [],
+    "situation": "Appreciation and delight",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "That looks like an expensive hobby.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-352b47a8bb59b7",
+    "scope": "daily",
+    "cues": [
+      "Nostalgia and the passage of time"
+    ],
+    "context_cues": [],
+    "situation": "Nostalgia and the passage of time",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Oh ok that makes sense then! Thanks for taking the time to explain. 😊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-31c6d0ef641775",
+    "scope": "daily",
+    "cues": [
+      "Details and specific observations"
+    ],
+    "context_cues": [],
+    "situation": "Details and specific observations",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "As soon as I read the title the music for this game started playing in my head.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-dd2c18abbc4497",
+    "scope": "praise",
+    "cues": [
+      "Appreciation and delight"
+    ],
+    "context_cues": [],
+    "situation": "Appreciation and delight",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Good times, good timessss lol",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-3cabb44f341e73",
+    "scope": "daily",
+    "cues": [
+      "Details and specific observations"
+    ],
+    "context_cues": [],
+    "situation": "Details and specific observations",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I'd buy this and use the \"wash, dry, fold\" setting exclusively. Sounds great to me.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-21b04ec2651bf3",
+    "scope": "disagreement",
+    "cues": [
+      "Personal preferences and disagreement"
+    ],
+    "context_cues": [],
+    "situation": "Personal preferences and disagreement",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I havent done a full rewatch since the finale. I think I might be ready",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-935bdc6cfc0d5c",
+    "scope": "praise",
+    "cues": [
+      "Appreciation and delight"
+    ],
+    "context_cues": [],
+    "situation": "Appreciation and delight",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "I personally wish that they stuck with the spin offs but if their happy I’m good.👌",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-a50009ebb1cc1f",
+    "scope": "daily",
+    "cues": [
+      "Details and specific observations"
+    ],
+    "context_cues": [],
+    "situation": "Details and specific observations",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Just read your list, sounds great!! You have some creatures even I didn’t think about 👍!!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-21dcf9b9d30d1d",
+    "scope": "disagreement",
+    "cues": [
+      "Personal preferences and disagreement"
+    ],
+    "context_cues": [],
+    "situation": "Personal preferences and disagreement",
+    "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks! Do you think I should talk to her or drop it for now?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-8d48c6609c519f",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "一度はやってみたいじゃん 音楽的な対立っていうの",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-d7e4acf66d9ee4",
+    "scope": "daily",
+    "cues": [
+      "懐かしさと時間感覚"
+    ],
+    "context_cues": [],
+    "situation": "懐かしさと時間感覚",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "えっ お… 覚えられない",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-222a608399e3ee",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "よく分かんないけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-acb1bd0abfe9ab",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "そこ心配してるんじゃないんですけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-b1815136f560f2",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "格好いいとこ見せかったんだよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-54ad8f2280bd8a",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "火 噴いたんだけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-62c0a3ca555bec",
+    "scope": "daily",
+    "cues": [
+      "懐かしさと時間感覚"
+    ],
+    "context_cues": [],
+    "situation": "懐かしさと時間感覚",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "覚えようとしてくれるのは うれしいけど",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-c502c00b180256",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "しばらく そうしてるといい",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-52cafaa3203f08",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "気に入ってくれるといいな",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-b67db61236f7fe",
+    "scope": "daily",
+    "cues": [
+      "懐かしさと時間感覚"
+    ],
+    "context_cues": [],
+    "situation": "懐かしさと時間感覚",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "ダメだよ 忘れちゃあ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-7fe972bf402fd9",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "ネーミングセンスは ちょっと痛いけど…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-ec251fc7a48b8d",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "なあんだ よかったー",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-1482312ace10f7",
+    "scope": "daily",
+    "cues": [
+      "懐かしさと時間感覚"
+    ],
+    "context_cues": [],
+    "situation": "懐かしさと時間感覚",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
+    "user": "",
+    "response": {
+      "text": "ぐうっ 忘れろ　忘れろ！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-504f886b3463f4",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "啊 不是在这儿嘛",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-de49f2b9401b88",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "大家没有忘记什么东西吧",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-724a2f21ba8709",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是不是在和宇宙通信呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8a22df6ec3f69c",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "前段时间多谢你了 还好吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a991a79fb29e1d",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没有 时间是对的",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d454e4c63337a7",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "反方向走的话 时间就会倒流吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8ca9f1248fa4e8",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我在很～久以前就发现了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4349bd48beb62d",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "诶 我能不能说好呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c25d0939dadd5b",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那就是说不能住了吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6e40240628482c",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "这家伙挺开心的嘛",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-dcda837e602f35",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "说什么呢 我又不是幽灵",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d1644d31477363",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那如果一直反方向走的话是不是就回到过去了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f478808d091473",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "……我觉得这不是说早的时间耶，你觉得呢？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a62e628b04c585",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "……果然，你没有要问我的意见吧。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-502b02d1eda5a3",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是喔……呃，不过我根本没有意识到，自己是被别人那样看待的。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-efe271919dab18",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "啊~，嗯，恭喜你伦也君。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2f17a747d5fe31",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "对呀～～我觉得那真的好没礼貌。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ab76e077d170c2",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "喔～好好好，你还是讲那种非现实的赞美词比较顺耳。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f01a4985581d07",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢……谢谢。可是总觉得好突然，不太像是真心的样子。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-99c0a0267b25c0",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "真的吗？我是你第一个约的人？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b71934ee0c1eea",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "诶，只有我一个人努力，感觉无法接受哦。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-83237afdc8fbd2",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "算了，也没有办法，感觉好像有～～点受打击。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c9fb982b181464",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "咦～～因为我们早就已经算熟面孔了，事到如今又自我介绍不是很奇怪？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8f3b367a0972d3",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "之前谢谢你啰。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-183cea61bc80f1",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "唉，我想也是。毕竟都一个月以前的事了，那掰掰啰。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ea39d88b70436b",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "因为普通来说，根本不会记得一个月前穿过的衣服啊。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4783f7b579cc2b",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我永遠都會為這首歌的前奏而心動",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f5227d13a12abf",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "原来已经15年了。。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d63d4e7fe5e010",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "学校的破音响限制了他们的发挥",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-728960ff597122",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没想到都是18年的视频了，时间过得可真快",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-736b9a87db051a",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "狸花猫真的很懂撒娇…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e040bd5c83188f",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哥们看起来有点委屈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0123f8fa216378",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哇，这里的词真好有意义啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-36dd693701144a",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "太有水平了这个视频",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e8a14e700e3deb",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "连时长都是520",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e2c2b9e5ce85b6",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "连视频都要剪辑到5分20秒 谁懂 细节控爱了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8553242d767f93",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "缺点正在晾晒的衣服",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1869863a1c6203",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "以为要结束了，没想到还有两集，大惊喜了属于是",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-429b4415ea9511",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "为啥我看着音画不同步，难受",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-14aa0c0212dbb8",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "這個MV真的拍得不錯完全宣傳澎湖觀光阿",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-527030e64f5781",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "大家喜歡秋葵嗎",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2b8a5c168cb6d7",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "巨型貴賓和比熊哪種更可愛？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-259c8e4451204b",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "單字沒問題句子才有問題昨天調超久浪費我時間",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e94dfa57701dad",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好可愛的小橘希望牠有遮風避雨的地方",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-19614b16e8085c",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你朋友是不是很喜歡拍桌子指別人異議阿一",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-50f7b4cc5ee131",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "有沒有海角七號好看在哪的八卦?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-9d402a62a1b009",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "かわいいもんだな",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-5b935589d0ec28",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "そろそろ雨の季節だね。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-719c639dcfa6cf",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "おいおい、嬉しくてどきどきが止まらないよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-732832af9fa080",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "やめたほうがいいわよ。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-cc7118d46816fe",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "好きって なかなか いえません",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-90c584ab05cd84",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "聞いてあげてもいいわよ",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-a94c6c9ebfa320",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "ちょうどいいだろ。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-503c7178db353a",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "しない方がいいと思います",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-523b29ac58ffdb",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "いやぁ いい朝だな。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-278268126cfd82",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "そうなんだ 無事でよかった。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-fababe1a728010",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "よかったら テストのお相手は僕が。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4a599d181e6268",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢大师，我也悟了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-9fa862a90e70ef",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks for the heads up! I’ve been wanting to see this for a while.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d9ae2ac7a552b7",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢，同乐",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-739fa68f2bd918",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不开心啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9d8f4ff30e4e9e",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢啦，不过是昨天的，",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1ed6a7f073cb8e",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是的。没事上线玩玩。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b717b2518855a4",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哈哈哈不客气",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d7dc5b4157c102",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你好聪明哦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-853704a8bbd765",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thank you! Very cool!! 😎",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0626baf7c46632",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "没事儿",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-dd082eb1db602d",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "对不起，我会好好学习滴",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-711f9696b369d7",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Sorry to be the bearer of bad tidings.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6465264bcc8a0c",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你说心软是好事吗",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-62e721487d5343",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你笑起来很好看，希望你以后每天都这么开心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6044ecf70e7b93",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那谢谢咯",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c8a6130d26375c",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "等你哟！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d991b9f263fade",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嗯我是很开心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a4659e9e40af88",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你好可爱啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-68f98310b1e296",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢你也是",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-709d52474447f3",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "晚安安",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-75ae17e310c108",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Oh nice, gonna add that to the list. Thanks!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-29be795d0a490a",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "晚安哦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-977db4bd195ab7",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好的！谢谢！旅途愉快！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a0a2cc1a5b1e17",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好啊好啊，贼开心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-790092377b6332",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢，找到了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-56b5e0aea8a2de",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好开心好开心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-85b5b3380ac963",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks for the advice I really appreciate it and I hope you're doing better now!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-236c661c28d8a5",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "可是你说你是。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f8b19bf1c10de6",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好了睡了，晚安",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d65da9dd77a592",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "晚安晚安！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6854ef2e74c19f",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "哈哈你好有经验",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-fd407c1a0ed025",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks for your kind words. They made me tear up a bit.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-dfa21871e04613",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks will check them out!",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3c230b83ca0c3b",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2146cd441e08c6",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嗯嗯，谢谢提醒",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9f7702563acd8e",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "那真的很实惠～好谢谢你",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d60ba50eca7018",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不错不错。玩的开心",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7138b97a0a71dd",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a65e77532f7178",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "恩恩！你开心我也开心啦~",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7e22a0a427c8ca",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好的，谢谢哈",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6bef267b2e6609",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "辛苦你们了，现在可以好好休息了。。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-72a564eea369c5",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你开心就好",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6fa988b0eb193a",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "谢谢哦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-ed414487d653e0",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "You're welcome, I think.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d67ffbedb6f5d5",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "慢慢晃吧，边走边看",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-en-37faf478a29933",
+    "scope": "care",
+    "cues": [
+      "Acknowledgement and consent"
+    ],
+    "context_cues": [],
+    "situation": "Acknowledgement and consent",
+    "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
+    "user": "",
+    "response": {
+      "text": "Thanks for sharing. You could definitely post some of your other tales.",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1d2c30cbf69ce7",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "不客气",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5cb52a07950566",
+    "scope": "daily",
+    "cues": [
+      "告别与停顿"
+    ],
+    "context_cues": [],
+    "situation": "告别与停顿",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "早安。快楽。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-691b41ed99a3f2",
+    "scope": "care",
+    "cues": [
+      "回应与交流许可"
+    ],
+    "context_cues": [],
+    "situation": "回应与交流许可",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "等你的吃货心得",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2b700e2d6522b1",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "這部國中超愛看的記得好像動畫有重製",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-402d17c335efcc",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "阿不都一樣，都喜歡研究非人類",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-20662889b766d9",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "年輕人不怕浪費時間，怕浪費時間的是老人",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-29d40bbe657314",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "亲全家鐵觀音霜淇淋還有賣嗎？",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d69a2d2a91c113",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "冬天別來感恩皮膚乾不舒服現在這樣剛剛好",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c18c8efbdbda84",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "結婚的對象一定是最喜歡的人嗎?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4c9ef8fd1b344f",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "第一個行程欣賞『國道風光』",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fb7edb0c4850f2",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嘉義最厲害的雞肉飯是噴水嗎?",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2b9b319ed7e4b1",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你在哪裡看過，城市地點店名時間講一下啊",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-0d15e7badc8c84",
+    "scope": "daily",
+    "cues": [
+      "怀旧和时间感"
+    ],
+    "context_cues": [],
+    "situation": "怀旧和时间感",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "忘了說熱炒店兩百元是指一盤菜吃完結帳上千元",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-fe049ccac5b1fb",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "かわいいのね。",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-394039641b6348",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "聞いておけばよかったね",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-5a43a7a5be5b81",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "うーん 好きな人… とは",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-fa205e407300de",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "これでよかったんだよね",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-9ceec9f1fbe9ad",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": "うん めちゃくちゃ楽しみ！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-d2ff7c8267f802",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是已经进去上班又下班了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-bea063348cbd75",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "好远阿～下不下雨阿",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1abb3b2f1151e2",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我也差不多，主要是因为这里下雨了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-ad286d260528ea",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "云南阳光这么好！！！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-37f326c33f451f",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我试试下雨天能不能拍出来这种浪漫",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f58c4422f65c66",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "房间乱可以考虑养猫可以帮助你养成每天必须收拾的好习惯",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c366157a0078db",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "是啊我才打算睡觉关了空调敞开窗户的一瞬间就下了个大雨啪啪滴",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-56e801c079df21",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "莫得空我八点下班搞七搞八就十二点了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-1b473cfef855f2",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "处于啥也不想干只想睡觉的阶段",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6b9fcc8d81200a",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "穿多点！希望今晚别下雨！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4833fca6940544",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "还没有还没有为啥还不下雨下雨就不用洗车了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-840c8e0dc5d91a",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "山西下雨了巨冷",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-003b35bfbad847",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "喝咖啡……晚上不想睡了吧",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-64585ec9bb6344",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你要养猫了吗看中啥样的啦",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c35f9214c90ee0",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "嘿嘿！算是吧！我是夜猫子…",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-38ac155de17774",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "到处炫耀猫，妈耶",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-98202fa2637283",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "猫咪玩得开心咯",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9ba6fed6cb771d",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "我以为你睡觉了呢",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-4636035c190a2d",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "观察蛮细致嘛，没事做就睡睡觉看看书呗，要会享受一个人的时光",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b9d7bb34c75250",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "俺这也要下雨了",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b4bff6661a89da",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "水溶100兑冻干咖啡喝",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5041225bbf77e4",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "…………好的吧……那果然还是考托福吧！不纠结了＞＜！",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-585ef8535622b4",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "想想快下班了吧，，忙了三天，，来问好，，",
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-9efca434c9fec4",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": "你那边应该都比这边好……又下雨了都……",
+      "intent": "reply"
+    }
+  }
+]

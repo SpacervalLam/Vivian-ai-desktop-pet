@@ -42,6 +42,7 @@ await writeFile(path.join(dir, 'src/lib.rs'), `#![allow(dead_code)]
 #[path="${source('proactive/triggers.rs')}"] mod triggers;
 #[path="${source('proactive/generation_retry.rs')}"] mod generation_retry;
 #[path="${source('world/interaction_guidance.rs')}"] mod interaction_guidance;
+#[path="${source('world/topic_window.rs')}"] mod topic_window;
 #[path="${source('world/environment_policy.rs')}"] mod environment_policy;
 #[cfg(test)] mod mind { pub mod conversation {pub use crate::conversation::*;} }
 mod error { #[derive(Debug)] pub enum VivianError {Other(String)} }

@@ -1365,6 +1365,8 @@ pub struct PromptParts {
     pub mind_section: Option<String>,
     /// Working Memory 段落（30 秒级"正在想什么"缓冲区），None 时不注入
     pub working_memory_section: Option<String>,
+    /// Ephemeral, attributed topic continuity, separate from thoughts and long-term memory.
+    pub topic_window_section: Option<String>,
     /// Self State 段落（角色自我状态快照），None 时不注入
     ///
     /// 包含当前心理状态/在场状态/当前活动/今日主动次数/被忽略次数/疲劳/社交满足度。
@@ -1966,6 +1968,7 @@ impl PromptBuilder {
         push!(1, "mind", parts.mind_section.clone().unwrap_or_default());
         // Working Memory 段落：此刻脑中的活跃想法（30 秒级缓冲）
         push!(1, "working_memory", parts.working_memory_section.clone().unwrap_or_default());
+        push!(1, "topic_window", parts.topic_window_section.clone().unwrap_or_default());
         // Self State 段落：角色自我状态快照（当前活动/今日节奏/疲劳/社交满足度）
         push!(1, "self_state", parts.self_state_section.clone().unwrap_or_default());
         // 后台任务段落：运行中任务 + 待汇报的完成报告（自我状态的延伸：我在后台忙什么）

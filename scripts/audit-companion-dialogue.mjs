@@ -79,7 +79,7 @@ assert.equal(truncated.status, 0, truncated.stderr);
 
 const libraries = {};
 for (const character of ['vivian', 'nana']) {
-  const entries = JSON.parse(await read(`src-tauri/prompts/characters/${character}/example_library.json`));
+  const entries = JSON.parse(await read(`src-tauri/prompts/characters/${character}/voice_fragments.json`));
   const language = text => !text ? 'empty' : /[\u3040-\u30ff]/.test(text) ? 'ja_or_mixed'
     : /[\u4e00-\u9fff]/.test(text) ? 'zh_or_mixed' : 'en_or_other';
   const scripts = {};

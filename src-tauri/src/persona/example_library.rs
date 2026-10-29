@@ -1,4 +1,4 @@
-//! Writable voice examples. References protect edits; examples remain fictional.
+//! Dialogue examples and sourced expression fragments. References protect edits.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -21,6 +21,52 @@ pub struct VoiceExample {
     pub attention: String,
     pub user: String,
     pub response: serde_json::Value,
+    // Synthetic citations exist only in isolated unit tests, never in app data.
+    #[cfg(test)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<serde_json::Value>,
+}
+
+impl VoiceExample {
+    /// A sourced utterance has no invented user turn. Keep the marker in the
+    /// portable base array so it survives restarts and factory upgrades.
+    pub fn is_fragment(&self) -> bool {
+        self.id.starts_with("voice-") && self.user.is_empty()
+    }
+
+    pub fn is_approved_utterance(&self) -> bool {
+        // The bundled corpus was verified offline. Match its id, user and exact
+        // response instead of shipping research metadata with every utterance.
+        static APPROVED: once_cell::sync::Lazy<BTreeSet<String>> = once_cell::sync::Lazy::new(|| {
+            [include_str!("../../prompts/characters/nana/voice_fragments.json"),
+             include_str!("../../prompts/characters/vivian/voice_fragments.json")]
+                .into_iter().flat_map(|raw| serde_json::from_str::<Vec<VoiceExample>>(raw).expect("valid voice corpus"))
+                .map(|entry| fingerprint(&(&entry.id, &entry.user, &entry.response))).collect()
+        });
+        if APPROVED.contains(&fingerprint(&(&self.id, &self.user, &self.response))) { return true; }
+        #[cfg(test)]
+        return self.has_fixture_source();
+        #[cfg(not(test))]
+        false
+    }
+
+    #[cfg(test)]
+    fn has_fixture_source(&self) -> bool {
+        let Some(source) = self.source.as_ref() else { return false; };
+        if source["dataset"] != "unit-test fixtures (never shipped)" { return false; }
+        let Some(text) = self.response["text"].as_str() else { return false; };
+        ["dataset", "url", "locator", "snapshot_sha256"].iter()
+            .all(|key| source[*key].as_str().is_some_and(|value| !value.trim().is_empty()))
+            && source["snapshot_sha256"].as_str().is_some_and(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            && source["text_sha256"].as_str() == Some(format!("{:x}", Sha256::digest(text.as_bytes())).as_str())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_source(text: &str) -> serde_json::Value {
+    let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+    serde_json::json!({"dataset":"unit-test fixtures (never shipped)",
+        "url":"https://example.invalid/unit-test-corpus", "locator":"fixture", "snapshot_sha256":hash, "text_sha256":hash})
 }
 
 pub fn fingerprint(value: &impl Serialize) -> String {
@@ -31,12 +77,14 @@ pub fn fingerprint(value: &impl Serialize) -> String {
 }
 
 pub fn factory_examples(char_id: &str) -> Vec<VoiceExample> {
-    let source = match char_id {
-        "nana" => include_str!("../../prompts/characters/nana/example_library.json"),
-        "vivian" => include_str!("../../prompts/characters/vivian/example_library.json"),
+    let fragments = match char_id {
+        "nana" => include_str!("../../prompts/characters/nana/voice_fragments.json"),
+        "vivian" => include_str!("../../prompts/characters/vivian/voice_fragments.json"),
         _ => "[]",
     };
-    serde_json::from_str(source).expect("valid factory example library")
+    let examples: Vec<VoiceExample> = serde_json::from_str(fragments).expect("valid sourced voice fragments");
+    assert!(examples.iter().all(VoiceExample::is_approved_utterance), "factory utterances require dataset provenance");
+    examples
 }
 
 /// Base arrays remain portable; a separate factory snapshot makes upgrades a
@@ -69,7 +117,7 @@ pub fn ensure_base(char_id: &str) -> Result<Vec<VoiceExample>, String> {
 
 pub fn base_examples(char_id: &str) -> Vec<VoiceExample> {
     match ensure_base(char_id) {
-        Ok(entries) => entries,
+        Ok(entries) => entries.into_iter().filter(VoiceExample::is_approved_utterance).collect(),
         Err(error) => {
             tracing::warn!("[VoiceCorpus:{char_id}] {error}");
             factory_examples(char_id)
@@ -180,8 +228,11 @@ pub fn materialize(
     overrides: &[ExampleOverride],
     learned: &[(String, String)],
 ) -> Vec<VoiceExample> {
-    let mut entries = base.to_vec();
+    let mut entries: Vec<_> = base.iter().filter(|entry| entry.is_approved_utterance()).cloned().collect();
     for update in overrides.iter().filter(|update| update.applies(learned)) {
+        // Old generated overrides must neither reach the diary audit nor hide a
+        // valid dataset quote by replacing it before retrieval filters run.
+        if update.edit.example.as_ref().is_some_and(|example| !example.is_approved_utterance()) { continue; }
         entries.retain(|entry| entry.id != update.edit.id);
         if let Some(example) = &update.edit.example {
             entries.push(example.clone());
@@ -196,7 +247,8 @@ fn bounded(s: &str, min: usize, max: usize) -> bool {
 }
 
 fn valid_example(e: &VoiceExample) -> bool {
-    bounded(&e.id, 1, 80)
+    e.is_approved_utterance()
+        && bounded(&e.id, 1, 80)
         && e.id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_:".contains(&c))
@@ -206,16 +258,16 @@ fn valid_example(e: &VoiceExample) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
         && bounded(&e.situation, 1, 240)
         && bounded(&e.attention, 0, 180)
-        && bounded(&e.user, 1, 180)
+        && bounded(&e.user, if e.is_fragment() { 0 } else { 1 }, 180)
         && (1..=8).contains(&e.cues.len())
         && e.context_cues.len() <= 8
         && e.cues
             .iter()
             .chain(&e.context_cues)
             .all(|cue| bounded(cue, 1, 60))
-        && e.cues
+        && (e.is_fragment() || e.cues
             .iter()
-            .any(|cue| e.user.to_lowercase().contains(&cue.to_lowercase()))
+            .any(|cue| e.user.to_lowercase().contains(&cue.to_lowercase())))
         && e.response
             .as_object()
             .is_some_and(|r| r.len() == 2 && r.contains_key("text") && r.contains_key("intent"))
@@ -267,6 +319,10 @@ pub fn validate_edits(
                 return previous.is_some();
             };
             valid_example(example)
+                && previous.is_none_or(|previous| previous.is_fragment() == example.is_fragment())
+                // Diary review may refine retrieval guidance or retire a quote,
+                // but must not silently rewrite the sourced wording.
+                && previous.is_none_or(|previous| !previous.is_fragment() || previous.response == example.response)
                 && example.id == edit.id
                 && responses.insert(
                     example.response["text"]
@@ -344,6 +400,57 @@ pub fn publish_edits(
 mod tests {
     use super::*;
     #[test]
+    fn fragments_survive_base_roundtrip_and_cannot_turn_into_paired_dialogue() {
+        let fragment = factory_examples("vivian").into_iter().find(|e|e.is_fragment()).unwrap();
+        assert!(valid_example(&fragment));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(BASE_FILE);
+        save_base_at(&path, &[fragment.clone()]).unwrap();
+        let restored = read_base_at(&path).unwrap();
+        assert!(restored[0].is_fragment());
+        assert_eq!(restored[0].response, fragment.response);
+        assert_eq!(restored[0].source, fragment.source);
+        let mut fabricated = fragment.clone();
+        fabricated.user = fabricated.cues[0].clone();
+        let edit = ExampleEdit {id:fragment.id.clone(),reference:Some(fingerprint(&fragment)),
+            reason:"不能凭空生成问答".into(),example:Some(fabricated)};
+        assert!(!validate_edits(&[edit], &[fragment], None));
+    }
+    #[test]
+    fn legacy_unattributed_cache_entries_are_not_a_runtime_corpus() {
+        let char_id = format!("legacy-source-test-{}", uuid::Uuid::new_v4());
+        let path = crate::utils::path::get_character_data_dir(&char_id).join("persona").join(BASE_FILE);
+        let mut legacy = sample("old-authored-example");
+        legacy.source = None;
+        save_base_at(&path, &[legacy]).unwrap();
+        assert!(base_examples(&char_id).is_empty());
+        assert_eq!(read_base_at(&path).unwrap().len(), 1, "do not erase an unrecognized user archive");
+    }
+    #[test]
+    fn diary_review_cannot_rephrase_sourced_utterances() {
+        let original = factory_examples("nana").into_iter().find(|e|e.is_fragment()).unwrap();
+        let mut changed = original.clone();
+        changed.response["text"] = "模型自行润色的回应".into();
+        let mut edit = ExampleEdit {id:original.id.clone(),reference:Some(fingerprint(&original)),
+            reason:"改写来源台词".into(),example:Some(changed)};
+        assert!(!validate_edits(&[edit.clone()], &[original.clone()], None));
+        edit.example = None;
+        assert!(validate_edits(&[edit], &[original], None));
+    }
+    #[test]
+    fn old_generated_override_cannot_hide_or_rewrite_a_sourced_quote() {
+        let original = factory_examples("vivian").into_iter().next().unwrap();
+        let mut invented = original.clone();
+        invented.response["text"] = "历史版本生成的台词".into();
+        invented.source = None;
+        let update = ExampleOverride {scope:original.scope.clone(),understanding:None,updated_at:1.0,
+            edit:ExampleEdit {id:original.id.clone(),reference:None,reason:"旧缓存".into(),example:Some(invented)}};
+        let restored = materialize(&[original.clone()], &[update], &[]);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].response, original.response);
+        assert_eq!(restored[0].source, original.source);
+    }
+    #[test]
     fn factory_upgrade_preserves_local_edits_deletions_and_learned_overrides() {
         let old = sample("factory");
         let edited = sample("edited");
@@ -394,7 +501,8 @@ mod tests {
         serde_json::from_value(
             serde_json::json!({"id":id,"scope":"comfort","cues":["不想讲"],
             "situation":"虚构示例：对方疲惫，不想复述事情。","user":"今天不想讲了",
-            "response":{"text":"那就歇会儿，想说了我再听。","intent":"reply"}}),
+            "response":{"text":"那就歇会儿，想说了我再听。","intent":"reply"},
+            "source":fixture_source("那就歇会儿，想说了我再听。")}),
         )
         .unwrap()
     }
@@ -432,8 +540,10 @@ mod tests {
         other.example.as_mut().unwrap().id = other.id.clone();
         assert!(!validate_edits(&[edit.clone(), other], &[], None));
         edit.example.as_mut().unwrap().response["text"] = "长".repeat(181).into();
+        edit.example.as_mut().unwrap().source = Some(fixture_source(&"长".repeat(181)));
         assert!(!validate_edits(&[edit.clone()], &[], None));
         edit.example.as_mut().unwrap().response["text"] = "短句".into();
+        edit.example.as_mut().unwrap().source = Some(fixture_source("短句"));
         edit.example.as_mut().unwrap().cues = vec!["不存在的匹配词".into()];
         assert!(!validate_edits(&[edit], &[], None));
     }
@@ -469,6 +579,7 @@ mod tests {
             .map(|index| {
                 let mut e = sample(&format!("grown-{index}"));
                 e.response["text"] = format!("独立表达{index}").into();
+                e.source = Some(fixture_source(&format!("独立表达{index}")));
                 ExampleOverride {
                     edit: ExampleEdit {
                         id: e.id.clone(),

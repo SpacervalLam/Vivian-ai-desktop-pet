@@ -9,6 +9,7 @@ const tests=source.slice(source.indexOf('    #[test]\n    fn literal_prefix'),so
 const metaSource=await readFile('src-tauri/src/messages.rs','utf8');
 const communication=metaSource.slice(metaSource.indexOf('#[derive',metaSource.indexOf('/// Trusted routing')),metaSource.indexOf('/// 消息元数据'));
 const companion=await readFile('src-tauri/src/pipeline/companion_prompt.rs','utf8');
+const positions=companion.match(/enum Position \{[^\n]+\}/)?.[0];assert.ok(positions);
 const extractedAssembly=companion.match(/    pub fn messages_with_communication\([\s\S]*?\n    \}/)?.[0];assert.ok(extractedAssembly);
 const assembly=extractedAssembly.replaceAll('super::spoken_reply::PRIVATE_OPERATION','PRIVATE_OPERATION');
 const privateRule=companion.match(/fn private_operation\([\s\S]*?\n\}/)?.[0];assert.ok(privateRule);
@@ -30,18 +31,18 @@ impl ChatMessage {pub fn system(s:impl Into<String>)->Self{Self{role:"system".in
 ${context}
 mod message_context{pub use crate::{append_current_turn,append_history};}
 const DATA_BOUNDARY:&str=${boundary};
-#[derive(PartialEq)]enum Position{Main,Example,Context,PostHistory}
+#[derive(PartialEq)]${positions}
 struct Block{id:String,position:Position,content:String}
 struct CompanionPrompt{blocks:Vec<Block>}
 const PRIVATE_OPERATION:&str=${privateMarker};
 ${privateRule}
 impl CompanionPrompt{fn contents(&self,position:Position)->Vec<&str>{self.blocks.iter().filter(|b|b.position==position).map(|b|b.content.as_str()).collect()}${assembly}}
-#[cfg(test)]mod tests{use super::*;#[test]fn evidence_precedes_history_and_current_input_stays_original(){
+#[cfg(test)]mod tests{use super::*;#[test]fn history_precedes_dynamic_context_and_current_input_stays_original(){
 let p=CompanionPrompt{blocks:vec![(Position::Main,"rules".into()),(Position::Example,"fictional example".into()),(Position::Context,"retrieved context".into()),(Position::PostHistory,"final protocol".into())].into_iter().enumerate().map(|(i,(position,content))|Block{id:format!("fixture_{i}"),position,content}).collect()};
 let history=vec![ChatMessage::user("old user"),ChatMessage::assistant("old answer")];
 let input="[Nana says to me] 用户自己输入的文本";
 let messages=p.messages_with_communication(&history,input,false,None,None);
-assert!(messages[2].content.contains("retrieved context"));assert_eq!(messages[3].content,"old user");assert_eq!(messages[4].role,"assistant");assert_eq!(messages[5].content,input);assert_eq!(messages[5].role,"user");assert_eq!(messages.iter().filter(|m|m.content.contains(input)).count(),1);assert_eq!(messages.last().unwrap().content,"final protocol");}
+assert_eq!(messages[1].content,"old user");assert_eq!(messages[2].role,"assistant");assert!(messages[3].content.contains("retrieved context"));assert_eq!(messages[4].content,"fictional example");assert_eq!(messages[5].content,input);assert_eq!(messages[5].role,"user");assert_eq!(messages.iter().filter(|m|m.content.contains(input)).count(),1);assert_eq!(messages.last().unwrap().content,"final protocol");}
 #[test]fn missing_participant_is_not_guessed(){let c=crate::messages::CommunicationContext::default();let note=communication_note(&c);assert!(note.contains("未记录"));assert!(!note.contains("用户 →"));}
 #[test]fn routing_note_is_brief_and_readable(){let c=crate::messages::CommunicationContext{speaker:Some("user".into()),listener:Some("nana".into()),current_character:Some("vivian".into()),knowledge_source:Some("observed".into())};let note=communication_note(&c);assert!(note.contains("用户 → Nana"));assert!(note.contains("不是向 Vivian 提问"));assert!(!note.contains("knowledge_source"));assert!(note.chars().count()<120);}
 ${tests.replaceAll('crate::messages::MessageMeta::default()', 'crate::types::response::Meta::default()')}}

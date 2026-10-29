@@ -17,6 +17,7 @@ pub mod environment_agent;
 pub mod environment_input;
 pub mod environment_policy;
 pub mod interaction_guidance;
+pub mod topic_window;
 pub mod foreground_window;
 pub mod foreground_context;
 pub mod game_input_policy;

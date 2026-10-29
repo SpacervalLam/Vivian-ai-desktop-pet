@@ -5,13 +5,24 @@ import { mergeByMaterial } from './merge';
 import { createLeafField } from './foliage';
 
 type Plot={x:number;z:number;w:number;d:number;angle:number;front:THREE.Vector3;bounds:THREE.Box2};
+export const INFILL_TENANTS = [
+  ['湖岸洗衣房', 'LAUNDRY · FOLD · FRESH'], ['朝露邮驿', 'PARCELS · POSTCARDS · HELLO'],
+  ['白帆旅行社', 'TICKETS TO SOMEWHERE NEW'], ['落日画廊', 'PAINTINGS · LOCAL ARTISTS'],
+  ['青岚社区诊所', 'NEIGHBOURHOOD CARE'], ['暮色小剧场', 'TONIGHT · A NEW STORY'],
+  ['南巷小面', 'NOODLES · SLOW BROTH'], ['雨后植物园', 'CUTTINGS · GROWING THINGS'],
+  ['风车碾磨坊', 'GRAIN · STONE MILLED'], ['拂晓报社', 'LOCAL STORIES · DAILY'],
+  ['流云陶染', 'INDIGO · HAND DYED'], ['石榴冷萃', 'COLD BREW · SMALL BATCH'],
+  ['暖路社区厨房', 'A MEAL TO SHARE'],
+] as const;
 /** Street-oriented infill selected against existing authored collision footprints and all road corridors. */
 export function createUrbanInfill(scene:THREE.Scene,existing:Collider[]){
   const root=new THREE.Group();root.name='inhabited-city-infill';root.userData.sceneCollideSkip=true;scene.add(root);
   const colliders:Collider[]=[],materials:THREE.Material[]=[],geometries=new Set<THREE.BufferGeometry>();
   const mat=(c:string)=>{const m=new THREE.MeshStandardMaterial({color:c,roughness:.88});m.userData.outlineWeight=0;materials.push(m);return m;};
   const walls=['#b9ac92','#c0937b','#98aaa0','#d4c7ac','#a3a9b2','#baaa9c'].map(mat),trim=mat('#e2d7bd'),iron=mat('#3e5059'),glass=mat('#829fa7'),wood=mat('#80604c'),green=mat('#627d5a'),clay=mat('#ad795d'),roof=mat('#637279'),paving=mat('#b2b2a6');
-  const cube=new THREE.BoxGeometry(1,1,1),sphere=new THREE.IcosahedronGeometry(1,1);geometries.add(cube);geometries.add(sphere);
+  const cube=new THREE.BoxGeometry(1,1,1),sphere=new THREE.IcosahedronGeometry(1,1);
+  const cylinder=new THREE.CylinderGeometry(1,1,1,16),ring=new THREE.TorusGeometry(1,.055,6,24);
+  for(const geometry of [cube,sphere,cylinder,ring])geometries.add(geometry);
   const reserved=existing.filter(c=>c.kind!=='floor'&&c.kind!=='ramp'&&c.max.y>.55&&c.min.y<4).map(c=>new THREE.Box2(new THREE.Vector2(c.min.x-.65,c.min.z-.65),new THREE.Vector2(c.max.x+.65,c.max.z+.65)));
   for(const [a,b,c,d] of [[-40,40,-10,9],[-40,40,-39,-22],[-31,39,12,28],[-11,11,34,57],[-64,-6,110,155],[16,64,109,146],[78,103,-78,165],[-35,-13,86,96]])reserved.push(new THREE.Box2(new THREE.Vector2(a,c),new THREE.Vector2(b,d)));
   const routes=[...CITY_ROUTES,...SOUTH_ROUTES];
@@ -37,12 +48,13 @@ export function createUrbanInfill(scene:THREE.Scene,existing:Collider[]){
   function box(parent:THREE.Group,x:number,y:number,z:number,w:number,h:number,d:number,m:THREE.Material){const o=new THREE.Mesh(cube,m);o.position.set(x,y,z);o.scale.set(w,h,d);o.castShadow=true;o.receiveShadow=true;parent.add(o);return o;}
   // One atlas for all storefront signs instead of one high-resolution texture per building.
   const canvas=document.createElement('canvas');canvas.width=1024;canvas.height=1024;const ctx=canvas.getContext('2d')!;
-  const names=['CORNER BAKERY','街角书房','DAILY MARKET','CAFÉ TERRACE','青禾食堂','FLOWER STUDIO','VINTAGE & VINYL','邻里药房'];
-  names.forEach((name,i)=>{const y=i*128;ctx.fillStyle=['#3e6456','#925f51','#485c79'][i%3];ctx.fillRect(0,y,1024,128);ctx.fillStyle='#f3e5cb';ctx.textAlign='center';ctx.font='bold 48px Georgia,"Microsoft YaHei",sans-serif';ctx.fillText(name,512,y+58);ctx.font='21px sans-serif';ctx.fillText('NEIGHBOURHOOD  ·  OPEN DAILY',512,y+104);});
+  if(plots.length>INFILL_TENANTS.length)throw new Error('New infill plots need individually authored tenants');
+  const tenants=INFILL_TENANTS.slice(0,plots.length);
+  tenants.forEach(([name,sub],i)=>{const x=i%4*256,y=Math.floor(i/4)*256;ctx.fillStyle=['#3e6456','#925f51','#485c79'][i%3];ctx.fillRect(x,y,256,256);ctx.strokeStyle='#d0b37f';ctx.strokeRect(x+9,y+9,238,238);ctx.fillStyle='#f3e5cb';ctx.textAlign='center';ctx.font='bold 33px "Microsoft YaHei",serif';ctx.fillText(name,x+128,y+99,232);ctx.font='12px Georgia,serif';ctx.fillText(sub,x+128,y+158,232);ctx.font='11px monospace';ctx.fillText(`NEIGHBOURHOOD / ${i+1}`,x+128,y+203);});
   const atlas=new THREE.CanvasTexture(canvas);atlas.colorSpace=THREE.SRGBColorSpace;const signMat=new THREE.MeshStandardMaterial({map:atlas,roughness:.85});signMat.userData.outlineWeight=0;materials.push(signMat);
-  const signs=names.map((_,i)=>{const geo=new THREE.PlaneGeometry(4.35,.6);const uv=geo.attributes.uv;for(let n=0;n<uv.count;n++)uv.setY(n,1-(i+1)/8+uv.getY(n)/8);geometries.add(geo);return geo;});
+  const signs=tenants.map((_,i)=>{const geo=new THREE.PlaneGeometry(4.35,.6);const uv=geo.attributes.uv;for(let n=0;n<uv.count;n++)uv.setXY(n,(i%4+uv.getX(n))/4,1-(Math.floor(i/4)+1-uv.getY(n))/4);geometries.add(geo);return geo;});
   plots.forEach((p,i)=>{
-    const g=new THREE.Group();g.name=`infill-house-${i}`;g.position.set(p.x,0,p.z);g.rotation.y=p.angle;root.add(g);
+    const g=new THREE.Group();g.name=`infill-house-${i}-${tenants[i][0]}`;g.userData.tenant=tenants[i][0];g.position.set(p.x,0,p.z);g.rotation.y=p.angle;root.add(g);
     const h=6.5+(i%3)*2.8,wall=walls[i%walls.length];
     box(g,0,h/2,0,p.w,h,p.d,wall);
     for(let y=3.4;y<h;y+=2.8)box(g,0,y,0,p.w+.12,.12,p.d+.12,trim);
@@ -56,15 +68,52 @@ export function createUrbanInfill(scene:THREE.Scene,existing:Collider[]){
     box(g,0,h+.15,0,p.w+.35,.3,p.d+.35,trim);box(g,0,h+.34,0,p.w-.22,.1,p.d-.22,roof);
     box(g,.8,h+.65,1.1,1.3,.5,1.05,iron);for(let n=0;n<7;n++)box(g,.28+n*.17,h+.92,1.1,.06,.035,.85,trim);
     box(g,-2.3,h/2,-3.2,.06,h,.06,iron);
-    const sign=new THREE.Mesh(signs[i%8],signMat);sign.rotation.y=Math.PI;sign.position.set(0,2.92,-3.18);g.add(sign);
-    for(let n=0;n<12;n++){box(g,-2.2+n*.4,2.5,-3.55,.39,.065,.8,n%2?trim:green);box(g,-2.2+n*.4,2.37,-3.93,.39,.21,.04,n%2?trim:green);}
+    const sign=new THREE.Mesh(signs[i],signMat);sign.rotation.y=Math.PI;sign.position.set(0,2.92,-3.18);g.add(sign);
+    const canopy=box(g,0,2.53,-3.38,4.3,.075,.5,i%2?wood:green);canopy.rotation.x=-.07-(i%3)*.025;
+    for(let n=0;n<3+i%4;n++)box(g,-1.9+n*3.8/(2+i%4),2.48,-3.38,.045,.11,.52,trim);
     box(g,.25,1.25,-3.18,.85,2.5,.08,wood);box(g,.5,1.2,-3.25,.04,.26,.04,trim);
+    // Each tenant has an independently composed display, kept inside the existing footprint.
+    const piece=(geometry:THREE.BufferGeometry,m:THREE.Material,x:number,y:number,z:number,a=1,b=1,c=1)=>{const mesh=new THREE.Mesh(geometry,m);mesh.position.set(x,y,z);mesh.scale.set(a,b,c);mesh.castShadow=true;g.add(mesh);return mesh;};
+    const disk=(x:number,y:number,r:number,m:THREE.Material)=>{const item=piece(cylinder,m,x,y,-3.38,r,.035,r);item.rotation.x=Math.PI/2;return item;};
+    switch(i){
+      case 0:
+        for(const x of [-1.75,-.85]){box(g,x,.78,-3.31,.75,.95,.36,trim);disk(x,.76,.26,iron);disk(x,.76,.2,glass);box(g,x,1.14,-3.51,.36,.06,.03,wood);}break;
+      case 1:
+        for(let row=0;row<3;row++)for(let col=0;col<3;col++){const x=-1.96+col*.51,y=.53+row*.51;box(g,x,y,-3.3,.46,.46,.25,(row+col)%2?wood:green);box(g,x+.13,y,-3.44,.04,.15,.025,trim);}break;
+      case 2:
+        piece(sphere,glass,-1.36,1.12,-3.33,.46,.46,.25);piece(ring,wood,-1.36,1.12,-3.37,.5,.5,.25).rotation.z=.3;box(g,-1.36,.54,-3.32,.15,.49,.21,iron);box(g,-1.36,.29,-3.33,.81,.09,.35,trim);break;
+      case 3:
+        for(let n=0;n<3;n++){const frame=box(g,-1.94+n*.56,1.13+n*.08,-3.3,.46,.83,.11,wood);frame.rotation.z=(n-1)*.1;box(g,-1.94+n*.56,1.13+n*.08,-3.37,.36,.71,.025,[green,glass,clay][n]).rotation.z=(n-1)*.1;}break;
+      case 4:
+        box(g,-1.35,1.29,-3.3,1.53,1.37,.18,trim);box(g,-1.35,1.4,-3.41,.19,.84,.045,green);box(g,-1.35,1.4,-3.41,.84,.19,.045,green);box(g,-1.35,.77,-3.42,1.16,.08,.03,wood);break;
+      case 5:
+        box(g,-1.38,1.2,-3.31,1.55,1.75,.18,iron);for(let n=0;n<8;n++)box(g,-2.02+n*.18,1.18,-3.44,.13,1.59,.07,clay);for(const x of [-1.86,-.86])piece(sphere,trim,x,2.17,-3.38,.08,.08,.08);break;
+      case 6:
+        box(g,-1.35,.61,-3.29,1.66,.91,.34,wood);for(const x of [-1.76,-.96]){piece(cylinder,trim,x,1.11,-3.33,.29,.12,.21);piece(cylinder,wood,x,1.18,-3.33,.23,.015,.17);for(let n=0;n<3;n++)box(g,x-.1+n*.1,1.2,-3.32,.018,.015,.22,clay);}break;
+      case 7:
+        for(let n=0;n<3;n++){const x=-1.91+n*.55;piece(cylinder,clay,x,.5,-3.31,.22,.46,.16);box(g,x,.95,-3.3,.035,.56,.03,wood);for(const side of [-1,1]){const leaf=piece(sphere,green,x+side*.12,1.22+n*.14,-3.34,.2,.31,.07);leaf.rotation.z=-side*.6;}}break;
+      case 8:
+        disk(-1.38,1.17,.53,wood);disk(-1.38,1.17,.43,trim);for(let n=0;n<4;n++)box(g,-1.38,1.17,-3.43,.075,1.07,.07,iron).rotation.z=n*Math.PI/4;box(g,-1.38,.38,-3.32,1.43,.2,.35,clay);break;
+      case 9:
+        for(let row=0;row<3;row++){box(g,-1.38,.53+row*.42,-3.3,1.59,.065,.31,wood);for(let n=0;n<5;n++){box(g,-2.02+n*.31,.7+row*.42,-3.37,.26,.31,.04,trim).rotation.x=-.12;box(g,-2.02+n*.31,.76+row*.42,-3.404,.19,.04,.016,iron);}}break;
+      case 10:
+        box(g,-1.35,2.06,-3.32,1.58,.065,.08,wood);for(let n=0;n<4;n++){box(g,-1.94+n*.39,1.42+n*.06,-3.32,.31,1.07-n*.1,.055,[glass,iron,green,trim][n]);box(g,-1.94+n*.39,1.77+n*.04,-3.36,.03,.32,.02,trim);}break;
+      case 11:
+        box(g,-1.36,.67,-3.29,1.57,.82,.37,wood);for(const x of [-1.83,-1.39,-.95]){piece(cylinder,glass,x,1.36,-3.32,.13,.49,.11);piece(sphere,wood,x,1.11,-3.32,.16,.13,.13);piece(cylinder,iron,x,1.65,-3.32,.14,.05,.13);}break;
+      case 12:
+        box(g,-1.38,.67,-3.29,1.67,.82,.37,iron);for(const x of [-1.78,-.96]){piece(cylinder,trim,x,1.23,-3.31,.25,.31,.18);piece(cylinder,wood,x,1.41,-3.31,.27,.045,.19);box(g,x,1.46,-3.31,.13,.07,.1,iron);}break;
+    }
+    // Individually proportioned rooftop silhouettes finish the secondary street wall.
+    if(i%3===0){const skylight=box(g,-.75,h+.66,-.35,1.3+i*.017,.45,1.8,glass);skylight.rotation.x=.16;box(g,-.75,h+.43,-.35,1.42,.08,1.92,wood);}
+    else if(i%3===1){box(g,-.76,h+.77,-.7,.57,.91+i*.013,.67,clay);box(g,-.76,h+1.26+i*.006,-.7,.74,.08,.84,iron);}
+    else{for(let n=0;n<3;n++)box(g,-1.65+n*.77,h+.45+n*.15,-.35,.66,.14,1.45,green);}
     // Explicit footprint includes projecting balconies, never an entire merged block.
     colliders.push({source:g.name,kind:'wall',min:new THREE.Vector3(p.bounds.min.x,0,p.bounds.min.y),max:new THREE.Vector3(p.bounds.max.x,h,p.bounds.max.y)});
     const entrance=new THREE.Vector3(0,0,-p.d/2-.75).applyAxisAngle(new THREE.Vector3(0,1,0),p.angle).add(g.position);
     for(const geo of buildCityRoutes(root,colliders,[{name:`infill-entry-${i}`,points:[[p.front.x,p.front.z],[entrance.x,entrance.z]],width:1.4,walk:true}],{road:paving,paving,paint:trim},.04))geometries.add(geo);
     // Planted backyard edge and a small paved forecourt occupy the leftover strip.
     box(g,0,.025,3.85,p.w,.05,1.4,paving);for(const x of [-1.8,1.8]){box(g,x,.23,3.8,.65,.46,.65,clay);const bush=new THREE.Mesh(sphere,green);bush.position.set(x,.68,3.8);bush.scale.set(.46,.45,.46);g.add(bush);}
+    mergeByMaterial(g);g.userData.noMerge=true;
   });
   // Small courtyard gardens occupy residual land between streets and buildings.
   let seed=734;const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
@@ -91,6 +140,6 @@ export function createUrbanInfill(scene:THREE.Scene,existing:Collider[]){
   for(const child of [...root.children]){const k=`${Math.floor(child.position.x/28)}:${Math.floor(child.position.z/28)}`;let c=chunks.get(k);if(!c){c=new THREE.Group();c.name=`infill-block-${k}`;chunks.set(k,c);}c.add(child);}
   for(const chunk of chunks.values()){root.add(chunk);mergeByMaterial(chunk);}
   root.add(foliage.build('infill-courtyard-leaves'));
-  root.userData.plan={buildings:plots.length,gardens,plots:plots.map(p=>({x:p.x,z:p.z,w:p.w,d:p.d,angle:p.angle}))};
+  root.userData.plan={buildings:plots.length,gardens,tenants:tenants.map(t=>t[0]),plots:plots.map(p=>({x:p.x,z:p.z,w:p.w,d:p.d,angle:p.angle}))};
   return {colliders,dispose(){root.removeFromParent();root.traverse(o=>{if(o instanceof THREE.Mesh)geometries.add(o.geometry);if(o instanceof THREE.InstancedMesh)o.dispose();});geometries.forEach(g=>g.dispose());materials.forEach(m=>m.dispose());atlas.dispose();foliage.material.dispose();foliage.texture.dispose();}};
 }

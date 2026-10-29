@@ -45,6 +45,7 @@ pub struct EnvironmentAgent {
     observations: Mutex<Observations>,
     planning: Arc<tokio::sync::Mutex<()>>,
     input: EnvironmentInput,
+    topics: super::topic_window::TopicWindows,
     priority: OnceLock<Arc<BackgroundPriority>>,
     last_sample: AtomicI64,
     sampling: AtomicBool,
@@ -264,6 +265,15 @@ impl EnvironmentAgent {
         self.hints.lock().get(character,listener,revision,chrono::Utc::now().timestamp() as f64)
     }
 
+    pub fn topic_context(&self, character: &str, session: &str) -> Option<String> {
+        self.topics.snapshot(character, Some(session), chrono::Utc::now().timestamp() as f64)
+            .and_then(|window| window.render())
+    }
+
+    pub fn clear_topic_context(&self, character: &str) {
+        self.topics.clear_character(character);
+    }
+
     /// Fresh, bounded observations for startup; no planner analysis or authored speech.
     /// First contact describes this installation's history, not the user's identity.
     pub fn startup_context(&self, snapshot: &WorldSnapshot, first_contact: bool) -> serde_json::Value {
@@ -328,6 +338,9 @@ impl EnvironmentAgent {
             || state.is_factory_reset_in_progress()
             || state.is_rebuild_in_progress()
         {
+            if state.is_factory_reset_in_progress() || state.is_rebuild_in_progress() {
+                self.topics.clear();
+            }
             let mut obs = self.observations.lock();
             self.input.drain();
             obs.processed_input_revision = self.input.revision();
@@ -370,6 +383,30 @@ impl EnvironmentAgent {
                 }
             })
         };
+        // Consume completed exchanges before selecting the focal role, so a newly
+        // speaking character does not wait behind another character's stale scene.
+        {
+            let mut inputs = self.input.drain();
+            inputs.sort_by_key(|input| input.revision);
+            let mut obs = self.observations.lock();
+            let priority_revision = self.background_priority().map_or(0,|priority| priority.revision());
+            if obs.priority_revision != priority_revision {
+                obs.priority_revision = priority_revision;
+                obs.policy.cancel_pending();
+                obs.epoch = obs.epoch.wrapping_add(1);
+                self.hints.lock().clear();
+            }
+            for input in inputs {
+                obs.policy.record_user_turn(&input.character_id, &input.user_text, &input.assistant_text, input.at);
+                obs.processed_input_revision = input.revision;
+                obs.epoch = obs.epoch.wrapping_add(1);
+            }
+            if obs.processed_input_revision != self.input.revision() {
+                obs.policy.invalidate();
+                self.suppressed_until.store(0, Ordering::Release);
+                return;
+            }
+        }
         // Each model invocation sees one role's permitted material, not a mix of private stores.
         let focus_id = private_hint.as_ref().map(|(id, _)| id.clone()).or_else(|| {
             let obs = self.observations.lock();
@@ -391,26 +428,7 @@ impl EnvironmentAgent {
         // Reserve before consuming the observation signature. Lock contention is deferral,
         // not a terminal evaluation of an event that was never sent to a model.
         let (events, user_turns, current_intent, epoch, input_revision) = {
-            let mut inputs = self.input.drain();
-            inputs.sort_by_key(|input| input.revision);
             let mut obs = self.observations.lock();
-            let priority_revision = self.background_priority().map_or(0,|priority| priority.revision());
-            if obs.priority_revision != priority_revision {
-                obs.priority_revision = priority_revision;
-                obs.policy.cancel_pending();
-                obs.epoch = obs.epoch.wrapping_add(1);
-                self.hints.lock().clear();
-            }
-            for input in inputs {
-                obs.policy.record_user_turn(
-                    &input.character_id,
-                    &input.user_text,
-                    &input.assistant_text,
-                    input.at,
-                );
-                obs.processed_input_revision = input.revision;
-                obs.epoch = obs.epoch.wrapping_add(1);
-            }
             if obs.processed_input_revision != self.input.revision() {
                 // Backpressure is optional-work loss, never a reason to stall a reply or use old intent.
                 obs.policy.invalidate();
@@ -459,6 +477,7 @@ impl EnvironmentAgent {
         let scene = self.observations.lock().hint.clone();
         let world_observations = scene_observations(self,&snap);
         let activity = focus.brain.proactive.activity_journal().to_brief();
+        let topic_window = self.topics.snapshot(&focus_id, None, now);
         let language = focus.brain.config.base.language.clone();
         let planning_roles: Vec<_> = roles.iter().map(|role| if role.id == focus_id { json!(role) }
             else { json!({"id":role.id,"available":role.available,"can_address_user":role.can_address_user}) }).collect();
@@ -474,14 +493,14 @@ impl EnvironmentAgent {
             let observed = json!({"scene":scene,"observations":world_observations,"activity":activity,
                     "focus_character_id":focus_id,"language":language,"evidence":evidence,"user_available":user_available,
                     "user_chatting":chatting,"participants":planning_roles,"events":events,
-                    "recent_user_turns":user_turns,"current_intent":current_intent});
+                    "recent_user_turns":user_turns,"current_intent":current_intent,"topic_window":topic_window});
             let (system, observed) = super::environment_policy::planning_prompt(
                 include_str!("../../prompts/framework/environment_agent.en.md"), observed, diary_candidate.as_ref());
             let messages = vec![ChatMessage::system(system), ChatMessage::user(observed.to_string())];
             let request = LLMRequest::new("environment_judge", messages)
                 .without_framework_instructions()
                 .with_temperature(0.0)
-                .with_max_tokens(800).with_reasoning(false);
+                .with_max_tokens(1100).with_reasoning(false);
             let Some(result) = priority
                 .run(tokio::time::timeout(
                     Duration::from_secs(12),
@@ -515,6 +534,10 @@ impl EnvironmentAgent {
             if let Some(decision) = decision.filter(|_| {
                 permitted && obs.epoch == epoch && agent.input.revision() == input_revision
             }) {
+                if let (Some(topic), Some(window)) = (decision.topic, topic_window.as_ref()) {
+                    agent.topics.apply(&focus_id, &window.session_id, topic,
+                        chrono::Utc::now().timestamp() as f64);
+                }
                 selected_cycle = decision.private_activity.and_then(|selection| diary_candidate.as_ref()
                     .filter(|candidate| selection.matches(candidate)).cloned());
                 if let Some(intent) = decision.user_intent {
@@ -618,12 +641,14 @@ impl EnvironmentAgent {
     }
 
     /// Internal control-plane input; never written to character dialogue or memory.
-    pub fn record_user_exchange(&self, character_id: &str, user_text: &str, assistant_text: &str) {
+    pub fn record_user_exchange(&self, character_id: &str, session: &str, user_text: &str, assistant_text: &str) {
+        let now = chrono::Local::now().timestamp() as f64;
+        self.topics.record(character_id, session, user_text, assistant_text, now);
         let _ = self.input.publish(
             character_id,
             user_text,
             assistant_text,
-            chrono::Local::now().timestamp() as f64,
+            now,
         );
     }
 

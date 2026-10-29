@@ -4,6 +4,8 @@
 pub mod async_ttl_cache;
 #[path = "../src/world/desktop_state.rs"]
 pub mod desktop_state;
+#[path = "../src/world/topic_window.rs"]
+pub mod topic_window;
 #[path = "../src/pipeline/presentation_grounding.rs"]
 pub mod presentation_grounding;
 #[path = "../src/brain/work_contract.rs"]

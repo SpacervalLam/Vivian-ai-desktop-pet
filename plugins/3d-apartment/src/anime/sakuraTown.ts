@@ -3,9 +3,11 @@ import { mergeByMaterial, freezeStatic } from './merge';
 import { createBlossomField, createFallenPetals, createLeafField, createTrunkField } from './foliage';
 import type { Collider } from './collider';
 import { CITY_LOTS, CITY_INBLOCK_TOWER_LOTS } from './urbanStreets';
+import { createArtisanShops } from './artisanShops';
 
 /** Human-scale foreground. All shop dimensions and collision boxes share local coordinates. */
 export function createSakuraTown(scene: THREE.Scene) {
+  const artisanShops = createArtisanShops();
   const root = new THREE.Group();
   root.name = 'sakura-shotengai';
   root.userData.sceneCollideSkip = true;
@@ -189,21 +191,17 @@ export function createSakuraTown(scene: THREE.Scene) {
     {x:-17.2,name:'サイクル丸山',sub:'自転車  /  修理・販売',wall:M.blue,cloth:M.teal,height:5.65,kind:4},
     {x:-13.84,name:'茶房 春風',sub:'抹茶と和菓子  /  TEA ROOM',wall:M.plaster,cloth:M.red,height:6.15,kind:3},
   ];
-  // Replace the generic apartment blocks with human-scale courtyard shop houses.
-  const titles=['桜月堂','暮らしの花','小春喫茶','こむぎ工房','春風食堂','ひだまり堂'];
   // 街区里由 districtArt 就地盖高楼的地块必须跳过：一块地只能有一个主人，
   // 两边都盖就是楼与店屋互穿。集合由 urbanStreets 统一给出（见 CITY_INBLOCK_TOWER_LOTS）。
-  CITY_LOTS.filter(lot=>!lot.id.endsWith('-19.6')&&!CITY_INBLOCK_TOWER_LOTS.has(lot.id)).forEach((lot,i)=>{
-    shopSpecs.push({x:lot.x,z:lot.z-3.3,name:titles[i%titles.length],sub:'桜町商店街  /  SAKURA TOWN',wall:[M.plaster,M.sage,M.blue,M.pink][i%4],cloth:i%2?M.teal:M.cream,height:5.5+(i%4)*.25,kind:i%4});
-  });
+  const artisanSites = CITY_LOTS.filter(lot=>!lot.id.endsWith('-19.6')&&!CITY_INBLOCK_TOWER_LOTS.has(lot.id))
+    .map((lot, i) => ({ x: lot.x, z: lot.z - 3.3, height: 5.5 + (i % 4) * .25 }));
   // Continuous frontage links the original shops to the railway approach.
-  for(const [i,x] of [49,52.5,56,59.5,68,71.5,75].entries())shopSpecs.push({x,z:16.7,name:titles[i%6],sub:'駅前通り  /  STATION STREET',wall:[M.plaster,M.sage,M.blue][i%3],cloth:i%2?M.teal:M.red,height:5.6+(i%3)*.3,kind:i%4});
+  for(const [i,x] of [49,52.5,56,59.5,68,71.5,75].entries())artisanSites.push({ x, z: 16.7, height: 5.6 + (i % 3) * .3 });
   shopSpecs.forEach((spec,shopNumber)=>{
     const index=spec.kind;
     const g=new THREE.Group();g.name=`sakura-shop-${shopNumber}`;g.position.set(spec.x,0,spec.z??15.8);root.add(g);
     if(shopNumber<6){const light=new THREE.PointLight('#ffcc92',9,5.4,2);light.position.set(.1,2.55,2.7);g.add(light);shopLights.push(light);}
     const w=3.24,d=6.6,h=spec.height;
-    if(shopNumber>=6)solid(g,'shop-entry-paving',0,.025,-1.2,3.24,.05,2.4,M.concrete,'floor');
     solid(g,'floor',0,.055,d/2,w,.11,d,M.concrete,'floor');
     solid(g,'west-wall',-w/2+.07,1.58,d/2,.14,3.05,d,spec.wall);
     solid(g,'east-wall',w/2-.07,1.58,d/2,.14,3.05,d,spec.wall);
@@ -391,6 +389,7 @@ export function createSakuraTown(scene: THREE.Scene) {
     label(g,'桜まつり','4.01 — 4.14',-1.39,1.3,-.16,.24,.34,'#f0d5d8','#915b66');
     mergeByMaterial(g);freezeStatic(g);
   });
+  artisanSites.forEach((site, id) => artisanShops.build(root, site.x, site.z, site.height, id, colliders));
   // Street furniture is authored independently so its collisions are not giant merged AABBs.
   const street=new THREE.Group();street.name='sakura-street-props';root.add(street);
   vending(street,35.45,15.66);
@@ -685,6 +684,7 @@ export function createSakuraTown(scene: THREE.Scene) {
   return {
     colliders,
     setEnvironment(period:string,weather:string){
+      artisanShops.setEnvironment(period);
       M.lamp.emissiveIntensity=period==='night'?1.3:period==='dusk'?.8:.35;
       M.redLamp.emissiveIntensity=period==='night'?.65:.20;
       for(const light of shopLights)light.intensity=period==='night'?13:period==='dusk'?10:7;
@@ -699,6 +699,7 @@ export function createSakuraTown(scene: THREE.Scene) {
       }drifting.instanceMatrix.needsUpdate=true;
     },
     dispose(){
+      artisanShops.dispose();
       root.traverse(o=>{if(o instanceof THREE.Mesh)geometries.add(o.geometry);if(o instanceof THREE.InstancedMesh)o.dispose();});
       for(const g of geometries)g.dispose();materials.forEach(m=>m.dispose());textures.forEach(t=>t.dispose());
       shrubs.material.dispose();shrubs.texture.dispose();root.removeFromParent();

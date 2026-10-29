@@ -46,6 +46,8 @@ import {
 import type { WorldSnapshotResponse } from './hostContract';
 import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
 import { mergeByMaterial, freezeStatic, dedupeGeometries } from './anime/merge';
+import { compactGeometries } from './anime/geometryMemory';
+import { loadBlenderTrunks } from './anime/blenderTrunks';
 import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildApartmentTwin, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
 import { buildRiverbank } from './anime/riverbank';
 import {
@@ -904,8 +906,16 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       BLOOM.radius ?? 0.62,
       BLOOM.threshold ?? 0.86
     );
+    // Bloom only samples color; none of its fullscreen passes use depth testing.
+    for (const target of [bloomPass.renderTargetBright, ...bloomPass.renderTargetsHorizontal, ...bloomPass.renderTargetsVertical]) {
+      target.depthBuffer = false;
+    }
     composer.addPass(bloomPass);
-    composer.addPass(new OutputPass());
+    const outputPass = new OutputPass();
+    // This terminal pass writes to the screen. Swapping afterward would make the
+    // next frame allocate a second full-size HDR + MSAA + depth target for no work.
+    outputPass.needsSwap = false;
+    composer.addPass(outputPass);
 
     /* ---------------- 泛光降分辨率 ----------------
      *
@@ -2165,10 +2175,14 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
      *
      * 必须放在所有 mergeByMaterial 之后：合批会 dispose 源几何，先去重等于白干。
      */
+    const compacted = compactGeometries(scene);
+    console.info(`[room] 几何索引压缩：${compacted.compacted} 个，省 ${(compacted.bytes / 1048576).toFixed(2)} MB`);
     const dedup = dedupeGeometries(scene);
     if (dedup.removed) {
       console.info(`[room] 几何去重：${dedup.groups} 组、收掉 ${dedup.removed} 个重复几何体，省 ${(dedup.bytes / 1048576).toFixed(2)} MB`);
     }
+    // Include the riverbank, built after the district, and bind assets only to this scene.
+    const disposeBlenderTrunks = loadBlenderTrunks(scene);
 
     /* ---- 场景遍历全量补碰撞 ----
      * 给所有未被 layout 驱动碰撞（家具尺寸盒/墙体门洞盒/栏杆/floor/ramp）覆盖的实体几何
@@ -3141,6 +3155,7 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       alive = false;
       characterAnimations.forEach(animation=>animation?.dispose());
       disposeBlenderFurniture();
+      disposeBlenderTrunks();
       apartmentLift.dispose();
       store.dispose();
       districtArt.dispose();
@@ -3153,6 +3168,10 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       // composer 的 RT 是它自己建的，renderer.dispose() 不管。漏掉会留一对
       // HalfFloat + MSAA 的 renderbuffer——这两个是显存大户，StrictMode 双挂载
       // 就是两份
+      // EffectComposer disposes its own targets, but does not dispose its passes.
+      bloomPass.dispose();
+      bloomPass.materialHighPassFilter.dispose();
+      outputPass.dispose();
       composer.dispose();
       window.removeEventListener('keydown', onEnterKey);
       window.removeEventListener('keydown', onFxKey);
@@ -3166,7 +3185,10 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       scene.traverse((o: any) => {
         if (o.isLight && o.shadow?.map) o.shadow.map.dispose();
       });
+      const skeletons = new Set<THREE.Skeleton>();
       scene.traverse((o: any) => {
+        if (o.isInstancedMesh) o.dispose();
+        if (o.isSkinnedMesh && o.skeleton) skeletons.add(o.skeleton);
         if (o.geometry) o.geometry.dispose();
         if (o.material) {
           if (Array.isArray(o.material)) {
@@ -3180,6 +3202,7 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
           }
         }
       });
+      for (const skeleton of skeletons) skeleton.dispose();
       // GLB 贴图是每次加载的独立实例，随场景一起释放；
       // 程序化贴图 / gradientMap 是模块级单例，刻意不 dispose
       // （StrictMode 会挂载两次，第一次销毁贴图，第二次就拿到废图了）
@@ -3195,7 +3218,14 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       // 注意：程序化贴图是模块级单例，这里刻意不 dispose ——
       // StrictMode 会挂载两次，第一次卸载时销毁贴图，第二次就拿到废图了。
       environmentApplyRef.current = null;
-      (window as any).__ROOM__.setEnvironmentSource = undefined;
+      // Debug hooks and the static navigation world otherwise retain the entire
+      // scene's CPU arrays after an unmount in the same WebView.
+      if ((window as any).__ROOM__?.scene === scene) {
+        delete (window as any).__ROOM__;
+        PetAgent.bindWorld(null);
+        PetAgent.resetClaims();
+      }
+      scene.clear();
     };
 
     // 场景建好了，把「立即释放」交给宿主。关窗路径（RoomWindow.closeRoom）会在

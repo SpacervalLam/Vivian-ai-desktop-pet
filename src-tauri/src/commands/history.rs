@@ -68,6 +68,7 @@ pub async fn clear_chat_history(
     let (dialogue, char_id, _) =
         crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
     dialogue.clear_history_file().map_err(|e| e.to_string())?;
+    state.world_provider.environment.clear_topic_context(&char_id);
     tracing::info!("[{}] 聊天历史已清空", char_id);
     Ok(())
 }

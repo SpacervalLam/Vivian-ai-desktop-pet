@@ -6,7 +6,7 @@
 !if /FileExists "${APARTMENT_HOOK_DIR}\apartment-package.nsh"
   !include "${APARTMENT_HOOK_DIR}\apartment-package.nsh"
 !else
-  !define APARTMENT_PACKAGE "Vivian-3D-Apartment-1.1.0.zip"
+  !define APARTMENT_PACKAGE "Vivian-3D-Apartment-1.1.1.zip"
   !define APARTMENT_SHA256 ""
 !endif
 

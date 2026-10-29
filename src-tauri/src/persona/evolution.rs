@@ -205,7 +205,7 @@ impl PersonaEvolution {
             let pending = self.candidates.iter().find(|c| c.scope == proposal.scope && c.kind == proposal.kind
                 && reference.map_or(c.text == clean(&proposal.text, 180), |r| c.reference() == r));
             if reference.is_some() && pending.is_none() { return Err(invalid()); }
-            let examples = if proposal.examples.is_empty() { pending.map(|c| c.examples.clone()).unwrap_or_default() }
+            let examples = if proposal.examples.is_empty() { pending.map(|c| c.examples.iter().filter(|edit| edit.example.as_ref().is_none_or(|e| e.is_approved_utterance())).cloned().collect()).unwrap_or_default() }
                 else { proposal.examples.clone() };
             if !example_library::validate_edits(&examples, &current, Some(&proposal.scope)) { return Err(invalid()); }
             prepared.push((proposal, examples));
@@ -363,7 +363,8 @@ mod tests {
     fn voice_edit() -> ExampleEdit {
         ExampleEdit { id:"grown-listening".into(), reference:None, reason:"将新的倾听理解表达成虚构示例".into(),
             example:Some(serde_json::from_value(serde_json::json!({"id":"grown-listening", "scope":"comfort", "cues":["不想讲"],
-                "situation":"虚构示例：对方累了。", "user":"我不想讲了", "response":{"text":"歇会儿吧，想说的时候再说。", "intent":"reply"}})).unwrap()) }
+                "situation":"虚构示例：对方累了。", "user":"我不想讲了", "response":{"text":"歇会儿吧，想说的时候再说。", "intent":"reply"},
+                "source":example_library::fixture_source("歇会儿吧，想说的时候再说。")})).unwrap()) }
     }
     fn diary_proposal(id: &str, day: f64, examples: Vec<ExampleEdit>) -> DiaryRevision {
         DiaryRevision { kind:"personality".into(), scope:"comfort".into(), text:"先尊重沉默，不把陪伴变成追问".into(),

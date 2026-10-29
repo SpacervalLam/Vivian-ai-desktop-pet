@@ -251,6 +251,14 @@ pub fn section_schema() -> PromptSectionSchema {
             optional: true,
         },
         SectionDef {
+            id: "topic_window",
+            name: "Current Conversation Topic",
+            i18n_key: "topic_window",
+            layer: SectionLayer::World,
+            section_type: SectionType::Dynamic,
+            optional: true,
+        },
+        SectionDef {
             id: "emotion",
             name: "Emotion Context",
             i18n_key: "emotion",
@@ -544,6 +552,7 @@ fn extract_section_content(id: &str, parts: &PromptParts, lang: &str) -> String 
             .as_deref()
             .unwrap_or("")
             .to_string(),
+        "topic_window" => parts.topic_window_section.as_deref().unwrap_or("").to_string(),
         "self_state" => parts
             .self_state_section
             .as_deref()
@@ -695,14 +704,14 @@ mod tests {
     #[test]
     fn schema_has_expected_counts() {
         let schema = section_schema();
-        // 29 = 9 static + 20 dynamic (four roommate blocks merged into who_else)
+        // 30 = 9 static + 21 dynamic (including the ephemeral topic window)
         // static: framework, output_format, character, style, examples,
         //         response_decision, channel_guide, inline_tag_format（伪静态归位）, relationship
         // 动态区合并组：memory_group（episode+log+memory+规则）、user_profile_group（facts+model+behavior）
-        assert_eq!(schema.total_count, 29);
+        assert_eq!(schema.total_count, 30);
         assert_eq!(schema.static_count, 9);
-        assert_eq!(schema.dynamic_count, 20);
-        assert_eq!(schema.optional_count, 23);
+        assert_eq!(schema.dynamic_count, 21);
+        assert_eq!(schema.optional_count, 24);
     }
 
     #[test]
@@ -729,6 +738,8 @@ mod tests {
             user_input: "你好".to_string(),
             memory_text: "一些记忆".to_string(),
             character_block: Some("我是 Vivian".to_string()),
+            // Both renderings must use the same instant, including across a second boundary.
+            environment_context: Some(crate::pipeline::prompt_modules::EnvironmentContext::now()),
             ..Default::default()
         };
 

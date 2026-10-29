@@ -5,37 +5,26 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
-const fixtureFile = 'tests/fixtures/few-shot-retrieval.json';
-const fixture = JSON.parse(await readFile(fixtureFile, 'utf8'));
-const libraries = await Promise.all(['vivian', 'nana'].map(async name =>
-  JSON.parse(await readFile(`src-tauri/prompts/characters/${name}/example_library.json`, 'utf8'))));
-const newEntries = libraries.map(entries => entries.filter(e => e.id.startsWith('style-')));
-assert.ok(fixture.cases.length >= 120, 'retain broad authored coverage');
-assert.equal(new Set(fixture.cases.map(c => c.id)).size, fixture.cases.length);
-assert.deepEqual(newEntries[0].map(e => e.id), newEntries[1].map(e => e.id));
-for (const [index, entries] of libraries.entries()) {
-  assert.equal(new Set(entries.map(e => e.id)).size, entries.length);
-  const authored = newEntries[index];
-  assert.equal(authored.length, fixture.cases.length);
-  assert.equal(new Set(authored.map(e => e.response.text)).size, authored.length, 'do not pad the corpus with duplicate lines');
-  for (const e of authored) {
-    // 「虚构示例」标记随条目语种本地化：en 走 Fictional example:、ja 走 架空の例：。
-    // 2026-10-24 翻译 style-en/ja 的 situation 后，这条从单一中文前缀变成按语种选档。
-    assert.match(e.situation, e.id.startsWith("style-en-") ? /^Fictional example:/ : (e.id.startsWith("style-ja-") ? /^架空の例：/ : /^虚构示例：/));
-    assert.ok(e.attention.trim() && e.user.trim());
-    assert.ok(e.cues.length >= 2 && e.cues.every(c => [...c].length >= 2));
-    assert.ok(e.cues.some(c => e.user.toLowerCase().includes(c.toLowerCase())), `${e.id}: canonical input needs a usable cue`);
-    assert.ok(e.response.text.trim() && [...e.response.text].length <= 120, `${e.id}: bounded complete speech`);
-    assert.ok(['reply', 'short_reply'].includes(e.response.intent));
-    assert.ok(fixture.cases.some(c => c.id === e.id));
+const fragments = await Promise.all(['vivian', 'nana'].map(async name =>
+  JSON.parse(await readFile(`src-tauri/prompts/characters/${name}/voice_fragments.json`, 'utf8'))));
+for (const entries of fragments) {
+  const ids = new Set();
+  for (const e of entries) {
+    assert.ok(e.id.startsWith('voice-') && !ids.has(e.id)); ids.add(e.id);
+    assert.equal(e.user, '', 'a single utterance must not acquire a fake user turn');
+    assert.ok(e.cues.length && e.situation && e.attention);
+    assert.deepEqual(Object.keys(e.response).sort(), ['intent', 'text']);
+    assert.ok(e.response.text.trim() && [...e.response.text].length <= 120);
+    assert.ok(!('source' in e), 'research provenance stays outside app assets');
   }
-  assert.ok(authored.filter(e => e.id.startsWith('style-en-')).length >= 12);
-  assert.ok(authored.filter(e => e.id.startsWith('style-ja-')).length >= 12);
+  assert.ok(entries.some(e => e.id.startsWith('voice-ja-')));
+  assert.ok(entries.some(e => e.id.startsWith('voice-en-')));
 }
-for (let i = 0; i < newEntries[0].length; i++) {
-  const [v, n] = newEntries.map(entries => entries[i]);
-  for (const key of ['id', 'scope', 'user', 'cues', 'context_cues']) assert.deepEqual(v[key], n[key]);
-  assert.notEqual(v.response.text, n.response.text, `${v.id}: write each character's perspective separately`);
+for (const character of ['vivian','nana']) {
+  for (const suffix of ['', '.en', '.ja']) {
+    const text = await readFile(`src-tauri/prompts/characters/${character}/examples${suffix}.md`, 'utf8');
+    assert.ok(!text.includes('Response:') && !text.includes('**Example '), 'static files contain rules, not self-written dialogues');
+  }
 }
 
 // Compile the production retriever and real follow-up predicate in a small
@@ -53,7 +42,7 @@ const source = (await readFile('src-tauri/src/persona/example_retriever.rs', 'ut
 // Keep the retriever's existing unit tests too. Its full CompanionPrompt
 // integration test belongs to the app crate; test that corpus's retrieval here
 // without substituting a fake prompt builder.
-const integrationStart = source.indexOf('    #[test]\n    fn modern_net_examples_reach_companion_prompt_without_remote_embeddings');
+const integrationStart = source.indexOf('    #[test]\n    fn sourced_fragments_reach_companion_prompt_without_fabricated_turns');
 const integrationEnd = source.indexOf('    #[test]', integrationStart + 12);
 assert.ok(integrationStart >= 0 && integrationEnd > integrationStart);
 const retriever = (source.slice(0, integrationStart) + source.slice(integrationEnd)).replaceAll(
@@ -116,62 +105,50 @@ fn main() {}
 #[cfg(test)] mod tests {
  use super::*;
  use std::sync::Arc;
- #[derive(serde::Deserialize)] struct Case {id:String,input:String,history:Vec<types::response::ChatMessage>,paraphrases:Vec<String>,gated:bool}
- #[derive(serde::Deserialize)] struct Fixture {cases:Vec<Case>}
- fn cases()->Vec<Case> {serde_json::from_str::<Fixture>(include_str!(${JSON.stringify(abs(fixtureFile))})).unwrap().cases}
- // 每条 fixture 用自己的界面语言检索：style-en-* 走 en、style-ja-* 走 ja，其余走
- // zh——语种门（2026-10-24）按界面语言选档，跨语言示例不混检索。
- fn case_lang(id:&str)->&'static str{if id.starts_with("style-en-"){"en"}else if id.starts_with("style-ja-"){"ja"}else{"zh"}}
- #[test] fn original_modern_corpus_remains_retrievable() {
-  for (name,source) in [
-   ("vivian",include_str!(${JSON.stringify(abs('src-tauri/prompts/characters/vivian/example_library.json'))})),
-   ("nana",include_str!(${JSON.stringify(abs('src-tauri/prompts/characters/nana/example_library.json'))}))
-  ] {
-   let entries:serde_json::Value=serde_json::from_str(source).unwrap();
+ struct Identity {len:usize}
+ impl memory::embedding::MemoryEmbeddingProvider for Identity {
+  fn dimension(&self)->usize {self.len}
+  fn is_remote(&self)->bool {true}
+  fn embed(&self,_:&str)->error::VivianResult<Vec<f32>> {panic!("query vectors are supplied by the contract test")}
+  fn embed_batch(&self,texts:&[String])->error::VivianResult<Vec<Vec<f32>>> {
+   assert_eq!(texts.len(),self.len);
+   Ok((0..self.len).map(|i|{let mut v=vec![0.0;self.len];v[i]=1.0;v}).collect())
+  }
+ }
+ #[test] fn source_fragments_are_loaded_without_fabricating_offline_matches() {
+  for name in ["vivian", "nana"] {
+   let entries=example_library::factory_examples(name);
    let r=production::ExampleRetriever::new(name,Arc::new(Offline));
-   for e in entries.as_array().unwrap().iter().filter(|e|e["id"].as_str().unwrap().starts_with("net-modern-")) {
-    for input in std::iter::once(e["user"].as_str().unwrap()).chain(e["cues"].as_array().unwrap().iter().map(|c|c.as_str().unwrap())) {
-     let out=r.retrieve(input,&[],None,&[], "zh").unwrap_or_default();
-     assert!(out.contains(&format!("Example {}\\n",e["id"].as_str().unwrap())),"{name}: {input}");
-    }
+   assert!(entries.iter().any(|e|e.is_fragment()));
+   for e in entries.iter().filter(|e|e.is_fragment()) {
+    let out=r.retrieve(e.response["text"].as_str().unwrap(),&[],None,&[], "zh").unwrap_or_default();
+    assert!(!out.contains("Expression fragment "),"a semantic-only fragment fired without embeddings: {name}/{}",e.id);
    }
   }
  }
- #[test] fn authored_scenarios_and_alternate_cues_reach_actual_retriever() {
-  let mut failures=Vec::new(); let mut count=0;
+ #[test] fn every_sourced_quote_keeps_its_index_language_and_bounded_voice_references() {
+  let mut probes=0;
   for name in ["vivian","nana"] {
-   let r=production::ExampleRetriever::new(name,Arc::new(Offline));
-   for c in cases() {for input in std::iter::once(&c.input).chain(c.paraphrases.iter()) {
-    let out=r.retrieve(input,&c.history,None,&[], case_lang(&c.id)).unwrap_or_default();count+=1;
-    if !out.contains(&format!("Example {}\\n",c.id)) {failures.push(format!("{name}/{}: {input} -> {out}",c.id));}
-    assert!(out.chars().count()<=1800);
-    assert!(out.lines().filter(|l|l.starts_with("Example response:")).count()<=3);
-   }}
-  }
-  assert!(failures.is_empty(),"{} retrieval failures:\\n{}",failures.len(),failures.join("\\n"));
-  println!("Verified {count} positive retrieval probes across both characters");
- }
- #[test] fn context_dependent_examples_require_the_right_recent_scene() {
-  for name in ["vivian","nana"] {let r=production::ExampleRetriever::new(name,Arc::new(Offline));
-   for c in cases().into_iter().filter(|c|c.gated) {
-    for history in [vec![],vec![types::response::ChatMessage{role:"assistant".into(),content:"我们正在谈论一片海。".into()}]] {
-     let out=r.retrieve(&c.input,&history,None,&[], case_lang(&c.id)).unwrap_or_default();
-     assert!(!out.contains(&format!("Example {}\\n",c.id)),"{} leaked into an unrelated scene",c.id);
-    }
+   let entries=example_library::factory_examples(name);
+   assert!(entries.iter().all(|e|e.is_approved_utterance() && e.is_fragment()));
+   let r=production::ExampleRetriever::new(name,Arc::new(Identity{len:entries.len()}));
+   r.preload();
+   for (i,e) in entries.iter().enumerate() {
+    let mut q=vec![0.0;entries.len()];q[i]=1.0;
+    let lang=if e.id.starts_with("voice-en-"){"en"}else if e.id.starts_with("voice-ja-"){"ja"}else{"zh"};
+    let out=r.retrieve("semantic probe",&[],Some(&q),&[],lang).unwrap();probes+=1;
+    assert!(out.contains(&format!("Expression fragment {}",e.id)),"{name}/{}",e.id);
+    assert!(!out.contains("Fictional user:") && out.chars().count()<=1800);
+    assert!(out.lines().filter(|line|line.starts_with("Expression fragment ")).count() <= 6);
+    assert_eq!(r.retrieve("semantic probe",&[],Some(&q),&[e.scope.clone()],lang).as_deref(),Some(out.as_str()));
+    let foreign=if lang=="en"{"ja"}else{"en"};
+    let foreign_out=r.retrieve("semantic probe",&[],Some(&q),&[],foreign).unwrap_or_default();
+    assert!(!foreign_out.contains(&format!("Expression fragment {}",e.id)));
    }
   }
+  println!("Verified {probes} corpus indices with controlled identity vectors, not a real-model relevance benchmark");
  }
- #[test] fn learned_scopes_still_replace_factory_samples() {
-  let library:serde_json::Value=serde_json::from_str(include_str!(${JSON.stringify(abs('src-tauri/prompts/characters/vivian/example_library.json'))})).unwrap();
-  for name in ["vivian","nana"] {let r=production::ExampleRetriever::new(name,Arc::new(Offline));
-   for c in cases() {
-    let e=library.as_array().unwrap().iter().find(|e|e["id"].as_str()==Some(&c.id)).unwrap();
-    let scope=e["scope"].as_str().unwrap().to_owned();
-    let out=r.retrieve(&c.input,&c.history,None,&[scope], case_lang(&c.id)).unwrap_or_default();
-    assert!(!out.contains(&format!("Example {}\\n",c.id)));
-   }
-  }
- }
+
 }
 `);
   const run = spawnSync('cargo', ['test', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml'), '--quiet', '--', '--nocapture'],
@@ -179,7 +156,7 @@ fn main() {}
       env:{...process.env, VIVIAN_TEST_DATA_DIR:path.join(dir, 'data')}});
   assert.equal(run.status, 0, run.stdout + run.stderr + (run.error?.message ?? ''));
   console.log(run.stdout.trim());
-  console.log(`${newEntries[0].length} authored pairs: schema, distinct voices, multilingual coverage, context gates and production retrieval verified.`);
+  console.log(`${fragments.flat().length} dataset-sourced fragments; zero authored dialogue samples. Approved corpus, persistence, language gates and retrieval verified.`);
 } finally {
   assert.equal(path.dirname(path.resolve(dir)), path.resolve(tmpdir()), 'cleanup must stay inside the temporary directory');
   assert.ok(path.basename(dir).startsWith('vivian-few-shot-'));

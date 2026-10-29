@@ -70,24 +70,15 @@ impl<'a> PersonaEvolutionAgent<'a> {
 
 fn review_schema() -> serde_json::Value {
     use serde_json::json;
-    let response = json!({"type":"object", "additionalProperties":false, "properties":{
-        "text":{"type":"string"}, "intent":{"type":"string","enum":["reply","short_reply","no_reply"]}
-    },"required":["text","intent"]});
-    let example = json!({"type":"object", "additionalProperties":false, "properties":{
-        "id":{"type":"string"},"scope":{"type":"string"},
-        "cues":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string"}},
-        "context_cues":{"type":"array","maxItems":8,"items":{"type":"string"}},
-        "situation":{"type":"string"},"attention":{"type":"string"},"user":{"type":"string"},"response":response
-    },"required":["id","scope","cues","context_cues","situation","attention","user","response"]});
     let edit = json!({"type":"object", "additionalProperties":false, "properties":{
         "id":{"type":"string"},"reference":{"type":["string","null"]},"reason":{"type":"string"},
-        "example":{"anyOf":[example,{"type":"null"}]}
+        "example":{"type":"null"}
     },"required":["id","reference","reason","example"]});
     let proposal = json!({"type":"object", "additionalProperties":false, "properties":{
         "scope":{"type":"string","enum":super::evolution::SCOPES},
         "kind":{"type":"string","enum":["personality","tone"]},
         "understanding":{"type":"string"},"reason":{"type":"string"},"source_quote":{"type":"string"},
-        "revises":{"type":["string","null"]},"examples":{"type":"array","maxItems":4,"items":edit}
+        "revises":{"type":["string","null"]},"examples":{"type":"array","maxItems":0,"items":edit}
     },"required":["scope","kind","understanding","reason","source_quote","revises","examples"]});
     json!({"type":"object", "additionalProperties":false, "properties":{
         "proposals":{"type":"array","maxItems":2,"items":proposal},
@@ -104,6 +95,29 @@ pub(crate) fn parse_review(raw: &str) -> VivianResult<EvolutionReview> {
     } else {
         raw
     };
-    serde_json::from_str(text)
-        .map_err(|e| VivianError::Other(format!("人设进化结果格式不完整，未应用修订: {e}")))
+    let review: EvolutionReview = serde_json::from_str(text)
+        .map_err(|e| VivianError::Other(format!("人设进化结果格式不完整，未应用修订: {e}")))?;
+    if review.proposals.iter().any(|proposal| !proposal.examples.is_empty())
+        || review.example_updates.iter().any(|edit| edit.example.is_some()) {
+        return Err(VivianError::Other("语料只使用数据集原句；日记自省不能新增或改写台词".into()));
+    }
+    Ok(review)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn corpus_review_can_retire_quotes_but_cannot_write_new_ones() {
+        assert!(parse_review(r#"{"proposals":[],"example_updates":[{"id":"voice-existing","reference":"current","reason":"不适用","example":null}]}"#).is_ok());
+        let authored = serde_json::json!({"proposals":[],"example_updates":[{
+            "id":"grown-new","reference":null,"reason":"创作新台词","example":{
+                "id":"grown-new","scope":"daily","cues":["你好"],"context_cues":[],
+                "situation":"虚构场景","attention":"测试","user":"你好",
+                "response":{"text":"自己编的新台词","intent":"reply"}
+            }}]});
+        assert!(parse_review(&authored.to_string()).is_err());
+        assert_eq!(review_schema()["properties"]["proposals"]["items"]["properties"]["examples"]["maxItems"],0);
+        assert_eq!(review_schema()["properties"]["example_updates"]["items"]["properties"]["example"]["type"],"null");
+    }
 }

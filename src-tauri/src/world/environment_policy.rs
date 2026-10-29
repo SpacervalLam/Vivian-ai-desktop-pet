@@ -72,8 +72,16 @@ pub struct PlanningDecision {
     pub opportunity: Option<Selection>,
     #[serde(default, deserialize_with = "optional_guidance")]
     pub guidance: Option<super::interaction_guidance::Suggestion>,
+    #[serde(default, deserialize_with = "optional_topic")]
+    pub topic: Option<super::topic_window::TopicAssessment>,
     #[serde(default, deserialize_with = "optional_private_activity")]
     pub private_activity: Option<PrivateActivitySelection>,
+}
+
+fn optional_topic<'de, D: serde::Deserializer<'de>>(deserializer: D)
+    -> Result<Option<super::topic_window::TopicAssessment>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -815,6 +823,17 @@ mod tests {
         let plan = PlanningDecision::parse(&malformed_hint).unwrap();
         assert!(plan.guidance.is_none());
         assert_eq!(plan.user_intent.unwrap().kind,IntentKind::NeedsSpace);
+        let topic_only = r#"{"user_intent":null,"opportunity":null,"topic":{"turn_id":"topic_turn:1","relation":"continue","subject":"周五看电影","open_question":null,"evidence":"周五","confidence":0.9}}"#;
+        let plan = PlanningDecision::parse(topic_only).unwrap();
+        assert_eq!(plan.topic.unwrap().subject, "周五看电影");
+        assert!(plan.opportunity.is_none(), "topic awareness does not authorize speech");
+        for topic in ["null", "\"invalid\"", r#"{"relation":"execute_shell"}"#] {
+            let with_invalid_topic = raw.replace("\"opportunity\":null",
+                &format!("\"opportunity\":null,\"topic\":{topic}"));
+            let plan = PlanningDecision::parse(&with_invalid_topic).unwrap();
+            assert!(plan.topic.is_none());
+            assert_eq!(plan.user_intent.unwrap().kind, IntentKind::NeedsSpace);
+        }
         assert!(PlanningDecision::parse(r#"{"user_intent":{"kind":"execute_shell"}}"#).is_none());
         assert!(PlanningDecision::parse("not JSON").is_none());
     }

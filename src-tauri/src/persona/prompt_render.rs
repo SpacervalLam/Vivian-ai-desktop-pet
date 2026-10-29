@@ -700,8 +700,8 @@ pub fn render_dialogue_preferences(config: &PersonaConfig, mode: SceneMode) -> S
     }
 }
 
-/// A small stable voice anchor when no scene example matches. Whole fictional
-/// contexts are retained; learned scene replacements and authored examples win.
+/// Dialogue behaviour is specified by rules. Expression references are selected
+/// from the sourced corpus, without unconditional authored seed dialogue.
 pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String]) -> Option<String> {
     render_dialogue_seed_examples_for_contact(config, learned, false)
 }
@@ -710,37 +710,12 @@ pub fn render_dialogue_seed_examples(config: &PersonaConfig, learned: &[String])
 pub fn render_dialogue_seed_examples_localized(config: &PersonaConfig, learned: &[String], first_contact: bool, lang: &str) -> Option<String> {
     let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
     if lang == "zh" { return render_dialogue_seed_examples_for_contact(config, learned, first_contact); }
-    if first_contact { return None; }
-    let prefix = format!("style-{lang}-");
-    let char_id = config.identity.name.to_lowercase();
-    let examples: Vec<_> = super::example_library::factory_examples(&char_id).into_iter()
-        .filter(|entry| entry.id.starts_with(&prefix) && !learned.contains(&entry.scope))
-        .take(2).map(|entry| format!("Example {}\nContext: {}\nFictional user: {}\nExample response: {}",
-            entry.id, entry.situation, entry.user, entry.response)).collect();
-    (!examples.is_empty()).then(|| examples.join("\n\n"))
+    None
 }
 
-pub fn render_dialogue_seed_examples_for_contact(config: &PersonaConfig, learned: &[String], first_contact: bool) -> Option<String> {
-    let source = default_section_for(&config.identity.name, CharacterSection::Examples);
-    let offsets: Vec<_> = source.match_indices("**Example ").map(|(offset, _)| offset).collect();
-    let mut references = Vec::new();
-    if first_contact {
-        for (index, start) in offsets.iter().enumerate() {
-            let end = offsets.get(index + 1).copied().unwrap_or(source.len());
-            let block = source[*start..end].trim();
-            if block.lines().next().unwrap_or_default().contains("[first-contact]") {
-                references.push(block);
-            }
-        }
-        return (!references.is_empty()).then(|| references.into_iter().take(2).collect::<Vec<_>>().join("\n\n"));
-    }
-    for (index, start) in offsets.iter().take(2).enumerate() {
-        let scope = if index == 0 && config.identity.name == "Vivian" { "play" } else { "sharing" };
-        if learned.iter().any(|item| item == scope) { continue; }
-        let end = offsets.get(index + 1).copied().unwrap_or(source.len());
-        references.push(source[*start..end].trim());
-    }
-    (!references.is_empty()).then(|| references.join("\n\n"))
+pub fn render_dialogue_seed_examples_for_contact(_config: &PersonaConfig, _learned: &[String], _first_contact: bool) -> Option<String> {
+    // First-contact behaviour is specified by rules, not invented dialogue.
+    None
 }
 
 /// Remove only factory scene examples whose scope has acquired a supported interpretation.
@@ -831,17 +806,9 @@ pub fn render_examples_block(config: &PersonaConfig, lang: &str) -> String {
     resolve_section(config, CharacterSection::Examples, lang)
 }
 
-/// Familiar relationships have actual shared history. Keep the seed examples
-/// that teach short replies, silence and care. The full factory examples remain
-/// for early encounters.
-pub fn render_examples_block_tiered(config: &PersonaConfig, lang: &str, tier: CharacterBlockTier) -> String {
-    let full = render_examples_block(config, lang);
-    if tier == CharacterBlockTier::Full {
-        return full;
-    }
-    full.find("**Example 5 - ")
-        .map(|end| full[..end].trim_end().to_string())
-        .unwrap_or(full)
+/// Both tiers use behaviour rules; spoken references live in the sourced corpus.
+pub fn render_examples_block_tiered(config: &PersonaConfig, lang: &str, _tier: CharacterBlockTier) -> String {
+    render_examples_block(config, lang)
 }
 
 #[cfg(test)]
@@ -849,16 +816,18 @@ mod example_budget_tests {
     use super::*;
     use crate::persona::schemas::default_persona_for;
 
-    /// Compact 档只保留前四条出厂示例；示例内容不可被用户覆盖。
     #[test]
-    fn familiar_character_trims_extended_factory_examples() {
-        let config = default_persona_for("nana");
-        let full = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Full);
-        let compact = render_examples_block_tiered(&config, "zh", CharacterBlockTier::Compact);
-        assert!(compact.len() < full.len());
-        assert!(compact.contains("no_reply"));
-        assert!(compact.contains("**Example 4"));
-        assert!(!compact.contains("**Example 5"));
+    fn static_dialogue_has_rules_but_no_authored_response_examples() {
+        for character in ["vivian", "nana"] {
+            let config = default_persona_for(character);
+            for lang in ["zh", "en", "ja"] {
+                let full = render_examples_block_tiered(&config, lang, CharacterBlockTier::Full);
+                assert!(!full.trim().is_empty());
+                assert!(!full.contains("**Example ") && !full.contains("Response:"));
+                assert!(render_dialogue_seed_examples_localized(&config, &[], false, lang).is_none());
+                assert!(render_dialogue_seed_examples_localized(&config, &[], true, lang).is_none());
+            }
+        }
     }
 }
 

@@ -411,16 +411,23 @@ impl PersonaEngine {
     /// Readable dialogue card; full configuration protocols remain available to
     /// analysis/editor paths without dominating the character's spoken replies.
     pub fn dialogue_card(&self) -> String {
+        let mut card = self.dialogue_stable_card();
+        let private = self.private_self_context();
+        if !private.is_empty() {
+            card.push_str("\n\n");
+            card.push_str(&private);
+        }
+        card
+    }
+
+    /// Fixed identity and learned preferences can share an API prefix across
+    /// turns. Current self-state is supplied separately by the chat pipeline.
+    pub(crate) fn dialogue_stable_card(&self) -> String {
         let lang = self.language.read().clone();
         let mut card = prompt_render::render_dialogue_card(&self.config_with_card_overlay(), &lang, &self.evolution.entries());
         if let Some(learned) = self.evolution.render(&lang) {
             card.push_str("\n\n");
             card.push_str(&learned);
-        }
-        let private = self.private_self_context();
-        if !private.is_empty() {
-            card.push_str("\n\n");
-            card.push_str(&private);
         }
         card
     }

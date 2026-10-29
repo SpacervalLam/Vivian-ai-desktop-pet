@@ -740,7 +740,7 @@ impl PromptBuildingStep {
                     && crate::pipeline::prompt_modules::normalize_lang(&self.language) == "zh" {
                     Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier))
                 } else { None };
-                (Some(p.dialogue_card()), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
+                (Some(p.dialogue_stable_card()), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
             }
             None => (None, None, None, None),
         };
@@ -988,13 +988,19 @@ impl PromptBuildingStep {
             .mind
             .as_ref()
             .and_then(|m| m.working_memory_prompt_section_with_thought(&self.language));
+        // Public direct topics never cross into private chat or roommate channels.
+        // Only a current semantic assessment is added; raw history stays in messages.
+        let topic_window_section = if state.current_channel == "direct" && !state.is_command
+            && state.metadata["system_directive"] != true && state.metadata["proactive_greeting"] != true {
+            self.world_provider.as_ref().and_then(|world|
+                world.environment.topic_context(&self.char_id, &state.conversation_id))
+        } else { None };
 
         // Self State 段落：角色自我状态快照（由 Brain 在 think 前注入 PipelineState）
-        let self_state_section = if state.self_state_text.trim().is_empty() {
-            None
-        } else {
-            Some(state.self_state_text.clone())
-        };
+        let private_self = self.persona.as_ref().map(|p|p.private_self_context()).unwrap_or_default();
+        let self_state = [state.self_state_text.as_str(), private_self.as_str()].into_iter()
+            .filter(|text|!text.trim().is_empty()).collect::<Vec<_>>().join("\n\n");
+        let self_state_section = (!self_state.is_empty()).then_some(self_state);
 
         // User Entity 段落：用户在场/离开/预期回归（由 WorldState 提供）
         // 让 LLM 感知"用户现在在哪、何时回来"，避免对着空座说话或对离开时间产生错判
@@ -1174,6 +1180,7 @@ impl PromptBuildingStep {
             environment_events,
             mind_section,
             working_memory_section,
+            topic_window_section,
             self_state_section,
             user_entity_section,
             background_tasks_section,
@@ -2102,6 +2109,26 @@ mod component_selection_tests {
         assert_eq!(parts.user_facts_section.as_deref(), Some("user_facts"));
         assert_eq!(parts.memory_text, "retrieved_fact");
         assert_eq!(parts.user_input, state.user_input);
+    }
+
+    #[test]
+    fn current_private_self_state_is_preserved_outside_the_cacheable_character_card() {
+        use crate::persona::self_profile::{ExperienceSource,SelfAspect,SelfEvidence};
+        let id=format!("cache-state-{}",uuid::Uuid::new_v4());
+        let persona=Arc::new(crate::persona::PersonaEngine::new(&id).unwrap());
+        let now=crate::memory::types::current_timestamp();
+        assert!(persona.self_profile.reserve_web_reflection(now));
+        assert!(persona.self_profile.observe(SelfAspect::Interest,"cache_state_interest","observed curiosity",SelfEvidence {
+            source:ExperienceSource::Web,source_id:"fixture-page".into(),fingerprint:"fixture-hash".into(),
+            quote:"fixture evidence of curiosity".into(),observed_at:now,
+        }));
+        assert!(persona.dialogue_card().contains("cache_state_interest"));
+        let mut step=PromptBuildingStep::new();step.persona=Some(persona);
+        let state=PipelineState {self_state_text:"existing_live_state".into(),..Default::default()};
+        let parts=step.build_parts_prepared(&state,None,None,None);
+        assert!(!parts.character_block.unwrap().contains("cache_state_interest"));
+        let live=parts.self_state_section.unwrap();
+        assert!(live.contains("cache_state_interest") && live.contains("existing_live_state"));
     }
 
     #[test]

@@ -8,12 +8,12 @@ import { createSakuraTown } from './sakuraTown';
 import { createSakuraStation } from './sakuraStation';
 import { createCivicQuarter } from './civicQuarter';
 import { loadBlenderVehicles } from './blenderVehicles';
-import { loadBlenderTrunks } from './blenderTrunks';
 import { createGlobalSquare } from './globalSquare';
 import { createWorldStreetLife } from './worldStreetLife';
 import { createUrbanInfill } from './urbanInfill';
 import { createCityDressing } from './cityDressing';
 import { createStreetTraffic } from './streetTraffic';
+import { createStreetStories } from './streetStories';
 /* 公寓的层标高（单点真相，见 exterior.ts 里那个 export 的注释）。 */
 import { FLOORS } from './exterior';
 /* 北侧小河的 z 范围，远景得让开它。 */
@@ -314,6 +314,8 @@ export function createDistrictArt(scene: THREE.Scene) {
    * 排在最后才能把 infill 那批房子也当成禁区，不会把垃圾桶插进人家院里。 */
   const cityDressing=createCityDressing(scene,colliders);
   colliders.push(...cityDressing.colliders);
+  const streetStories=createStreetStories(scene,colliders);
+  colliders.push(...streetStories.colliders);
 
   /* 动态车流。**放在最后建**：车身组每帧都在动，一旦被 `mergeByMaterial` 扫到
    * 就会被把变换烘进顶点、再也挪不动（第 298 行那次合批的对象是 `district`，
@@ -321,10 +323,6 @@ export function createDistrictArt(scene: THREE.Scene) {
    * 它不落位、不吃 `free()` 判据，所以 `colliders` 也不进（恒为空数组）。 */
   const streetTraffic=createStreetTraffic(scene);
   const disposeBlenderVehicles=loadBlenderVehicles(scene);
-  /* 树干几何同理：Blender 资产异步到位，载入前各场用程序化回退顶着。
-   * **必须排在所有建树模块之后** —— 各场是在自己模块里 build 的，这里只是把
-   * GLB 几何派发下去（见 blenderTrunks 文件头）。 */
-  const disposeBlenderTrunks=loadBlenderTrunks();
 
   /**
    * 远景低模楼：**四面围合**。
@@ -686,6 +684,7 @@ export function createDistrictArt(scene: THREE.Scene) {
   const dynamicColliders:Collider[]=[];
   return {prepare,colliders,boundary,dynamicColliders,
     setEnvironment(period:string,weather:string){
+      streetStories.setEnvironment(period);
       sakuraTown.setEnvironment(period,weather);
       /* LUMINA 的内透（幕墙/中庭穹顶/停车楼灯带）。只吃 period，不看天气 ——
        * 商场夜里开灯与下不下雨无关。 */
@@ -703,6 +702,7 @@ export function createDistrictArt(scene: THREE.Scene) {
     update(camera:THREE.Camera,dt:number){
       sky.position.copy(camera.position);
       elapsed+=dt;
+      streetStories.update(elapsed);
       sakuraTown.update(elapsed);civicQuarter.update(elapsed);sakuraStation.update(dt,camera);streetTraffic.update(dt,camera);
       dynamicColliders.length=0;
       for(const c of sakuraStation.dynamicColliders)dynamicColliders.push(c);
@@ -718,7 +718,7 @@ export function createDistrictArt(scene: THREE.Scene) {
       }
       positions.needsUpdate=true;
     },
-    dispose(){disposeBlenderVehicles();disposeBlenderTrunks();urbanInfill.dispose();cityDressing.dispose();streetTraffic.dispose();worldStreetLife.dispose();globalSquare.dispose();civicQuarter.dispose();sakuraStation.dispose();sakuraTown.dispose();streets.dispose();petalGeometry.dispose();petalMaterial.dispose();for(const m of detailMaterials)m.dispose();for(const m of converted.values())m.dispose();for(const g of bevels.values())g.dispose();
+    dispose(){disposeBlenderVehicles();streetStories.dispose();urbanInfill.dispose();cityDressing.dispose();streetTraffic.dispose();worldStreetLife.dispose();globalSquare.dispose();civicQuarter.dispose();sakuraStation.dispose();sakuraTown.dispose();streets.dispose();petalGeometry.dispose();petalMaterial.dispose();for(const m of detailMaterials)m.dispose();for(const m of converted.values())m.dispose();for(const g of bevels.values())g.dispose();
       /* 远景四面墙的合批几何是自己 merge 出来的，不在上面任何一处缓存里，要单独放。
        * 材质是共享的（stone/trim/roof…），不能在这里 dispose。 */
       for(const wall of skyline)wall.traverse(o=>{const mesh=o as THREE.Mesh;if(mesh.isMesh)mesh.geometry.dispose();});}
