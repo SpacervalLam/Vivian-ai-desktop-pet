@@ -153,9 +153,12 @@ pub fn search(conn: &Connection, query: &str, owner: &str, filter: &MemoryRetrie
     limit: usize) -> rusqlite::Result<Vec<(String,f64)>> {
     if limit == 0 {return Ok(Vec::new());}
     let mut seen = HashSet::new();
-    let words = tokenize::tokenize(query);
+    let words = if super::recall_policy::preference_query(query) { vec!["preference".into()] }
+        else { tokenize::tokenize(query) };
     let single = words.len() == 1;
-    let mut terms: Vec<_> = words.into_iter().filter(|word| (single || word.chars().count()>1) && seen.insert(word.clone())).collect();
+    let mut terms: Vec<_> = words.into_iter().filter(|word|
+        (single || word.chars().count()>1 || ["猫","狗","饭","药","病","钱","书","歌","茶"].contains(&word.as_str()))
+        && seen.insert(word.clone())).collect();
     if terms.len() > 64 {terms.drain(32..terms.len()-32);}
     if terms.is_empty() {return Ok(Vec::new());}
     // Bind a quoted OR expression; user text never becomes FTS operators or SQL.

@@ -63,6 +63,17 @@ pub fn recent_retrieval_context(history: &[ChatMessage]) -> String {
     serde_json::Value::Array(rows).to_string()
 }
 
+/// A follow-up borrows the latest substantive user topic, not serialized role keys
+/// or a long assistant answer. A new self-contained question never calls this.
+pub fn recent_retrieval_topic(history: &[ChatMessage], current: &str) -> String {
+    history.iter().rev().filter(|message| message.role == "user"
+        && message.content.trim() != current.trim()
+        && !is_short_followup(&message.content)
+        && message.meta.as_ref().is_none_or(|meta| meta.source.is_memory_eligible()))
+        .take(1).map(|message| message.content.chars().take(400).collect::<String>())
+        .next().unwrap_or_default()
+}
+
 pub fn split_prompt_context<'a>(prompt: &'a str, user_input: &str, language: &str) -> PromptContext<'a> {
     let Some(after_open) = prompt.trim_start().strip_prefix(STATIC_OPEN) else {
         return PromptContext { system: prompt.trim(), dynamic: None };
@@ -197,6 +208,7 @@ mod tests {
         assert_eq!(messages[0].content, input);
         assert_eq!(messages[0].role, "user");
     }
+
     #[test]
     fn third_party_assistant_is_evidence_not_our_reply() {
         let mut speech = ChatMessage::assistant("Nana 的原话");

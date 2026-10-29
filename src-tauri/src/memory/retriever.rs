@@ -126,8 +126,7 @@ fn tokenize_entry(e: &MemoryItem) -> (HashMap<String, usize>, usize) {
 /// - hook_boost = 含未闭环 open_hooks 的记忆获得加成（1.0 / 0.0）
 /// - need_sim = 当前用户输入与记忆内容的 Jaccard 相似度（jieba 分词）
 ///
-/// recency + relevance + importance 三因子加权，各分量先 min-max 归一化到 [0,1]
-/// 再加权求和，本实现扩展为五因子。
+/// 各分量按固定尺度映射到 [0,1] 后加权；候选数量不改变分数尺度。
 #[derive(Debug, Clone, Copy)]
 pub struct RetrievalWeights {
     pub recency: f64,
@@ -136,8 +135,8 @@ pub struct RetrievalWeights {
     pub hook_boost: f64,
     pub need_sim: f64,
     pub recency_tau_hours: f64,
-    /// 最终融合分数的下限阈值：低于此值的命中会被过滤，避免噪声记忆污染 prompt 上下文。
-    /// 默认 0.15，取值范围 [0, 1]；设为 0 等价于不启用过滤。
+    /// Legacy serialized setting, retained for configuration compatibility.
+    /// Relevance admission no longer depends on batch-normalized ranking scores.
     pub min_score: f64,
 }
 
@@ -246,6 +245,8 @@ pub fn hybrid_search_with_arms(
     // Bind ids to real items before reranking/post-graph compensation. The old
     // implementation reranked placeholders with empty content and timestamps.
     let mut reranked = rerank(fused, query, entries);
+    reranked.retain(|hit| super::recall_policy::admit(query, &hit.item,
+        Some(hit.vector_score), hit.graph_score > 0.0).is_some());
 
     apply_post_graph_compensation(&mut reranked, entries, query, 2, 0.30);
 
@@ -282,6 +283,7 @@ fn apply_post_graph_compensation(
         .unwrap_or(0.0)
         .max(1e-9);
     for (item, score) in compensated {
+        if super::recall_policy::admit(query, &item, None, false).is_none() { continue; }
         reranked.push(RetrievalHit {
             item,
             bm25_score: 0.0,
@@ -304,6 +306,20 @@ fn apply_post_graph_compensation(
 /// BM25 检索：返回 (memory_id, bm25_score) 列表，按分数降序
 fn bm25_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(String, f64)> {
     bm25_search_cached(entries, query, k, &TOKEN_CACHE)
+}
+
+/// FTS selects a bounded pool; rerank that pool with the same BM25 used offline.
+/// Its rank values have different scales from BM25 and must not be substituted.
+pub fn score_lexical_candidates(entries: &[MemoryItem], focus: &str, context: &str, k: usize) -> Vec<(String,f64)> {
+    let mut primary = bm25_search(entries,focus,k);
+    if !context.trim().is_empty() && context != focus {
+        let previous: HashMap<_,_> = bm25_search(entries,context,k).into_iter().collect();
+        for (id,score) in &mut primary {
+            if let Some(support) = previous.get(id) { *score += 0.2 * support.min(*score); }
+        }
+        primary.sort_by(|a,b|b.1.total_cmp(&a.1));
+    }
+    primary
 }
 
 fn bm25_search_cached(entries: &[MemoryItem], query: &str, k: usize,
@@ -655,7 +671,7 @@ pub fn attach_items(
 /// - hook_boost = 含未闭环 open_hooks 的记忆获得 1.0 加成，否则 0.0
 /// - need_sim = 当前用户输入与记忆内容的 Jaccard 相似度（jieba 分词）
 ///
-/// 所有分量先 min-max 归一化到 [0,1]，再加权求和。
+/// 各分量按固定尺度映射到 [0,1]，再加权求和。
 pub fn attach_items_with_weights(
     mut hits: Vec<RetrievalHit>,
     entries: &[MemoryItem],
@@ -685,7 +701,7 @@ pub fn attach_items_with_weights(
 
             // 精确实体/专名命中 boost：查询中的"显著词"（非纯中文短词，如人名/产品名）在记忆
             // 内容/描述/标签中逐字出现时，显著提高 fused_score，确保实体查询（如"AlenTinn"）
-            // 能召回对应记忆，避免因长文本稀释向量相似度而被 min_score 过滤掉。
+            // 能优先召回对应记忆，避免长文本稀释相关性。
             if entity_token_hit(&query_tokens, &hit.item) {
                 hit.fused_score *= ENTITY_BOOST;
             }
@@ -720,35 +736,17 @@ pub fn attach_items_with_weights(
         }
     }
 
-    // 第二遍：min-max 归一化各分量
+    // Fixed-scale ranking: loading a smaller candidate pool must not stretch a
+    // tiny age/importance difference into a full 0..1 signal.
     let n = raw_components.len() as f64;
-    let (rel_min, rel_max) = min_max(raw_components.iter().map(|(_, r, _, _, _, _)| *r));
-    let (rec_min, rec_max) = min_max(raw_components.iter().map(|(_, _, rec, _, _, _)| *rec));
-    let (imp_min, imp_max) = min_max(raw_components.iter().map(|(_, _, _, imp, _, _)| *imp));
-    let (hook_min, hook_max) = min_max(raw_components.iter().map(|(_, _, _, _, hb, _)| *hb));
-    let (need_min, need_max) = min_max(raw_components.iter().map(|(_, _, _, _, _, ns)| *ns));
-
-    let rel_range = (rel_max - rel_min).max(1e-9);
-    let raw_rec_range = rec_max - rec_min;
-    let rec_range = raw_rec_range.max(1e-9);
-    let imp_range = (imp_max - imp_min).max(1e-9);
-    let hook_range = (hook_max - hook_min).max(1e-9);
-    let need_range = (need_max - need_min).max(1e-9);
 
     for (idx, raw_rel, raw_rec, raw_imp, raw_hb, raw_ns) in &raw_components {
         let hit = &mut hits[*idx];
-        let norm_rel = (raw_rel - rel_min) / rel_range;
-        // 创建时间仅差几十秒时不应被 min-max 拉伸成 0 与 1；那会让测试
-        // 构造顺序或同一轮的写入先后压过真正的相关性。recency 差异不足
-        // 约千分之一时视为同档。
-        let norm_rec = if raw_rec_range < 1e-3 {
-            0.0
-        } else {
-            (raw_rec - rec_min) / rec_range
-        };
-        let norm_imp = (raw_imp - imp_min) / imp_range;
-        let norm_hb = (raw_hb - hook_min) / hook_range;
-        let norm_ns = (raw_ns - need_min) / need_range;
+        let norm_rel = raw_rel.max(0.0) / (raw_rel.max(0.0) + 1.0 / RRF_K);
+        let norm_rec = raw_rec.clamp(0.0,1.0);
+        let norm_imp = raw_imp.clamp(0.0,1.0);
+        let norm_hb = raw_hb.clamp(0.0,1.0);
+        let norm_ns = raw_ns.clamp(0.0,1.0);
 
         let final_score = weights.recency * norm_rec
             + weights.relevance * norm_rel
@@ -811,32 +809,20 @@ pub fn attach_items_with_weights(
             );
             obj.insert("semantic_boost".to_string(), serde_json::json!(semantic_type_boost(&hit.item.semantic_type())));
             obj.insert("knowledge_source_boost".to_string(), serde_json::json!(knowledge_source_boost(&hit.item.metadata)));
-            // n 用于诊断：归一化样本数过少时分数意义有限
+            // Candidate count is diagnostic only; it never rescales these scores.
             obj.insert("normalize_n".to_string(), serde_json::json!(n));
         }
         hit.item.metadata = meta;
+        if let Some(evidence) = super::recall_policy::admit(query, &hit.item,
+            Some(hit.vector_score), hit.graph_score > 0.0) {
+            super::recall_policy::stamp(&mut hit.item, query, evidence);
+        }
     }
 
     hits.retain(|h| !h.item.content.is_empty());
 
-    // min_score 过滤：低于阈值的命中视为噪声，避免污染 prompt 上下文。
-    // 仅当阈值 > 0 时启用（设为 0 等价于不启用），过滤发生在归一化重排之后，
-    // 因此阈值是相对值（0.15 对应"最低保留 15% 的归一化综合分"）。
-    // 小样本豁免：min-max 归一化在候选 ≤ 5 条时分数失真（极值被拉平），
-    // 且少量候选本就稀缺，全部保留。
-    if weights.min_score > 0.0 && hits.len() > 5 {
-        let before = hits.len();
-        hits.retain(|h| h.fused_score >= weights.min_score);
-        if before != hits.len() {
-            tracing::debug!(
-                "[Retriever] min_score={:.3} 过滤掉 {} 条噪声命中（{} → {}）",
-                weights.min_score,
-                before - hits.len(),
-                before,
-                hits.len()
-            );
-        }
-    }
+    // Admission uses query-local lexical/semantic/relational evidence above.
+    // Batch-normalized rank (including age) must never become an admission test.
 
     // 重新按 final fused_score 排序
     hits.sort_by(|a, b| {
@@ -874,29 +860,6 @@ fn jaccard_similarity(
     } else {
         inter / union
     }
-}
-
-/// 计算一组数值的 (min, max)
-fn min_max<I>(iter: I) -> (f64, f64)
-where
-    I: Iterator<Item = f64>,
-{
-    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
-    for v in iter {
-        if v < min {
-            min = v;
-        }
-        if v > max {
-            max = v;
-        }
-    }
-    if !min.is_finite() {
-        min = 0.0;
-    }
-    if !max.is_finite() {
-        max = 0.0;
-    }
-    (min, max)
 }
 
 /// 上下文扩窗：对命中的 raw 对话按 seq_no ±1 取邻接记忆。
@@ -1350,6 +1313,22 @@ mod tests {
         // 至少包含 m1 或 m3
         let ids: Vec<_> = hits.iter().map(|(id, _)| id.as_str()).collect();
         assert!(ids.contains(&"m1") || ids.contains(&"m3"));
+    }
+
+    #[test]
+    fn fixed_rank_scale_does_not_change_with_candidate_extremes() {
+        let mut first = make_item("first", "香菜过敏", 0.8); first.timestamp = 1.0;
+        let mut second = make_item("second", "香菜过敏的另一条记录", 0.01); second.timestamp = 1.0;
+        let hit = |item: MemoryItem, score: f64| RetrievalHit {
+            item,bm25_score:1.0,vector_score:0.0,graph_score:0.0,fused_score:score,
+            result_type:RetrievalResultType::Memory,
+        };
+        let alone = attach_items(vec![hit(first.clone(),0.04)], &[first.clone()], "香菜过敏");
+        let together = attach_items(vec![hit(first.clone(),0.04),hit(second.clone(),0.08)], &[first,second], "香菜过敏");
+        let original = together.iter().find(|hit|hit.item.id == "first").unwrap();
+        assert_eq!(alone[0].item.metadata["norm_relevance"], original.item.metadata["norm_relevance"]);
+        assert!((alone[0].fused_score-original.fused_score).abs() < 1e-9);
+        assert!(alone[0].fused_score > 0.0);
     }
 
     #[test]

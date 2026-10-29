@@ -47,7 +47,7 @@ const innerImpl = manager.slice(manager.indexOf('impl MemoryManagerInner {'), ma
 const summarizedPart=manager.slice(manager.indexOf('pub fn is_summarized('),manager.indexOf('fn apply_observer_penalty('));
 const summarized=summarizedPart.slice(0,summarizedPart.lastIndexOf('}')+1);
 const incremental=innerStruct.includes('changes:');
-const indexed=manager.includes('let lexical = store.search_candidates(');
+const indexed=manager.includes('store.search_candidates(');
 function rustItem(source, marker) {
     const start=source.indexOf(marker);if(start<0)throw new Error(`Missing Rust item: ${marker}`);
     const open=source.indexOf('{',start);let depth=1;let i=open+1;
@@ -63,6 +63,7 @@ impl IndexedHarness {
     ${manager.includes('pub fn consolidation_summaries(') ? rustItem(manager,'pub fn consolidation_summaries(') : ''}
     ${manager.includes('pub fn count_diary_material(') ? rustItem(manager,'pub fn count_diary_material(') : ''}
     ${rustItem(manager,'fn recall_snapshot(')}
+    ${manager.includes('fn recall_snapshot_for_query(') ? rustItem(manager,'fn recall_snapshot_for_query(') : ''}
     pub fn new(store:Arc<super::entry_store::MemoryEntryStore>, owner:&str)->Self {
         let dir=tempfile::tempdir().unwrap();
         let inner=MemoryManagerInner{data:MemoryStoreData::default(),id_index:HashMap::new(),capacities:HashMap::new(),entry_store:store,changes:Default::default(),revision:0,
@@ -169,7 +170,7 @@ pub mod config { pub mod manager {
     pub struct RetrievalWeightsConfig { pub recency:f64,pub relevance:f64,pub importance:f64,pub hook_boost:f64,pub need_sim:f64,pub recency_tau_hours:f64,pub min_score:f64 }
 } }
 pub mod memory {
-    pub use vivian_storage_contracts::{types,entry_store,search_index,provenance};
+    pub use vivian_storage_contracts::{types,entry_store,search_index,provenance,recall_policy};
     pub mod session_summary { __SUMMARY_HELPERS__ }
     pub use embedding::MemoryEmbeddingProvider;
     __MODULES__

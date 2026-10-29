@@ -1318,8 +1318,8 @@ pub struct RetrievalWeightsConfig {
     /// recency 衰减时间常数（小时），τ=24 时 24h 后 R≈0.368
     #[serde(default = "default_w_tau")]
     pub recency_tau_hours: f64,
-    /// 最终融合分数的下限阈值：低于此值的命中会被过滤，避免噪声记忆污染 prompt 上下文。
-    /// 默认 0.15；设为 0 等价于不启用过滤。
+    /// Legacy compatibility field. Recall admission now uses query-local evidence,
+    /// independently of the normalized rank and age of other candidates.
     #[serde(default = "default_w_min_score")]
     pub min_score: f64,
 }

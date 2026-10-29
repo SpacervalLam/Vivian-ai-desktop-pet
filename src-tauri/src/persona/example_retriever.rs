@@ -19,7 +19,13 @@ fn embedding_text(e: &Example) -> String {
     if e.is_fragment() {
         // The utterance itself is searchable. Topic labels are supplementary;
         // cues and situation contain the same label in the sourced library.
-        format!("{}\n{}", e.response["text"].as_str().unwrap_or_default(), e.situation)
+        let wording = if let Some(text) = e.response["text"].as_str() {
+            text.to_owned()
+        } else {
+            ["zh", "ja", "en"].iter().filter_map(|lang| e.text_for(lang))
+                .collect::<Vec<_>>().join("\n")
+        };
+        format!("{wording}\n{}", e.situation)
     } else {
         format!("{}\n{}\n{}", e.cues.join(" "), e.situation, e.user)
     }
@@ -104,12 +110,14 @@ impl ExampleRetriever {
         for (index, e) in entries.iter().enumerate() {
             if !e.is_approved_utterance() { continue; }
             if !e.is_fragment() && learned.contains(&e.scope) && !revised_ids.contains(&e.id) { continue; }
-            // 语种门：三语示例混在同一库文件里，检索必须按界面语言选档。
-            // 不过滤时，配了远程多语 embedding 的中文对话会召回 style-en/ja 示例
-            // （跨语言相似度过准入线），而英文/日文界面更是一直在吃中文示例——
-            // 模型会直接跟着示例的语言说话。2026-10-24 补上这道门。
-            let e_lang = entry_lang(e);
-            if e_lang != "any" && e_lang != lang_norm { continue; }
+            // Every trilingual record participates in the same semantic index.
+            // Only its requested wording reaches the prompt. Legacy scalar
+            // records retain their language gate while local arrays migrate.
+            if e.response["text"].is_string() {
+                let e_lang = entry_lang(e);
+                if e_lang != "any" && e_lang != lang_norm { continue; }
+            }
+            let Some(wording) = e.text_for(lang_norm) else { continue; };
             // Generic confirmations/duration answers require the right ongoing scene.
             if !e.is_fragment() && !e.context_cues.is_empty() && !e.context_cues.iter().any(|cue| cue_matches(&normalized_history, &cue.trim().to_lowercase())) { continue; }
             let literal_score = if e.is_fragment() { None } else { e.cues.iter().filter_map(|cue| {
@@ -155,7 +163,7 @@ impl ExampleRetriever {
                 },
             };
             if e.is_fragment() || score >= 0.65 {
-                let terms = response_terms(e.response["text"].as_str().unwrap_or_default());
+                let terms = response_terms(wording);
                 let repeated = recent_replies.iter().enumerate().map(|(age, reply)|
                     term_similarity(&terms, reply) / (age + 1) as f64).fold(0.0_f64, f64::max);
                 // A small penalty breaks near ties without admitting irrelevant examples.
@@ -188,7 +196,8 @@ impl ExampleRetriever {
             let block = if e.is_fragment() {
                 // Shared framing carries attribution once. Keep the actual voice
                 // samples prominent instead of repeating metadata per utterance.
-                format!("\nExpression fragment {}\nWording and rhythm only: {}\n", e.id, e.response["text"])
+                format!("\nExpression fragment {}\nWording and rhythm only: {}\n", e.id,
+                    serde_json::to_string(e.text_for(lang_norm).expect("selected language")).expect("serializable wording"))
             } else {
                 format!("\nExample {}\nFictional context (not user history): {}\n{}Fictional user: {}\nExample response: {}\n", e.id, e.situation, attention, e.user, e.response)
             };
@@ -228,11 +237,10 @@ pub(crate) fn source_transformation(input: &str) -> bool {
     })
 }
 
-/// 示例条目的语种：先看显式 id 前缀（style-en-* / style-ja-*），否则按文本判定
+/// Legacy scalar 示例的语种：先看显式 id 前缀，否则按文本判定。
 /// （假名→ja，汉字→zh，纯 ASCII→en）。
 ///
-/// 与 persona 的 examples.md 不同，voice_fragments.json 是三语混排的单文件，
-/// 消费侧必须自己选档——`resolve_section` 那套按语言解析的逻辑到不了这里。
+/// 三语对象的原始 id 仅作为稳定标识，不再限制它能参与哪种语言的召回。
 fn entry_lang(entry: &Example) -> &'static str {
     // 语种前缀是权威标记；不能从单句的辅助主题标签推断原文语种。
     if entry.id.starts_with("style-en-") || entry.id.starts_with("voice-en-") { return "en"; }
@@ -576,7 +584,12 @@ mod tests {
             let r = ExampleRetriever::new(name, default_embedding());
             let mut ids = std::collections::HashSet::new();
             assert!(r.entries.len() >= 24);
-            for e in r.entries { assert!(ids.insert(e.id)); assert!(!e.cues.is_empty()); assert!(e.response["text"].is_string()); assert!(e.response["intent"].is_string()); }
+            for e in r.entries {
+                assert!(ids.insert(e.id.clone()));
+                assert!(!e.cues.is_empty());
+                for lang in ["zh", "ja", "en"] { assert!(e.text_for(lang).is_some()); }
+                assert!(e.response["intent"].is_string());
+            }
         }
     }
     #[test]
@@ -589,7 +602,9 @@ mod tests {
             for e in fragments {
                 assert!(e.user.is_empty());
                 assert!(e.cues.iter().all(|c| c.chars().count() >= 2));
-                assert!(e.response["text"].as_str().unwrap().chars().count() <= 120);
+                for lang in ["zh", "ja", "en"] {
+                    assert!(e.text_for(lang).unwrap().chars().count() <= 180);
+                }
             }
         }
     }
@@ -597,13 +612,15 @@ mod tests {
     fn example_responses_stay_short_enough_for_the_char_budget() {
         for name in ["nana", "vivian"] {
             for e in ExampleRetriever::new(name, default_embedding()).entries {
-                let n = e.response["text"].as_str().map(|s| s.chars().count()).unwrap_or(0);
-                assert!(
-                    n <= 120,
-                    "{name}/{} 回复 {n} 字，过长会挤掉同轮其他示例（预算 {}）",
-                    e.id,
-                    MAX_CHARS
-                );
+                for lang in ["zh", "ja", "en"] {
+                    let n = e.text_for(lang).unwrap().chars().count();
+                    assert!(
+                        n <= 180,
+                        "{name}/{} 回复 {n} 字，过长会挤掉同轮其他示例（预算 {}）",
+                        e.id,
+                        MAX_CHARS
+                    );
+                }
             }
         }
     }

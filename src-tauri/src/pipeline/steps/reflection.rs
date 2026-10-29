@@ -326,6 +326,7 @@ impl ReflectionRunnable {
     }
 
     fn apply_self_profile(&self, json: &Value, state: &PipelineState) {
+        self.apply_shared_language(json, state);
         let Some(persona) = self.persona.as_ref() else { return; };
         for update in json.get("self_profile").and_then(Value::as_array).into_iter().flatten().take(2) {
             // A user interest alone does not establish the companion's interest.
@@ -339,6 +340,20 @@ impl ReflectionRunnable {
             };
             crate::persona::self_development::record_interpretation(persona, update, evidence, &state.user_input);
         }
+    }
+
+    fn apply_shared_language(&self, json: &Value, state: &PipelineState) {
+        if state.is_command || state.current_channel == "cross_character"
+            || state.metadata["skip_memory_save"] == true || state.metadata["system_directive"] == true { return; }
+        let Some(persona) = self.persona.as_ref() else { return; };
+        let Some(id) = state.metadata["growth_source_memory_id"].as_str() else { return; };
+        let Some(content) = state.metadata["growth_source_content"].as_str() else { return; };
+        let Some(timestamp) = state.metadata["growth_source_timestamp"].as_f64() else { return; };
+        let proposals: Vec<crate::persona::shared_language::WordProposal> = json.get("shared_words")
+            .and_then(Value::as_array).into_iter().flatten().take(3)
+            .filter_map(|value| serde_json::from_value::<crate::persona::shared_language::WordProposal>(value.clone()).ok())
+            .filter(|proposal| state.user_input.contains(proposal.source_quote.trim())).collect();
+        persona.shared_language.observe(id, content, timestamp, &proposals);
     }
 
     fn char_display_name(&self) -> &str {
@@ -581,6 +596,12 @@ impl Runnable for ReflectionRunnable {
         _config: Option<crate::pipeline::base::RunnableConfig>,
     ) -> VivianResult<Value> {
         let mut state = PipelineState::from_json(input);
+
+        if self.is_current_turn() {
+            // Count real occurrences even when reflection is unavailable. Source IDs
+            // make the later interpretation and retries idempotent.
+            self.apply_shared_language(&serde_json::json!({}), &state);
+        }
 
         // 跳过条件：命令、不应答、graceful_exit、text 为空
         if state.is_command || !state.should_respond || state.graceful_exit || state.text.is_empty()

@@ -26,9 +26,8 @@ fn a_new_topic_does_not_retrieve_the_previous_long_technical_conversation() {
     let mut state = PipelineState::from_json(state("我喜欢哪种甜点"));
     state.messages.push(ChatMessage::assistant("Rust 编译和工具报告".repeat(10000)));
     let query = RecallProbe::build_retrieval_query(&state);
-    assert!(query.contains("我喜欢哪种甜点"));
-    assert!(!query.contains("Rust"));
-    assert!(!query.contains("Recent conversation"));
+    assert_eq!(query.focus,"我喜欢哪种甜点");
+    assert!(query.context.is_empty());
 }
 
 #[test]
@@ -36,13 +35,29 @@ fn references_use_bounded_history_and_an_already_resolved_query_does_not_duplica
     let mut state = PipelineState::from_json(state("它后来怎么样了"));
     state.messages.push(ChatMessage::assistant("🐳".repeat(10000)));
     let query = RecallProbe::build_retrieval_query(&state);
-    assert!(query.contains("Nana"));
-    assert!(query.contains("Recent conversation"));
-    assert!(query.chars().count() < 3000);
+    assert!(query.context.contains("Nana"));
+    assert!(!query.context.contains("🐳"));
+    assert!(query.context.chars().count() <= 400);
     state.resolved_user_input = "Nana 提到的草莓蛋糕".into();
     let query = RecallProbe::build_retrieval_query(&state);
-    assert!(query.contains("Resolved query: Nana 提到的草莓蛋糕"));
-    assert!(!query.contains("Recent conversation"));
+    assert_eq!(query.focus,"Nana 提到的草莓蛋糕");
+    assert!(query.context.is_empty());
+}
+
+#[test]
+fn generic_followups_and_quantity_answers_borrow_topic_but_new_products_do_not() {
+    for input in ["为什么", "展开讲讲", "30分钟"] {
+        let mut state = PipelineState::from_json(state(input));
+        state.resolved_user_input = input.into(); // An unchanged rewrite did not resolve anything.
+        let query = RecallProbe::build_retrieval_query(&state);
+        assert!(query.continuation);
+        assert_eq!(query.effective_text(), "Nana 说她喜欢草莓蛋糕");
+    }
+    let product = PipelineState::from_json(state("iPhone 17 怎么样"));
+    let query = RecallProbe::build_retrieval_query(&product);
+    assert!(!query.continuation);
+    assert!(query.context.is_empty());
+    assert_eq!(query.effective_text(),"iPhone 17 怎么样");
 }
 
 #[test]

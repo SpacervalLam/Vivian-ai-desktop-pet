@@ -98,7 +98,7 @@ fn search_keyword_impl(entries: &[MemoryItem], query: &str, limit: usize) -> Vec
                 score = 1.0;
             }
 
-            if score > 0.0 {
+            if score > 0.0 && super::recall_policy::admit(query, m, None, false).is_some() {
                 score += m.importance * 0.1;
                 Some((m.clone(), score))
             } else {
@@ -113,7 +113,12 @@ fn search_keyword_impl(entries: &[MemoryItem], query: &str, limit: usize) -> Vec
     }
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(limit).map(|(m, _)| m).collect()
+    scored.into_iter().take(limit).map(|(mut m, _)| {
+        if let Some(evidence) = super::recall_policy::admit(query, &m, None, false) {
+            super::recall_policy::stamp(&mut m, query, evidence);
+        }
+        m
+    }).collect()
 }
 
 // ============================================================================
@@ -142,7 +147,7 @@ fn search_vector_impl(
         super::retriever::vector_search(ctx.vector_store, &qemb, ctx.entries, limit)
     };
     if hits.is_empty() {
-        return search_importance_based_impl(ctx.entries, query, limit);
+        return search_keyword_impl(ctx.entries, query, limit);
     }
 
     // id → 索引映射
@@ -157,6 +162,9 @@ fn search_vector_impl(
             continue;
         };
         let mut item = ctx.entries[idx].clone();
+        let semantic = (ctx.prepared_arms.is_some() || ctx.embedding.model_id() != "hashing").then_some(sim);
+        let Some(evidence) = super::recall_policy::admit(query, &item, semantic, false) else { continue; };
+        super::recall_policy::stamp(&mut item, query, evidence);
         let ms = compute_match_score(&item, query);
         let combined = 0.75 * sim + 0.25 * (ms / (1.0 + ms));
         if let Some(obj) = item.metadata.as_object_mut() {
@@ -194,22 +202,6 @@ fn compute_match_score(item: &MemoryItem, query: &str) -> f64 {
     score + item.importance * 0.1
 }
 
-fn search_importance_based_impl(
-    entries: &[MemoryItem],
-    query: &str,
-    limit: usize,
-) -> Vec<MemoryItem> {
-    let mut scored: Vec<(MemoryItem, f64)> = entries
-        .iter()
-        .map(|m| {
-            let ms = compute_match_score(m, query);
-            (m.clone(), ms)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(limit).map(|(m, _)| m).collect()
-}
-
 // ============================================================================
 // HybridStrategy：match_score + 关键词 boost（简化版，非 BM25）
 // ============================================================================
@@ -226,6 +218,7 @@ impl MemoryRetrievalStrategy for HybridStrategy {
         let mut scored: Vec<(MemoryItem, f64)> = ctx
             .entries
             .iter()
+            .filter(|m| super::recall_policy::admit(query, m, None, false).is_some())
             .map(|m| {
                 let ms = compute_match_score(m, query);
                 let boost = if m.content.to_lowercase().contains(&lower_query) {
@@ -410,6 +403,8 @@ impl MemoryRetrievalStrategy for GraphStrategy {
             .filter_map(|h| {
                 let &idx = id_index.get(h.memory_id.as_str())?;
                 let mut cloned = ctx.entries[idx].clone();
+                let evidence = super::recall_policy::admit(query, &cloned, None, true)?;
+                super::recall_policy::stamp(&mut cloned, query, evidence);
                 if let Some(obj) = cloned.metadata.as_object_mut() {
                     obj.insert("graph_hop".into(), serde_json::json!(h.hop));
                     obj.insert("graph_relation".into(), serde_json::json!(h.via_relation.as_str()));
@@ -443,9 +438,40 @@ pub fn create_strategy(
 mod tests {
     use super::*;
     use crate::memory::embedding::HashingMemoryEmbedding;
-    use crate::memory::types::{Granularity, MemoryItem};
+    use crate::memory::types::{Granularity, MemoryItem, RetrievalStrategy};
     use crate::memory::vector_search::MemoryVectorStore;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_strategy_rejects_unrelated_high_importance_and_weak_vector_candidates() {
+        let mut unrelated = MemoryItem::new("用户养了一只猫".into(),Granularity::Summary,1.0);
+        unrelated.id = "unrelated".into();
+        let items = vec![unrelated]; let dir = tempfile::tempdir().unwrap();
+        let store = MemoryVectorStore::new(dir.path().join("vectors.db"),2,"test").unwrap();
+        let embedding: Arc<dyn MemoryEmbeddingProvider> = Arc::new(HashingMemoryEmbedding::default());
+        let arms = RecallArms { lexical:vec![],vector:vec![("unrelated".into(),0.65)] };
+        let ctx = RetrievalContext { entries:&items,vector_store:&store,embedding:&embedding,
+            graph:None,weights:None,query_embedding:QueryEmbedding::Prepared(None),prepared_arms:Some(&arms) };
+        for strategy in [RetrievalStrategy::Auto,RetrievalStrategy::Keyword,RetrievalStrategy::Vector,RetrievalStrategy::Hybrid,RetrievalStrategy::Graph] {
+            assert!(create_strategy(&strategy).search(&ctx,"量子纠缠",5).is_empty(),"{strategy:?}");
+        }
+    }
+
+    #[test]
+    fn old_literal_matches_survive_rank_cutoffs_and_large_batches() {
+        let mut items: Vec<_> = (0..8).map(|i| {
+            let mut item = MemoryItem::new(format!("项目里第{i}条明确的香菜过敏记录"),Granularity::Summary,0.1);
+            item.id = format!("old-{i}"); item.timestamp = 1.0; item
+        }).collect();
+        items[0].importance = 1.0;
+        let dir=tempfile::tempdir().unwrap();
+        let store=MemoryVectorStore::new(dir.path().join("vectors.db"),2,"test").unwrap();
+        let embedding:Arc<dyn MemoryEmbeddingProvider>=Arc::new(HashingMemoryEmbedding::default());
+        let ctx=RetrievalContext{entries:&items,vector_store:&store,embedding:&embedding,graph:None,
+            weights:Some(RetrievalWeights{min_score:1.0,..Default::default()}),
+            query_embedding:QueryEmbedding::Prepared(None),prepared_arms:None};
+        assert_eq!(AutoStrategy.search(&ctx,"香菜过敏",8).len(),8);
+    }
 
     fn make_items() -> Vec<MemoryItem> {
         vec![

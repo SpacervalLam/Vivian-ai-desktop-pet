@@ -20,7 +20,7 @@ const mocks={
  'react-i18next':`export const useTranslation=()=>({t:key=>key});`,
  '@tauri-apps/api/core':`export const invoke=(...args)=>globalThis.__workInput.invoke(...args);`,
  '@tauri-apps/api/event':`export const listen=(...args)=>globalThis.__workInput.listen(...args);`,
- 'lucide-react':`export const ArrowUp='icon',Pencil='icon',Trash2='icon';`,
+ 'lucide-react':`export const ArrowUp='icon',Pencil='icon',Send='icon',Trash2='icon';`,
 };
 async function load(entry){const result=await build({entryPoints:[entry],bundle:true,write:false,format:'esm',platform:'node',plugins:[{name:'queue-fixture',setup(b){
  b.onResolve({filter:/^react$|^react\/jsx-runtime$|^react-i18next$|^@tauri-apps\/api\/|^lucide-react$/},({path})=>({path,namespace:'fixture'}));

@@ -38,6 +38,7 @@ pub mod precision_filter;
 pub mod provenance;
 pub mod qdrant;
 pub mod query_embedding;
+pub mod recall_policy;
 pub mod redact;
 pub mod recycle_bin;
 pub mod refiner;

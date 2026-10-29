@@ -28,6 +28,24 @@ pub struct VoiceExample {
 }
 
 impl VoiceExample {
+    /// One utterance owns all localized wordings; legacy local arrays may still
+    /// contain a single string until their factory snapshot is upgraded.
+    pub fn text_for(&self, lang: &str) -> Option<&str> {
+        let text = &self.response["text"];
+        text.as_str().or_else(|| text.get(lang).and_then(serde_json::Value::as_str))
+    }
+
+    fn valid_text(&self) -> bool {
+        let text = &self.response["text"];
+        if let Some(text) = text.as_str() {
+            return bounded(text, if self.response["intent"] == "no_reply" { 0 } else { 1 }, 180);
+        }
+        text.as_object().is_some_and(|versions| versions.len() == 3
+            && ["zh", "ja", "en"].iter().all(|lang|
+                versions.get(*lang).and_then(serde_json::Value::as_str)
+                    .is_some_and(|text| bounded(text, 1, 180))))
+    }
+
     /// A sourced utterance has no invented user turn. Keep the marker in the
     /// portable base array so it survives restarts and factory upgrades.
     pub fn is_fragment(&self) -> bool {
@@ -98,7 +116,7 @@ pub fn read_base_at(path: &std::path::Path) -> Result<Vec<VoiceExample>, String>
         e.id.is_empty()
             || !ids.insert(&e.id)
             || e.cues.is_empty()
-            || !e.response["text"].is_string()
+            || !e.valid_text()
             || !e.response["intent"].is_string()
     }) {
         return Err("模仿语料基础库存在重复 ID 或不完整样例".into());
@@ -274,17 +292,7 @@ fn valid_example(e: &VoiceExample) -> bool {
         && e.response["intent"]
             .as_str()
             .is_some_and(|s| matches!(s, "reply" | "short_reply" | "no_reply"))
-        && e.response["text"].as_str().is_some_and(|s| {
-            bounded(
-                s,
-                if e.response["intent"] == "no_reply" {
-                    0
-                } else {
-                    1
-                },
-                180,
-            )
-        })
+        && e.valid_text()
 }
 
 /// Validate the entire small batch against the exact corpus the reviewer saw.
@@ -399,6 +407,40 @@ pub fn publish_edits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trilingual_factory_preserves_identity_through_legacy_snapshot_upgrade() {
+        let current = factory_examples("vivian");
+        let mut legacy = current.clone();
+        for e in &mut legacy {
+            let lang = e.id.split('-').nth(1).unwrap();
+            e.response["text"] = e.text_for(lang).unwrap().into();
+        }
+        let merged = merge_factory(&legacy, Some(&legacy), &current, &BTreeSet::new());
+        assert_eq!(fingerprint(&merged), fingerprint(&current));
+        for entry in merged {
+            assert!(entry.is_approved_utterance());
+            for lang in ["zh", "ja", "en"] { assert!(entry.text_for(lang).is_some()); }
+        }
+    }
+
+    #[test]
+    fn translations_require_all_languages_and_cannot_bypass_corpus_approval() {
+        let original = factory_examples("nana").remove(0);
+        assert!(original.valid_text());
+        let mut changed = original.clone();
+        changed.response["text"]["en"] = "An invented event happened to me.".into();
+        assert!(!changed.is_approved_utterance());
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(BASE_FILE);
+        for bad in [serde_json::json!({"zh":"原句","ja":"原文"}),
+                    serde_json::json!({"zh":"原句","ja":"原文","en":""}),
+                    serde_json::json!({"zh":"原句","ja":"原文","en":"word","fr":"mot"})] {
+            changed.response["text"] = bad;
+            save_base_at(&path, &[changed.clone()]).unwrap();
+            assert!(read_base_at(&path).is_err());
+        }
+    }
+
     #[test]
     fn fragments_survive_base_roundtrip_and_cannot_turn_into_paired_dialogue() {
         let fragment = factory_examples("vivian").into_iter().find(|e|e.is_fragment()).unwrap();

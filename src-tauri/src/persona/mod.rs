@@ -20,6 +20,7 @@ pub mod prompt_render;
 pub mod schemas;
 pub mod scene_selector;
 pub mod self_profile;
+pub mod shared_language;
 pub(crate) mod self_profile_store;
 pub(crate) mod self_development;
 pub(crate) mod reading_corpus;
@@ -61,6 +62,7 @@ pub struct PersonaEngine {
     evolution: PersonaEvolutionStore,
     voice_base: Vec<example_library::VoiceExample>,
     pub(crate) self_profile: self_profile_store::SelfProfileStore,
+    pub(crate) shared_language: shared_language::SharedLanguageStore,
     /// 人设配置修订号（任何 config 变更时递增，驱动 Character 块渲染缓存失效）
     config_revision: std::sync::atomic::AtomicU64,
     /// Character 块渲染缓存：(tier, lang, config修订, evolution更新时间, 渲染文本)
@@ -118,6 +120,7 @@ impl PersonaEngine {
             evolution,
             voice_base,
             self_profile: self_profile_store::SelfProfileStore::new(persona_dir.join("self_profile.json")),
+            shared_language: shared_language::SharedLanguageStore::new(persona_dir.join("shared_language.json")),
             config_revision: std::sync::atomic::AtomicU64::new(0),
             character_block_cache: RwLock::new(None),
         })
@@ -158,6 +161,7 @@ impl PersonaEngine {
             .map_err(VivianError::Memory)?;
         self.evolution.flush_for_backup()?;
         self.self_profile.flush_for_backup().map_err(VivianError::Memory)?;
+        self.shared_language.flush_for_backup().map_err(VivianError::Memory)?;
         self.card_store.flush_for_backup()
     }
 
@@ -511,6 +515,10 @@ impl PersonaEngine {
             .map(|content| content.contains(&e.quote)
                 && format!("{:x}", Sha256::digest(content.trim().as_bytes())) == e.fingerprint)
             .unwrap_or(false));
+        self.shared_language.reconcile(|e| memory.get_memory_content_by_id(&e.memory_id)
+            .map(|content| content.contains(&e.quote)
+                && format!("{:x}", Sha256::digest(content.trim().as_bytes())) == e.fingerprint)
+            .unwrap_or(false));
     }
 
     pub fn evolution_history(&self) -> Vec<EvolutionEntry> { self.evolution.history() }
@@ -548,6 +556,7 @@ impl PersonaEngine {
     pub fn reset_evolution(&self) {
         self.evolution.reset();
         self.self_profile.reset();
+        self.shared_language.reset();
         tracing::info!("[PersonaEngine] 自我进化覆盖层已清空（恢复出厂）");
     }
 
@@ -800,6 +809,7 @@ impl Default for PersonaEngine {
                 evolution: PersonaEvolutionStore::fallback(),
                 voice_base: example_library::factory_examples("vivian"),
                 self_profile: self_profile_store::SelfProfileStore::fallback(),
+                shared_language: shared_language::SharedLanguageStore::fallback(),
                 config_revision: std::sync::atomic::AtomicU64::new(0),
                 character_block_cache: RwLock::new(None),
             }

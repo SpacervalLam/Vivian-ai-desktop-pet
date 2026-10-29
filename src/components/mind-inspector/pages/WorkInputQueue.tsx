@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowUp, Pencil, Trash2 } from 'lucide-react';
+import { ArrowUp, Pencil, Send, Trash2 } from 'lucide-react';
 import type useWorkInputQueue from './useWorkInputQueue';
 import './workInputStrings';
 import './WorkInputQueue.css';
@@ -18,7 +18,7 @@ export default function WorkInputQueue({ controller }: { controller: Controller 
     <div className="codex-queue-card">
       <div className="codex-queue-head">
         <span className="codex-queue-label">{t('workInput.title', { count: queue.items.length })}</span>
-        {queue.items.length > 0 && <button type="button" disabled={busy} onClick={() => { void run(queue.paused ? 'resume' : 'pause').catch(() => {}); }}>{t(queue.paused ? 'workInput.resume' : 'workInput.pause')}</button>}
+        {queue.items.length > 0 && <button type="button" className={queue.paused ? 'codex-queue-btn' : undefined} title={t(queue.paused ? 'workInput.resume' : 'workInput.pause')} aria-label={t(queue.paused ? 'workInput.resume' : 'workInput.pause')} disabled={busy} onClick={() => { void run(queue.paused ? 'resume' : 'pause').catch(() => {}); }}>{queue.paused ? <Send size={14} /> : t('workInput.pause')}</button>}
       </div>
       {queue.paused && queue.items.length > 0 && <p role="status">{t('workInput.paused')}</p>}
       <p className="work-input-hint">{t('workInput.hint')}</p>

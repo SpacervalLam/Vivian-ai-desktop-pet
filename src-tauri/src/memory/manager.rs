@@ -148,7 +148,8 @@ impl RecallSnapshot {
             query_embedding: QueryEmbedding::Prepared(query_embedding),
             prepared_arms: Some(&self.arms),
         };
-        create_strategy(&strategy).search(&context, query, limit)
+        super::recall_policy::filter_for_query(
+            create_strategy(&strategy).search(&context, query, limit), query)
     }
 }
 
@@ -2553,6 +2554,13 @@ impl MemoryManager {
     fn recall_snapshot(&self, query: &str, strategy: RetrievalStrategy,
         filter: Option<&MemoryRetrievalFilter>, limit: usize, query_embedding: Option<&[f32]>)
         -> VivianResult<RecallSnapshot> {
+        self.recall_snapshot_for_query(&super::recall_policy::RecallQuery::new(query, ""),
+            strategy, filter, limit, query_embedding)
+    }
+
+    fn recall_snapshot_for_query(&self, query: &super::recall_policy::RecallQuery, strategy: RetrievalStrategy,
+        filter: Option<&MemoryRetrievalFilter>, limit: usize, query_embedding: Option<&[f32]>)
+        -> VivianResult<RecallSnapshot> {
         let start = std::time::Instant::now();
         let (store, vectors, embedding, weights, revision) = {
             let inner = self.inner.read();
@@ -2561,9 +2569,10 @@ impl MemoryManager {
         let default_filter = MemoryRetrievalFilter::default();
         let filter = filter.unwrap_or(&default_filter);
         let per_arm = limit.saturating_mul(4).clamp(32,128);
-        let lexical = store.search_candidates(query,&self.char_id,filter,per_arm)?;
+        let primary = query.effective_text();
+        let lexical = store.search_candidates(primary,&self.char_id,filter,per_arm)?;
         let mut vector = Vec::new();
-        if matches!(strategy,RetrievalStrategy::Auto | RetrievalStrategy::Vector) {
+        if matches!(strategy,RetrievalStrategy::Auto | RetrievalStrategy::Vector) && embedding.model_id() != "hashing" {
             if let Some(query_embedding) = query_embedding {
                 let mut fetch = per_arm;
                 loop {
@@ -2581,7 +2590,7 @@ impl MemoryManager {
             }
         }
         let graph_ids = if matches!(strategy,RetrievalStrategy::Auto | RetrievalStrategy::Graph) {
-            super::relational_recall::candidate_memory_ids(&self.knowledge_graph,query,per_arm)
+            super::relational_recall::candidate_memory_ids(&self.knowledge_graph,primary,per_arm)
         } else {Vec::new()};
         let graph_ids = store.load_by_ids(&graph_ids,Some(&self.char_id),filter)?.into_iter().map(|item|item.id);
         let mut seen = std::collections::HashSet::new();
@@ -2601,7 +2610,7 @@ impl MemoryManager {
         entries.retain(|item|super::kinds::recallable(item)
             && super::provenance::visible_to(&item.metadata,&self.char_id) && filter.matches(item));
         let valid: std::collections::HashSet<_> = entries.iter().map(|item|item.id.as_str()).collect();
-        let lexical = lexical.into_iter().filter(|(id,_)|valid.contains(id.as_str())).collect();
+        let lexical = super::retriever::score_lexical_candidates(&entries,primary,&query.context,per_arm);
         vector.retain(|(id,_)|valid.contains(id.as_str()));
         tracing::debug!(candidates=entries.len(),elapsed_ms=start.elapsed().as_millis(),"记忆索引候选已按需读取");
         Ok(RecallSnapshot {entries,vector_store:vectors,embedding,weights,revision,
@@ -2628,18 +2637,23 @@ impl MemoryManager {
 
     pub async fn search_memories(&self, query: &str, strategy: RetrievalStrategy,
         limit: usize) -> VivianResult<Vec<MemoryItem>> {
-        if limit == 0 { return Ok(Vec::new()); }
-        let key = self.search_cache_key(query, strategy, limit);
+        self.search_turn_memories(&super::recall_policy::RecallQuery::new(query, ""), strategy, limit).await
+    }
+
+    pub async fn search_turn_memories(&self, query: &super::recall_policy::RecallQuery, strategy: RetrievalStrategy,
+        limit: usize) -> VivianResult<Vec<MemoryItem>> {
+        if limit == 0 || query.effective_text().trim().is_empty() { return Ok(Vec::new()); }
+        let key = self.search_cache_key(&query.cache_key(), strategy, limit);
         if let Some(items) = self.cached_search(&key) { return Ok(items); }
-        let embedding = self.prepare_recall_embedding(query, strategy).await;
+        let embedding = self.prepare_recall_embedding(query.effective_text(), strategy).await;
         let memory = self.clone();
-        let query = query.to_owned();
+        let query = query.clone();
         tokio::task::spawn_blocking(move || {
-            let snapshot = memory.recall_snapshot(&query,strategy,None,limit,embedding.as_deref())?;
-            let key = format!("{}|{:?}|{}|{}|{}|{}", query.trim().to_lowercase(), strategy, limit,
+            let snapshot = memory.recall_snapshot_for_query(&query,strategy,None,limit,embedding.as_deref())?;
+            let key = format!("{}|{:?}|{}|{}|{}|{}", query.cache_key().trim().to_lowercase(), strategy, limit,
                 snapshot.embedding.model_id(), snapshot.embedding.dimension(), snapshot.revision);
             if let Some(items) = memory.cached_search(&key) { return Ok(items); }
-            let results = snapshot.search(&query, strategy, limit, embedding.as_deref(), &memory.knowledge_graph);
+            let results = snapshot.search(query.effective_text(), strategy, limit, embedding.as_deref(), &memory.knowledge_graph);
             let results = dedup_by_content(apply_observer_penalty(results));
             let mut cache = memory.search_cache.lock();
             if cache.len() >= 16 {

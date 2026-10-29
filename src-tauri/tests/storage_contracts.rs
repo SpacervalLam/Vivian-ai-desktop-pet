@@ -20,6 +20,10 @@ pub mod kinds;
 pub mod provenance;
 #[path = "../src/memory/tokenize.rs"]
 pub mod tokenize;
+#[path = "../src/memory/recall_policy.rs"]
+pub mod recall_policy;
+#[path = "../src/persona/shared_language.rs"]
+pub mod shared_language;
 #[path = "../src/error.rs"]
 pub mod error;
 #[path = "../src/utils/fs.rs"]

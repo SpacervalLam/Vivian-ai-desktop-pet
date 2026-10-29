@@ -36,6 +36,7 @@ parking_lot="0.12"
 lru="0.12"
 tracing="0.1"
 tokio={version="1",features=["rt-multi-thread","macros","time"]}
+vivian-storage-contracts={path="${path.resolve('src-tauri/storage-contracts').replaceAll('\\','/')}"}
 [lib]
 path="lib.rs"
 `);
@@ -60,7 +61,7 @@ mod types {pub mod response {
   pub fn assistant(text:impl Into<String>)->Self{Self{role:"assistant".into(),content:text.into(),meta:None}}
  }
 }}
-mod memory {pub struct MemoryManager;impl MemoryManager {pub fn entry_count(&self)->usize{20}}}
+mod memory {pub use vivian_storage_contracts::recall_policy;pub struct MemoryManager;impl MemoryManager {pub fn entry_count(&self)->usize{20}}}
 mod providers {
  pub mod base {
   pub struct LLMRequest {pub task_type:String,pub messages:Vec<crate::types::response::ChatMessage>,pub include_framework_instructions:Option<bool>}

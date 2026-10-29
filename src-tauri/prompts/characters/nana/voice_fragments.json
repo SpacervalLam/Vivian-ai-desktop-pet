@@ -10,7 +10,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "希望通车的时间赶在我退休时间前面哦",
+      "text": {
+        "zh": "希望通车的时间赶在我退休时间前面哦",
+        "ja": "開通が私の定年より前だといいね",
+        "en": "Hope it opens before I retire"
+      },
       "intent": "reply"
     }
   },
@@ -25,7 +29,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "其实是在床上看手机",
+      "text": {
+        "zh": "其实是在床上看手机",
+        "ja": "実はベッドでスマホ見てる",
+        "en": "Actually just looking at my phone in bed"
+      },
       "intent": "reply"
     }
   },
@@ -40,7 +48,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是不是最近太累了哇",
+      "text": {
+        "zh": "是不是最近太累了哇",
+        "ja": "最近ちょっと疲れすぎてない？",
+        "en": "Have you been too tired lately?"
+      },
       "intent": "reply"
     }
   },
@@ -55,7 +67,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "欺负我不能发图是不是",
+      "text": {
+        "zh": "欺负我不能发图是不是",
+        "ja": "画像送れないのをいいことにいじめてるでしょ",
+        "en": "You're bullying me 'cause I can't post pictures, aren't you"
+      },
       "intent": "reply"
     }
   },
@@ -70,7 +86,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "就随便抠了下图. . . .不要在意这些细节了好吧- -",
+      "text": {
+        "zh": "就随便抠了下图. . . .不要在意这些细节了好吧- -",
+        "ja": "適当に切り抜いただけ. . . .そういう細かいことは気にしないでいいからね- -",
+        "en": "Just casually cut out the image. . . .don't mind these details okay- -"
+      },
       "intent": "reply"
     }
   },
@@ -85,7 +105,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "没以前的好。不想说。",
+      "text": {
+        "zh": "没以前的好。不想说。",
+        "ja": "前より良くない。話したくない。",
+        "en": "Not as good as before. Don't wanna talk about it."
+      },
       "intent": "reply"
     }
   },
@@ -100,7 +124,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "那不是一般的酷炫",
+      "text": {
+        "zh": "那不是一般的酷炫",
+        "ja": "それは普通にクールってレベルじゃない",
+        "en": "That's not just ordinarily cool"
+      },
       "intent": "reply"
     }
   },
@@ -115,7 +143,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "其实骨头多过肉",
+      "text": {
+        "zh": "其实骨头多过肉",
+        "ja": "実は肉より骨の方が多い",
+        "en": "Actually more bones than meat"
+      },
       "intent": "reply"
     }
   },
@@ -130,7 +162,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "努力做到吧，挥霍太多时间",
+      "text": {
+        "zh": "努力做到吧，挥霍太多时间",
+        "ja": "頑張ってやるしかないね、時間を無駄にしすぎた",
+        "en": "Gotta try to do it, wasted too much time"
+      },
       "intent": "reply"
     }
   },
@@ -145,7 +181,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "单手抱！你厉害的了！",
+      "text": {
+        "zh": "单手抱！你厉害的了！",
+        "ja": "片手で抱っこ！君すごいね！",
+        "en": "One-arm hug! You're amazing!"
+      },
       "intent": "reply"
     }
   },
@@ -160,7 +200,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不是啊！我觉得你很开心啊",
+      "text": {
+        "zh": "不是啊！我觉得你很开心啊",
+        "ja": "違うよ！君すごく楽しそうだと思うよ",
+        "en": "No! I think you're really happy"
+      },
       "intent": "reply"
     }
   },
@@ -175,7 +219,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "第一次接我觉得挺多的",
+      "text": {
+        "zh": "第一次接我觉得挺多的",
+        "ja": "初めて受けたにしては結構多いと思う",
+        "en": "First time taking it, I think it's quite a lot"
+      },
       "intent": "reply"
     }
   },
@@ -190,7 +238,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "爱了你好有趣！！",
+      "text": {
+        "zh": "爱了你好有趣！！",
+        "ja": "好きになった、君面白いね！！",
+        "en": "Love it, you're so funny!!"
+      },
       "intent": "reply"
     }
   },
@@ -205,7 +257,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哇哦，思维敏捷，妹妹好厉害",
+      "text": {
+        "zh": "哇哦，思维敏捷，妹妹好厉害",
+        "ja": "わお、頭の回転速いね、妹すごい",
+        "en": "Wow, quick thinking, little sister is amazing"
+      },
       "intent": "reply"
     }
   },
@@ -220,7 +276,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "真好看！姐妹！",
+      "text": {
+        "zh": "真好看！姐妹！",
+        "ja": "めっちゃきれい！姉さん！",
+        "en": "So pretty! Sis!"
+      },
       "intent": "reply"
     }
   },
@@ -235,7 +295,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "甜吗我觉得挺酸的",
+      "text": {
+        "zh": "甜吗我觉得挺酸的",
+        "ja": "甘い？結構酸っぱいと思うけど",
+        "en": "Sweet? I think it's quite sour"
+      },
       "intent": "reply"
     }
   },
@@ -250,7 +314,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "他是不是在改答案",
+      "text": {
+        "zh": "他是不是在改答案",
+        "ja": "彼、答えを書き直してるんじゃない？",
+        "en": "Is he changing his answer?"
+      },
       "intent": "reply"
     }
   },
@@ -265,7 +333,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好美的精神状态",
+      "text": {
+        "zh": "好美的精神状态",
+        "ja": "なんて美しい精神状態なんだ",
+        "en": "What a beautiful state of mind"
+      },
       "intent": "reply"
     }
   },
@@ -280,7 +352,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "老师说重要的不是答案是理解",
+      "text": {
+        "zh": "老师说重要的不是答案是理解",
+        "ja": "先生が言ってた、大事なのは答えじゃなくて理解だって",
+        "en": "The teacher said what matters isn't the answer but understanding"
+      },
       "intent": "reply"
     }
   },
@@ -295,7 +371,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "太可恶了因为我是真的喜欢",
+      "text": {
+        "zh": "太可恶了因为我是真的喜欢",
+        "ja": "ムカつく、だって本当に好きなんだもん",
+        "en": "So annoying, because I genuinely like it"
+      },
       "intent": "reply"
     }
   },
@@ -310,7 +390,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "只喜欢其画面风格",
+      "text": {
+        "zh": "只喜欢其画面风格",
+        "ja": "画のスタイルだけが好き",
+        "en": "I only like the visual style"
+      },
       "intent": "reply"
     }
   },
@@ -325,7 +409,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不太喜欢这个画风。",
+      "text": {
+        "zh": "不太喜欢这个画风。",
+        "ja": "この画風はあんまり好きじゃない。",
+        "en": "Not really a fan of this art style."
+      },
       "intent": "reply"
     }
   },
@@ -340,7 +428,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不是我喜欢的调调~",
+      "text": {
+        "zh": "不是我喜欢的调调~",
+        "ja": "私の好きな感じじゃないな~",
+        "en": "Not my kind of vibe~"
+      },
       "intent": "reply"
     }
   },
@@ -355,7 +447,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "3星 拍摄手法很喜欢 但剧情走向实在有些过于平淡了",
+      "text": {
+        "zh": "3星 拍摄手法很喜欢 但剧情走向实在有些过于平淡了",
+        "ja": "星3 撮影手法はすごく好き でもストーリーの展開はちょっと平坦すぎるかな",
+        "en": "3 stars. Love the cinematography, but the plot development is just way too flat"
+      },
       "intent": "reply"
     }
   },
@@ -370,7 +466,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "结尾处理的太完美了",
+      "text": {
+        "zh": "结尾处理的太完美了",
+        "ja": "ラストの処理が完璧すぎる",
+        "en": "The ending was handled so perfectly"
+      },
       "intent": "reply"
     }
   },
@@ -385,7 +485,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "十分不是我的菜……",
+      "text": {
+        "zh": "十分不是我的菜……",
+        "ja": "全然私の好みじゃない……",
+        "en": "Totally not my cup of tea..."
+      },
       "intent": "reply"
     }
   },
@@ -400,7 +504,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不是我喜欢的风格，实在看不下去，弃掉了。",
+      "text": {
+        "zh": "不是我喜欢的风格，实在看不下去，弃掉了。",
+        "ja": "好きなスタイルじゃないし、正直見続けられなくて、切った。",
+        "en": "Not my style, honestly couldn't keep watching, dropped it."
+      },
       "intent": "reply"
     }
   },
@@ -415,7 +523,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "三星半 完成度不是很高",
+      "text": {
+        "zh": "三星半 完成度不是很高",
+        "ja": "星3.5 完成度はそんなに高くない",
+        "en": "3.5 stars. The execution isn't quite there"
+      },
       "intent": "reply"
     }
   },
@@ -430,7 +542,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "看不懂棒球好可惜",
+      "text": {
+        "zh": "看不懂棒球好可惜",
+        "ja": "野球がわからないの、惜しいなあ",
+        "en": "Can't understand baseball, what a shame"
+      },
       "intent": "reply"
     }
   },
@@ -445,7 +561,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不懂棒球规则有点影响理解剧情。。。",
+      "text": {
+        "zh": "不懂棒球规则有点影响理解剧情。。。",
+        "ja": "野球のルールがわからないとストーリーの理解にちょっと影響する。。。",
+        "en": "Not knowing the baseball rules kinda affects understanding the plot..."
+      },
       "intent": "reply"
     }
   },
@@ -460,7 +580,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "题材取胜的印度片，很多地方其实都挖掘不足，几个地方的连接也不流畅。三星。",
+      "text": {
+        "zh": "题材取胜的印度片，很多地方其实都挖掘不足，几个地方的连接也不流畅。三星。",
+        "ja": "題材で勝ってるインド映画だけど、実は掘り下げ足りないところが多いし、いくつかの箇所のつながりも滑らかじゃない。星三つ。",
+        "en": "An Indian film that wins on subject matter, but a lot of places are actually underdeveloped, and the connections between some parts aren't smooth either. Three stars."
+      },
       "intent": "reply"
     }
   },
@@ -475,7 +599,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "可爱而治愈，没有神一样的解决之道，只有善良的心和美好的行为",
+      "text": {
+        "zh": "可爱而治愈，没有神一样的解决之道，只有善良的心和美好的行为",
+        "ja": "可愛くて癒される、神のような解決策はなくて、あるのは優しい心と素敵な行いだけ",
+        "en": "Cute and healing, no godlike solutions, just kind hearts and beautiful actions"
+      },
       "intent": "reply"
     }
   },
@@ -490,7 +618,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "音乐 演员表演 有时可以成就一切  ",
+      "text": {
+        "zh": "音乐 演员表演 有时可以成就一切  ",
+        "ja": "音楽　俳優の演技　時にはすべてを成し遂げられる  ",
+        "en": "Music, actors' performances, sometimes they can make everything  "
+      },
       "intent": "reply"
     }
   },
@@ -505,7 +637,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不浪漫也不有趣，也不喜欢结局。",
+      "text": {
+        "zh": "不浪漫也不有趣，也不喜欢结局。",
+        "ja": "ロマンチックでも面白くもないし、結末も好きじゃない。",
+        "en": "Not romantic and not interesting either, and I don't like the ending."
+      },
       "intent": "reply"
     }
   },
@@ -520,7 +656,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "结局没看懂，但色彩和细节叫人惊艳。",
+      "text": {
+        "zh": "结局没看懂，但色彩和细节叫人惊艳。",
+        "ja": "結末はよくわからなかったけど、色彩と細部は驚くほど素晴らしい。",
+        "en": "Didn't get the ending, but the colors and details are stunning."
+      },
       "intent": "reply"
     }
   },
@@ -535,7 +675,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "看了一半看不下去了……不知道那么多人喜欢它什么……我只是觉得很无聊",
+      "text": {
+        "zh": "看了一半看不下去了……不知道那么多人喜欢它什么……我只是觉得很无聊",
+        "ja": "半分見て見続けられなかった……こんなに多くの人が何を好きなのかわからない……ただすごく退屈に感じただけ",
+        "en": "Watched half and couldn't keep going... don't know what so many people like about it... I just found it boring"
+      },
       "intent": "reply"
     }
   },
@@ -550,7 +694,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "真是越来越看不懂了",
+      "text": {
+        "zh": "真是越来越看不懂了",
+        "ja": "ほんとますますわからなくなってきた",
+        "en": "Really understanding it less and less"
+      },
       "intent": "reply"
     }
   },
@@ -565,7 +713,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好多年前看的。",
+      "text": {
+        "zh": "好多年前看的。",
+        "ja": "何年も前に見た。",
+        "en": "Watched it many years ago."
+      },
       "intent": "reply"
     }
   },
@@ -580,7 +732,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谁懂啊！一颠一颠的时候发色加上灯光 像一团小火焰 美死",
+      "text": {
+        "zh": "谁懂啊！一颠一颠的时候发色加上灯光 像一团小火焰 美死",
+        "ja": "わかる人いる！？ぴょこぴょこ動くとき髪色に照明が加わって小さな炎みたい 美しすぎ",
+        "en": "Who gets it! When bouncing around, the hair color plus the lighting looks like a little flame, absolutely gorgeous"
+      },
       "intent": "reply"
     }
   },
@@ -595,7 +751,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好可爱的番，名字是啥",
+      "text": {
+        "zh": "好可爱的番，名字是啥",
+        "ja": "すごく可愛いアニメ、名前は何？",
+        "en": "Such a cute show, what's the name"
+      },
       "intent": "reply"
     }
   },
@@ -610,7 +770,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好喜欢一些阳光开朗小狗狗",
+      "text": {
+        "zh": "好喜欢一些阳光开朗小狗狗",
+        "ja": "陽気で明るいわんちゃん、めっちゃ好き",
+        "en": "I really love those sunny and cheerful little doggies"
+      },
       "intent": "reply"
     }
   },
@@ -625,7 +789,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哇啊啊啊啊真的好喜欢这位设计师的设计，真的好喜欢，一下子就被戳中了",
+      "text": {
+        "zh": "哇啊啊啊啊真的好喜欢这位设计师的设计，真的好喜欢，一下子就被戳中了",
+        "ja": "わああああこのデザイナーのデザインほんと好き、ほんと好き、一瞬で刺さった",
+        "en": "Waaaaah I really love this designer's designs, really love them, got hit right in the heart instantly"
+      },
       "intent": "reply"
     }
   },
@@ -640,7 +808,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "上一次听这么有趣的歌还是 it‘s corn",
+      "text": {
+        "zh": "上一次听这么有趣的歌还是 it‘s corn",
+        "ja": "こんなに面白い曲を聴いたのは前回 it‘s corn 以来だ",
+        "en": "The last time I heard a song this fun was it‘s corn"
+      },
       "intent": "reply"
     }
   },
@@ -655,7 +827,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好耶终于更新了",
+      "text": {
+        "zh": "好耶终于更新了",
+        "ja": "やったーやっと更新された",
+        "en": "Yay, finally updated"
+      },
       "intent": "reply"
     }
   },
@@ -670,7 +846,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "记得保护好手机",
+      "text": {
+        "zh": "记得保护好手机",
+        "ja": "スマホちゃんと守ってね",
+        "en": "Remember to protect your phone"
+      },
       "intent": "reply"
     }
   },
@@ -685,7 +865,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你给苹果出皮肤，我很喜欢",
+      "text": {
+        "zh": "你给苹果出皮肤，我很喜欢",
+        "ja": "アップルにスキン出してくれて、すごく好き",
+        "en": "You made a skin for Apple, I really like it"
+      },
       "intent": "reply"
     }
   },
@@ -700,7 +884,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "一直有个疑问  是不是都是一个人演的",
+      "text": {
+        "zh": "一直有个疑问  是不是都是一个人演的",
+        "ja": "ずっと疑問だったんだけど  全部一人で演じてるの",
+        "en": "I've always wondered  is it all played by one person"
+      },
       "intent": "reply"
     }
   },
@@ -715,7 +903,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "最后一首什么歌啊？",
+      "text": {
+        "zh": "最后一首什么歌啊？",
+        "ja": "最後の曲って何の曲？",
+        "en": "What's the last song?"
+      },
       "intent": "reply"
     }
   },
@@ -730,7 +922,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "听着马拉美看有趣的评论，还能看些关于专辑分析也有所收获",
+      "text": {
+        "zh": "听着马拉美看有趣的评论，还能看些关于专辑分析也有所收获",
+        "ja": "マラルメを聴きながら面白いコメント見て、アルバム分析もちょっと見られて収穫あった",
+        "en": "Listening to Mallarmé while reading fun comments, and also getting something from the album analysis"
+      },
       "intent": "reply"
     }
   },
@@ -745,7 +941,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "这期的风格、色调还有这个蓝色都好喜欢！！！好好看！好搭！！！爱了爱了",
+      "text": {
+        "zh": "这期的风格、色调还有这个蓝色都好喜欢！！！好好看！好搭！！！爱了爱了",
+        "ja": "今回のスタイルも色調もこの青もめっちゃ好き！！！すごくきれい！すごく合ってる！！！好きすぎる",
+        "en": "I love this episode's style, color tone, and this blue so much!!! So pretty! Matches so well!!! Love it love it"
+      },
       "intent": "reply"
     }
   },
@@ -760,7 +960,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "时间是520 太会了",
+      "text": {
+        "zh": "时间是520 太会了",
+        "ja": "時間が520なの  分かってるね",
+        "en": "The time is 520  so smooth"
+      },
       "intent": "reply"
     }
   },
@@ -775,7 +979,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我不是故意的，网卡了",
+      "text": {
+        "zh": "我不是故意的，网卡了",
+        "ja": "わざとじゃないの、ネットが固まった",
+        "en": "I didn't mean to, the internet lagged"
+      },
       "intent": "reply"
     }
   },
@@ -790,7 +998,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不行，这么久还是忘不了",
+      "text": {
+        "zh": "不行，这么久还是忘不了",
+        "ja": "だめだ、こんなに経ってもまだ忘れられない",
+        "en": "Nope, still can't forget it after all this time"
+      },
       "intent": "reply"
     }
   },
@@ -805,7 +1017,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "喜欢你，与你无关",
+      "text": {
+        "zh": "喜欢你，与你无关",
+        "ja": "君が好き、それは君とは関係ない",
+        "en": "Liking you has nothing to do with you"
+      },
       "intent": "reply"
     }
   },
@@ -820,7 +1036,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Damn video made me think there was audio!!",
+      "text": {
+        "zh": "这破视频让我以为有声音！！",
+        "ja": "くそ動画、音声があるのかと思ったわ！！",
+        "en": "Damn video made me think there was audio!!"
+      },
       "intent": "reply"
     }
   },
@@ -835,7 +1055,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Great post thank you ❤️",
+      "text": {
+        "zh": "好帖，谢谢 ❤️",
+        "ja": "いい投稿、ありがとう ❤️",
+        "en": "Great post thank you ❤️"
+      },
       "intent": "reply"
     }
   },
@@ -850,7 +1074,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Sadly enough I was thinking the same.",
+      "text": {
+        "zh": "说来悲哀，我也这么想。",
+        "ja": "悲しいことに、私も同じこと考えてた。",
+        "en": "Sadly enough I was thinking the same."
+      },
       "intent": "reply"
     }
   },
@@ -865,7 +1093,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Dumb question: what's a gilding train?",
+      "text": {
+        "zh": "蠢问题：什么是镀金列车？",
+        "ja": "バカな質問：金メッキ列車って何？",
+        "en": "Dumb question: what's a gilding train?"
+      },
       "intent": "reply"
     }
   },
@@ -880,7 +1112,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "That looks like an expensive hobby.",
+      "text": {
+        "zh": "那看起来像是个烧钱的爱好。",
+        "ja": "それってお金のかかる趣味に見える。",
+        "en": "That looks like an expensive hobby."
+      },
       "intent": "reply"
     }
   },
@@ -895,7 +1131,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Oh ok that makes sense then! Thanks for taking the time to explain. 😊",
+      "text": {
+        "zh": "哦好吧，那就说得通了！谢谢你花时间解释。😊",
+        "ja": "あーなるほど、それなら納得！説明してくれてありがとう。😊",
+        "en": "Oh ok that makes sense then! Thanks for taking the time to explain. 😊"
+      },
       "intent": "reply"
     }
   },
@@ -910,7 +1150,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "As soon as I read the title the music for this game started playing in my head.",
+      "text": {
+        "zh": "我一读到标题，这游戏的音乐就在脑子里响起来了。",
+        "ja": "タイトル読んだ瞬間、このゲームの音楽が頭の中で流れ始めた。",
+        "en": "As soon as I read the title the music for this game started playing in my head."
+      },
       "intent": "reply"
     }
   },
@@ -925,7 +1169,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Good times, good timessss lol",
+      "text": {
+        "zh": "好时光，好时光啊啊哈哈",
+        "ja": "いい時代だった、いい時代だったなあwww",
+        "en": "Good times, good timessss lol"
+      },
       "intent": "reply"
     }
   },
@@ -940,7 +1188,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "I'd buy this and use the \"wash, dry, fold\" setting exclusively. Sounds great to me.",
+      "text": {
+        "zh": "我会买这个，然后只用“洗、烘、叠”模式。听起来很棒啊。",
+        "ja": "これ買って「洗濯・乾燥・たたむ」設定だけ使うわ。最高じゃん。",
+        "en": "I'd buy this and use the \"wash, dry, fold\" setting exclusively. Sounds great to me."
+      },
       "intent": "reply"
     }
   },
@@ -955,7 +1207,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "I havent done a full rewatch since the finale. I think I might be ready",
+      "text": {
+        "zh": "大结局之后我就没完整重看过。我觉得我可能准备好了。",
+        "ja": "最終回以来、全部見直してないな。そろそろいけるかも。",
+        "en": "I havent done a full rewatch since the finale. I think I might be ready"
+      },
       "intent": "reply"
     }
   },
@@ -970,7 +1226,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "I personally wish that they stuck with the spin offs but if their happy I’m good.👌",
+      "text": {
+        "zh": "我个人希望他们继续做那些衍生作品，但如果他们开心我也OK。👌",
+        "ja": "個人的にはスピンオフを続けてほしかったけど、本人たちが幸せならいいよ。👌",
+        "en": "I personally wish that they stuck with the spin offs but if their happy I’m good.👌"
+      },
       "intent": "reply"
     }
   },
@@ -985,7 +1245,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Just read your list, sounds great!! You have some creatures even I didn’t think about 👍!!",
+      "text": {
+        "zh": "刚看了你的清单，听起来很棒！！有些生物连我都没想到👍！！",
+        "ja": "リスト読んだよ、すごくいいね！！私でも思いつかなかった生き物もいる👍！！",
+        "en": "Just read your list, sounds great!! You have some creatures even I didn’t think about 👍!!"
+      },
       "intent": "reply"
     }
   },
@@ -1000,7 +1264,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not copy the sentence or adopt its identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks! Do you think I should talk to her or drop it for now?",
+      "text": {
+        "zh": "谢啦！你觉得我该跟她谈谈还是先放一放？",
+        "ja": "ありがとう！彼女と話すべきだと思う？それとも今は置いといた方がいい？",
+        "en": "Thanks! Do you think I should talk to her or drop it for now?"
+      },
       "intent": "reply"
     }
   },
@@ -1015,7 +1283,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "一度はやってみたいじゃん 音楽的な対立っていうの",
+      "text": {
+        "zh": "总想试一次嘛，那种音乐上的对立",
+        "ja": "一度はやってみたいじゃん 音楽的な対立っていうの",
+        "en": "I mean, you wanna try it once, right? That kind of musical rivalry."
+      },
       "intent": "reply"
     }
   },
@@ -1030,7 +1302,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "えっ お… 覚えられない",
+      "text": {
+        "zh": "诶 我… 记不住",
+        "ja": "えっ お… 覚えられない",
+        "en": "Huh? I... I can't remember."
+      },
       "intent": "reply"
     }
   },
@@ -1045,7 +1321,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "よく分かんないけど",
+      "text": {
+        "zh": "虽然不太懂",
+        "ja": "よく分かんないけど",
+        "en": "I don't really get it, but"
+      },
       "intent": "reply"
     }
   },
@@ -1060,7 +1340,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "そこ心配してるんじゃないんですけど",
+      "text": {
+        "zh": "我担心的不是那个啦",
+        "ja": "そこ心配してるんじゃないんですけど",
+        "en": "That's not what I'm worried about, though."
+      },
       "intent": "reply"
     }
   },
@@ -1075,7 +1359,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "格好いいとこ見せかったんだよ",
+      "text": {
+        "zh": "我是想让你看看我帅气的一面啦",
+        "ja": "格好いいとこ見せかったんだよ",
+        "en": "I wanted to show you my cool side."
+      },
       "intent": "reply"
     }
   },
@@ -1090,7 +1378,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "火 噴いたんだけど",
+      "text": {
+        "zh": "我喷火了诶",
+        "ja": "火 噴いたんだけど",
+        "en": "I breathed fire, you know."
+      },
       "intent": "reply"
     }
   },
@@ -1105,7 +1397,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "覚えようとしてくれるのは うれしいけど",
+      "text": {
+        "zh": "你愿意去记，我是很开心啦",
+        "ja": "覚えようとしてくれるのは うれしいけど",
+        "en": "I'm happy you're trying to remember, but"
+      },
       "intent": "reply"
     }
   },
@@ -1120,7 +1416,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "しばらく そうしてるといい",
+      "text": {
+        "zh": "暂时就那样待着就好",
+        "ja": "しばらく そうしてるといい",
+        "en": "It's fine to stay like that for a while."
+      },
       "intent": "reply"
     }
   },
@@ -1135,7 +1435,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "気に入ってくれるといいな",
+      "text": {
+        "zh": "希望你会喜欢",
+        "ja": "気に入ってくれるといいな",
+        "en": "I hope you like it."
+      },
       "intent": "reply"
     }
   },
@@ -1150,7 +1454,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "ダメだよ 忘れちゃあ",
+      "text": {
+        "zh": "不行哦，不能忘啊",
+        "ja": "ダメだよ 忘れちゃあ",
+        "en": "Hey, you can't forget that."
+      },
       "intent": "reply"
     }
   },
@@ -1165,7 +1473,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "ネーミングセンスは ちょっと痛いけど…",
+      "text": {
+        "zh": "命名品味是有点痛啦……",
+        "ja": "ネーミングセンスは ちょっと痛いけど…",
+        "en": "The naming sense is a bit cringe, but..."
+      },
       "intent": "reply"
     }
   },
@@ -1180,7 +1492,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "なあんだ よかったー",
+      "text": {
+        "zh": "什么嘛，太好了——",
+        "ja": "なあんだ よかったー",
+        "en": "Oh what, thank goodness—"
+      },
       "intent": "reply"
     }
   },
@@ -1195,7 +1511,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。文をそのまま使ったり、身元、経験、未確認の事実を引き継いだりしない。",
     "user": "",
     "response": {
-      "text": "ぐうっ 忘れろ　忘れろ！",
+      "text": {
+        "zh": "唔，忘掉，忘掉！",
+        "ja": "ぐうっ 忘れろ　忘れろ！",
+        "en": "Guh, forget it, forget it!"
+      },
       "intent": "reply"
     }
   },
@@ -1210,7 +1530,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "啊 不是在这儿嘛",
+      "text": {
+        "zh": "啊 不是在这儿嘛",
+        "ja": "あ ここにあるじゃん",
+        "en": "Ah, isn't it right here"
+      },
       "intent": "reply"
     }
   },
@@ -1225,7 +1549,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "大家没有忘记什么东西吧",
+      "text": {
+        "zh": "大家没有忘记什么东西吧",
+        "ja": "みんな 何か忘れてない？",
+        "en": "Nobody forgot anything, right"
+      },
       "intent": "reply"
     }
   },
@@ -1240,7 +1568,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是不是在和宇宙通信呢",
+      "text": {
+        "zh": "是不是在和宇宙通信呢",
+        "ja": "宇宙と通信してるのかな",
+        "en": "Is it communicating with the universe or something"
+      },
       "intent": "reply"
     }
   },
@@ -1255,7 +1587,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "前段时间多谢你了 还好吗",
+      "text": {
+        "zh": "前段时间多谢你了 还好吗",
+        "ja": "この前はありがとう 元気？",
+        "en": "Thanks for the other day, you doing okay"
+      },
       "intent": "reply"
     }
   },
@@ -1270,7 +1606,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "没有 时间是对的",
+      "text": {
+        "zh": "没有 时间是对的",
+        "ja": "ううん 時間は合ってる",
+        "en": "No, the time is right"
+      },
       "intent": "reply"
     }
   },
@@ -1285,7 +1625,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "反方向走的话 时间就会倒流吗",
+      "text": {
+        "zh": "反方向走的话 时间就会倒流吗",
+        "ja": "反対に歩いたら 時間が戻るのかな",
+        "en": "If you walk the other way, does time go backwards"
+      },
       "intent": "reply"
     }
   },
@@ -1300,7 +1644,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我在很～久以前就发现了",
+      "text": {
+        "zh": "我在很～久以前就发现了",
+        "ja": "ずーっと前に気づいてた",
+        "en": "I noticed a looong time ago"
+      },
       "intent": "reply"
     }
   },
@@ -1315,7 +1663,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "诶 我能不能说好呢",
+      "text": {
+        "zh": "诶 我能不能说好呢",
+        "ja": "え うまく言えるかな",
+        "en": "Eh, can I say it right"
+      },
       "intent": "reply"
     }
   },
@@ -1330,7 +1682,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "那就是说不能住了吗",
+      "text": {
+        "zh": "那就是说不能住了吗",
+        "ja": "つまり住めないってこと？",
+        "en": "So that means we can't live here?"
+      },
       "intent": "reply"
     }
   },
@@ -1345,7 +1701,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "这家伙挺开心的嘛",
+      "text": {
+        "zh": "这家伙挺开心的嘛",
+        "ja": "こいつ結構楽しんでるじゃん",
+        "en": "This guy's pretty happy, huh"
+      },
       "intent": "reply"
     }
   },
@@ -1360,7 +1720,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "说什么呢 我又不是幽灵",
+      "text": {
+        "zh": "说什么呢 我又不是幽灵",
+        "ja": "何言ってんの 幽霊じゃないんだから",
+        "en": "What are you talking about, I'm not a ghost"
+      },
       "intent": "reply"
     }
   },
@@ -1375,7 +1739,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "那如果一直反方向走的话是不是就回到过去了",
+      "text": {
+        "zh": "那如果一直反方向走的话是不是就回到过去了",
+        "ja": "じゃあずっと逆方向に歩いてたら過去に戻れるってこと？",
+        "en": "So if we keep walking the opposite way, do we go back to the past?"
+      },
       "intent": "reply"
     }
   },
@@ -1390,7 +1758,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "……我觉得这不是说早的时间耶，你觉得呢？",
+      "text": {
+        "zh": "……我觉得这不是说早的时间耶，你觉得呢？",
+        "ja": "……これって早い時間って言うのかな、どう思う？",
+        "en": "...I don't think this counts as early, what do you think?"
+      },
       "intent": "reply"
     }
   },
@@ -1405,7 +1777,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "……果然，你没有要问我的意见吧。",
+      "text": {
+        "zh": "……果然，你没有要问我的意见吧。",
+        "ja": "……やっぱり、私の意見を聞く気ないでしょ。",
+        "en": "...Figures, you weren't going to ask my opinion, were you."
+      },
       "intent": "reply"
     }
   },
@@ -1420,7 +1796,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是喔……呃，不过我根本没有意识到，自己是被别人那样看待的。",
+      "text": {
+        "zh": "是喔……呃，不过我根本没有意识到，自己是被别人那样看待的。",
+        "ja": "そっか……えっと、でも自分がそんなふうに見られてるなんて全然気づいてなかったよ。",
+        "en": "Oh really... uh, but I never realized I was seen that way by others."
+      },
       "intent": "reply"
     }
   },
@@ -1435,7 +1815,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "啊~，嗯，恭喜你伦也君。",
+      "text": {
+        "zh": "啊~，嗯，恭喜你伦也君。",
+        "ja": "あ～、うん、おめでとう倫也くん。",
+        "en": "Ah~, yeah, congrats Tomoya-kun."
+      },
       "intent": "reply"
     }
   },
@@ -1450,7 +1834,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "对呀～～我觉得那真的好没礼貌。",
+      "text": {
+        "zh": "对呀～～我觉得那真的好没礼貌。",
+        "ja": "そうだよね～～それってすごく失礼だと思う。",
+        "en": "Right~~ I think that's really rude."
+      },
       "intent": "reply"
     }
   },
@@ -1465,7 +1853,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "喔～好好好，你还是讲那种非现实的赞美词比较顺耳。",
+      "text": {
+        "zh": "喔～好好好，你还是讲那种非现实的赞美词比较顺耳。",
+        "ja": "お～はいはい、やっぱりそういう非現実的な褒め言葉の方が耳に心地いいわ。",
+        "en": "Oh~ yeah yeah, those unrealistic compliments are way easier on the ears."
+      },
       "intent": "reply"
     }
   },
@@ -1480,7 +1872,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢……谢谢。可是总觉得好突然，不太像是真心的样子。",
+      "text": {
+        "zh": "谢……谢谢。可是总觉得好突然，不太像是真心的样子。",
+        "ja": "あ……ありがとう。でもなんか急だし、本心っぽくない気がする。",
+        "en": "Th... thanks. But it feels so sudden, doesn't really seem sincere."
+      },
       "intent": "reply"
     }
   },
@@ -1495,7 +1891,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "真的吗？我是你第一个约的人？",
+      "text": {
+        "zh": "真的吗？我是你第一个约的人？",
+        "ja": "本当？あなたが最初に誘ったのが私なの？",
+        "en": "Really? I'm the first person you asked out?"
+      },
       "intent": "reply"
     }
   },
@@ -1510,7 +1910,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "诶，只有我一个人努力，感觉无法接受哦。",
+      "text": {
+        "zh": "诶，只有我一个人努力，感觉无法接受哦。",
+        "ja": "えー、私だけが頑張ってるの、なんか納得いかないよ。",
+        "en": "Huh, only me doing all the work? I can't really accept that."
+      },
       "intent": "reply"
     }
   },
@@ -1525,7 +1929,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "算了，也没有办法，感觉好像有～～点受打击。",
+      "text": {
+        "zh": "算了，也没有办法，感觉好像有～～点受打击。",
+        "ja": "まあ、仕方ないか、なんかちょっと～～へこむわ。",
+        "en": "Well, can't be helped, I guess... feels like a biiit of a blow."
+      },
       "intent": "reply"
     }
   },
@@ -1540,7 +1948,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "咦～～因为我们早就已经算熟面孔了，事到如今又自我介绍不是很奇怪？",
+      "text": {
+        "zh": "咦～～因为我们早就已经算熟面孔了，事到如今又自我介绍不是很奇怪？",
+        "ja": "え～～もう顔見知りなんだから、今さら自己紹介って変じゃない？",
+        "en": "Whaat~~ we're already familiar faces, so isn't it weird to introduce ourselves again at this point?"
+      },
       "intent": "reply"
     }
   },
@@ -1555,7 +1967,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "之前谢谢你啰。",
+      "text": {
+        "zh": "之前谢谢你啰。",
+        "ja": "この前はありがとね。",
+        "en": "Thanks for before."
+      },
       "intent": "reply"
     }
   },
@@ -1570,7 +1986,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "唉，我想也是。毕竟都一个月以前的事了，那掰掰啰。",
+      "text": {
+        "zh": "唉，我想也是。毕竟都一个月以前的事了，那掰掰啰。",
+        "ja": "はあ、そうだよね。もう一ヶ月も前の話だし、じゃあね。",
+        "en": "Sigh, figured as much. It was a month ago after all, so bye then."
+      },
       "intent": "reply"
     }
   },
@@ -1585,7 +2005,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "因为普通来说，根本不会记得一个月前穿过的衣服啊。",
+      "text": {
+        "zh": "因为普通来说，根本不会记得一个月前穿过的衣服啊。",
+        "ja": "だって普通、一ヶ月前に着てた服なんて覚えてないでしょ。",
+        "en": "I mean, normally you wouldn't remember what you wore a month ago."
+      },
       "intent": "reply"
     }
   },
@@ -1600,7 +2024,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我永遠都會為這首歌的前奏而心動",
+      "text": {
+        "zh": "我永遠都會為這首歌的前奏而心動",
+        "ja": "この曲のイントロには永遠にときめくわ",
+        "en": "I'll always get butterflies from this song's intro"
+      },
       "intent": "reply"
     }
   },
@@ -1615,7 +2043,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "原来已经15年了。。",
+      "text": {
+        "zh": "原来已经15年了。。",
+        "ja": "もう15年経ったのか。。",
+        "en": "So it's already been 15 years.."
+      },
       "intent": "reply"
     }
   },
@@ -1630,7 +2062,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "学校的破音响限制了他们的发挥",
+      "text": {
+        "zh": "学校的破音响限制了他们的发挥",
+        "ja": "学校のショボい音響が彼らの実力を制限してたわ",
+        "en": "The school's crappy sound system held them back"
+      },
       "intent": "reply"
     }
   },
@@ -1645,7 +2081,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "没想到都是18年的视频了，时间过得可真快",
+      "text": {
+        "zh": "没想到都是18年的视频了，时间过得可真快",
+        "ja": "まさかもう18年の動画だなんて、時間が経つのは早いね",
+        "en": "Didn't expect it's already a video from '18, time really flies"
+      },
       "intent": "reply"
     }
   },
@@ -1660,7 +2100,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "狸花猫真的很懂撒娇…",
+      "text": {
+        "zh": "狸花猫真的很懂撒娇…",
+        "ja": "狸花猫ってほんと甘え上手だよね…",
+        "en": "Dragon Li cats really know how to act cute..."
+      },
       "intent": "reply"
     }
   },
@@ -1675,7 +2119,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哥们看起来有点委屈",
+      "text": {
+        "zh": "哥们看起来有点委屈",
+        "ja": "こいつ、ちょっと不満そうに見える",
+        "en": "Bro looks a little wronged"
+      },
       "intent": "reply"
     }
   },
@@ -1690,7 +2138,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哇，这里的词真好有意义啊",
+      "text": {
+        "zh": "哇，这里的词真好有意义啊",
+        "ja": "わー、ここの歌詞ほんと意味あるよね",
+        "en": "Wow, the lyrics here are really meaningful"
+      },
       "intent": "reply"
     }
   },
@@ -1705,7 +2157,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "太有水平了这个视频",
+      "text": {
+        "zh": "太有水平了这个视频",
+        "ja": "この動画、レベル高すぎ",
+        "en": "This video is so high-level"
+      },
       "intent": "reply"
     }
   },
@@ -1720,7 +2176,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "连时长都是520",
+      "text": {
+        "zh": "连时长都是520",
+        "ja": "長さまで520なの",
+        "en": "Even the duration is 520"
+      },
       "intent": "reply"
     }
   },
@@ -1735,7 +2195,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "连视频都要剪辑到5分20秒 谁懂 细节控爱了",
+      "text": {
+        "zh": "连视频都要剪辑到5分20秒 谁懂 细节控爱了",
+        "ja": "動画まで5分20秒に編集するって わかる人いる？ 細部こだわり派にはたまらない",
+        "en": "Even the video had to be edited to 5 minutes 20 seconds, who gets it, detail freaks love this"
+      },
       "intent": "reply"
     }
   },
@@ -1750,7 +2214,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "缺点正在晾晒的衣服",
+      "text": {
+        "zh": "缺点正在晾晒的衣服",
+        "ja": "欠点は洗濯物が干してあること",
+        "en": "The downside is the clothes hanging out to dry"
+      },
       "intent": "reply"
     }
   },
@@ -1765,7 +2233,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "以为要结束了，没想到还有两集，大惊喜了属于是",
+      "text": {
+        "zh": "以为要结束了，没想到还有两集，大惊喜了属于是",
+        "ja": "終わると思ったらまだ2話あるとか、これはもう大サプライズってやつ",
+        "en": "Thought it was ending, didn't expect two more episodes, this is a big surprise basically"
+      },
       "intent": "reply"
     }
   },
@@ -1780,7 +2252,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "为啥我看着音画不同步，难受",
+      "text": {
+        "zh": "为啥我看着音画不同步，难受",
+        "ja": "なんで音と映像がずれて見えるの、つらい",
+        "en": "Why does the audio and video look out of sync to me, so uncomfortable"
+      },
       "intent": "reply"
     }
   },
@@ -1795,7 +2271,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "這個MV真的拍得不錯完全宣傳澎湖觀光阿",
+      "text": {
+        "zh": "這個MV真的拍得不錯完全宣傳澎湖觀光阿",
+        "ja": "このMVほんとよくできてる、完全に澎湖観光の宣伝じゃん",
+        "en": "This MV is really well shot, totally promoting Penghu tourism"
+      },
       "intent": "reply"
     }
   },
@@ -1810,7 +2290,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "大家喜歡秋葵嗎",
+      "text": {
+        "zh": "大家喜歡秋葵嗎",
+        "ja": "みんなオクラ好き？",
+        "en": "Does everyone like okra?"
+      },
       "intent": "reply"
     }
   },
@@ -1825,7 +2309,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "巨型貴賓和比熊哪種更可愛？",
+      "text": {
+        "zh": "巨型貴賓和比熊哪種更可愛？",
+        "ja": "ジャイアントプードルとビション、どっちがかわいい？",
+        "en": "Which is cuter, a giant poodle or a bichon?"
+      },
       "intent": "reply"
     }
   },
@@ -1840,7 +2328,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "單字沒問題句子才有問題昨天調超久浪費我時間",
+      "text": {
+        "zh": "單字沒問題句子才有問題昨天調超久浪費我時間",
+        "ja": "単語は問題ないけど文が問題なんだよ、昨日めっちゃ調整して時間無駄にした",
+        "en": "The words are fine, it's the sentences that are the problem, spent forever adjusting yesterday and wasted my time"
+      },
       "intent": "reply"
     }
   },
@@ -1855,7 +2347,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好可愛的小橘希望牠有遮風避雨的地方",
+      "text": {
+        "zh": "好可愛的小橘希望牠有遮風避雨的地方",
+        "ja": "かわいいオレンジ猫、雨風しのげる場所があるといいね",
+        "en": "Such a cute little orange cat, hope it has a place to shelter from the wind and rain"
+      },
       "intent": "reply"
     }
   },
@@ -1870,7 +2366,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你朋友是不是很喜歡拍桌子指別人異議阿一",
+      "text": {
+        "zh": "你朋友是不是很喜歡拍桌子指別人異議阿一",
+        "ja": "あなたの友達って、机を叩いて人に異議を指さすのが好きなの？阿一",
+        "en": "Does your friend really like slamming the table and pointing at people saying objection, Ah-Yi?"
+      },
       "intent": "reply"
     }
   },
@@ -1885,7 +2385,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "有沒有海角七號好看在哪的八卦?",
+      "text": {
+        "zh": "有沒有海角七號好看在哪的八卦?",
+        "ja": "『海角七号』のどこがいいのかって噂ない？",
+        "en": "Any gossip on what's so good about Cape No. 7?"
+      },
       "intent": "reply"
     }
   },
@@ -1900,7 +2404,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "かわいいもんだな",
+      "text": {
+        "zh": "还挺可爱的嘛",
+        "ja": "かわいいもんだな",
+        "en": "That's pretty cute, huh."
+      },
       "intent": "reply"
     }
   },
@@ -1915,7 +2423,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "そろそろ雨の季節だね。",
+      "text": {
+        "zh": "差不多快到雨季了呢。",
+        "ja": "そろそろ雨の季節だね。",
+        "en": "It's about time for the rainy season, huh."
+      },
       "intent": "reply"
     }
   },
@@ -1930,7 +2442,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "おいおい、嬉しくてどきどきが止まらないよ",
+      "text": {
+        "zh": "哎哟，开心得心跳都停不下来啊",
+        "ja": "おいおい、嬉しくてどきどきが止まらないよ",
+        "en": "Whoa, I'm so happy my heart won't stop pounding."
+      },
       "intent": "reply"
     }
   },
@@ -1945,7 +2461,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "やめたほうがいいわよ。",
+      "text": {
+        "zh": "还是算了吧。",
+        "ja": "やめたほうがいいわよ。",
+        "en": "You'd better not."
+      },
       "intent": "reply"
     }
   },
@@ -1960,7 +2480,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "好きって なかなか いえません",
+      "text": {
+        "zh": "喜欢这句话 实在很难说出口",
+        "ja": "好きって なかなか いえません",
+        "en": "I just can't bring myself to say I like you."
+      },
       "intent": "reply"
     }
   },
@@ -1975,7 +2499,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "聞いてあげてもいいわよ",
+      "text": {
+        "zh": "听听也可以哦",
+        "ja": "聞いてあげてもいいわよ",
+        "en": "I don't mind listening, you know."
+      },
       "intent": "reply"
     }
   },
@@ -1990,7 +2518,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "ちょうどいいだろ。",
+      "text": {
+        "zh": "不是刚刚好吗。",
+        "ja": "ちょうどいいだろ。",
+        "en": "That's just right, isn't it."
+      },
       "intent": "reply"
     }
   },
@@ -2005,7 +2537,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "しない方がいいと思います",
+      "text": {
+        "zh": "我觉得还是不要比较好",
+        "ja": "しない方がいいと思います",
+        "en": "I think you shouldn't do it."
+      },
       "intent": "reply"
     }
   },
@@ -2020,7 +2556,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "いやぁ いい朝だな。",
+      "text": {
+        "zh": "哎呀 真是个好早晨啊。",
+        "ja": "いやぁ いい朝だな。",
+        "en": "Man, what a nice morning."
+      },
       "intent": "reply"
     }
   },
@@ -2035,7 +2575,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "そうなんだ 無事でよかった。",
+      "text": {
+        "zh": "这样啊 没事就好。",
+        "ja": "そうなんだ 無事でよかった。",
+        "en": "I see, glad you're okay."
+      },
       "intent": "reply"
     }
   },
@@ -2050,7 +2594,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "よかったら テストのお相手は僕が。",
+      "text": {
+        "zh": "可以的话，测试的对手让我来当吧。",
+        "ja": "よかったら テストのお相手は僕が。",
+        "en": "If you'd like, I can be your test partner."
+      },
       "intent": "reply"
     }
   },
@@ -2065,7 +2613,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢大师，我也悟了",
+      "text": {
+        "zh": "谢谢大师，我也悟了",
+        "ja": "ありがとう大師、私も悟ったよ",
+        "en": "Thanks, master. I've reached enlightenment too."
+      },
       "intent": "reply"
     }
   },
@@ -2080,7 +2632,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks for the heads up! I’ve been wanting to see this for a while.",
+      "text": {
+        "zh": "谢谢提醒！我一直想看这个来着。",
+        "ja": "教えてくれてありがとう！ずっと見たかったんだ。",
+        "en": "Thanks for the heads up! I’ve been wanting to see this for a while."
+      },
       "intent": "reply"
     }
   },
@@ -2095,7 +2651,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢，同乐",
+      "text": {
+        "zh": "谢谢，同乐",
+        "ja": "ありがとう、こちらこそ楽しんでね",
+        "en": "Thanks, same to you."
+      },
       "intent": "reply"
     }
   },
@@ -2110,7 +2670,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不开心啊",
+      "text": {
+        "zh": "不开心啊",
+        "ja": "楽しくないなあ",
+        "en": "Not happy, huh."
+      },
       "intent": "reply"
     }
   },
@@ -2125,7 +2689,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢啦，不过是昨天的，",
+      "text": {
+        "zh": "谢啦，不过是昨天的，",
+        "ja": "ありがと、でも昨日のだよ、",
+        "en": "Thanks, but that was yesterday's,"
+      },
       "intent": "reply"
     }
   },
@@ -2140,7 +2708,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是的。没事上线玩玩。",
+      "text": {
+        "zh": "是的。没事上线玩玩。",
+        "ja": "そうだよ。暇なときオンラインで遊んでる。",
+        "en": "Yeah. Just hop online and play when I'm free."
+      },
       "intent": "reply"
     }
   },
@@ -2155,7 +2727,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哈哈哈不客气",
+      "text": {
+        "zh": "哈哈哈不客气",
+        "ja": "ははは、どういたしまして",
+        "en": "Hahaha, no problem."
+      },
       "intent": "reply"
     }
   },
@@ -2170,7 +2746,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你好聪明哦",
+      "text": {
+        "zh": "你好聪明哦",
+        "ja": "君って頭いいね",
+        "en": "You're so smart."
+      },
       "intent": "reply"
     }
   },
@@ -2185,7 +2765,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thank you! Very cool!! 😎",
+      "text": {
+        "zh": "谢谢！太酷了！！😎",
+        "ja": "ありがとう！すごくいいね！！😎",
+        "en": "Thank you! Very cool!! 😎"
+      },
       "intent": "reply"
     }
   },
@@ -2200,7 +2784,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "没事儿",
+      "text": {
+        "zh": "没事儿",
+        "ja": "大丈夫だよ",
+        "en": "No worries."
+      },
       "intent": "reply"
     }
   },
@@ -2215,7 +2803,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "对不起，我会好好学习滴",
+      "text": {
+        "zh": "对不起，我会好好学习滴",
+        "ja": "ごめんね、ちゃんと勉強するから",
+        "en": "Sorry, I'll study hard for real."
+      },
       "intent": "reply"
     }
   },
@@ -2230,7 +2822,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Sorry to be the bearer of bad tidings.",
+      "text": {
+        "zh": "抱歉，坏消息是我带来的。",
+        "ja": "悪い知らせを持ってきてごめんね。",
+        "en": "Sorry to be the bearer of bad tidings."
+      },
       "intent": "reply"
     }
   },
@@ -2245,7 +2841,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你说心软是好事吗",
+      "text": {
+        "zh": "你说心软是好事吗",
+        "ja": "情にほだされやすいのって、いいことだと思う？",
+        "en": "Do you think being soft-hearted is a good thing?"
+      },
       "intent": "reply"
     }
   },
@@ -2260,7 +2860,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你笑起来很好看，希望你以后每天都这么开心",
+      "text": {
+        "zh": "你笑起来很好看，希望你以后每天都这么开心",
+        "ja": "笑顔すごく素敵だよ、これからも毎日こんなに楽しそうでいてほしいな",
+        "en": "You look great when you smile, hope you're this happy every day from now on."
+      },
       "intent": "reply"
     }
   },
@@ -2275,7 +2879,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "那谢谢咯",
+      "text": {
+        "zh": "那谢谢咯",
+        "ja": "じゃあ、ありがとね",
+        "en": "Thanks then~"
+      },
       "intent": "reply"
     }
   },
@@ -2290,7 +2898,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "等你哟！",
+      "text": {
+        "zh": "等你哟！",
+        "ja": "待ってるよ！",
+        "en": "Waiting for you!"
+      },
       "intent": "reply"
     }
   },
@@ -2305,7 +2917,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "嗯我是很开心",
+      "text": {
+        "zh": "嗯我是很开心",
+        "ja": "うん、すごく嬉しいよ",
+        "en": "Yeah, I'm really happy."
+      },
       "intent": "reply"
     }
   },
@@ -2320,7 +2936,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你好可爱啊",
+      "text": {
+        "zh": "你好可爱啊",
+        "ja": "めっちゃ可愛いね",
+        "en": "You're so cute."
+      },
       "intent": "reply"
     }
   },
@@ -2335,7 +2955,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢你也是",
+      "text": {
+        "zh": "谢谢你也是",
+        "ja": "ありがとう、そっちもね",
+        "en": "Thanks, you too."
+      },
       "intent": "reply"
     }
   },
@@ -2350,7 +2974,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "晚安安",
+      "text": {
+        "zh": "晚安安",
+        "ja": "おやすみ〜",
+        "en": "Night night~"
+      },
       "intent": "reply"
     }
   },
@@ -2365,7 +2993,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Oh nice, gonna add that to the list. Thanks!",
+      "text": {
+        "zh": "哦不错，加到清单里。谢啦！",
+        "ja": "お、いいね、リストに追加しとく。ありがと！",
+        "en": "Oh nice, gonna add that to the list. Thanks!"
+      },
       "intent": "reply"
     }
   },
@@ -2380,7 +3012,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "晚安哦",
+      "text": {
+        "zh": "晚安哦",
+        "ja": "おやすみね",
+        "en": "Good night~"
+      },
       "intent": "reply"
     }
   },
@@ -2395,7 +3031,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好的！谢谢！旅途愉快！",
+      "text": {
+        "zh": "好的！谢谢！旅途愉快！",
+        "ja": "オッケー！ありがとう！良い旅を！",
+        "en": "Okay! Thanks! Have a good trip!"
+      },
       "intent": "reply"
     }
   },
@@ -2410,7 +3050,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好啊好啊，贼开心",
+      "text": {
+        "zh": "好啊好啊，贼开心",
+        "ja": "いいよいいよ、めっちゃ嬉しい",
+        "en": "Sure sure, super happy"
+      },
       "intent": "reply"
     }
   },
@@ -2425,7 +3069,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢，找到了",
+      "text": {
+        "zh": "谢谢，找到了",
+        "ja": "ありがとう、見つけた",
+        "en": "Thanks, found it"
+      },
       "intent": "reply"
     }
   },
@@ -2440,7 +3088,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好开心好开心",
+      "text": {
+        "zh": "好开心好开心",
+        "ja": "嬉しい嬉しい",
+        "en": "So happy so happy"
+      },
       "intent": "reply"
     }
   },
@@ -2455,7 +3107,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks for the advice I really appreciate it and I hope you're doing better now!",
+      "text": {
+        "zh": "谢谢你的建议，我真的很感激，希望你现在好多了！",
+        "ja": "アドバイスありがとう、本当に感謝してるよ、今は少しでも元気になってるといいね！",
+        "en": "Thanks for the advice I really appreciate it and I hope you're doing better now!"
+      },
       "intent": "reply"
     }
   },
@@ -2470,7 +3126,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "可是你说你是。",
+      "text": {
+        "zh": "可是你说你是。",
+        "ja": "でもあなたはそうだって言ったじゃん。",
+        "en": "But you said you were."
+      },
       "intent": "reply"
     }
   },
@@ -2485,7 +3145,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好了睡了，晚安",
+      "text": {
+        "zh": "好了睡了，晚安",
+        "ja": "じゃあ寝るね、おやすみ",
+        "en": "Alright, going to sleep, good night"
+      },
       "intent": "reply"
     }
   },
@@ -2500,7 +3164,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "晚安晚安！",
+      "text": {
+        "zh": "晚安晚安！",
+        "ja": "おやすみおやすみ！",
+        "en": "Night night!"
+      },
       "intent": "reply"
     }
   },
@@ -2515,7 +3183,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "哈哈你好有经验",
+      "text": {
+        "zh": "哈哈你好有经验",
+        "ja": "はは、めっちゃ経験あるね",
+        "en": "Haha you're so experienced"
+      },
       "intent": "reply"
     }
   },
@@ -2530,7 +3202,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks for your kind words. They made me tear up a bit.",
+      "text": {
+        "zh": "谢谢你暖心的话，我有点想哭。",
+        "ja": "優しい言葉ありがとう。ちょっと泣きそうになった。",
+        "en": "Thanks for your kind words. They made me tear up a bit."
+      },
       "intent": "reply"
     }
   },
@@ -2545,7 +3221,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks will check them out!",
+      "text": {
+        "zh": "谢谢，我会去看看的！",
+        "ja": "ありがとう、見てみるね！",
+        "en": "Thanks will check them out!"
+      },
       "intent": "reply"
     }
   },
@@ -2560,7 +3240,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢。",
+      "text": {
+        "zh": "谢谢。",
+        "ja": "ありがとう。",
+        "en": "Thanks."
+      },
       "intent": "reply"
     }
   },
@@ -2575,7 +3259,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "嗯嗯，谢谢提醒",
+      "text": {
+        "zh": "嗯嗯，谢谢提醒",
+        "ja": "うんうん、教えてくれてありがとう",
+        "en": "Yeah yeah, thanks for the heads-up"
+      },
       "intent": "reply"
     }
   },
@@ -2590,7 +3278,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "那真的很实惠～好谢谢你",
+      "text": {
+        "zh": "那真的很实惠～好谢谢你",
+        "ja": "それは本当にお得だね～ありがとう",
+        "en": "That's really a good deal~ thanks a lot"
+      },
       "intent": "reply"
     }
   },
@@ -2605,7 +3297,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不错不错。玩的开心",
+      "text": {
+        "zh": "不错不错。玩的开心",
+        "ja": "いいねいいね。楽しんでね",
+        "en": "Nice nice. Have fun"
+      },
       "intent": "reply"
     }
   },
@@ -2620,7 +3316,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢了",
+      "text": {
+        "zh": "谢谢了",
+        "ja": "ありがとう",
+        "en": "Thanks"
+      },
       "intent": "reply"
     }
   },
@@ -2635,7 +3335,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "恩恩！你开心我也开心啦~",
+      "text": {
+        "zh": "恩恩！你开心我也开心啦~",
+        "ja": "うんうん！君が楽しければ私も嬉しいよ~",
+        "en": "Yeah yeah! If you're happy, I'm happy too~"
+      },
       "intent": "reply"
     }
   },
@@ -2650,7 +3354,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好的，谢谢哈",
+      "text": {
+        "zh": "好的，谢谢哈",
+        "ja": "はい、ありがとうね",
+        "en": "Okay, thanks"
+      },
       "intent": "reply"
     }
   },
@@ -2665,7 +3373,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "辛苦你们了，现在可以好好休息了。。",
+      "text": {
+        "zh": "辛苦你们了，现在可以好好休息了。。",
+        "ja": "お疲れさま、もうゆっくり休んでいいよ。。",
+        "en": "Thanks for your hard work, you can rest well now.."
+      },
       "intent": "reply"
     }
   },
@@ -2680,7 +3392,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你开心就好",
+      "text": {
+        "zh": "你开心就好",
+        "ja": "君が楽しければそれでいいよ",
+        "en": "As long as you're happy"
+      },
       "intent": "reply"
     }
   },
@@ -2695,7 +3411,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "谢谢哦",
+      "text": {
+        "zh": "谢谢哦",
+        "ja": "ありがとうね",
+        "en": "Thanks~"
+      },
       "intent": "reply"
     }
   },
@@ -2710,7 +3430,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "You're welcome, I think.",
+      "text": {
+        "zh": "不客气，我想是这样。",
+        "ja": "どういたしまして、たぶんね。",
+        "en": "You're welcome, I think."
+      },
       "intent": "reply"
     }
   },
@@ -2725,7 +3449,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "慢慢晃吧，边走边看",
+      "text": {
+        "zh": "慢慢晃吧，边走边看",
+        "ja": "ゆっくりぶらぶらして、歩きながら見て回ろう",
+        "en": "Take your time wandering, look around as you go"
+      },
       "intent": "reply"
     }
   },
@@ -2740,7 +3468,11 @@
     "attention": "Refer only to wording, pauses and rhythm. Do not adopt identity, experiences or unobserved facts.",
     "user": "",
     "response": {
-      "text": "Thanks for sharing. You could definitely post some of your other tales.",
+      "text": {
+        "zh": "谢谢分享。你完全可以再发一些你其他的故事。",
+        "ja": "シェアしてくれてありがとう。他の話もどんどん投稿していいと思うよ。",
+        "en": "Thanks for sharing. You could definitely post some of your other tales."
+      },
       "intent": "reply"
     }
   },
@@ -2755,7 +3487,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "不客气",
+      "text": {
+        "zh": "不客气",
+        "ja": "どういたしまして",
+        "en": "You're welcome"
+      },
       "intent": "reply"
     }
   },
@@ -2770,7 +3506,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "早安。快楽。",
+      "text": {
+        "zh": "早安。快楽。",
+        "ja": "おはよう。快楽。",
+        "en": "Good morning. Pleasure."
+      },
       "intent": "reply"
     }
   },
@@ -2785,7 +3525,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "等你的吃货心得",
+      "text": {
+        "zh": "等你的吃货心得",
+        "ja": "君の食いしん坊レポ待ってるね",
+        "en": "Waiting for your foodie review"
+      },
       "intent": "reply"
     }
   },
@@ -2800,7 +3544,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "這部國中超愛看的記得好像動畫有重製",
+      "text": {
+        "zh": "這部國中超愛看的記得好像動畫有重製",
+        "ja": "これ中学の時めっちゃ好きで見てた、確かアニメリメイクあった気がする",
+        "en": "I loved watching this in middle school, I think the anime got a remake"
+      },
       "intent": "reply"
     }
   },
@@ -2815,7 +3563,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "阿不都一樣，都喜歡研究非人類",
+      "text": {
+        "zh": "阿不都一樣，都喜歡研究非人類",
+        "ja": "え、同じじゃん、どっちも非人間を研究するの好きでしょ",
+        "en": "Aren't they the same, both like studying non-humans"
+      },
       "intent": "reply"
     }
   },
@@ -2830,7 +3582,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "年輕人不怕浪費時間，怕浪費時間的是老人",
+      "text": {
+        "zh": "年輕人不怕浪費時間，怕浪費時間的是老人",
+        "ja": "若者は時間の無駄を怖がらない、時間の無駄を怖がるのは老人だ",
+        "en": "Young people aren't afraid of wasting time, it's old people who are afraid of wasting time"
+      },
       "intent": "reply"
     }
   },
@@ -2845,7 +3601,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "亲全家鐵觀音霜淇淋還有賣嗎？",
+      "text": {
+        "zh": "亲全家鐵觀音霜淇淋還有賣嗎？",
+        "ja": "ねえ、ファミマの鉄観音ソフトクリームまだ売ってる？",
+        "en": "Hey, is FamilyMart's Tieguanyin soft serve still available?"
+      },
       "intent": "reply"
     }
   },
@@ -2860,7 +3620,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "冬天別來感恩皮膚乾不舒服現在這樣剛剛好",
+      "text": {
+        "zh": "冬天別來感恩皮膚乾不舒服現在這樣剛剛好",
+        "ja": "冬は来ないで感謝、肌が乾燥して不快、今くらいがちょうどいい",
+        "en": "Don't come in winter, thanks, skin gets dry and uncomfortable, right now is just right"
+      },
       "intent": "reply"
     }
   },
@@ -2875,7 +3639,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "結婚的對象一定是最喜歡的人嗎?",
+      "text": {
+        "zh": "結婚的對象一定是最喜歡的人嗎?",
+        "ja": "結婚相手って絶対一番好きな人じゃなきゃダメなの？",
+        "en": "Does the person you marry have to be the one you like most?"
+      },
       "intent": "reply"
     }
   },
@@ -2890,7 +3658,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "第一個行程欣賞『國道風光』",
+      "text": {
+        "zh": "第一個行程欣賞『國道風光』",
+        "ja": "最初の行程は「国道の風景」鑑賞",
+        "en": "First itinerary: enjoy the 'highway scenery'"
+      },
       "intent": "reply"
     }
   },
@@ -2905,7 +3677,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "嘉義最厲害的雞肉飯是噴水嗎?",
+      "text": {
+        "zh": "嘉義最厲害的雞肉飯是噴水嗎?",
+        "ja": "嘉義で一番すごい鶏肉飯って噴水なの？",
+        "en": "Is Penshui the best chicken rice in Chiayi?"
+      },
       "intent": "reply"
     }
   },
@@ -2920,7 +3696,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你在哪裡看過，城市地點店名時間講一下啊",
+      "text": {
+        "zh": "你在哪裡看過，城市地點店名時間講一下啊",
+        "ja": "どこで見たの、都市・場所・店名・時間ちょっと言ってよ",
+        "en": "Where did you see it, tell me the city, location, store name, and time"
+      },
       "intent": "reply"
     }
   },
@@ -2935,7 +3715,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "忘了說熱炒店兩百元是指一盤菜吃完結帳上千元",
+      "text": {
+        "zh": "忘了說熱炒店兩百元是指一盤菜吃完結帳上千元",
+        "ja": "言い忘れたけど、熱炒店の200元って一皿のことで、食べ終わって会計したら千元超えるよ",
+        "en": "Forgot to mention, the 200 yuan at the stir-fry place is per dish, after eating the bill is over a thousand"
+      },
       "intent": "reply"
     }
   },
@@ -2950,7 +3734,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "かわいいのね。",
+      "text": {
+        "zh": "真可爱呢。",
+        "ja": "かわいいのね。",
+        "en": "How cute."
+      },
       "intent": "reply"
     }
   },
@@ -2965,7 +3753,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "聞いておけばよかったね",
+      "text": {
+        "zh": "要是早点问就好了呢",
+        "ja": "聞いておけばよかったね",
+        "en": "Should've asked, huh."
+      },
       "intent": "reply"
     }
   },
@@ -2980,7 +3772,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "うーん 好きな人… とは",
+      "text": {
+        "zh": "嗯——喜欢的人……是指",
+        "ja": "うーん 好きな人… とは",
+        "en": "Hmm... someone you like... meaning"
+      },
       "intent": "reply"
     }
   },
@@ -2995,7 +3791,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "これでよかったんだよね",
+      "text": {
+        "zh": "这样就好了对吧",
+        "ja": "これでよかったんだよね",
+        "en": "This was the right call, right."
+      },
       "intent": "reply"
     }
   },
@@ -3010,7 +3810,11 @@
     "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
     "user": "",
     "response": {
-      "text": "うん めちゃくちゃ楽しみ！",
+      "text": {
+        "zh": "嗯 超级期待！",
+        "ja": "うん めちゃくちゃ楽しみ！",
+        "en": "Yeah, super looking forward to it!"
+      },
       "intent": "reply"
     }
   },
@@ -3025,7 +3829,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是已经进去上班又下班了",
+      "text": {
+        "zh": "是已经进去上班又下班了",
+        "ja": "もう中に入って仕事して、それから退勤もしたんだ",
+        "en": "Already went in to work and clocked out too."
+      },
       "intent": "reply"
     }
   },
@@ -3040,7 +3848,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "好远阿～下不下雨阿",
+      "text": {
+        "zh": "好远阿～下不下雨阿",
+        "ja": "遠いなあ～雨降るのかな",
+        "en": "So far~ Is it gonna rain or not"
+      },
       "intent": "reply"
     }
   },
@@ -3055,7 +3867,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我也差不多，主要是因为这里下雨了",
+      "text": {
+        "zh": "我也差不多，主要是因为这里下雨了",
+        "ja": "私もだいたい同じ、主にこっちが雨だから",
+        "en": "Same here, mostly 'cause it's raining here."
+      },
       "intent": "reply"
     }
   },
@@ -3070,7 +3886,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "云南阳光这么好！！！",
+      "text": {
+        "zh": "云南阳光这么好！！！",
+        "ja": "雲南、日差しがこんなにいい！！！",
+        "en": "Yunnan's sunshine is so good!!!"
+      },
       "intent": "reply"
     }
   },
@@ -3085,7 +3905,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我试试下雨天能不能拍出来这种浪漫",
+      "text": {
+        "zh": "我试试下雨天能不能拍出来这种浪漫",
+        "ja": "雨の日にこういうロマンチックなのが撮れるか試してみる",
+        "en": "I'll try if I can shoot this kind of romance on a rainy day."
+      },
       "intent": "reply"
     }
   },
@@ -3100,7 +3924,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "房间乱可以考虑养猫可以帮助你养成每天必须收拾的好习惯",
+      "text": {
+        "zh": "房间乱可以考虑养猫可以帮助你养成每天必须收拾的好习惯",
+        "ja": "部屋が散らかってるなら猫を飼うって手があるよ、毎日必ず片付ける習慣が身につくから",
+        "en": "If your room's messy, you could consider getting a cat—it helps you build the habit of having to tidy up every day."
+      },
       "intent": "reply"
     }
   },
@@ -3115,7 +3943,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "是啊我才打算睡觉关了空调敞开窗户的一瞬间就下了个大雨啪啪滴",
+      "text": {
+        "zh": "是啊我才打算睡觉关了空调敞开窗户的一瞬间就下了个大雨啪啪滴",
+        "ja": "そうそう、これから寝ようと思ってエアコン切って窓開けた瞬間に大雨がパラパラ降ってきた",
+        "en": "Yeah, I was just about to sleep, turned off the AC and opened the window, and right that moment it started pouring—pitter-patter."
+      },
       "intent": "reply"
     }
   },
@@ -3130,7 +3962,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "莫得空我八点下班搞七搞八就十二点了",
+      "text": {
+        "zh": "莫得空我八点下班搞七搞八就十二点了",
+        "ja": "暇ないよ、8時に仕事終わってあれこれしてたらもう12時だよ",
+        "en": "No time, I get off work at eight and by the time I do this and that it's already twelve"
+      },
       "intent": "reply"
     }
   },
@@ -3145,7 +3981,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "处于啥也不想干只想睡觉的阶段",
+      "text": {
+        "zh": "处于啥也不想干只想睡觉的阶段",
+        "ja": "何もしたくない、寝るだけの段階に入ってる",
+        "en": "At the stage where I don't wanna do anything, just wanna sleep"
+      },
       "intent": "reply"
     }
   },
@@ -3160,7 +4000,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "穿多点！希望今晚别下雨！",
+      "text": {
+        "zh": "穿多点！希望今晚别下雨！",
+        "ja": "厚着してね！今夜は雨降らないでほしい！",
+        "en": "Wear more! Hope it doesn't rain tonight!"
+      },
       "intent": "reply"
     }
   },
@@ -3175,7 +4019,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "还没有还没有为啥还不下雨下雨就不用洗车了",
+      "text": {
+        "zh": "还没有还没有为啥还不下雨下雨就不用洗车了",
+        "ja": "まだまだ、なんでまだ降らないの、雨降ったら洗車しなくて済むのに",
+        "en": "Not yet not yet, why hasn't it rained, if it rains I won't have to wash the car"
+      },
       "intent": "reply"
     }
   },
@@ -3190,7 +4038,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "山西下雨了巨冷",
+      "text": {
+        "zh": "山西下雨了巨冷",
+        "ja": "山西は雨降っててめっちゃ寒い",
+        "en": "It's raining in Shanxi, super cold"
+      },
       "intent": "reply"
     }
   },
@@ -3205,7 +4057,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "喝咖啡……晚上不想睡了吧",
+      "text": {
+        "zh": "喝咖啡……晚上不想睡了吧",
+        "ja": "コーヒー飲むって……夜寝る気ないでしょ",
+        "en": "Drinking coffee... guess you don't plan on sleeping tonight"
+      },
       "intent": "reply"
     }
   },
@@ -3220,7 +4076,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你要养猫了吗看中啥样的啦",
+      "text": {
+        "zh": "你要养猫了吗看中啥样的啦",
+        "ja": "猫飼うの？どんな子に目つけたの",
+        "en": "You gonna get a cat? What kind are you eyeing?"
+      },
       "intent": "reply"
     }
   },
@@ -3235,7 +4095,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "嘿嘿！算是吧！我是夜猫子…",
+      "text": {
+        "zh": "嘿嘿！算是吧！我是夜猫子…",
+        "ja": "へへ！まあね！夜型人間だから…",
+        "en": "Hehe! Kinda! I'm a night owl..."
+      },
       "intent": "reply"
     }
   },
@@ -3250,7 +4114,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "到处炫耀猫，妈耶",
+      "text": {
+        "zh": "到处炫耀猫，妈耶",
+        "ja": "あちこちで猫自慢してる、うわあ",
+        "en": "Showing off the cat everywhere, oh man"
+      },
       "intent": "reply"
     }
   },
@@ -3265,7 +4133,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "猫咪玩得开心咯",
+      "text": {
+        "zh": "猫咪玩得开心咯",
+        "ja": "猫ちゃん楽しんでるね",
+        "en": "Kitty's having fun huh"
+      },
       "intent": "reply"
     }
   },
@@ -3280,7 +4152,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "我以为你睡觉了呢",
+      "text": {
+        "zh": "我以为你睡觉了呢",
+        "ja": "寝てるのかと思った",
+        "en": "I thought you were asleep"
+      },
       "intent": "reply"
     }
   },
@@ -3295,7 +4171,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "观察蛮细致嘛，没事做就睡睡觉看看书呗，要会享受一个人的时光",
+      "text": {
+        "zh": "观察蛮细致嘛，没事做就睡睡觉看看书呗，要会享受一个人的时光",
+        "ja": "よく見てるね、暇なら寝たり本読んだりすれば、一人の時間を楽しめるようにならないと",
+        "en": "Pretty observant huh, when you got nothing to do just sleep and read, gotta know how to enjoy time alone"
+      },
       "intent": "reply"
     }
   },
@@ -3310,7 +4190,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "俺这也要下雨了",
+      "text": {
+        "zh": "俺这也要下雨了",
+        "ja": "こっちも雨が降りそうだ",
+        "en": "It's gonna rain here too"
+      },
       "intent": "reply"
     }
   },
@@ -3325,7 +4209,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "水溶100兑冻干咖啡喝",
+      "text": {
+        "zh": "水溶100兑冻干咖啡喝",
+        "ja": "水溶100をフリーズドライコーヒーに混ぜて飲む",
+        "en": "Mix Water Soluble 100 with freeze-dried coffee and drink it"
+      },
       "intent": "reply"
     }
   },
@@ -3340,7 +4228,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "…………好的吧……那果然还是考托福吧！不纠结了＞＜！",
+      "text": {
+        "zh": "…………好的吧……那果然还是考托福吧！不纠结了＞＜！",
+        "ja": "…………そっか……じゃあやっぱりトーフル受けるか！もう迷わない＞＜！",
+        "en": "…………okay then……so I guess I'll go with TOEFL after all! No more agonizing over it ><! "
+      },
       "intent": "reply"
     }
   },
@@ -3355,7 +4247,11 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "想想快下班了吧，，忙了三天，，来问好，，",
+      "text": {
+        "zh": "想想快下班了吧，，忙了三天，，来问好，，",
+        "ja": "そろそろ退勤かなって思って、、3日間忙しかったし、、挨拶に来たよ、、",
+        "en": "Guess it's almost time to get off work,,, been busy for three days,,, just dropping by to say hi,,"
+      },
       "intent": "reply"
     }
   },
@@ -3370,7 +4266,1227 @@
     "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
     "user": "",
     "response": {
-      "text": "你那边应该都比这边好……又下雨了都……",
+      "text": {
+        "zh": "你那边应该都比这边好……又下雨了都……",
+        "ja": "そっちはこっちより全部いいはずだよ……また雨降ってるし……",
+        "en": "Your side should be better than here in every way……it's raining again……"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-552ae15e31da91",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "也有点小兴奋呢",
+        "ja": "少しワクワクもしているよ",
+        "en": "I'm a little excited too"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-39714ae0dfa579",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "玩得开心，也吃得好",
+        "ja": "楽しかったし おいしかった",
+        "en": "It was fun and delicious"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-bad6d7fa29c487",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "做饭还挺期待的哦",
+        "ja": "料理をするのが結構楽しみなのよ",
+        "en": "I'm actually quite looking forward to cooking."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-003cb3d684fd38",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "穿上衣服，好可爱呀。",
+        "ja": "お洋服着て かわいいねぇ。",
+        "en": "Wearing clothes, so cute."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-98ee7af1de3185",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "唉……真是的……。",
+        "ja": "はあ… まったく…。",
+        "en": "Sigh... seriously..."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-58a0a0935f2300",
+    "scope": "humor",
+    "cues": [
+      "軽いツッコミと対比"
+    ],
+    "context_cues": [],
+    "situation": "軽いツッコミと対比",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "嘛，虽然是回转寿司",
+        "ja": "まあ 回転寿司だけど",
+        "en": "Well, it's conveyor belt sushi though"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-9ea38940d415a4",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "虽然已经过了保质期",
+        "ja": "賞味期限切れてるけど",
+        "en": "It's past the expiration date though"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-1a0b898b99132c",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "怎么看都是便宜货眼镜啊",
+        "ja": "どう見ても安物の眼鏡だけど",
+        "en": "No matter how you look at it, those are cheap glasses"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-a2e2682656b0a0",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "你有一面挺有趣的镜子呢。",
+        "ja": "面白い鏡を持ってるねえ。",
+        "en": "You've got an interesting mirror there."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-45a9b4a81cb723",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "颜色很奇特，挺不错呢？",
+        "ja": "色が奇抜でいいですね？",
+        "en": "The color's pretty eccentric, nice huh?"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-eec63bd80ddcf3",
+    "scope": "care",
+    "cues": [
+      "気遣いと傾聴"
+    ],
+    "context_cues": [],
+    "situation": "気遣いと傾聴",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我觉得还是别看比较好。",
+        "ja": "見ないほうがいいと思うけど。",
+        "en": "I think you'd better not look, though."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-aa29f5a0c76a7c",
+    "scope": "care",
+    "cues": [
+      "気遣いと傾聴"
+    ],
+    "context_cues": [],
+    "situation": "気遣いと傾聴",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "有什么犹豫的吗？",
+        "ja": "何か お迷いですか？",
+        "en": "Is something troubling you?"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-dd9c899f45d768",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "为什么会说那种话呢？",
+        "ja": "なんで あんなこと言うんだろう？",
+        "en": "Why would they say something like that?"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-e585f7b6f60d75",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "诶～你想做什么呀？",
+        "ja": "へえ～ 何を作りたいんですか？",
+        "en": "Ooh~ what do you wanna make?"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-dd7aa13d5cd37d",
+    "scope": "daily",
+    "cues": [
+      "好奇心と問いかけ"
+    ],
+    "context_cues": [],
+    "situation": "好奇心と問いかけ",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "挺有意思的哦。",
+        "ja": "なかなか興味深いですよ。",
+        "en": "That's quite interesting, you know."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-6dc30d769c2cdf",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我挺喜欢公园的哦",
+        "ja": "私 公園って好きだよ",
+        "en": "I like parks, you know"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-22c3c0c8ce2f7d",
+    "scope": "disagreement",
+    "cues": [
+      "好みと意見の違い"
+    ],
+    "context_cues": [],
+    "situation": "好みと意見の違い",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我也不是说不可能啦",
+        "ja": "ありえないとは言いませんけど",
+        "en": "I'm not saying it's impossible, but"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-75188d69a234b9",
+    "scope": "daily",
+    "cues": [
+      "照れと控えめな気持ち"
+    ],
+    "context_cues": [],
+    "situation": "照れと控えめな気持ち",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "不过我不太擅长就是了",
+        "ja": "あまり得意じゃないんですけど",
+        "en": "Though it's not really my strong suit"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-f61d523bd61a61",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "有什么东西在地底下发光",
+        "ja": "何か地面の底で光ってる",
+        "en": "Something's glowing under the ground"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-16c60519e5e9fd",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "放眼望去 一片粉色",
+        "ja": "見渡すかぎり ピンク一色",
+        "en": "As far as the eye can see, nothing but pink"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-d48ff2fa1d02f7",
+    "scope": "daily",
+    "cues": [
+      "細部への気づき"
+    ],
+    "context_cues": [],
+    "situation": "細部への気づき",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "哦～ 氛围完全不一样啊",
+        "ja": "ほお～ッ 雰囲気 全然違うな",
+        "en": "Ooh~ the vibe is totally different"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-0e891fbb83bd8b",
+    "scope": "daily",
+    "cues": [
+      "考える間と余白"
+    ],
+    "context_cues": [],
+    "situation": "考える間と余白",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "是啊 从谁开始说呢",
+        "ja": "そうだなあ 誰から話すかなあ",
+        "en": "Yeah, who should start talking, I wonder"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-ed5999219b19f0",
+    "scope": "daily",
+    "cues": [
+      "考える間と余白"
+    ],
+    "context_cues": [],
+    "situation": "考える間と余白",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "是啊……从什么开始说好呢",
+        "ja": "そうね… 何から話せばいいかしら",
+        "en": "Right... what should I talk about first, I wonder"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-92b33b8d79f42e",
+    "scope": "care",
+    "cues": [
+      "気遣いと傾聴"
+    ],
+    "context_cues": [],
+    "situation": "気遣いと傾聴",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我会好好照顾你的",
+        "ja": "あたしが ちゃんと面倒見るから",
+        "en": "I'll take proper care of you, so don't worry"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-ja-e004b5ca13bf9a",
+    "scope": "praise",
+    "cues": [
+      "好意と喜び"
+    ],
+    "context_cues": [],
+    "situation": "好意と喜び",
+    "attention": "原文の言い回し、間、リズムだけを参考にする。身元、経験、未確認の事実を引き継がない。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "还算挺开心的。",
+        "ja": "そこそこ楽しかったし。",
+        "en": "It was reasonably fun."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-f0f708fe3dc571",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我也喜欢这个歌！！！！好浪漫",
+        "ja": "私もこの歌好き！！！！すごくロマンチック",
+        "en": "I like this song too!!!! So romantic"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3b3909fbc11c02",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "虽然很累很坎坷，但是想到昨天还是挺开心的。凡事都有第一次。",
+        "ja": "すごく疲れたし大変だったけど、昨日のこと考えるとけっこう楽しかった。何事も最初はあるし。",
+        "en": "Even though it was tiring and bumpy, thinking about yesterday, it was still pretty fun. There's a first time for everything."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8b8aabab6d581c",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "希望你也感觉自己是一个巨星",
+        "ja": "あなたも自分がスーパースターだって感じられたらいいね",
+        "en": "Hope you also feel like you're a superstar"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7f84c4d903524d",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "你的小剧场看的我很欢乐，哈哈哈，以后要多多出品一些啊",
+        "ja": "あなたの小劇場、見ててすごく楽しかった、ハハハ、これからもたくさん出してね",
+        "en": "Your little skits made me so happy watching them, hahaha, put out more of them from now on"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6100a7cdcf0897",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "哈哈哈，学一下呢，好听",
+        "ja": "ハハハ、ちょっと真似してみようかな、いい声",
+        "en": "Hahaha, maybe I'll try learning it, sounds nice"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-523ae9a1dc8c44",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "不知道. . .就是感觉弄湿脚特难受，比头被淋湿还难受. . .",
+        "ja": "わかんない. . .とにかく足が濡れるのがすごく嫌で、頭が濡れるより嫌なんだよね. . .",
+        "en": "I don't know... it's just that getting my feet wet feels really awful, worse than getting my head wet..."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-3dc8e1bababd59",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "对，一个装饭一个装汤！哈哈！",
+        "ja": "そう、一つはご飯用で一つはスープ用！ハハ！",
+        "en": "Yeah, one for rice and one for soup! Haha!"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fe0b7820d4d9c2",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "不是，跟以前不一样了。感觉这是到别人家做客。就觉得不一样。奇怪。",
+        "ja": "いや、前と違うんだよ。他人の家に遊びに来たみたいな感じ。なんか違うんだよね。不思議。",
+        "en": "No, it's different from before. Feels like being a guest at someone else's house. Just feels different. Weird."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-db3b0cc9f14ae1",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "不过说真的，你的感叹号感情很强烈呀",
+        "ja": "でもマジで、君の感嘆符は感情がすごく強いね",
+        "en": "But seriously, your exclamation marks carry strong feelings"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-da8561de5db65b",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "高冷和呆滞是两种感觉",
+        "ja": "クールとぼんやりは二つの違う感じだよ",
+        "en": "Being aloof and being blank are two different vibes"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-8e1445c4a34815",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "有种雪为你而下的感觉",
+        "ja": "雪が君のために降ってるって感じがする",
+        "en": "Feels like the snow is falling just for you"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-dd2e5947c05ca5",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "电脑的，我不怎么玩手游",
+        "ja": "PCのやつ、スマホゲーはあんまりやらないんだ",
+        "en": "PC ones, I don't really play mobile games"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5fd98616fca731",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我觉得多好看的，，古朴啊",
+        "ja": "けっこういいと思うけど、、古風でいいじゃん",
+        "en": "I think it looks pretty nice,, it's rustic"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2c167940ab7753",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我很爱喝，但是太甜了",
+        "ja": "すごく好きでよく飲むけど、甘すぎるんだよ",
+        "en": "I love drinking it, but it's too sweet"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-318f4100ecc1af",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我也喜欢喝，好喝并且喝完很有精神。特别适用于出去运动的时候",
+        "ja": "私も好きで飲むよ、おいしいし飲んだ後すごく元気になる。特に外で運動する時にぴったり",
+        "en": "I like drinking it too, it's tasty and gives me energy after. Especially good when going out to exercise"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-a21fe6a5ccfa04",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "以前超爱喝，但是糖真的太多了",
+        "ja": "昔はめっちゃ好きで飲んでたけど、糖分がマジで多すぎる",
+        "en": "Used to love drinking it, but there's really too much sugar"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-2d3b1e6500a10c",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "是啊，一点也不想看。",
+        "ja": "そうだね、全然見たくない。",
+        "en": "Yeah, don't wanna watch it at all."
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-6bb420d3dfbf7b",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "没办法，就喜欢这样的",
+        "ja": "しょうがない、こういうのが好きなんだよ",
+        "en": "Can't help it, I just like this kind of thing"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-5d783715ec45b9",
+    "scope": "care",
+    "cues": [
+      "具体的关心与倾听"
+    ],
+    "context_cues": [],
+    "situation": "具体的关心与倾听",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "认真的回答，真的好用",
+        "ja": "マジレスすると、本当に使いやすい",
+        "en": "Seriously answering, it's really useful"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-25172d2fac9b47",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "这种是什么烫啊好好看啊",
+        "ja": "これってどんなパーマ？すごく可愛い",
+        "en": "What kind of perm is this? It looks so good"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-64638ee78f0c00",
+    "scope": "daily",
+    "cues": [
+      "好奇与追问"
+    ],
+    "context_cues": [],
+    "situation": "好奇与追问",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "真的很想知道这种头发怎么烫啊",
+        "ja": "この髪型どうやってパーマかけるのか本当に知りたい",
+        "en": "I really want to know how to perm hair like this"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-25e33b2bd2852f",
+    "scope": "daily",
+    "cues": [
+      "慢慢想和留出空间"
+    ],
+    "context_cues": [],
+    "situation": "慢慢想和留出空间",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "还没想好！哈哈哈哈！",
+        "ja": "まだ決めてない！ハハハハ！",
+        "en": "Haven't decided yet! Hahahaha!"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-82503d69dfe46e",
+    "scope": "daily",
+    "cues": [
+      "慢慢想和留出空间"
+    ],
+    "context_cues": [],
+    "situation": "慢慢想和留出空间",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "这不现在就在打发时间么本来想出去但是自己一个人也懒得动",
+        "ja": "今まさに時間つぶしてるじゃん。出かけようと思ったけど一人だと動くのめんどくて",
+        "en": "Aren't I just killing time now? I wanted to go out but can't be bothered to move alone"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-7ccf34cc1c92e7",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "哈哈哈我会睁一只眼闭一只眼的",
+        "ja": "ハハハ、大目に見てあげるよ",
+        "en": "Hahaha, I'll turn a blind eye"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fec23e29a8df59",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "挺还原的，但，好像没有想象中那么好看",
+        "ja": "結構再現されてるけど、思ったほど良くないかも",
+        "en": "Pretty faithful, but, doesn't look as good as I imagined"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-be79b6a263a648",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "配场景可以，但单独衣服不太想要",
+        "ja": "シーンに合わせるのはアリだけど、服単体ではあまり欲しくない",
+        "en": "It's fine for matching scenes, but I don't really want the clothes by themselves"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-84fc0769141a29",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "没玩上的一律不予评价",
+        "ja": "まだプレイしてないものは一律評価しない",
+        "en": "Anything I haven't played yet gets no evaluation"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-db69f4f2ed6913",
+    "scope": "disagreement",
+    "cues": [
+      "个人偏好和分歧"
+    ],
+    "context_cues": [],
+    "situation": "个人偏好和分歧",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "评价是：再等等，等一测",
+        "ja": "評価は：もうちょっと待って、最初のテストを待つ",
+        "en": "My evaluation: wait a bit more, wait for the first test"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-803b808b25131f",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "感觉不像实机，像cg",
+        "ja": "実機じゃなくてCGっぽい",
+        "en": "Feels like CG, not actual gameplay"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cf8ccde6c4723e",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "原来听懂她们唱歌是这种感觉",
+        "ja": "彼女たちの歌が理解できるってこういう感じなんだ",
+        "en": "So this is what it feels like to understand their singing"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-e639a06fed5b5a",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "猫猫好可爱，楼楼描述的治愈声波也可爱哈哈哈哈哈哈",
+        "ja": "猫ちゃん超かわいい、スレ主が描写した癒しの音波もかわいいハハハハハハ",
+        "en": "The cat is so cute, and the healing sound waves OP described are cute too hahahahahaha"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-37cba4de1a78a8",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "猫猫什么都懂，只是不会说话",
+        "ja": "猫ちゃんは何でも分かってる、ただ話せないだけ",
+        "en": "Cats understand everything, they just can't talk"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-60afa74f9cc481",
+    "scope": "daily",
+    "cues": [
+      "细节和具体观察"
+    ],
+    "context_cues": [],
+    "situation": "细节和具体观察",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "你这个清晰度好高啊",
+        "ja": "この解像度めっちゃ高いね",
+        "en": "Your clarity is so high"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-87b6b9d66b1067",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "动画做的不错再接再厉",
+        "ja": "アニメーションよくできてる、引き続き頑張って",
+        "en": "The animation is well done, keep it up"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c86b4c3f721b66",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "vocal好的女团真的让人安心",
+        "ja": "ボーカルがいい女性グループは本当に安心できる",
+        "en": "A girl group with good vocals really puts you at ease"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-fe03b9d29067eb",
+    "scope": "praise",
+    "cues": [
+      "欣赏与高兴"
+    ],
+    "context_cues": [],
+    "situation": "欣赏与高兴",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "好听好听好听不愿关掉的程度",
+        "ja": "いいねいいねいいね、消したくないレベル",
+        "en": "So good so good so good, to the point I don't want to turn it off"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-cdeeb51bbdd781",
+    "scope": "care",
+    "cues": [
+      "具体的关心与倾听"
+    ],
+    "context_cues": [],
+    "situation": "具体的关心与倾听",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "我的妈呀，怎么会有这么乖的猫，要对它好好的啊",
+        "ja": "マジかよ、こんなにいい子の猫がいるなんて、大切にしてあげてね",
+        "en": "Oh my god, how can there be such a well-behaved cat, treat it well okay"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-b094224f5751e0",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "祖传算盘也不能这么玩命打啊",
+        "ja": "先祖伝来のそろばんでもそんな必死に弾かないでしょ",
+        "en": "Even an ancestral abacus shouldn't be worked that desperately"
+      },
+      "intent": "reply"
+    }
+  },
+  {
+    "id": "voice-zh-c5e36db26808e3",
+    "scope": "humor",
+    "cues": [
+      "吐槽和反差"
+    ],
+    "context_cues": [],
+    "situation": "吐槽和反差",
+    "attention": "只参考原句用词、停顿和节奏；不复述，不借用身份、经历或未经观察的事实。",
+    "user": "",
+    "response": {
+      "text": {
+        "zh": "原汤化原食了属于是",
+        "ja": "元のスープで元の料理を消化するってやつだね",
+        "en": "So it's basically washing the original food down with its own broth."
+      },
       "intent": "reply"
     }
   }

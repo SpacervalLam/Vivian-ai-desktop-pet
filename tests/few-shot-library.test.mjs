@@ -14,7 +14,10 @@ for (const entries of fragments) {
     assert.equal(e.user, '', 'a single utterance must not acquire a fake user turn');
     assert.ok(e.cues.length && e.situation && e.attention);
     assert.deepEqual(Object.keys(e.response).sort(), ['intent', 'text']);
-    assert.ok(e.response.text.trim() && [...e.response.text].length <= 120);
+    assert.deepEqual(Object.keys(e.response.text).sort(), ['en', 'ja', 'zh']);
+    for (const lang of ['zh', 'ja', 'en']) {
+      assert.ok(e.response.text[lang].trim() && [...e.response.text[lang]].length <= 180);
+    }
     assert.ok(!('source' in e), 'research provenance stays outside app assets');
   }
   assert.ok(entries.some(e => e.id.startsWith('voice-ja-')));
@@ -121,12 +124,12 @@ fn main() {}
    let r=production::ExampleRetriever::new(name,Arc::new(Offline));
    assert!(entries.iter().any(|e|e.is_fragment()));
    for e in entries.iter().filter(|e|e.is_fragment()) {
-    let out=r.retrieve(e.response["text"].as_str().unwrap(),&[],None,&[], "zh").unwrap_or_default();
+    let out=r.retrieve(e.text_for("zh").unwrap(),&[],None,&[], "zh").unwrap_or_default();
     assert!(!out.contains("Expression fragment "),"a semantic-only fragment fired without embeddings: {name}/{}",e.id);
    }
   }
  }
- #[test] fn every_sourced_quote_keeps_its_index_language_and_bounded_voice_references() {
+ #[test] fn every_sourced_quote_shares_one_index_across_three_languages() {
   let mut probes=0;
   for name in ["vivian","nana"] {
    let entries=example_library::factory_examples(name);
@@ -135,15 +138,20 @@ fn main() {}
    r.preload();
    for (i,e) in entries.iter().enumerate() {
     let mut q=vec![0.0;entries.len()];q[i]=1.0;
-    let lang=if e.id.starts_with("voice-en-"){"en"}else if e.id.starts_with("voice-ja-"){"ja"}else{"zh"};
+    for lang in ["zh","ja","en"] {
     let out=r.retrieve("semantic probe",&[],Some(&q),&[],lang).unwrap();probes+=1;
     assert!(out.contains(&format!("Expression fragment {}",e.id)),"{name}/{}",e.id);
     assert!(!out.contains("Fictional user:") && out.chars().count()<=1800);
     assert!(out.lines().filter(|line|line.starts_with("Expression fragment ")).count() <= 6);
     assert_eq!(r.retrieve("semantic probe",&[],Some(&q),&[e.scope.clone()],lang).as_deref(),Some(out.as_str()));
-    let foreign=if lang=="en"{"ja"}else{"en"};
-    let foreign_out=r.retrieve("semantic probe",&[],Some(&q),&[],foreign).unwrap_or_default();
-    assert!(!foreign_out.contains(&format!("Expression fragment {}",e.id)));
+    let marker=format!("Expression fragment {}\\nWording and rhythm only: ",e.id);
+    let wording=out.split(&marker).nth(1).unwrap().lines().next().unwrap();
+    let wording:serde_json::Value=serde_json::from_str(wording).unwrap();
+    assert_eq!(wording.as_str(),e.text_for(lang),"wrong translation for {name}/{} in {lang}",e.id);
+    for line in out.lines().filter_map(|l|l.strip_prefix("Wording and rhythm only: ")) {
+     assert!(serde_json::from_str::<serde_json::Value>(line).unwrap().is_string(),"never inject the trilingual object");
+    }
+    }
    }
   }
   println!("Verified {probes} corpus indices with controlled identity vectors, not a real-model relevance benchmark");

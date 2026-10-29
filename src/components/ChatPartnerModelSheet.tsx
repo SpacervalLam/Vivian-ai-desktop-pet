@@ -148,7 +148,11 @@ const ChatPartnerModelSheet: React.FC<Props> = ({ partnerId, partnerName, onClos
         duration: 2400,
         key: `partner-model-${Date.now()}`,
       });
-      await load();
+      if (next) {
+        onClose();
+      } else {
+        await load();
+      }
     } catch (e) {
       setError(typeof e === 'string' ? e : String(e));
     } finally {

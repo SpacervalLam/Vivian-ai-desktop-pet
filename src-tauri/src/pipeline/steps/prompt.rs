@@ -998,7 +998,14 @@ impl PromptBuildingStep {
 
         // Self State 段落：角色自我状态快照（由 Brain 在 think 前注入 PipelineState）
         let private_self = self.persona.as_ref().map(|p|p.private_self_context()).unwrap_or_default();
-        let self_state = [state.self_state_text.as_str(), private_self.as_str()].into_iter()
+        let shared_language = if state.current_channel != "cross_character" && !state.is_command
+            && state.metadata["system_directive"] != true
+            && !crate::persona::example_retriever::source_transformation(&state.user_input) {
+            let recent: Vec<_> = state.messages.iter().rev().filter(|message|message.role == "assistant")
+                .take(6).map(|message|message.content.clone()).collect();
+            self.persona.as_ref().map(|persona|persona.shared_language.render(&state.user_input,&recent,&self.language)).unwrap_or_default()
+        } else { String::new() };
+        let self_state = [state.self_state_text.as_str(), private_self.as_str(), shared_language.as_str()].into_iter()
             .filter(|text|!text.trim().is_empty()).collect::<Vec<_>>().join("\n\n");
         let self_state_section = (!self_state.is_empty()).then_some(self_state);
 

@@ -132,28 +132,17 @@ impl MemoryRetrievalStep {
         self
     }
 
-    fn build_retrieval_query(state: &PipelineState) -> String {
-        let mut parts: Vec<String> = Vec::new();
-
-        if !state.resolved_user_input.is_empty() {
-            parts.push(format!("Resolved query: {}", state.resolved_user_input));
-        }
-        if !state.user_input.is_empty() {
-            parts.push(format!("Original query: {}", state.user_input));
-        }
-        if !state.intent.is_empty() {
-            parts.push(format!("Intent: {}", state.intent));
-        }
-
-        // A resolved query already names its subject. Only unresolved references
-        // need dialogue history; unrelated long answers must not steer recall.
-        if state.resolved_user_input.trim().is_empty()
+    fn build_retrieval_query(state: &PipelineState) -> crate::memory::recall_policy::RecallQuery {
+        let resolved = state.resolved_user_input.trim();
+        let has_resolution = !resolved.is_empty() && resolved != state.user_input.trim();
+        let focus = if has_resolution { resolved } else { &state.user_input };
+        let context = if !has_resolution
             && crate::pipeline::message_context::retrieval_needs_context(&state.user_input) {
-            let recent = crate::pipeline::message_context::recent_retrieval_context(&state.messages);
-            if !recent.is_empty() { parts.push(format!("Recent conversation:\n{recent}")); }
-        }
-
-        parts.join("\n\n")
+            crate::pipeline::message_context::recent_retrieval_topic(&state.messages, &state.user_input)
+        } else { String::new() };
+        let mut query = crate::memory::recall_policy::RecallQuery::new(focus, &context);
+        query.continuation = !has_resolution && crate::pipeline::message_context::is_short_followup(&state.user_input);
+        query
     }
 
     /// 收集多跳关联检索的查询词。
@@ -189,7 +178,7 @@ impl MemoryRetrievalStep {
 
 /// Typed, request-local base recall; never serialized into the prompt or shared globally.
 pub(super) struct PrefetchedMemory {
-    query: String,
+    query: crate::memory::recall_policy::RecallQuery,
     items: Vec<crate::memory::MemoryItem>,
     budget: crate::memory::retrieval_budget::Budget,
     ready_at: std::time::Instant,
@@ -237,7 +226,7 @@ impl MemoryRetrievalStep {
         // 兼容旧库：原先的 OS/话题/工具记录可能占据候选位，先多取再按陪伴记忆边界过滤。
         let limit = 24;
         let items = match retrieval_budget.run("base", std::time::Duration::from_millis(900),
-            || self.memory.search_memories(&retrieval_query, strategy, limit)).await {
+            || self.memory.search_turn_memories(&retrieval_query, strategy, limit)).await {
             Some(Ok(items)) => items,
             result => { tracing::warn!(?result, "[MemoryRetrieval] base arm unavailable; continuing without fabricated recall"); Vec::new() }
         };
@@ -250,6 +239,8 @@ impl MemoryRetrievalStep {
         let Some(PrefetchedMemory { query: retrieval_query, items, mut budget, ready_at }) = base else {
             return Ok(state.to_json());
         };
+        state.metadata["memory_query_components"] = json!(retrieval_query);
+        let retrieval_query = retrieval_query.effective_text().to_owned();
         budget.exclude_dependency_wait(ready_at);
         let mut retrieval_budget = budget;
         let strategy = self.strategy.unwrap_or(RetrievalStrategy::Auto);
@@ -442,6 +433,10 @@ impl MemoryRetrievalStep {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
+        let before_admission = filtered_items.len();
+        filtered_items = crate::memory::recall_policy::filter_for_query(filtered_items, &retrieval_query);
+        state.metadata["memory_admission"] = json!({"considered":before_admission,
+            "admitted":filtered_items.len(),"rejected":before_admission-filtered_items.len()});
         // 融合路径可能返回同一事实的原话、摘要和重复副本；运行时想法不能成为对话证据。
         filtered_items = crate::memory::companion_policy::dedup_recall(
             filtered_items, current_timestamp(), 5,
@@ -534,21 +529,11 @@ impl MemoryRetrievalStep {
             let stale_hint = staleness_text(mem.timestamp, now)
                 .map(|s| format!(" [{}]", s))
                 .unwrap_or_default();
-            // 置信度标记：combined_score 或 temporal_adjusted_score 低于阈值的标注 [需验证]
-            //
-            // ⚠️ 这里量的是**检索相关性**（这条记忆跟当前问题有多像），
-            // 不是**记忆本身可不可信**。两者是独立的：一条记忆可以字面高度匹配、
-            // 但已经被用户当面否认过。后者由下面的 evidence_hint 负责。
+            // Vector-only relevance is not proof of a remembered detail. Batch
+            // rank and age never become confidence labels; disputes stay separate.
             let confidence_hint = {
-                let score = mem
-                    .metadata
-                    .get("temporal_adjusted_score")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| mem.metadata.get("fused_score").and_then(|v| v.as_f64()))
-                    .or_else(|| mem.metadata.get("combined_score").and_then(|v| v.as_f64()))
-                    .unwrap_or(1.0);
-                if score < 0.3 {
-                    " [需验证]"
+                if mem.metadata["recall_admission"]["kind"] == "semantic" {
+                    " [语义关联，细节需核对]"
                 } else {
                     ""
                 }
@@ -1169,6 +1154,23 @@ impl Runnable for MemorySavingRunnable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_query_preserves_focus_and_only_borrows_history_for_unresolved_followups() {
+        let mut state = PipelineState { user_input:"展开讲讲".into(),
+            messages:vec![crate::types::response::ChatMessage::user("我最近在准备考研"),
+                crate::types::response::ChatMessage::assistant("无关产品介绍".repeat(1000))],
+            ..Default::default() };
+        let query = MemoryRetrievalStep::build_retrieval_query(&state);
+        assert_eq!(query.effective_text(),"我最近在准备考研");
+        assert!(query.continuation);
+        state.user_input = "iPhone 17 怎么样".into();
+        let query = MemoryRetrievalStep::build_retrieval_query(&state);
+        assert_eq!(query.focus,"iPhone 17 怎么样"); assert!(query.context.is_empty());
+        state.user_input = "它呢".into(); state.resolved_user_input = "考研进展".into();
+        let query = MemoryRetrievalStep::build_retrieval_query(&state);
+        assert_eq!(query.focus,"考研进展"); assert!(query.context.is_empty());
+    }
 
     #[tokio::test]
     async fn persisted_reply_is_the_presented_text_without_unpublished_drafts_or_templates() {
