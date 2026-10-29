@@ -1,5 +1,7 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/brain/coding_input_queue.rs"]
+pub mod coding_input_queue;
 #[path = "../src/utils/git_changes.rs"]
 pub mod git_changes;
 #[path = "../src/utils/async_ttl_cache.rs"]

@@ -587,6 +587,29 @@ pub fn coding_send_message(
     )
 }
 
+/// Read or update persisted pending input; only explicit actions may restart a paused queue.
+#[tauri::command]
+pub async fn coding_input_queue(
+    app: AppHandle, state: State<'_, Arc<AppState>>, session_id: String, action: String,
+    id: Option<String>, message: Option<String>, images: Option<Vec<crate::brain::coding_agent::CodingImage>>,
+    file_refs: Option<Vec<crate::brain::coding_agent::CodingFileRef>>,
+) -> Result<crate::brain::coding_input_queue::InputQueue<crate::brain::coding_agent::PendingInput>, String> {
+    let routing = if matches!(action.as_str(), "add" | "resume" | "steer") {
+        Some((state.model_router.read().clone().ok_or("模型路由未初始化（请先配置模型）")?,
+            state.tool_system.clone(), state.config.read().get_all().tools.max_coding_rounds as usize))
+    } else { None };
+    tokio::task::spawn_blocking(move || {
+        if action != "list" {
+            CODING_AGENT.change_input_queue(&session_id, &action, id.as_deref().unwrap_or(""), crate::brain::coding_agent::PendingInput {
+                content: message.unwrap_or_default(), images: images.unwrap_or_default(), file_refs: file_refs.unwrap_or_default(),
+            })?;
+            CODING_AGENT.emit_input_queue(&app, &session_id);
+            if let Some((router, tools, rounds)) = routing { CODING_AGENT.dispatch_input_queue(app, &session_id, router, tools, rounds); }
+        }
+        CODING_AGENT.input_queue(&session_id)
+    }).await.map_err(|error| error.to_string())?
+}
+
 /// Continue a canceled workflow from persisted history without a user message.
 #[tauri::command]
 pub fn coding_resume_session(

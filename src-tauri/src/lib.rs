@@ -566,6 +566,7 @@ pub fn run() {
             commands::coding_agent::coding_rename_session,
             commands::coding_agent::coding_cancel_session,
             commands::coding_agent::coding_send_message,
+            commands::coding_agent::coding_input_queue,
             commands::coding_agent::coding_resume_session,
             commands::coding_agent::coding_list_dir_tree,
             commands::coding_agent::coding_read_file,

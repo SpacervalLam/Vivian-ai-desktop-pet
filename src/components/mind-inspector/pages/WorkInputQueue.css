@@ -1,0 +1,15 @@
+.work-input-queue p { margin: 5px 12px; font-size: 12px; }
+.work-input-queue .codex-queue-card { max-height: min(320px, 40vh); overflow-y: auto; }
+.work-input-queue .codex-queue-head { position: sticky; top: 0; z-index: 1; background: var(--codex-paper-card); }
+.work-input-queue .codex-queue-btn { border: 0; background: transparent; padding: 0; }
+.work-input-queue .codex-queue-btn:hover:not(:disabled) { background: var(--codex-accent-soft); }
+.work-input-queue button:focus-visible, .work-input-queue textarea:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 1px; }
+.work-input-queue button:not(.codex-queue-btn) { border: 1px solid var(--codex-line); border-radius: 5px; background: var(--codex-paper-card); color: var(--codex-ink); padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.work-input-queue button:disabled { opacity: .5; cursor: default; }
+.work-input-queue .codex-queue-head { justify-content: space-between; }
+.work-input-hint { color: var(--codex-ink-faint); font-size: 11px; padding-left: 4px; }
+.work-input-queue [role="alert"] { color: var(--codex-danger); }
+.work-input-item + .work-input-item { border-top: 1px solid var(--codex-line-light); }
+.work-input-edit { padding: 5px; }
+.work-input-edit textarea { display: block; box-sizing: border-box; width: 100%; min-height: 70px; resize: vertical; margin-bottom: 6px; padding: 6px; font: inherit; font-size: 12px; color: var(--codex-ink); background: var(--codex-paper); border: 1px solid var(--codex-line); border-radius: 5px; }
+.work-input-edit button + button { margin-left: 5px; }

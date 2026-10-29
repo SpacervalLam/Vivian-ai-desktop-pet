@@ -399,9 +399,23 @@ pub struct ExtraWorkspace {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInput {
+    pub content: String,
+    #[serde(default)]
+    pub images: Vec<CodingImage>,
+    #[serde(default)]
+    pub file_refs: Vec<CodingFileRef>,
+}
+
+#[path = "coding_input_service.rs"]
+mod input_service;
+
 /// 编程会话。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodingSession {
+    #[serde(default)]
+    pub input_queue: super::coding_input_queue::InputQueue<PendingInput>,
     pub session_id: String,
     pub char_id: String,
     /// 会话是否由陪伴侧代表用户创建。
@@ -845,10 +859,16 @@ pub fn permission_to_access_level(permission: &str) -> crate::tools::types::Agen
 // ============================================================================
 
 fn default_history_loaded() -> bool { true }
+fn should_pause_input_queue(session: &CodingSession, status: CodingStatus, pending_jobs: bool) -> bool {
+    status != CodingStatus::Idle || session.resume_available || pending_jobs || !unfinished_todos(session).is_empty()
+        || session.task.as_ref().and_then(|task| task.result.as_ref())
+            .is_some_and(|result| result.contract_validated && result.status != TaskStatus::Completed)
+}
 impl CodingSession {
     pub fn message_count(&self) -> usize { if self.history_loaded { self.messages.len() } else { self.stored_message_count } }
 }
 fn normalize_session(session: &mut CodingSession) {
+    if !session.input_queue.items.is_empty() { session.input_queue.pause(true); }
     if session.updated_at > 0 && session.updated_at < 100_000_000_000 { session.updated_at *= 1000; }
     session.resume_available |= matches!(session.status, CodingStatus::Running | CodingStatus::Canceled);
     session.status = CodingStatus::Idle;
@@ -1047,6 +1067,7 @@ impl CodingAgentService {
     /// 新建会话。
     pub fn create_session(&self, char_id: &str, working_directory: &str, mode: &str) -> CodingSession {
         let session = CodingSession {
+            input_queue: Default::default(),
             session_id: format!("code-{}", uuid::Uuid::new_v4().simple()),
             char_id: char_id.to_string(),
             delegated_by_companion: false,
@@ -1745,9 +1766,9 @@ impl CodingAgentService {
         let canceled = {
             let mut guard = self.sessions.write();
             match guard.get_mut(session_id) {
-                Some(s) if s.status == CodingStatus::Running => {
-                    s.status = CodingStatus::Canceled;
-                    true
+                Some(s) => {
+                    s.input_queue.pause(true);
+                    if s.status == CodingStatus::Running { s.status = CodingStatus::Canceled; true } else { false }
                 }
                 _ => false,
             }
@@ -1762,8 +1783,8 @@ impl CodingAgentService {
             crate::brain::work_notices::global().drop_session(session_id);
             if let Some(run) = &cancellation { run.cancel(); }
             drop(cancellation);
-            self.persist();
         }
+        self.persist();
         canceled
     }
 
@@ -2164,14 +2185,31 @@ impl CodingAgentService {
         interjected: bool,
         guided: bool,
     ) -> Result<(), String> {
+        self.start_message(app, session_id, router, tool_system, text, images, file_refs, max_rounds, interjected, guided, None)
+    }
+
+    fn start_message(
+        self: &Arc<Self>, app: tauri::AppHandle, session_id: String, router: ModelRouter,
+        tool_system: Arc<ToolSystem>, mut text: String, mut images: Vec<CodingImage>,
+        mut file_refs: Vec<CodingFileRef>, max_rounds: usize, interjected: bool, mut guided: bool,
+        queued_id: Option<String>,
+    ) -> Result<(), String> {
         // 会话存在性 + 状态检查（Running 时拒绝新消息，前端按钮已禁用，这里兜底）
-        let (working_directory, extra_workspaces, run) = {
+        let (run, message_index, user_message) = {
             let mut guard = self.sessions.write();
             let s = guard.get_mut(&session_id).ok_or("会话不存在")?;
             if s.status == CodingStatus::Running {
                 return Err("会话正在处理上一条消息".into());
             }
+            if let Some(id) = queued_id.as_deref() {
+                if s.input_queue.paused { return Err("待发消息已暂停".into()); }
+                let input = s.input_queue.items.iter().find(|input| input.id == id).ok_or("消息已发送或已移除")?;
+                text = input.payload.content.clone(); images = input.payload.images.clone(); file_refs = input.payload.file_refs.clone();
+                guided = input.kind == super::coding_input_queue::InputKind::Steering;
+            }
             let run = self.active_runs.begin(&session_id).ok_or("上一轮正在停止，请稍后再试")?;
+            let resolved_refs = resolve_file_refs(&s.working_directory, &s.extra_workspaces, file_refs);
+            if let Some(id) = queued_id.as_deref() { s.input_queue.remove(id)?; }
             s.status = CodingStatus::Running;
             s.resume_available = false;
             if !text.trim_start().starts_with('/') {
@@ -2185,12 +2223,19 @@ impl CodingAgentService {
                 let t: String = text.chars().take(SESSION_TITLE_MAX_CHARS).collect();
                 s.title = t;
             }
-            (s.working_directory.clone(), s.extra_workspaces.clone(), run)
+            let user_message = CodingMessage {
+                role: CodingRole::User, content: text.clone(), images: if images.is_empty() { None } else { Some(images.clone()) },
+                file_refs: if resolved_refs.is_empty() { None } else { Some(resolved_refs) }, widgets: None,
+                interjected: interjected.then_some(true), guided: guided.then_some(true), tool_name: None,
+                tool_arguments: None, tool_success: None, tool_call_id: None, timestamp: chrono::Utc::now().timestamp_millis(),
+            };
+            let message_index = s.messages.len();
+            s.messages.push(user_message.clone());
+            s.updated_at = chrono::Utc::now().timestamp_millis();
+            (run, message_index, user_message)
         };
         // A fresh invocation invalidates undelivered state from the previous turn.
         super::work_notices::global().drop_session(&session_id);
-        // 文件引用：解析路径并读取内容（工作区归属校验 + 数量/长度上限）
-        let resolved_refs = resolve_file_refs(&working_directory, &extra_workspaces, file_refs);
 
         let audit_payload = serde_json::json!({
             "interjected":interjected,"guided":guided,"max_rounds":max_rounds,
@@ -2201,32 +2246,15 @@ impl CodingAgentService {
         });
         let audit_context = super::coding_event_log::begin_turn(&session_id, audit_payload);
 
-        self.push_message(
-            &session_id,
-            CodingMessage {
-                role: CodingRole::User,
-                content: text.clone(),
-                images: if images.is_empty() { None } else { Some(images.clone()) },
-                file_refs: if resolved_refs.is_empty() {
-                    None
-                } else {
-                    Some(resolved_refs)
-                },
-                widgets: None,
-                interjected: if interjected { Some(true) } else { None },
-                guided: if guided { Some(true) } else { None },
-                tool_name: None,
-                tool_arguments: None,
-                tool_success: None,
-                tool_call_id: None,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            },
-        );
+        super::coding_event_log::record(&session_id, None, "message_added", serde_json::json!({
+            "message_index":message_index,"role":"user","content":text,"interjected":interjected,"guided":guided,"queued_id":queued_id,
+        }));
         // Persist the invocation boundary before any asynchronous execution.
         self.persist();
+        self.emit_input_queue(&app, &session_id);
         let _ = app.emit(
             "coding:user_message",
-            serde_json::json!({ "session_id": session_id, "content": text, "images": images }),
+            serde_json::json!({ "session_id": session_id, "content": text, "images": images, "guided":guided, "queued_id":queued_id, "message":user_message }),
         );
 
         // 斜杠命令：拦截分发，不走 agent loop（同步命令即时处理，/compact 异步 LLM 摘要）
@@ -2242,6 +2270,7 @@ impl CodingAgentService {
                     _ = svc.handle_slash_command(app_clone.clone(), &session_id, &router, &cmd_text) => {},
                 }
                 drop(run);
+                svc.dispatch_input_queue(app_clone, &session_id, router, tool_system, max_rounds);
                 }).await;
             });
             return Ok(());
@@ -2354,6 +2383,7 @@ impl CodingAgentService {
                 );
             }
             Err(e) => {
+                if let Some(session) = self.sessions.write().get_mut(session_id) { session.input_queue.pause(true); }
                 self.push_message(
                     session_id,
                     CodingMessage {
@@ -2938,11 +2968,12 @@ impl CodingAgentService {
         let canceled = tokio::select! {
             biased;
             _ = run.cancelled() => { self.finish_canceled_turn(app.clone(), session_id); true },
-            _ = self.run_loop_inner(app.clone(), session_id, router, tool_system, max_rounds) => self.is_canceled(session_id),
+            _ = self.run_loop_inner(app.clone(), session_id, router, tool_system.clone(), max_rounds) => self.is_canceled(session_id),
         };
         drop(run);
         // A user stop must not start another model request for a memory summary.
         if canceled { return; }
+        let completed_session = self.get_session(session_id);
 
         // 本轮结束（含正常/取消/错误所有出口）：异步摘要入库，不阻塞会话
         let svc = Arc::clone(self);
@@ -2950,8 +2981,9 @@ impl CodingAgentService {
         let router_clone = router.clone();
         let sid = session_id.to_string();
         tauri::async_runtime::spawn(async move {
-            svc.summarize_turn_to_memory(app_clone, &sid, &router_clone).await;
+            if let Some(session) = completed_session { svc.summarize_turn_to_memory(app_clone, &sid, &router_clone, session).await; }
         });
+        self.dispatch_input_queue(app, session_id, router.clone(), tool_system, max_rounds);
     }
 
     /// Direct work is adaptive: inspect results before choosing subsequent steps.
@@ -3146,6 +3178,7 @@ impl CodingAgentService {
             definitions.push(task_return_definition());
             // 智能压缩：上轮请求真实上下文接近窗口上限时自动归档早期历史为摘要，
             // 防止多轮工具调用的历史累积超出模型上下文窗口
+            self.consume_steering(&app, session_id);
             let user_revision = self.sessions.read().get(session_id).map(|s| s.messages.iter().filter(|m| m.role == CodingRole::User).count()).unwrap_or(0);
             let mut messages = self.build_llm_messages(session_id, &char_id, &mode);
             append_work_tool_index(&mut messages, &display_available, &definitions);
@@ -3483,6 +3516,7 @@ impl CodingAgentService {
                 step_usage.clone(),
             );
 
+            self.consume_steering(&app, session_id);
             if self.sessions.read().get(session_id).is_some_and(|s| s.messages.iter().filter(|m| m.role == CodingRole::User).count() != user_revision) {
                 pending_hint.offer(5, "[用户补充] 用户刚刚补充了要求，请先阅读最新消息，再决定下一步；上一份尚未执行的调用已作废。".into());
                 continue;
@@ -3866,12 +3900,16 @@ impl CodingAgentService {
         // 本轮改动清单挂到「本轮最后一条用户消息之后的那条助手消息」上。
         // 由宿主按工具实际执行结果生成，不依赖模型在正文里自述改了哪些文件。
         let changed = self.take_turn_changed_files(session_id);
+        let pending_jobs = !super::work_jobs::global_work_job_registry().pending_for(session_id).is_empty();
         {
             let mut guard = self.sessions.write();
             if let Some(s) = guard.get_mut(session_id) {
                 // Canceled 保留标记（前端可感知），下次发消息时重置为 Running
                 s.status = status;
                 s.resume_available |= status == CodingStatus::Canceled;
+                if should_pause_input_queue(s, status, pending_jobs) {
+                    s.input_queue.pause(true);
+                }
                 if !changed.is_empty() {
                     let start = s
                         .messages
@@ -3890,9 +3928,10 @@ impl CodingAgentService {
         }
         self.persist();
         let stats = self.stats_snapshot(session_id);
+        self.emit_input_queue(&app, session_id);
         let _ = app.emit(
             "coding:turn_done",
-            serde_json::json!({ "session_id": session_id, "stats": stats,
+            serde_json::json!({ "session_id": session_id, "stats": stats, "status":status,
                 "resume_available": self.sessions.read().get(session_id).is_some_and(|s| s.resume_available),
                 "task_result": self.sessions.read().get(session_id).and_then(|s| s.task.as_ref()).and_then(|t| t.result.clone()) }),
         );
@@ -4234,15 +4273,15 @@ impl CodingAgentService {
         app: tauri::AppHandle,
         session_id: &str,
         router: &ModelRouter,
+        session: CodingSession,
     ) {
-        let Some(session) = self.get_session(session_id) else { return };
         // 本轮切片：从最后一条用户消息起（send_message 每轮恰好 push 一条 User）
-        let turn_start = session
+        let turn_start = session.task.as_ref().map(|task| task.start_message).unwrap_or_else(|| session
             .messages
             .iter()
             .rposition(|m| m.role == CodingRole::User)
-            .unwrap_or(0);
-        let slice = &session.messages[turn_start..];
+            .unwrap_or(0));
+        let slice = &session.messages[turn_start.min(session.messages.len())..];
         if slice.is_empty() {
             return;
         }
@@ -6421,6 +6460,7 @@ mod compaction_boundary_tests {
     #[test]
     fn reasoning_roundtrip_and_repeated_compaction_keep_full_history() {
         let mut session = CodingSession {
+            input_queue: Default::default(),
             session_id: "test".into(), char_id: "vivian".into(), delegated_by_companion: false,
             working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
             mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
@@ -6470,6 +6510,7 @@ mod compaction_boundary_tests {
     #[test]
     fn compaction_preserves_messages_appended_during_summary() {
         let mut session = CodingSession {
+            input_queue: Default::default(),
             session_id: "test".into(), char_id: "vivian".into(), delegated_by_companion: false,
             working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
             mode: "standard".into(), permission: "workspace_write".into(), model_id: None,

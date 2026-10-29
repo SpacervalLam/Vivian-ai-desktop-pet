@@ -184,6 +184,7 @@ fn head(mut value: Value) -> Value {
         object.insert("messages".into(), serde_json::json!([]));
         object.insert("history_loaded".into(), false.into());
         for key in [
+            "input_queue",
             "file_changes",
             "message_changes",
             "message_feedback",
@@ -403,6 +404,19 @@ pub fn load<T: DeserializeOwned>(dir: &Path) -> Option<Vec<T>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queued_attachments_stay_in_the_history_body_and_out_of_sidebar_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = serde_json::json!({"session_id":"queued","messages":[],"input_queue":{
+            "revision":3,"paused":true,"recent_ids":["accepted"],"items":[{"id":"accepted","payload":{"images":[{"data":"IMAGE_BYTES"}],"content":"pending"}}]
+        }});
+        save(dir.path(), || vec![("queued".into(), payload.clone())]).unwrap();
+        let body: Value = read_one(dir.path(), "queued").unwrap();
+        assert_eq!(body["input_queue"], payload["input_queue"]);
+        let heads = load_heads::<Value>(dir.path()).unwrap().unwrap();
+        assert!(heads[0].1.get("input_queue").is_none());
+        assert!(!std::fs::read_to_string(dir.path().join("index.json")).unwrap().contains("IMAGE_BYTES"));
+    }
     #[test]
     fn delta_index_preserves_checkpoints_and_rejects_damaged_journal() {
         let dir = tempfile::tempdir().unwrap();

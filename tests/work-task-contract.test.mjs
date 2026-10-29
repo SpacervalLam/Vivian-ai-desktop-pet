@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 // linking Tauri. Only platform/provider adapters are substituted. Desktop type
 // compatibility is checked separately with cargo check --tests.
 const source = (await readFile('src-tauri/src/brain/coding_agent.rs', 'utf8')).replaceAll('\r\n', '\n');
+const inputService = (await readFile('src-tauri/src/brain/coding_input_service.rs', 'utf8')).replaceAll('\r\n', '\n');
 const child = (await readFile('src-tauri/src/brain/coding_subagent.rs', 'utf8')).replaceAll('\r\n', '\n');
 
 function endOf(text, start, block = true) {
@@ -44,7 +45,7 @@ const constant = name => {
   return source.slice(start, endOf(source, start, false));
 };
 const modulePath = name => JSON.stringify(path.resolve(`src-tauri/src/brain/${name}.rs`).replaceAll('\\', '/'));
-const types = ['CodingImage', 'CodingWidget', 'CodingFileRef', 'CodingMessage', 'CodingTokenUsage',
+const types = ['PendingInput', 'CodingImage', 'CodingWidget', 'CodingFileRef', 'CodingMessage', 'CodingTokenUsage',
   'CodingStats', 'ExtraWorkspace', 'CodingSession', 'WorkTodo', 'FileChange', 'CodingFileChangeView']
   .map(name => item(source, `pub struct ${name} {`, true)).join('\n');
 const requestView = item(source, 'struct WorkRequestView {');
@@ -104,6 +105,8 @@ pub mod tools {
   }
 }
 pub mod brain {
+  #[path=${modulePath('coding_input_queue')}] pub mod coding_input_queue;
+  #[path=${modulePath('coding_io')}] pub mod coding_io;
   #[path=${modulePath('work_harness')}] pub mod work_harness;
   #[path=${modulePath('coding_cancel')}] pub mod coding_cancel;
   #[path=${modulePath('work_contract')}] pub mod work_contract;
@@ -149,15 +152,17 @@ pub mod brain {
     use serde::{Serialize,Deserialize}; use std::sync::Arc;
     use crate::types::response::{ChatMessage,MessageToolCall};
     use super::work_contract::{self,Artifact,Evidence,TaskResult,TaskStatus,WorkTask};
+    use super::coding_input_queue::InputQueue;
+    ${item(inputService, 'fn validate(')}
     ${types}\n${enums}\n${requestView}
     ${item(source, "pub struct WorkMemoryDocument {", true)}
     static MEMORY_POLICY_GATE: std::sync::LazyLock<parking_lot::Mutex<()>> = std::sync::LazyLock::new(Default::default);
     ${['default_context_window_tokens', 'default_mode', 'default_permission', 'default_reasoning_level', 'default_history_loaded', 'default_work_todo_status'].map(fn).join('\n')}
     ${item(source, 'impl WorkTodo {')}
     ${fn('normalize_session')}\n${fn('restored_session')}
-    ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}
+    ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}\n${fn('should_pause_input_queue')}
     ${fn('web_capability_section')}
-    ${['TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
+    ${['FILE_REF_MAX_COUNT','TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
     static MEMORY_TEST_DATA: once_cell::sync::Lazy<tempfile::TempDir> = once_cell::sync::Lazy::new(||tempfile::tempdir().unwrap());
     fn get_user_data_dir()->std::path::PathBuf {MEMORY_TEST_DATA.path().to_path_buf()}
     ${fn('global_work_memory_path')}
@@ -173,6 +178,8 @@ pub mod brain {
     struct CodingAgentService {active_runs:Arc<super::coding_cancel::Runs>,sessions:RwLock<BTreeMap<String,CodingSession>>}
     impl CodingAgentService {
       fn persist(&self) {}
+      ${item(inputService, 'pub fn input_queue(')}
+      ${item(inputService, 'pub fn change_input_queue(').replace('super::super::coding_io::flush()', 'super::coding_io::flush()')}
       fn get_session(&self,id:&str)->Option<CodingSession> {self.sessions.read().get(id).cloned()}
       ${pubFn('set_memory_policy')}
       ${pubFn('memory_documents')}
@@ -186,6 +193,55 @@ pub mod brain {
       ${fn('settle_unvalidated_task')}
     }
     #[cfg(test)] mod tests {use super::*; ${fn('message')} ${fn('test_session')} ${tests}
+      #[test] fn queue_pauses_for_interruptions_and_open_work_without_changing_task_verdicts() {
+        let mut session=test_session("pause-policy","",0);
+        session.task=Some(WorkTask::new("goal".into(),0));
+        session.task.as_mut().unwrap().settle(work_contract::unvalidated_return("plain reply".into(),TaskStatus::Partial,vec!["not verified".into()],vec![]));
+        assert!(!should_pause_input_queue(&session,CodingStatus::Idle,false));
+        assert_eq!(session.task.as_ref().unwrap().status,TaskStatus::Partial);
+        assert!(should_pause_input_queue(&session,CodingStatus::Canceled,false));
+        assert!(should_pause_input_queue(&session,CodingStatus::Idle,true));
+        session.resume_available=true;assert!(should_pause_input_queue(&session,CodingStatus::Idle,false));session.resume_available=false;
+        session.task.as_mut().unwrap().result.as_mut().unwrap().contract_validated=true;
+        assert!(should_pause_input_queue(&session,CodingStatus::Idle,false));
+        session.task.as_mut().unwrap().result.as_mut().unwrap().status=TaskStatus::Completed;
+        assert!(!should_pause_input_queue(&session,CodingStatus::Idle,false));
+      }
+      #[test] fn host_input_queue_keeps_attachments_edits_and_restart_pause() {
+        let service=CodingAgentService {active_runs:Default::default(),sessions:RwLock::new(BTreeMap::from([("a".into(),test_session("a","",0)),("b".into(),test_session("b","",0))]))};
+        let id=uuid::Uuid::new_v4().to_string();
+        let payload=PendingInput {content:"initial".into(),images:vec![CodingImage {media_type:"image/png".into(),data:"BASE64".into(),name:Some("image".into())}],file_refs:vec![CodingFileRef {path:"src/a.rs".into(),content:None,error:None}]};
+        service.change_input_queue("a","add",&id,payload.clone()).unwrap();
+        service.change_input_queue("a","add",&id,payload.clone()).unwrap();
+        assert_eq!(service.input_queue("a").unwrap().items.len(),1);
+        service.change_input_queue("a","edit",&id,PendingInput {content:"edited".into(),images:vec![],file_refs:vec![]}).unwrap();
+        service.change_input_queue("a","steer",&id,payload.clone()).unwrap();
+        let queue=service.input_queue("a").unwrap();
+        assert_eq!(queue.items[0].payload.content,"edited");
+        assert_eq!(queue.items[0].payload.images[0].data,"BASE64");
+        assert_eq!(queue.items[0].payload.file_refs[0].path,"src/a.rs");
+        assert_eq!(queue.items[0].kind,super::super::coding_input_queue::InputKind::Steering);
+        assert!(service.input_queue("b").unwrap().items.is_empty());
+        let mut current=service.get_session("a").unwrap(); current.status=CodingStatus::Running;
+        let decoded:CodingSession=serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        let restored=restored_session(decoded);
+        assert!(restored.input_queue.paused && restored.input_queue.next().is_none());
+        assert!(restored.resume_available);
+        assert_eq!(restored.input_queue.items[0].payload.images[0].data,"BASE64");
+        service.change_input_queue("a","remove",&id,payload.clone()).unwrap();
+        assert!(service.change_input_queue("a","edit",&id,payload).is_err());
+      }
+      #[test] fn concurrent_queue_additions_preserve_every_unique_message() {
+        let service=Arc::new(CodingAgentService {active_runs:Default::default(),sessions:RwLock::new(BTreeMap::from([("a".into(),test_session("a","",0))]))});
+        let threads:Vec<_>=(0..16).map(|index| {let service=service.clone();std::thread::spawn(move || {
+          let id=uuid::Uuid::new_v4().to_string();let payload=PendingInput {content:format!("item {index}"),images:vec![],file_refs:vec![]};
+          service.change_input_queue("a","add",&id,payload.clone()).unwrap();
+          service.change_input_queue("a","add",&id,payload).unwrap();
+        })}).collect();
+        for thread in threads {thread.join().unwrap();}
+        let queue=service.input_queue("a").unwrap(); assert_eq!(queue.items.len(),16);
+        assert_eq!(queue.items.iter().map(|item|&item.id).collect::<std::collections::HashSet<_>>().len(),16);
+      }
       #[test] fn memory_controls_persist_independently_and_revoke_old_jobs() {
         let mut session=test_session("memory-controls","",0);
         session.role_memory_context="stale role memory".into();

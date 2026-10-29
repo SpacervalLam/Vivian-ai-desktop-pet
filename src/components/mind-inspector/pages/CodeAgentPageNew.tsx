@@ -20,11 +20,11 @@ import { open as openDialog, save as saveDialog, confirm as confirmDialog } from
 import { raiseWindow } from '../../../utils/windowRaiser';
 import { reportInspectorSession } from '../../../utils/inspectorAttention';
 import {
-  Plus, Trash2, ChevronDown, ChevronRight, Loader2,
+  Plus, ChevronDown, ChevronRight, Loader2,
   FileText, FilePlus, FileEdit, Terminal as TerminalIcon, Search, FolderTree,
   Wrench, FolderOpen, Braces, XCircle, X, Globe,
   Folder, Lock, Shield, Sparkles, Check, Cpu, Zap, Code2,
-  Activity, Send, Square, Play, ArrowUp, List,
+  Activity, Send, Square, Play, List,
   PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen,
   Goal, ClipboardList, History, MessageSquare, Download, Copy, ThumbsUp, ThumbsDown, GitFork, Mic, Brain,
   HelpCircle, FileDiff, Settings, File as FileIcon, Info, StickyNote, Maximize2, Minimize2,
@@ -35,6 +35,8 @@ import { workActivitySummary } from './workActivitySummary';
 import './workflowStrings';
 import './browserStrings';
 import SessionSearch from './SessionSearch';
+import useWorkInputQueue from './useWorkInputQueue';
+import WorkInputQueue from './WorkInputQueue';
 import WorkMemoryPanel from './WorkMemoryPanel';
 import SessionSidebar from './SessionSidebar';
 import { mergeSidebarSessions } from './sessionSidebarModel';
@@ -3561,9 +3563,8 @@ const CodeAgentPage: React.FC = () => {
   const [msgFeedback, setMsgFeedback] = useState<Record<number, string>>({});
   const [stats, setStats] = useState<CodingStats | null>(null);
   const [deliverables, setDeliverables] = useState<string[]>([]);
-  const [queue, setQueue] = useState<string[]>([]);
-  // 引导消息：不打断当前任务，待当前 run 结束后优先发送（后端加"引导"标注）
-  const guideRef = useRef<string | null>(null);
+  const pendingInputs = useWorkInputQueue(activeId);
+  const queue = pendingInputs.queue.items;
   const resumeStartedAtRef = useRef<number | null>(null);
   const [turnStart, setTurnStart] = useState<number | null>(null);
   const [turnElapsed, setTurnElapsed] = useState(0);
@@ -4301,7 +4302,6 @@ const CodeAgentPage: React.FC = () => {
     setStreamingText('');
     setThinkingText('');
     setStats(s.stats ?? null);
-    setQueue([]);
     // 切换会话清空预览页签
     setPreviewTabs([]);
     setActivePreview(null);
@@ -4397,7 +4397,6 @@ const CodeAgentPage: React.FC = () => {
     setStreamingText('');
     setThinkingText('');
     setStats(null);
-    setQueue([]);
     setPreviewTabs([]);
     setActivePreview(null);
     inputRef.current?.focus();
@@ -4528,7 +4527,29 @@ const CodeAgentPage: React.FC = () => {
     const hasRefs = draftRefs.length > 0;
     if (!text && !hasImages && !hasRefs) return;
     if (running) {
-      if (text) setQueue((q) => [...q, text]);
+      const sid = activeIdRef.current;
+      if (!sid) return;
+      const sentImages = draftImages, sentRefs = draftRefs;
+      try {
+        const images = await Promise.all(sentImages.map(async draft => ({
+          media_type: draft.file.type, data: await fileToBase64(draft.file), name: draft.file.name || null,
+        })));
+        await pendingInputs.enqueue({ content: text, images, file_refs: sentRefs.map(ref => ({ path: ref.path })) });
+        const matches = (draft: ComposerDraft) => draft.text === input && draft.images === sentImages && draft.refs === sentRefs;
+        let acceptedDraft = false;
+        if (activeIdRef.current === sid && composerDraftRef.current.text === input
+          && composerDraftRef.current.images === sentImages && composerDraftRef.current.refs === sentRefs) {
+          setInput(''); setDraftImages([]); setDraftRefs([]);
+          acceptedDraft = true;
+        } else if (activeIdRef.current !== sid) {
+          const saved = viewDraftsRef.current.get(sid);
+          if (saved && matches(saved)) {
+            viewDraftsRef.current.set(sid, { text: '', images: [], refs: [] });
+            acceptedDraft = true;
+          }
+        }
+        if (acceptedDraft) for (const image of sentImages) URL.revokeObjectURL(image.previewUrl);
+      } catch (error) { notifyError(String(error)); }
       return;
     }
     // 无工作模型时无法路由：先判模型再建会话，否则会白留一个空会话在侧边栏
@@ -4590,51 +4611,7 @@ const CodeAgentPage: React.FC = () => {
       setMessages((prev) => [...prev, { role: 'error', content: String(e), timestamp: Date.now() }]);
       setRunning(false);
     }
-  }, [input, running, draftImages, draftRefs, ensureSession, loadActiveModelId, notifyError]);
-
-  useEffect(() => {
-    if (running || !activeId) return;
-    // 引导消息：优先于普通排队消息，当前任务结束后发送（后端加"引导"标注）
-    const guide = guideRef.current;
-    if (guide !== null) {
-      guideRef.current = null;
-      setRunning(true);
-      setBudgetStopped(false);
-      setBudgetHint(false);
-      atBottomRef.current = true;
-      setAtBottom(true);
-      setMessages((prev) => [...prev, { role: 'user', content: guide, timestamp: Date.now() }]);
-      void (async () => {
-        try {
-          // guided: 用户给出的引导，后端构建 LLM 上下文时加引导标注
-          await invoke('coding_send_message', { sessionId: activeId, message: guide, guided: true });
-        } catch (e) {
-          setMessages((prev) => [...prev, { role: 'error', content: String(e), timestamp: Date.now() }]);
-          setRunning(false);
-        }
-      })();
-      return;
-    }
-    if (queue.length === 0) return;
-    const [next, ...rest] = queue;
-    setQueue(rest);
-    setRunning(true);
-    setBudgetStopped(false);
-    setBudgetHint(false);
-    atBottomRef.current = true;
-    setAtBottom(true);
-    setMessages((prev) => [...prev, { role: 'user', content: next, timestamp: Date.now() }]);
-    void (async () => {
-      try {
-        // interjected: 任务执行期间排队的插话，后端构建 LLM 上下文时加插话标注
-        await invoke('coding_send_message', { sessionId: activeId, message: next, interjected: true });
-      } catch (e) {
-        setMessages((prev) => [...prev, { role: 'error', content: String(e), timestamp: Date.now() }]);
-        setRunning(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, queue, activeId]);
+  }, [input, running, draftImages, draftRefs, ensureSession, loadActiveModelId, notifyError, pendingInputs.enqueue]);
 
   useEffect(() => {
     if (running) {
@@ -4679,25 +4656,6 @@ const CodeAgentPage: React.FC = () => {
       notifyError(String(error));
     }
   }, [activeId, turnStart, notifyError]);
-
-  /** 引导：不打断当前任务，把该条标记为引导消息，待当前 run 结束后优先发送（后端加引导标注）。 */
-  const handleGuideSend = useCallback((index: number) => {
-    if (!activeId) return;
-    const target = queue[index];
-    if (target === undefined) return;
-    setQueue((prev) => prev.filter((_, j) => j !== index));
-    guideRef.current = target;
-  }, [activeId, queue]);
-
-  /** 编辑待发消息：写回输入框并移出队列。 */
-  const handleEditQueued = useCallback((index: number) => {
-    setQueue((prev) => {
-      const target = prev[index];
-      if (target !== undefined) setInput(target);
-      return prev.filter((_, j) => j !== index);
-    });
-    inputRef.current?.focus();
-  }, []);
 
   /** 复制消息内容到剪贴板。 */
   const handleCopyMessage = useCallback((content: string) => {
@@ -4752,6 +4710,7 @@ const CodeAgentPage: React.FC = () => {
   useEffect(() => {
     const unlistens: UnlistenFn[] = [];
     let cancelled = false;
+    let inputEpoch = 0;
     void (async () => {
       const add = async (name: string, handler: (payload: unknown) => void) => {
         const un = await listen(name, (e) => handler(e.payload));
@@ -4788,6 +4747,7 @@ const CodeAgentPage: React.FC = () => {
       });
       await add('coding:thinking', (p) => {
         if (!isMine(p)) return;
+        inputEpoch += 1;
         setThinking(true);
         setThinkingText('');
       });
@@ -4863,6 +4823,14 @@ const CodeAgentPage: React.FC = () => {
         setThinkingText('');
         setStreamingText('');
         setBudgetStopped(false);
+      });
+      await add('coding:user_message', (p) => {
+        if (!isMine(p)) return;
+        inputEpoch += 1;
+        const payload = p as { queued_id?: string; message?: CodingMessage; content?: string; images?: CodingImageView[]; guided?: boolean };
+        if (!payload.queued_id) return;
+        append(payload.message ?? { role: 'user', content: payload.content ?? '', images: payload.images, guided: payload.guided, interjected: true, timestamp: Date.now() });
+        setRunning(true);
       });
       await add('coding:companion_instruction', (p) => {
         if (!isMine(p)) return;
@@ -4943,14 +4911,15 @@ const CodeAgentPage: React.FC = () => {
       });
       await add('coding:turn_done', (p) => {
         if (!isMine(p)) return;
+        const inputEpochAtEnd = inputEpoch;
         setThinking(false);
         setThinkingText('');
         setCompacting(false);
         setStreamingText('');
         setRunning(false);
-        const { stats: turnStats, resume_available } = p as { stats?: CodingStats | null; resume_available?: boolean };
+        const { stats: turnStats, resume_available, status } = p as { stats?: CodingStats | null; resume_available?: boolean; status?: CodingSession['status'] };
         setSessions(previous => previous.map(session => session.session_id === activeIdRef.current
-          ? { ...session, status: 'idle', resume_available: resume_available ?? false } : session));
+          ? { ...session, status: status ?? 'idle', resume_available: resume_available ?? false } : session));
         if (turnStats) setStats(turnStats);
         void (async () => {
           const id = activeIdRef.current;
@@ -4958,9 +4927,10 @@ const CodeAgentPage: React.FC = () => {
           await refreshSessions();
           if (!id) return;
           const cur = (await invoke<CodingSession[]>('coding_list_sessions', { sessionId: id }))[0];
-          if (cur && activeIdRef.current === id && selection === sessionSelection.current) {
+          if (cur && activeIdRef.current === id && selection === sessionSelection.current && inputEpochAtEnd === inputEpoch) {
             setSessions(previous => previous.map(s => s.session_id === id ? cur : s));
             setMessages(cur.messages ?? []);
+            setRunning(cur.status === 'running');
             setStats(cur.stats ?? turnStats ?? null);
             setDeliverables(cur.deliverables ?? []);
           }
@@ -5415,48 +5385,7 @@ const CodeAgentPage: React.FC = () => {
           ))}
         </div>
       )}
-      {queue.length > 0 && (
-        <div className="codex-queue">
-          <div className="codex-queue-card">
-            <div className="codex-queue-head">
-              <span className="codex-queue-label">{t('mind_inspector.code_queue_label')}</span>
-              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--codex-ink)' }}>{t('mind_inspector.code_queue_count', { n: queue.length })}</span>
-            </div>
-            {queue.map((q, i) => (
-              <div key={`${i}-${q.slice(0, 12)}`} className="codex-queue-row">
-                <span className="codex-queue-num">#{i + 1}</span>
-                <span className="codex-queue-text">{q}</span>
-                <span className="codex-queue-actions">
-                  <button
-                    type="button"
-                    title={t('mind_inspector.code_queue_guide')}
-                    onClick={() => handleGuideSend(i)}
-                    className="codex-queue-btn codex-queue-btn-send"
-                  >
-                    <ArrowUp size={14} strokeWidth={2.4} />
-                  </button>
-                  <button
-                    type="button"
-                    title={t('mind_inspector.code_queue_edit')}
-                    onClick={() => handleEditQueued(i)}
-                    className="codex-queue-btn"
-                  >
-                    <FileEdit size={13} />
-                  </button>
-                  <button
-                    type="button"
-                    title={t('mind_inspector.code_queue_remove')}
-                    onClick={() => setQueue((prev) => prev.filter((_, j) => j !== i))}
-                    className="codex-queue-btn codex-queue-btn-remove"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      <WorkInputQueue key={activeId ?? 'draft'} controller={pendingInputs} />
       <div className="codex-composer-input-row" ref={composerRef}>
         <ComposerEditor
           ref={inputRef}
@@ -6100,9 +6029,9 @@ const CodeAgentPage: React.FC = () => {
                     {t('mind_inspector.code_msg_queue')}
                   </div>
                   {queue.map((q, i) => (
-                    <div key={`${i}-${q.slice(0, 12)}`} className="codex-info-row">
+                    <div key={q.id} className="codex-info-row">
                       <span className="codex-info-key">#{i + 1}</span>
-                      <span className="codex-info-value">{q}</span>
+                      <span className="codex-info-value">{q.payload.content}</span>
                     </div>
                   ))}
                 </div>
