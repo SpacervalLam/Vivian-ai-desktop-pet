@@ -18,6 +18,18 @@ use std::process::{Command, Stdio};
 
 use serde::Serialize;
 
+#[tauri::command]
+pub async fn git_changed_files(working_directory: String, scope: String) -> Result<crate::utils::git_changes::ChangesSnapshot, String> {
+    tokio::task::spawn_blocking(move || crate::utils::git_changes::changes(&working_directory, &scope))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn git_file_diff(working_directory: String, path: String, scope: String) -> Result<crate::utils::git_changes::FileDiff, String> {
+    tokio::task::spawn_blocking(move || crate::utils::git_changes::diff(&working_directory, &path, &scope))
+        .await.map_err(|e| e.to_string())?
+}
+
 // ============ 进程调用 ============
 
 /// Windows 下隐藏 git 弹出的控制台窗口。

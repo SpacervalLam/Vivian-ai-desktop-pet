@@ -1,5 +1,7 @@
 //! Test the application's actual portable modules without starting Tauri or accessing user data.
 #![allow(dead_code)]
+#[path = "../src/utils/git_changes.rs"]
+pub mod git_changes;
 #[path = "../src/utils/async_ttl_cache.rs"]
 pub mod async_ttl_cache;
 #[path = "../src/world/desktop_state.rs"]

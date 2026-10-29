@@ -1,0 +1,41 @@
+.change-review { display: flex; flex-direction: column; gap: 10px; padding: 12px; color: var(--codex-ink); font-size: 12px; min-width: 0; }
+.change-review button { color: inherit; font: inherit; border: 1px solid var(--codex-line); background: var(--codex-paper); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
+.change-review button:disabled { opacity: .5; cursor: default; }
+.change-review button:hover:not(:disabled), .change-review button[aria-pressed="true"] { background: var(--codex-accent-soft); }
+.change-review button:focus-visible, .change-review input:focus-visible, .change-review textarea:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 1px; }
+.change-review-heading, .change-review-path, .change-review-comments article > div { display: flex; align-items: center; gap: 7px; }
+.change-review-heading strong, .change-review-path > span, .change-review-comments article > div > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.change-review-heading button { display: flex; }
+.change-review-scopes { display: flex; gap: 5px; }
+.change-review-scopes button { flex: 1; }
+.change-review input, .change-review textarea { box-sizing: border-box; width: 100%; color: var(--codex-ink); background: var(--codex-paper); border: 1px solid var(--codex-line); border-radius: 5px; padding: 7px; font: inherit; }
+.change-review p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
+.change-review-hint { color: var(--codex-ink-faint); }
+.change-review-error, .change-review-conflict { color: var(--codex-danger); }
+.change-review-error button { margin-left: 8px; }
+.change-review-files { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.change-review-files button { display: flex; gap: 8px; text-align: left; border-color: transparent; align-items: baseline; }
+.change-review-files button.selected { border-color: var(--codex-line); background: var(--codex-accent-soft); }
+.change-review-files button > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; flex: 1; }
+.change-review-status, .change-review-conflict { white-space: pre; font-family: monospace; }
+.change-review-detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.change-review-path { padding: 7px 0; border-top: 1px solid var(--codex-line); }
+.change-review-path button { flex-shrink: 0; }
+.change-review-diff { overflow: auto; max-height: 480px; border: 1px solid var(--codex-line); border-radius: 5px; font: 11px/1.65 Consolas, monospace; }
+.change-review-line { display: flex; min-width: max-content; }
+.change-review-line code { white-space: pre; padding: 0 8px; font: inherit; }
+.change-review-gutter { display: inline-flex; width: 80px; flex-shrink: 0; background: var(--codex-paper); color: var(--codex-ink-faint); border-right: 1px solid var(--codex-line); padding: 0 3px; position: sticky; left: 0; }
+.change-review-gutter > span, .change-review-gutter > button { width: 37px; text-align: right; }
+.change-review-gutter > button { background: transparent; border: 0; border-radius: 0; padding: 0; font: inherit; color: inherit; }
+.change-review-stats { display: flex; gap: 8px; font-family: var(--codex-mono); }
+.change-review-stats > span:first-child { color: var(--codex-success); }
+.change-review-stats > span:last-child { color: var(--codex-danger); }
+.change-review-line.add { background: var(--codex-success-soft); }
+.change-review-line.delete { background: var(--codex-danger-soft); }
+.change-review-line.meta, .change-review-line.hunk { color: var(--codex-ink-faint); }
+.change-review-editor, .change-review-comments { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--codex-line); border-radius: 6px; }
+.change-review-editor pre, .change-review-comments blockquote { margin: 0; padding: 6px; background: var(--codex-accent-soft); overflow-wrap: anywhere; white-space: pre-wrap; max-height: 100px; overflow-y: auto; }
+.change-review-editor textarea { min-height: 85px; resize: vertical; }
+.change-review-editor > div { display: flex; gap: 6px; }
+.change-review-comments article { display: flex; flex-direction: column; gap: 5px; border-top: 1px solid var(--codex-line); padding-top: 8px; }
+.change-review-comments article p { white-space: pre-wrap; }

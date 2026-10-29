@@ -54,6 +54,7 @@ import DOMPurify from 'dompurify';
 
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
 const WorkflowPanel = lazy(() => import('./WorkflowPanel'));
+const ChangesPanel = lazy(() => import('./ChangesPanel'));
 const BrowserPanel = lazy(() => import('./BrowserPanel'));
 
 /**
@@ -6129,7 +6130,12 @@ const CodeAgentPage: React.FC = () => {
             </div>
           ) : rightTab === 'changes' ? (
             <div className="codex-inspector-pane">
-              <ChangeListCard changes={activeSession?.file_changes ?? []} />
+              <Suspense fallback={<span>{t('workbench.pending')}</span>}>
+                <ChangesPanel key={`${activeId ?? 'draft'}:${activeSession?.working_directory || draftDirectory}`}
+                  workspace={activeSession?.working_directory || draftDirectory}
+                  onOpen={openPreview} onAddToChat={handleAddPreviewSelectionToChat}
+                  fallback={<ChangeListCard changes={activeSession?.file_changes ?? []} />} />
+              </Suspense>
             </div>
           ) : null}
           {pagesOpened.current && <div className="codex-unified-pages" style={{ display: pageGroup ? 'flex' : 'none' }}>

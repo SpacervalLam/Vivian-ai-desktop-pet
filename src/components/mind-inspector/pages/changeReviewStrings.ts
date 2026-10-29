@@ -1,0 +1,47 @@
+import i18n from 'i18next';
+
+const strings = {
+  'zh-CN': {
+    title: '工作区变更', all: '全部', staged: '已暂存', unstaged: '未暂存', refresh: '刷新变更',
+    search: '筛选文件路径…', loading: '正在读取 Git 变更…', empty: '此范围内没有变更',
+    noWorkspace: '选择工作区后查看变更', notRepo: '此工作区不是 Git 仓库，以下为工具记录的变更',
+    retry: '重试', choose: '选择文件以查看当前 diff', binary: '二进制文件，不显示文本 diff',
+    noDiff: '没有文本差异（可能只有重命名或文件模式变化）', truncated: '内容过大，仅显示部分结果',
+    open: '打开当前文件', conflict: '冲突', untracked: '未跟踪', comment: '添加行内意见',
+    commentHint: '点击 diff 行的行号添加意见', commentPlaceholder: '描述需要调整的问题…',
+    save: '保存意见', cancel: '取消', comments: '审阅意见（{{count}}）', remove: '删除意见',
+    workspace: '工作区', reviewInstruction: '请根据以下审阅意见调整代码，修改前先核对当前文件。引用和行号对应添加意见时的 diff；旧版本指删除前内容，已暂存指暂存区中的版本。',
+    addToChat: '加入输入框', captured: '意见保留创建时的内容和行号，发送后会请智能体先核对当前文件。',
+    stale: '此文件的 diff 已变化，请核对原意见', old: '旧版本', new: '新版本',
+    storageError: '审阅意见无法保存到本地，请先加入输入框备份。', limit: '最多保留 100 条审阅意见',
+  },
+  en: {
+    title: 'Workspace changes', all: 'All', staged: 'Staged', unstaged: 'Unstaged', refresh: 'Refresh changes',
+    search: 'Filter file paths…', loading: 'Reading Git changes…', empty: 'No changes in this scope',
+    noWorkspace: 'Select a workspace to view changes', notRepo: 'This workspace is not a Git repository. Showing tool-recorded changes.',
+    retry: 'Retry', choose: 'Select a file to view its current diff', binary: 'Binary file; no text diff',
+    noDiff: 'No text difference (the file may only have been renamed or changed mode)', truncated: 'Large result; only part is shown',
+    open: 'Open current file', conflict: 'Conflict', untracked: 'Untracked', comment: 'Add line comment',
+    commentHint: 'Click a diff line number to add a comment', commentPlaceholder: 'Describe what needs to change…',
+    save: 'Save comment', cancel: 'Cancel', comments: 'Review comments ({{count}})', remove: 'Remove comment',
+    workspace: 'Workspace', reviewInstruction: 'Address the following review comments and read the current files before editing. Quotes and line numbers describe the captured diff; the old side refers to removed content, and staged scope refers to the index.',
+    addToChat: 'Add to composer', captured: 'Comments keep their original text and line numbers. The agent is asked to read the current files before editing.',
+    stale: 'This file’s diff changed. Check the captured comment.', old: 'Old', new: 'New',
+    storageError: 'Review comments could not be saved locally. Add them to the composer to keep a copy.', limit: 'Keep up to 100 review comments',
+  },
+  ja: {
+    title: 'ワークスペースの変更', all: 'すべて', staged: 'ステージ済み', unstaged: '未ステージ', refresh: '変更を更新',
+    search: 'ファイルパスを絞り込み…', loading: 'Git の変更を読み込み中…', empty: 'この範囲に変更はありません',
+    noWorkspace: 'ワークスペースを選択してください', notRepo: 'Git リポジトリではありません。ツールが記録した変更を表示します。',
+    retry: '再試行', choose: 'ファイルを選択して現在の差分を表示', binary: 'バイナリファイルのため差分は表示しません',
+    noDiff: 'テキスト差分はありません（名前やモードのみの変更の場合があります）', truncated: '結果が大きいため一部のみ表示しています',
+    open: '現在のファイルを開く', conflict: '競合', untracked: '未追跡', comment: '行にコメントを追加',
+    commentHint: '差分の行番号をクリックしてコメントを追加', commentPlaceholder: '修正が必要な点を記入…',
+    save: 'コメントを保存', cancel: 'キャンセル', comments: 'レビューコメント（{{count}}）', remove: 'コメントを削除',
+    workspace: 'ワークスペース', reviewInstruction: '次のレビューコメントに対応し、編集前に現在のファイルを確認してください。引用と行番号はコメント作成時の差分です。変更前は削除前の内容、ステージ済みはインデックスの内容を指します。',
+    addToChat: '入力欄に追加', captured: 'コメントは作成時の内容と行番号を保持します。編集前に現在のファイルを読むようエージェントに伝えます。',
+    stale: '差分が変更されました。元のコメントを確認してください。', old: '変更前', new: '変更後',
+    storageError: 'コメントをローカルに保存できません。入力欄に追加してコピーを残してください。', limit: 'コメントは最大100件までです',
+  },
+};
+for (const [language, resource] of Object.entries(strings)) i18n.addResourceBundle(language, 'translation', { changeReview: resource }, true, true);

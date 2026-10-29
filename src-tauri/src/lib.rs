@@ -612,6 +612,8 @@ pub fn run() {
             commands::plugin_advisor::plugin_advisor_action,
             commands::plugins::delete_plugin,
             commands::git::git_repo_status,
+            commands::git::git_changed_files,
+            commands::git::git_file_diff,
             commands::git::git_list_branches,
             commands::git::git_branch_diff,
             commands::git::git_commit_push,
