@@ -6738,7 +6738,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vivian"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6796,12 +6796,23 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "vivian-speech-runtime",
  "webview2-com",
  "windows 0.61.3",
  "windows-core 0.61.2",
  "winreg",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "vivian-speech-runtime"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "rodio",
+ "symphonia",
+ "tokio",
 ]
 
 [[package]]

@@ -23,7 +23,21 @@ use crate::state::AppState;
 pub fn start_asr_event_forwarder(app: AppHandle, manager: AsrManager) {
     let mut rx = manager.subscribe();
     tauri::async_runtime::spawn(async move {
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(count, "ASR event consumer lagged"); continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            let (event, session_id, owner_window) = match event {
+                AsrEvent::Scoped { session_id, owner_window, event } => {
+                    if session_id != manager.session_id() { continue; }
+                    (*event, session_id, owner_window)
+                }
+                event => (event, manager.session_id(), manager.owner_window()),
+            };
             // 后端自动停止（静默超时/会话结束）时同步管理器状态
             if matches!(event, AsrEvent::Stopped) {
                 manager.mark_stopped();
@@ -32,7 +46,10 @@ pub fn start_asr_event_forwarder(app: AppHandle, manager: AsrManager) {
                 crate::voice_diagnostics::finish("asr", "microphone", "stop_to_final_result");
             }
             // AsrEvent 已派生 Serialize 且带 `#[serde(tag = "type")]`，可直接 emit
-            let _ = app.emit("asr:event", &event);
+            let mut payload = serde_json::to_value(&event).unwrap_or_default();
+            payload["session_id"] = serde_json::json!(session_id);
+            payload["owner_window"] = serde_json::json!(owner_window);
+            let _ = app.emit("asr:event", payload);
             if matches!(event, AsrEvent::Error { .. }) {
                 tracing::debug!("ASR 事件已转发: {:?}", event);
             }
@@ -44,6 +61,7 @@ pub fn start_asr_event_forwarder(app: AppHandle, manager: AsrManager) {
 /// 开始语音识别
 #[tauri::command]
 pub async fn start_recognition(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
     character_id: Option<String>,
 ) -> Result<(), String> {
@@ -52,19 +70,17 @@ pub async fn start_recognition(
     }
     // 半双工协调：若 TTS 正在播放，先停止 TTS 再启动录音，
     // 避免麦克风录到扬声器声音（回声/自激）
-    if state.playback_gate.is_playing() {
-        if let Ok(character) = state.get_character(character_id.as_deref()) {
-            let planner = crate::speech::get_planner().await;
-            let _ = planner.stop_speaker(&character.id).await;
-        }
-        state.playback_gate.mark_finished();
+    if state.playback_gate.is_playing() || crate::speech::get_planner().await.any_speaking() {
+        crate::speech::get_planner().await.stop_all().await.map_err(|e| e.to_string())?;
+        state.playback_gate.clear();
     }
-    state.asr.start_recognition().await.map_err(|e| e.to_string())
+    state.asr.start_owned(Some(window.label().to_string())).await.map_err(|e| e.to_string())
 }
 
 /// 停止语音识别
 #[tauri::command]
-pub async fn stop_recognition(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn stop_recognition(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.asr.owner_window().is_some_and(|owner| owner != window.label()) { return Err("录音属于另一个窗口".into()); }
     crate::voice_diagnostics::begin("asr", "microphone", "stop_to_final_result");
     state.asr.stop_recognition().await.map_err(|e| e.to_string())
 }
@@ -86,6 +102,9 @@ pub async fn transcribe_audio(
     samples_b64: String,
 ) -> Result<String, String> {
     use base64::Engine;
+    if samples_b64.len() > 10_240_000 {
+        return Err("音频超过最大时长".into());
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(samples_b64.trim())
         .map_err(|e| format!("base64 解码失败: {e}"))?;
@@ -96,6 +115,7 @@ pub async fn transcribe_audio(
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
+    if samples.is_empty() || samples.iter().any(|s| !s.is_finite()) { return Err("音频为空或含非有限样本".into()); }
     state.asr.transcribe(&samples).await.map_err(|e| e.to_string())
 }
 

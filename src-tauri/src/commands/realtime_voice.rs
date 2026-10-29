@@ -41,6 +41,9 @@ pub async fn start_realtime_call(
     if character_id.as_deref().is_some_and(|id| crate::chat_partner::get(id).is_some()) {
         return Err("聊天专属角色不支持实时通话，可使用语音转写聊天".into());
     }
+    state.asr.stop_recognition().await.map_err(err_str)?;
+    crate::speech::get_planner().await.stop_all().await.map_err(err_str)?;
+    state.playback_gate.clear();
     let config = {
         let cm = state.config.read();
         cm.get_all().realtime_voice.clone()

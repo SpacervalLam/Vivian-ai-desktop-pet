@@ -158,6 +158,14 @@ impl TtsBackend for GptSoVitsBackend {
         }
     }
 
+    fn supports_streaming(&self) -> bool { true }
+    async fn stream_audio(&self, text: &str, config: &TtsConfig, output: vivian_speech_runtime::streaming::AudioWriter) -> VivianResult<()> {
+        let base = Self::base_url(config)?;
+        let _session = super::model_session::acquire(base, Self::request_timeout(config)).await?;
+        self.select_models(config, base).await?;
+        self.stream_v2(text, config, base, Self::detect_language(text), output).await
+    }
+
     async fn list_voices(&self, _config: &TtsConfig) -> VivianResult<Vec<VoiceInfo>> {
         // GPT-SoVITS 没有"语音列表"概念:它通过参考音频+文本驱动音色克隆
         // 模型切换通过 /set_gpt_weights 和 /set_sovits_weights 端点,而非语音 ID
@@ -494,5 +502,124 @@ mod session_tests {
         assert!(GptSoVitsBackend::new().synthesize("hello", &config).await.is_err());
         assert!(log.lock().unwrap().is_empty());
         server.abort();
+    }
+}
+
+impl GptSoVitsBackend {
+    async fn stream_v2(
+        &self,
+        text: &str,
+        config: &TtsConfig,
+        base: &str,
+        lang: &str,
+        output: vivian_speech_runtime::streaming::AudioWriter,
+    ) -> VivianResult<()> {
+        let url = format!("{}/tts", base.trim_end_matches('/'));
+
+        // prompt_lang: 用户配置的参考音频语种,默认与 text_lang 相同
+        let prompt_lang = config
+            .gpt_sovits_prompt_lang
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(lang);
+
+        // 文本切分方式:用户可在配置中选择,默认 cut5(按标点切)
+        let text_split_method = config
+            .gpt_sovits_text_split_method
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("cut5");
+
+        // 并行推理:默认 true
+        let parallel_infer = config.gpt_sovits_parallel_infer.unwrap_or(true);
+
+        // 输出格式: wav(默认)/raw(无头 PCM) — 对齐 api_v2 的 media_type 合法值
+
+        // 构建请求体:严格对齐 api_v2.py 的 TTS_Request 模型
+        let mut body = json!({
+            "text": text,
+            "text_lang": lang,
+            "prompt_lang": prompt_lang,
+            "media_type": "wav",
+            "streaming_mode": true,
+            "text_split_method": text_split_method,
+            "speed_factor": config.rate,
+            "parallel_infer": parallel_infer,
+        });
+
+        // 主参考音频(必填):决定音色
+        // - 本地服务:路径必须真实存在,不存在直接报错(跳过会导致服务端用默认音色或 400)
+        // - 远程服务(Docker/局域网):路径是服务端路径,本地无法校验,直接透传
+        if let Some(ref_audio) = config.gpt_sovits_ref_audio.as_deref() {
+            if !ref_audio.is_empty() {
+                if !Self::is_local_url(base) || std::path::Path::new(ref_audio).exists() {
+                    body["ref_audio_path"] = json!(ref_audio);
+                } else {
+                    return Err(VivianError::Speech(format!(
+                        "GPT-SoVITS 参考音频文件不存在: {ref_audio}"
+                    )));
+                }
+            }
+        }
+        // 参考音频文本(可选)
+        if let Some(prompt_text) = config.gpt_sovits_prompt_text.as_deref() {
+            if !prompt_text.is_empty() {
+                body["prompt_text"] = json!(prompt_text);
+            }
+        }
+        // 辅助参考音频(可选):多参考音频音色融合 — 过滤不存在的路径
+        if let Some(aux_paths) = config.gpt_sovits_aux_ref_audios.as_ref() {
+            let valid_aux: Vec<&String> = aux_paths
+                .iter()
+                .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
+                .collect();
+            if !valid_aux.is_empty() {
+                body["aux_ref_audio_paths"] = json!(valid_aux);
+            }
+            let invalid: Vec<&String> = aux_paths
+                .iter()
+                .filter(|p| !p.is_empty() && !std::path::Path::new(p).exists())
+                .collect();
+            for p in invalid {
+                tracing::warn!("[TTS] GPT-SoVITS 辅助参考音频不存在，已跳过: {}", p);
+            }
+        }
+        // 高级采样参数(可选)
+        if let Some(top_k) = config.gpt_sovits_top_k {
+            body["top_k"] = json!(top_k);
+        }
+        if let Some(top_p) = config.gpt_sovits_top_p {
+            body["top_p"] = json!(top_p);
+        }
+        if let Some(temperature) = config.gpt_sovits_temperature {
+            body["temperature"] = json!(temperature);
+        }
+
+        let timeout = Self::request_timeout(config);
+        let resp = self
+            .client
+            .post(&url)
+            .timeout(timeout)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| VivianError::Speech(format!("GPT-SoVITS v2 请求失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(VivianError::Speech(format!(
+                "GPT-SoVITS v2 失败 [{}]: {}",
+                status, body
+            )));
+        }
+
+        use futures::StreamExt;
+        let mut chunks = resp.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let bytes = chunk.map_err(|e| VivianError::Speech(format!("GPT-SoVITS stream: {e}")))?;
+            output.write(&bytes).await.map_err(VivianError::Speech)?;
+        }
+        Ok(())
     }
 }

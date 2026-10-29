@@ -262,6 +262,100 @@ impl TtsBackend for FishSpeechBackend {
         Ok(TtsSynthesisResult::new(audio, format))
     }
 
+    fn supports_streaming(&self) -> bool { true }
+
+    async fn stream_audio(&self, text: &str, config: &TtsConfig, output: vivian_speech_runtime::streaming::AudioWriter) -> VivianResult<()> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+
+        let base = Self::base_url(config);
+        let url = format!("{}/v1/tts", base);
+
+        // 云端必须鉴权；本地部署无 --api-key 时允许空 token
+        let token = config.fish_speech_key.as_deref().unwrap_or("");
+        if Self::is_cloud(&base) && token.is_empty() {
+            return Err(VivianError::Speech(
+                "Fish Speech 云端服务未配置 API Key".to_string(),
+            ));
+        }
+
+        // 音频格式：默认 wav（Fish Speech 服务器原生格式，无编码开销）
+
+        // chunk_length: schema 限制 100-1000，默认 200
+        // 不暴露给用户配置，使用默认值
+        let chunk_length: u32 = 200;
+
+        // 构建请求体：严格对齐 ServeTTSRequest schema
+        let mut body = json!({
+            "text": text,
+            "format": "wav",
+            "latency": "normal",
+            "normalize": true,
+            "chunk_length": chunk_length,
+            "streaming": true,
+        });
+
+        // 音色指定策略（二选一）：
+        // 1. reference_id（优先）：服务器端预上传的参考音频目录名
+        // 2. references（零样本）：本地音频文件 base64 编码后传入
+        let reference_id = config
+            .fish_speech_character
+            .as_deref()
+            .filter(|s| !s.is_empty());
+
+        if let Some(id) = reference_id {
+            body["reference_id"] = json!(id);
+        } else if let Some(ref_audio_path) = config.fish_speech_ref_audio.as_deref() {
+            if !ref_audio_path.is_empty() {
+                // 零样本克隆：读取本地参考音频，base64 编码后通过 references 字段传递
+                let audio_b64 = Self::read_ref_audio_base64(ref_audio_path).await?;
+                let ref_text = config
+                    .fish_speech_ref_text
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("");
+                body["references"] = json!([{
+                    "audio": audio_b64,
+                    "text": ref_text,
+                }]);
+            }
+        }
+
+        // 构建请求
+        let mut req = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        if !token.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| VivianError::Speech(format!("Fish Speech 请求失败: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(VivianError::Speech(format!(
+                "Fish Speech 失败 [{}]: {}",
+                status, body
+            )));
+        }
+
+        use futures::StreamExt;
+        let mut chunks = resp.bytes_stream();
+        while let Some(chunk) = chunks.next().await {
+            let bytes = chunk.map_err(|e| VivianError::Speech(format!("Fish audio stream: {e}")))?;
+            output.write(&bytes).await.map_err(VivianError::Speech)?;
+        }
+        Ok(())
+    }
+
     async fn list_voices(&self, config: &TtsConfig) -> VivianResult<Vec<VoiceInfo>> {
         // 调用 /v1/references/list 拉取服务器端预上传的参考音频 ID
         let base = Self::base_url(config);

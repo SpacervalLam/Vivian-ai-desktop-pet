@@ -1549,10 +1549,10 @@ pub struct RealtimeVoiceConfig {
     /// 上次通话的 dialog_id（用于恢复最近20轮对话上下文）
     #[serde(default)]
     pub dialog_id: String,
-    /// 是否启用回声抑制（AI 说话时静音麦克风采集，防止 AI 听到自己的声音）
+    /// 是否启用声学回声消除（使用扬声器播放参考，保留用户插话）
     #[serde(default = "default_true")]
     pub echo_suppression: bool,
-    /// 回声抑制释放尾长（毫秒）：AI 音频结束后继续静音麦克风的时间
+    /// 声学回声消除滤波尾长（毫秒），兼容原 echo_release_ms 配置
     #[serde(default = "default_echo_release_ms")]
     pub echo_release_ms: u64,
 }

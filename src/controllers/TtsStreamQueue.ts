@@ -34,7 +34,7 @@ const MAX_QUEUE_SIZE = 5;
 const PARAGRAPH_END_RE = /[\n\r]/;
 
 /** 句末标点（中英文句号、问号、叹号）— 句级切分点 */
-const SENTENCE_END_CHARS = new Set(['。', '！', '？', '!', '?']);
+const SENTENCE_END_CHARS = new Set(['。', '！', '？', '!', '?', '.']);
 
 /** 句级切片的最大字符数（在不超过此范围的最后一个句末标点处切） */
 const MAX_SENTENCE_CHARS = 80;
@@ -70,7 +70,7 @@ function findLastSentenceEnd(buffer: string, maxChars: number): number {
   const searchLen = Math.min(buffer.length, maxChars);
   let lastEnd = -1;
   for (let i = 0; i < searchLen; i++) {
-    if (SENTENCE_END_CHARS.has(buffer[i])) {
+    if (SENTENCE_END_CHARS.has(buffer[i]) && !(buffer[i] === '.' && /[0-9]/.test(buffer[i - 1] ?? '') && /[0-9]/.test(buffer[i + 1] ?? ''))) {
       lastEnd = i;
     }
   }
@@ -271,8 +271,9 @@ class TtsStreamQueueClass {
       }
 
       if (this.buffer.length >= MAX_BUFFER_CHARS) {
-        this.enqueue(this.buffer);
-        this.buffer = '';
+        this.enqueue(this.buffer.slice(0, MAX_BUFFER_CHARS));
+        this.buffer = this.buffer.slice(MAX_BUFFER_CHARS);
+        continue;
       }
       break;
     }
@@ -359,7 +360,7 @@ class TtsStreamQueueClass {
       this.pumping = false;
       this.queue = [];
       this.speaking = false;
-      this.startResolvers = [];
+      for (const resolve of this.startResolvers.splice(0)) resolve();
       try {
         await invoke('stop_speaking', { characterId: getCharacterId() ?? undefined });
       } catch {
@@ -381,7 +382,7 @@ class TtsStreamQueueClass {
     this.currentPresentation = null;
     this.streamCbs = null;
     this.firstAudioFired = false;
-    this.startResolvers = [];
+    for (const resolve of this.startResolvers.splice(0)) resolve();
     try {
       await invoke('stop_speaking', { characterId: getCharacterId() ?? undefined });
     } catch {
@@ -399,14 +400,14 @@ class TtsStreamQueueClass {
     this.currentPresentation = null;
     this.streamCbs = null;
     this.firstAudioFired = false;
-    this.startResolvers = [];
+    for (const resolve of this.startResolvers.splice(0)) resolve();
   }
 
   /** 加入播放队列并触发 pump */
   private enqueue(text: string): void {
     const trimmed = text.trim();
     if (!trimmed) return;
-    if (!/[\u4e00-\u9fa5a-zA-Z0-9]/.test(trimmed)) return;
+    if (!/[\p{L}\p{N}]/u.test(trimmed)) return;
 
     if (this.queue.length >= MAX_QUEUE_SIZE) {
       this.queue = compactSpeechSegments(this.queue);
@@ -424,12 +425,6 @@ class TtsStreamQueueClass {
     this.speaking = true;
 
     while (this.queue.length > 0 && epoch === this.playbackEpoch) {
-      // 预取队列中所有待播句：后端各自独立连接并行合成
-      // 已缓存的句子会立即返回，不会重复请求
-      for (const segment of this.queue) {
-        void invoke('prefetch_tts', { text: segment.text, characterId: segment.characterId }).catch(() => {});
-      }
-
       const segment = this.queue.shift()!;
       try {
         await invoke('speak_text', {

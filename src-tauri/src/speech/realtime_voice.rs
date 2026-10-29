@@ -149,7 +149,11 @@ pub enum RealtimeEvent {
 
 pub struct RealtimeVoiceManager {
     state: Arc<RwLock<CallState>>,
+    duplex: Arc<Mutex<Option<Arc<vivian_speech_runtime::duplex::Duplex>>>>,
+    device_lease: Arc<Mutex<Option<super::session::AudioLease>>>,
     stop_flag: Arc<AtomicBool>,
+    call_generation: Arc<std::sync::atomic::AtomicU64>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
     mic_stop_flag: Arc<AtomicBool>,
     mic_thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     speaker_stop_flag: Arc<AtomicBool>,
@@ -188,7 +192,11 @@ impl RealtimeVoiceManager {
     pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(CallState::Idle)),
+            duplex: Arc::new(Mutex::new(None)),
+            device_lease: Arc::new(Mutex::new(None)),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            call_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             mic_stop_flag: Arc::new(AtomicBool::new(false)),
             mic_thread: Arc::new(Mutex::new(None)),
             speaker_stop_flag: Arc::new(AtomicBool::new(false)),
@@ -248,6 +256,19 @@ impl RealtimeVoiceManager {
 
     /// 启动实时语音通话
     pub async fn start_call(&self, app: AppHandle, config: RealtimeVoiceConfig, persona: RealtimePersona) -> VivianResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.state() != CallState::Idle { return Err(VivianError::Speech("通话已在进行中".into())); }
+        self.stop_flag.store(false, Ordering::SeqCst);
+        let lease = super::session::capture(super::session::AudioMode::Call).await.map_err(VivianError::Speech)?;
+        if self.stop_flag.load(Ordering::SeqCst) { return Err(VivianError::Speech("通话已取消".into())); }
+        *self.device_lease.lock() = Some(lease);
+        self.call_generation.fetch_add(1, Ordering::SeqCst);
+        let result = self.start_call_inner(app.clone(), config, persona).await;
+        if result.is_err() { self.stop_call(); self.set_state(&app, CallState::Idle); }
+        result
+    }
+
+    async fn start_call_inner(&self, app: AppHandle, config: RealtimeVoiceConfig, persona: RealtimePersona) -> VivianResult<()> {
         if crate::companion_quiet::active() { return Err(crate::error::VivianError::Provider("勿扰模式下已暂停语音对话".into())); }
         if *self.state.read() != CallState::Idle {
             return Err(VivianError::Speech("通话已在进行中".to_string()));
@@ -258,7 +279,7 @@ impl RealtimeVoiceManager {
             ));
         }
 
-        self.stop_flag.store(false, Ordering::SeqCst);
+
         self.diagnostic_asr_at.store(0, Ordering::Relaxed);
         self.diagnostic_playback_at.store(0, Ordering::Relaxed);
         self.mic_stop_flag.store(false, Ordering::SeqCst);
@@ -435,6 +456,14 @@ impl RealtimeVoiceManager {
         let writer_tx_for_capture = writer_tx.clone();
         *self.ws_writer_tx.lock() = Some(writer_tx);
 
+        let audio_writer = writer_tx_for_capture.clone();
+        let audio_session = new_session_id.clone();
+        let duplex = vivian_speech_runtime::duplex::Duplex::start(config.echo_suppression, config.echo_release_ms.clamp(40, 500) as u32, move |samples| {
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let _ = audio_writer.try_send(build_audio_frame(&audio_session, &bytes));
+        }).map_err(VivianError::Speech)?;
+        *self.duplex.lock() = Some(Arc::new(duplex));
+        if self.stop_flag.load(Ordering::SeqCst) { return Err(VivianError::Speech("通话已取消".into())); }
         self.start_mic_capture(new_session_id.clone(), writer_tx_for_capture)?;
         self.start_speaker_playback(app.clone())?;
 
@@ -468,7 +497,7 @@ impl RealtimeVoiceManager {
         // WS 读取循环
         let app_read = app.clone();
         let stop_read = self.stop_flag.clone();
-        let state_read = self.state.clone();
+
         let state_for_stop = self.state.clone();
         let audio_buf = self.audio_out_buffer.clone();
         let diagnostic_asr = self.diagnostic_asr_at.clone();
@@ -481,7 +510,13 @@ impl RealtimeVoiceManager {
         let pending_rag_ref = self.pending_rag.clone();
         let ws_writer_ref = self.ws_writer_tx.clone();
         let session_id_ref = self.session_id.clone();
-        let last_ai_audio_ref = self.last_ai_audio_at.clone();
+
+        let mic_stop = self.mic_stop_flag.clone();
+        let speaker_stop = self.speaker_stop_flag.clone();
+        let session_stop = self.stop_flag.clone();
+        let read_lifecycle = self.lifecycle.clone();
+        let read_generation = self.call_generation.clone();
+        let generation = read_generation.load(Ordering::SeqCst);
         let read_task = tokio::spawn(async move {
             let mut ai_text_buffer = String::new();
             let mut ai_audio_active = false;
@@ -575,7 +610,7 @@ impl RealtimeVoiceManager {
                                     ai_audio_active = true;
                                     let _ = app_read.emit("realtime:event", RealtimeEvent::AiAudioStarted);
                                 }
-                                *last_ai_audio_ref.lock() = Some(std::time::Instant::now());
+
                                 // 写入播放缓冲（24kHz s16le → f32）
                                 let mut buf = audio_buf.write();
                                 for chunk in pcm.chunks_exact(2) {
@@ -608,9 +643,14 @@ impl RealtimeVoiceManager {
                     None => break,
                 }
             }
+            let _end_lifecycle = read_lifecycle.lock().await;
+            if read_generation.load(Ordering::SeqCst) != generation { return; }
+            mic_stop.store(true, Ordering::SeqCst);
+            speaker_stop.store(true, Ordering::SeqCst);
+            session_stop.store(true, Ordering::SeqCst);
+            ws_writer_ref.lock().take();
             // 通话结束
-            *state_read.write() = CallState::Idle;
-            let _ = app_read.emit("realtime:event", RealtimeEvent::StateChanged { state: CallState::Idle });
+            // The supervisor publishes Idle only after both devices have closed.
             let _ = app_read.emit("realtime:event", RealtimeEvent::AiAudioFinished);
             // 持久化 dialog_id 到磁盘（异常断开也能保存）
             let did = dialog_id_ref.read().clone();
@@ -627,16 +667,35 @@ impl RealtimeVoiceManager {
         });
 
         // 等待停止信号
+        let mic_thread = self.mic_thread.clone();
+        let speaker_thread = self.speaker_thread.clone();
+        let duplex_owner = self.duplex.clone();
+        let device_owner = self.device_lease.clone();
         let stop_wait = self.stop_flag.clone();
         let app_wait = app.clone();
+        let cleanup_lifecycle = self.lifecycle.clone();
+        let cleanup_generation = self.call_generation.clone();
+        let stop_generation = self.call_generation.clone();
+        let generation = stop_generation.load(Ordering::SeqCst);
         tokio::spawn(async move {
-            while !stop_wait.load(Ordering::SeqCst) {
+            while !stop_wait.load(Ordering::SeqCst) && stop_generation.load(Ordering::SeqCst) == generation {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            if stop_generation.load(Ordering::SeqCst) != generation { read_task.abort(); write_task.abort(); tick_task.abort(); return; }
+            let _ = tokio::task::spawn_blocking(move || {
+                let _guard = cleanup_lifecycle.blocking_lock();
+                if cleanup_generation.load(Ordering::SeqCst) != generation { return; }
+                if let Some(thread) = mic_thread.lock().take() { let _ = thread.join(); }
+                if let Some(thread) = speaker_thread.lock().take() { let _ = thread.join(); }
+                duplex_owner.lock().take();
+                device_owner.lock().take();
+            }).await;
             // 停止所有子任务
-            drop(write_task);
+            let mut write_task = write_task;
+            if tokio::time::timeout(Duration::from_secs(2), &mut write_task).await.is_err() { write_task.abort(); }
             tick_task.abort();
             read_task.abort();
+            if stop_generation.load(Ordering::SeqCst) != generation { return; }
             *state_for_stop.write() = CallState::Idle;
             let _ = app_wait.emit("realtime:event", RealtimeEvent::StateChanged { state: CallState::Idle });
         });
@@ -669,8 +728,11 @@ impl RealtimeVoiceManager {
         if let Some(handle) = self.speaker_thread.lock().take() {
             let _ = handle.join();
         }
+        self.duplex.lock().take();
+        self.device_lease.lock().take();
         *self.session_id.write() = String::new();
         *self.call_start.lock() = None;
+        *self.state.write() = CallState::Idle;
     }
 
     /// 获取当前/上次通话的 dialog_id（用于持久化以恢复上下文）
@@ -710,8 +772,8 @@ impl RealtimeVoiceManager {
     /// 启动麦克风采集（独立线程持有 cpal Stream）
     fn start_mic_capture(
         &self,
-        session_id: String,
-        writer_tx: mpsc::Sender<Vec<u8>>,
+        _session_id: String,
+        _writer_tx: mpsc::Sender<Vec<u8>>,
     ) -> VivianResult<()> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         use cpal::{SampleFormat, SampleRate, StreamConfig};
@@ -736,132 +798,98 @@ impl RealtimeVoiceManager {
             supported.max_sample_rate().0
         };
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: supported.channels(),
             sample_rate: SampleRate(actual_rate),
             buffer_size: cpal::BufferSize::Default,
         };
         let stop_flag = self.mic_stop_flag.clone();
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
-        let sr_in = actual_rate as f32;
-        let sr_out = 16000f32;
 
-        let echo_enabled = self.echo_suppression_enabled.clone();
-        let echo_enabled_i16 = echo_enabled.clone();
-        let echo_enabled_u16 = echo_enabled.clone();
-        let echo_enabled_f32 = echo_enabled.clone();
-        let last_ai_at = self.last_ai_audio_at.clone();
-        let last_ai_at_i16 = last_ai_at.clone();
-        let last_ai_at_u16 = last_ai_at.clone();
-        let last_ai_at_f32 = last_ai_at.clone();
-        let echo_release = self.echo_release_ms.clone();
-        let echo_release_i16 = echo_release.clone();
-        let echo_release_u16 = echo_release.clone();
-        let echo_release_f32 = echo_release.clone();
+
+
+        let duplex = self.duplex.lock().clone().ok_or_else(|| VivianError::Speech("AEC 会话尚未初始化".into()))?;
 
         let err_fn = |e: cpal::StreamError| {
             tracing::error!("麦克风采集错误: {e}");
         };
 
+        let mut capture = super::pcm::PcmCapture::new(actual_rate, 16000, supported.channels());
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let handle = std::thread::spawn(move || {
             // 临时缓冲，累积到 20ms（640 字节 = 320 samples）再发送
             let mut pcm_buf: Vec<i16> = Vec::with_capacity(320 * 4);
+            let mut capture_clock = None::<std::time::Instant>;
 
             let stream = match sample_format {
                 SampleFormat::I16 => device.build_input_stream(
                     &stream_config,
-                    move |data: &[i16], _: &_| {
+                    move |data: &[i16], info: &cpal::InputCallbackInfo| {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        if mic_echo_suppressed(&echo_enabled_i16, &last_ai_at_i16, &echo_release_i16) {
-                            pcm_buf.clear();
-                            return;
+                        let converted = capture.convert(data, |s: i16| s);
+                        if capture_clock.is_none() {
+                            let stamp = info.timestamp();
+                            let age = stamp.callback.duration_since(&stamp.capture).unwrap_or_default();
+                            capture_clock = Some(std::time::Instant::now().checked_sub(age).unwrap_or_else(std::time::Instant::now));
                         }
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            while pcm_buf.len() <= out_idx {
-                                pcm_buf.push(0);
-                            }
-                            pcm_buf[out_idx] = s;
-                        }
+                        pcm_buf.extend(converted);
                         while pcm_buf.len() >= 320 {
                             let chunk: Vec<i16> = pcm_buf.drain(..320).collect();
-                            let mut bytes = Vec::with_capacity(640);
-                            for &s in chunk.iter() {
-                                bytes.extend_from_slice(&s.to_le_bytes());
-                            }
-                            let frame = build_audio_frame(&session_id, &bytes);
-                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
-                            let _ = writer_tx.try_send(frame);
+                            let at = capture_clock.unwrap_or_else(std::time::Instant::now);
+                            duplex.capture(chunk, at);
+                            capture_clock = Some(at + Duration::from_millis(20));
                         }
+                        if pcm_buf.is_empty() { capture_clock = None; }
                     },
                     err_fn,
                     None,
                 ),
                 SampleFormat::U16 => device.build_input_stream(
                     &stream_config,
-                    move |data: &[u16], _: &_| {
+                    move |data: &[u16], info: &cpal::InputCallbackInfo| {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        if mic_echo_suppressed(&echo_enabled_u16, &last_ai_at_u16, &echo_release_u16) {
-                            pcm_buf.clear();
-                            return;
+                        let converted = capture.convert(data, |s: u16| (s as i32 - 32768) as i16);
+                        if capture_clock.is_none() {
+                            let stamp = info.timestamp();
+                            let age = stamp.callback.duration_since(&stamp.capture).unwrap_or_default();
+                            capture_clock = Some(std::time::Instant::now().checked_sub(age).unwrap_or_else(std::time::Instant::now));
                         }
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s as i32 - 32768) as i16;
-                            while pcm_buf.len() <= out_idx {
-                                pcm_buf.push(0);
-                            }
-                            pcm_buf[out_idx] = pcm;
-                        }
+                        pcm_buf.extend(converted);
                         while pcm_buf.len() >= 320 {
                             let chunk: Vec<i16> = pcm_buf.drain(..320).collect();
-                            let mut bytes = Vec::with_capacity(640);
-                            for &s in chunk.iter() {
-                                bytes.extend_from_slice(&s.to_le_bytes());
-                            }
-                            let frame = build_audio_frame(&session_id, &bytes);
-                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
-                            let _ = writer_tx.try_send(frame);
+                            let at = capture_clock.unwrap_or_else(std::time::Instant::now);
+                            duplex.capture(chunk, at);
+                            capture_clock = Some(at + Duration::from_millis(20));
                         }
+                        if pcm_buf.is_empty() { capture_clock = None; }
                     },
                     err_fn,
                     None,
                 ),
                 SampleFormat::F32 => device.build_input_stream(
                     &stream_config,
-                    move |data: &[f32], _: &_| {
+                    move |data: &[f32], info: &cpal::InputCallbackInfo| {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        if mic_echo_suppressed(&echo_enabled_f32, &last_ai_at_f32, &echo_release_f32) {
-                            pcm_buf.clear();
-                            return;
+                        let converted = capture.convert(data, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                        if capture_clock.is_none() {
+                            let stamp = info.timestamp();
+                            let age = stamp.callback.duration_since(&stamp.capture).unwrap_or_default();
+                            capture_clock = Some(std::time::Instant::now().checked_sub(age).unwrap_or_else(std::time::Instant::now));
                         }
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                            while pcm_buf.len() <= out_idx {
-                                pcm_buf.push(0);
-                            }
-                            pcm_buf[out_idx] = pcm;
-                        }
+                        pcm_buf.extend(converted);
                         while pcm_buf.len() >= 320 {
                             let chunk: Vec<i16> = pcm_buf.drain(..320).collect();
-                            let mut bytes = Vec::with_capacity(640);
-                            for &s in chunk.iter() {
-                                bytes.extend_from_slice(&s.to_le_bytes());
-                            }
-                            let frame = build_audio_frame(&session_id, &bytes);
-                            // try_send：队列满（网络跟不上）时丢帧，绝不阻塞采集线程
-                            let _ = writer_tx.try_send(frame);
+                            let at = capture_clock.unwrap_or_else(std::time::Instant::now);
+                            duplex.capture(chunk, at);
+                            capture_clock = Some(at + Duration::from_millis(20));
                         }
+                        if pcm_buf.is_empty() { capture_clock = None; }
                     },
                     err_fn,
                     None,
@@ -882,12 +910,14 @@ impl RealtimeVoiceManager {
                 tracing::error!("启动麦克风采集失败: {e}");
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
             while !stop_for_loop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             drop(stream);
         });
 
+        if ready_rx.recv_timeout(Duration::from_secs(5)) != Ok(Ok(())) { self.mic_stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech("麦克风启动失败".into())); }
         *self.mic_thread.lock() = Some(handle);
         Ok(())
     }
@@ -917,7 +947,8 @@ impl RealtimeVoiceManager {
             supported.max_sample_rate().0
         };
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: supported.channels(),
+
             sample_rate: SampleRate(actual_rate),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -929,6 +960,11 @@ impl RealtimeVoiceManager {
         let diagnostic_playback = self.diagnostic_playback_at.clone();
         let diagnostic_asr_monitor = diagnostic_asr.clone();
         let diagnostic_playback_monitor = diagnostic_playback.clone();
+        let reference = self.duplex.lock().clone().ok_or_else(|| VivianError::Speech("AEC 会话尚未初始化".into()))?;
+        let mut render_capture = super::pcm::PcmCapture::new(actual_rate, 16000, supported.channels());
+        let playback_at_f32 = self.last_ai_audio_at.clone();
+        let playback_at_i16 = self.last_ai_audio_at.clone();
+        let channels = supported.channels() as usize;
         let sr_in = 24000f32;
         let sr_out = actual_rate as f32;
 
@@ -936,11 +972,12 @@ impl RealtimeVoiceManager {
             tracing::error!("扬声器播放错误: {e}");
         };
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let handle = std::thread::spawn(move || {
             let stream = match sample_format {
                 SampleFormat::F32 => device.build_output_stream(
                     &stream_config,
-                    move |out: &mut [f32], _: &_| {
+                    move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             for s in out.iter_mut() {
                                 *s = 0.0;
@@ -948,20 +985,25 @@ impl RealtimeVoiceManager {
                             return;
                         }
                         let mut buf = buffer.write();
+                        if !buf.is_empty() { *playback_at_f32.lock() = Some(std::time::Instant::now()); }
                         if !buf.is_empty() && diagnostic_asr.load(Ordering::Relaxed) != 0 {
                             let _ = diagnostic_playback.compare_exchange(0, crate::voice_diagnostics::now_ms(), Ordering::Relaxed, Ordering::Relaxed);
                         }
                         let ratio = sr_out / sr_in;
-                        for (i, out_s) in out.iter_mut().enumerate() {
+                        for (i, frame) in out.chunks_exact_mut(channels).enumerate() {
                             let in_idx = (i as f32 / ratio) as usize;
-                            *out_s = if in_idx < buf.len() {
+                            let sample = if in_idx < buf.len() {
                                 buf[in_idx]
                             } else {
                                 0.0
                             };
+                            frame.fill(sample);
                         }
+                        let timestamp = info.timestamp();
+                        let delay = timestamp.playback.duration_since(&timestamp.callback).unwrap_or_default();
+                        reference.render(render_capture.convert(out, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16), std::time::Instant::now() + delay);
                         // 清掉已消费的样本
-                        let consumed = (out.len() as f32 / ratio) as usize;
+                        let consumed = ((out.len() / channels) as f32 / ratio) as usize;
                         if consumed <= buf.len() {
                             buf.drain(..consumed);
                         } else {
@@ -973,7 +1015,7 @@ impl RealtimeVoiceManager {
                 ),
                 SampleFormat::I16 => device.build_output_stream(
                     &stream_config,
-                    move |out: &mut [i16], _: &_| {
+                    move |out: &mut [i16], info: &cpal::OutputCallbackInfo| {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             for s in out.iter_mut() {
                                 *s = 0;
@@ -981,19 +1023,24 @@ impl RealtimeVoiceManager {
                             return;
                         }
                         let mut buf = buffer.write();
+                        if !buf.is_empty() { *playback_at_i16.lock() = Some(std::time::Instant::now()); }
                         if !buf.is_empty() && diagnostic_asr.load(Ordering::Relaxed) != 0 {
                             let _ = diagnostic_playback.compare_exchange(0, crate::voice_diagnostics::now_ms(), Ordering::Relaxed, Ordering::Relaxed);
                         }
                         let ratio = sr_out / sr_in;
-                        for (i, out_s) in out.iter_mut().enumerate() {
+                        for (i, frame) in out.chunks_exact_mut(channels).enumerate() {
                             let in_idx = (i as f32 / ratio) as usize;
-                            *out_s = if in_idx < buf.len() {
+                            let sample = if in_idx < buf.len() {
                                 (buf[in_idx] * 32767.0) as i16
                             } else {
                                 0
                             };
+                            frame.fill(sample);
                         }
-                        let consumed = (out.len() as f32 / ratio) as usize;
+                        let timestamp = info.timestamp();
+                        let delay = timestamp.playback.duration_since(&timestamp.callback).unwrap_or_default();
+                        reference.render(render_capture.convert(out, |s| s), std::time::Instant::now() + delay);
+                        let consumed = ((out.len() / channels) as f32 / ratio) as usize;
                         if consumed <= buf.len() {
                             buf.drain(..consumed);
                         } else {
@@ -1022,6 +1069,7 @@ impl RealtimeVoiceManager {
                 tracing::error!("启动扬声器播放失败: {e}");
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
             while !stop_for_loop.load(Ordering::SeqCst) {
                 let end = diagnostic_playback_monitor.swap(0, Ordering::Relaxed);
                 if end != 0 {
@@ -1033,6 +1081,7 @@ impl RealtimeVoiceManager {
             drop(stream);
         });
 
+        if ready_rx.recv_timeout(Duration::from_secs(5)) != Ok(Ok(())) { self.speaker_stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech("扬声器启动失败".into())); }
         *self.speaker_thread.lock() = Some(handle);
         Ok(())
     }
@@ -1112,20 +1161,6 @@ async fn build_chat_rag(
 }
 
 /// 处理服务端文本事件
-fn mic_echo_suppressed(
-    enabled: &AtomicBool,
-    last_ai_audio: &Mutex<Option<std::time::Instant>>,
-    release_ms: &Mutex<u64>,
-) -> bool {
-    if !enabled.load(Ordering::SeqCst) {
-        return false;
-    }
-    let release = *release_ms.lock();
-    match *last_ai_audio.lock() {
-        Some(t) => t.elapsed().as_millis() < release as u128,
-        None => false,
-    }
-}
 
 fn handle_server_event(
     app: &AppHandle,

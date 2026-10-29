@@ -104,7 +104,7 @@ pub async fn set_tts_enabled_all(
         // 2b) 禁用：打断正在朗读的语音（否则当前这句话会播完才停）
         let planner = get_planner().await;
         let _ = planner.stop_all().await;
-        state.playback_gate.mark_finished();
+        state.playback_gate.clear();
     }
 
     // 3) 通知所有窗口同步（多角色窗口共享同一份 enabled 真相）
@@ -184,8 +184,7 @@ pub async fn speak_text(
     presentation: Option<Presentation>,
 ) -> Result<(), String> {
     tracing::info!(
-        "[TTS] speak_text 调用: text={:?} len={} emotion={:?}",
-        &text,
+        "[TTS] speak_text 调用: len={} emotion={:?}",
         text.chars().count(),
         &emotion
     );
@@ -193,6 +192,7 @@ pub async fn speak_text(
     let speaker_id = character.id.clone();
     crate::voice_diagnostics::begin("tts", &speaker_id, "request_to_playback_started");
     let tts = character.brain.tts.clone();
+    if state.asr.is_recording() { return Err("录音期间暂停语音播放".into()); }
     let config_snapshot = tts.get_config();
     tracing::info!(
         "[TTS] 当前配置: enabled={} engine={:?} volume={} rate={} display_lang={:?} tts_lang={:?} trans_provider={:?}",
@@ -267,7 +267,7 @@ pub async fn speak_text(
         tracing::info!("[TTS] 过滤后文本为空，跳过朗读");
         return Ok(());
     }
-    tracing::info!("[TTS] 过滤后文本: {:?} len={}", &tts_text, tts_text.chars().count());
+    tracing::debug!("[TTS] prepared text length={}", tts_text.chars().count());
 
     // 注册事件回调:将 TtsEvent 转发为 tauri 事件（附带来源 character_id 防止多窗口串扰）
     let app_for_cb = app.clone();
@@ -281,18 +281,18 @@ pub async fn speak_text(
         match event {
             TtsEvent::Started { .. } => {
                 crate::voice_diagnostics::finish("tts", &sid_for_cb, "request_to_playback_started");
-                gate_for_cb.mark_started();
+                gate_for_cb.mark_started_for(&sid_for_cb);
                 let _ = app_for_cb.emit("tts:started", payload);
             }
             TtsEvent::WordBoundary { .. } => {
                 let _ = app_for_cb.emit("tts:word", payload);
             }
             TtsEvent::Finished => {
-                gate_for_cb.mark_finished();
+                gate_for_cb.mark_finished_for(&sid_for_cb);
                 let _ = app_for_cb.emit("tts:finished", payload);
             }
             TtsEvent::Error { .. } => {
-                gate_for_cb.mark_finished();
+                gate_for_cb.mark_finished_for(&sid_for_cb);
                 let _ = app_for_cb.emit("tts:error", payload);
             }
             TtsEvent::Fallback { .. } => {
@@ -331,7 +331,7 @@ pub async fn speak_text(
     };
 
     // 清除事件回调(避免下次 speak 重复发射)
-    tts.set_event_callback(None);
+    // The event bridge remains installed for late cancellation/finalization events.
 
     result
 }
@@ -357,7 +357,7 @@ pub async fn stop_speaking(
         .await
         .map_err(|e| e.to_string())?;
 
-    state.playback_gate.mark_finished();
+    state.playback_gate.mark_finished_for(&speaker_id);
 
     Ok(())
 }
@@ -761,4 +761,3 @@ mod global_voice_switch_tests {
         assert!(config.fish_speech_auto_start);
     }
 }
-

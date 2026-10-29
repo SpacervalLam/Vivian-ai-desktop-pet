@@ -16,6 +16,7 @@ pub struct PlaybackGate {
 
 struct Inner {
     playing: AtomicBool,
+    speakers: Mutex<std::collections::HashSet<String>>,
     last_start: Mutex<Option<Instant>>,
     last_end: Mutex<Option<Instant>>,
     tx: broadcast::Sender<PlaybackEvent>,
@@ -33,11 +34,25 @@ impl PlaybackGate {
         Self {
             inner: Arc::new(Inner {
                 playing: AtomicBool::new(false),
+                speakers: Mutex::new(std::collections::HashSet::new()),
                 last_start: Mutex::new(None),
                 last_end: Mutex::new(None),
                 tx,
             }),
         }
+    }
+
+    pub fn clear(&self) { self.inner.speakers.lock().clear(); self.mark_finished(); }
+
+    pub fn mark_started_for(&self, speaker: &str) {
+        self.inner.speakers.lock().insert(speaker.to_owned());
+        self.mark_started();
+    }
+
+    pub fn mark_finished_for(&self, speaker: &str) {
+        let mut speakers = self.inner.speakers.lock();
+        speakers.remove(speaker);
+        if speakers.is_empty() { self.mark_finished(); }
     }
 
     pub fn mark_started(&self) {
@@ -53,6 +68,7 @@ impl PlaybackGate {
     }
 
     pub fn is_playing(&self) -> bool {
+        if !self.inner.speakers.lock().is_empty() { return true; }
         if self.inner.playing.load(Ordering::SeqCst) {
             let stale = self
                 .inner
@@ -90,7 +106,8 @@ impl PlaybackGate {
                 _ = &mut deadline => return !self.is_playing(),
                 ev = rx.recv() => {
                     match ev {
-                        Ok(PlaybackEvent::Finished) => return true,
+                        Ok(PlaybackEvent::Finished) if !self.is_playing() => return true,
+                        Ok(PlaybackEvent::Finished) => continue,
                         Ok(PlaybackEvent::Started) => continue,
                         Err(_) => return !self.is_playing(),
                     }
@@ -103,5 +120,18 @@ impl PlaybackGate {
 impl Default for PlaybackGate {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod speech_gate_tests {
+    use super::*;
+    #[test]
+    fn one_speaker_finishing_cannot_release_another() {
+        let gate = PlaybackGate::new();
+        gate.mark_started_for("a"); gate.mark_started_for("b");
+        gate.mark_finished_for("a"); assert!(gate.is_playing());
+        gate.mark_finished_for("b"); assert!(!gate.is_playing());
+        gate.mark_started_for("a"); gate.clear(); assert!(!gate.is_playing());
     }
 }

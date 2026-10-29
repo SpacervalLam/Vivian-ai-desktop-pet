@@ -264,6 +264,7 @@ struct QueuedIntent {
 
 /// 正在播放的语音
 struct ActiveSpeech {
+    sequence: u64,
     speaker_id: String,
     priority: SpeechPriority,
     /// 播放完成后的通知通道
@@ -643,13 +644,13 @@ impl SpeechPlanner {
     fn spawn_play(&self, intent: SpeakIntent, done_tx: oneshot::Sender<SubmitResult>) {
         let speaker_id = intent.speaker_id.clone();
         let text = intent.text.clone();
-        
+
         let in_queue = {
             let q = self.queue.lock();
             q.iter()
                 .any(|qi| qi.intent.speaker_id == speaker_id && qi.intent.text == text)
         };
-        
+
         if in_queue {
             tracing::warn!(
                 "[SpeechPlanner] 重复提交: speaker={} text=\"{}\" 已在队列中,丢弃",
@@ -659,7 +660,7 @@ impl SpeechPlanner {
             let _ = done_tx.send(SubmitResult::Dropped);
             return;
         }
-        
+
         self.enqueue(intent, done_tx);
         self.pump_notify.notify_one();
     }
@@ -748,7 +749,7 @@ impl SpeechPlanner {
             loop {
                 // 取出可以播放的 intent(该角色没有在播放)
                 let next = {
-                    let cur = self.current.lock();
+                    let mut cur = self.current.lock();
                     let mut q = self.queue.lock();
                     if q.is_empty() {
                         break;
@@ -768,7 +769,14 @@ impl SpeechPlanner {
                         }
                     }
                     match idx {
-                        Some(i) => Some(q.remove(i)),
+                        Some(i) => {
+                            let qi = q.remove(i);
+                            cur.insert(qi.intent.speaker_id.clone(), ActiveSpeech {
+                                sequence: qi.seq, speaker_id: qi.intent.speaker_id.clone(),
+                                priority: qi.intent.priority, done_tx: None,
+                            });
+                            Some(qi)
+                        },
                         None => None,
                     }
                 };
@@ -797,6 +805,7 @@ impl SpeechPlanner {
     async fn play_intent(self: Arc<Self>, qi: QueuedIntent) {
         let speaker_id = qi.intent.speaker_id.clone();
         let priority = qi.intent.priority;
+        let sequence = qi.seq;
         let text = qi.intent.text.clone();
         let emotion = qi.intent.emotion.clone();
         let presentation = qi.intent.presentation.clone();
@@ -817,6 +826,7 @@ impl SpeechPlanner {
                         "角色 {} 未注册 TtsManager",
                         speaker_id
                     )));
+                    { let mut current = self.current.lock(); if current.get(&speaker_id).is_some_and(|active| active.sequence == sequence) { current.remove(&speaker_id); } }
                     self.pump_notify.notify_one();
                     return;
                 }
@@ -832,20 +842,29 @@ impl SpeechPlanner {
                 speaker_id,
                 text.chars().count()
             );
+            { let mut current = self.current.lock(); if current.get(&speaker_id).is_some_and(|active| active.sequence == sequence) { current.remove(&speaker_id); } }
             let _ = done_tx.send(SubmitResult::Disabled);
             self.pump_notify.notify_one();
             return;
         }
 
-        // 设置 current
-        self.current.lock().insert(
+        // A cancelled reservation must never restart after stop.
+        {
+        let mut current = self.current.lock();
+        if !current.get(&speaker_id).is_some_and(|active| active.sequence == sequence) {
+            let _ = done_tx.send(SubmitResult::Dropped); return;
+        }
+        current.insert(
             speaker_id.clone(),
             ActiveSpeech {
+                sequence,
                 speaker_id: speaker_id.clone(),
                 priority,
                 done_tx: Some(done_tx),
             },
         );
+
+        }
 
         // Ducking: 新角色开始播放,可能需要压低 Background 语音
         self.update_ducking_for_all().await;
@@ -869,11 +888,12 @@ impl SpeechPlanner {
             .await;
 
         // 移除 current
-        let done_tx = self
-            .current
-            .lock()
-            .remove(&speaker_id)
-            .and_then(|a| a.done_tx);
+        let done_tx = {
+            let mut current = self.current.lock();
+            if current.get(&speaker_id).is_some_and(|active| active.sequence == sequence) {
+                current.remove(&speaker_id).and_then(|active| active.done_tx)
+            } else { None }
+        };
 
         // Ducking: 角色停止播放,可能需要恢复 Background 语音
         self.update_ducking_for_all().await;

@@ -1,0 +1,4 @@
+SpeexDSP 1.2.1, https://github.com/xiph/speexdsp
+Commit: 1b28a0f61bc31162979e1f26f3981fc3637095c8
+Unmodified upstream DSP implementation and headers; floating point KISS FFT build.
+License: BSD, see COPYING and individual source file notices.

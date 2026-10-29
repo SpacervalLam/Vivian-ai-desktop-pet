@@ -55,7 +55,7 @@ pub struct WhisperRealtimeBackend {
     /// WS 主任务（连接 + 收发循环）
     ws_task: Option<JoinHandle<VivianResult<()>>>,
     /// 向 WS 任务发送指令的通道
-    cmd_tx: Option<mpsc::UnboundedSender<WsCmd>>,
+    cmd_tx: Option<mpsc::Sender<WsCmd>>,
     pending_audio: Arc<RwLock<Vec<i16>>>,
 }
 
@@ -124,7 +124,7 @@ impl WhisperRealtimeBackend {
     }
 
     /// 启动 cpal 麦克风采集（独立线程，重采样到 24kHz，每 CHUNK_SAMPLES 发一个 chunk）
-    fn start_capture(&mut self, cmd_tx: mpsc::UnboundedSender<WsCmd>) -> VivianResult<()> {
+    fn start_capture(&mut self, cmd_tx: mpsc::Sender<WsCmd>) -> VivianResult<()> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         use cpal::{SampleFormat, SampleRate, StreamConfig};
 
@@ -148,14 +148,14 @@ impl WhisperRealtimeBackend {
             supported.max_sample_rate().0
         };
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: supported.channels(),
             sample_rate: SampleRate(actual_rate),
             buffer_size: cpal::BufferSize::Default,
         };
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
-        let sr_in = actual_rate as f32;
+
         let sr_out = TARGET_SAMPLE_RATE as f32;
 
         let err_fn = |e: cpal::StreamError| {
@@ -166,6 +166,9 @@ impl WhisperRealtimeBackend {
         self.pending_audio.write().clear();
         let resampled_buf = self.pending_audio.clone();
 
+        let mut endpoint = crate::speech::endpoint::Endpoint::new(TARGET_SAMPLE_RATE, &self.config.vad, self.config.silence_timeout_ms, self.event_tx.clone());
+        let mut capture = super::pcm::PcmCapture::new(actual_rate, TARGET_SAMPLE_RATE, supported.channels());
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let handle = std::thread::spawn(move || {
             let stream = match sample_format {
                 SampleFormat::I16 => device.build_input_stream(
@@ -174,7 +177,9 @@ impl WhisperRealtimeBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        process_pcm_chunk(data, sr_in, sr_out, &resampled_buf, &cmd_tx, |s| s);
+                        let converted = capture.convert(data, |s| s);
+                        let converted = endpoint.filter(&converted);
+                        process_pcm_chunk(&converted, sr_out, sr_out, &resampled_buf, &cmd_tx, |s| s);
                     },
                     err_fn,
                     None,
@@ -185,9 +190,11 @@ impl WhisperRealtimeBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        process_pcm_chunk(data, sr_in, sr_out, &resampled_buf, &cmd_tx, |s| {
+                        let converted = capture.convert(data, |s| {
                             (s as i32 - 32768) as i16
                         });
+                        let converted = endpoint.filter(&converted);
+                        process_pcm_chunk(&converted, sr_out, sr_out, &resampled_buf, &cmd_tx, |s| s);
                     },
                     err_fn,
                     None,
@@ -198,9 +205,11 @@ impl WhisperRealtimeBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        process_pcm_chunk(data, sr_in, sr_out, &resampled_buf, &cmd_tx, |s| {
+                        let converted = capture.convert(data, |s| {
                             (s.clamp(-1.0, 1.0) * 32767.0) as i16
                         });
+                        let converted = endpoint.filter(&converted);
+                        process_pcm_chunk(&converted, sr_out, sr_out, &resampled_buf, &cmd_tx, |s| s);
                     },
                     err_fn,
                     None,
@@ -221,12 +230,17 @@ impl WhisperRealtimeBackend {
                 tracing::error!("[Whisper-RT] 启动麦克风采集失败: {e}");
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
             while !stop_for_loop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             drop(stream);
         });
 
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {},
+            status => { stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech(format!("麦克风启动失败: {status:?}"))); }
+        }
         self.stop_flag = Some(stop_flag);
         self.capture_thread = Some(handle);
         Ok(())
@@ -236,7 +250,7 @@ impl WhisperRealtimeBackend {
     fn start_ws_task(
         &mut self,
         ws_url: String,
-        cmd_rx: mpsc::UnboundedReceiver<WsCmd>,
+        cmd_rx: mpsc::Receiver<WsCmd>,
         event_tx: broadcast::Sender<AsrEvent>,
     ) -> VivianResult<()> {
         let api_key = self.whisper_cfg.api_key.clone();
@@ -246,6 +260,7 @@ impl WhisperRealtimeBackend {
                 tracing::error!("[Whisper-RT] WS 主任务异常退出: {e}");
                 let _ = event_tx.send(AsrEvent::error(e.to_string()));
             }
+            let _ = event_tx.send(AsrEvent::Stopped);
             result
         });
         self.ws_task = Some(handle);
@@ -259,7 +274,7 @@ fn process_pcm_chunk<T: Copy>(
     sr_in: f32,
     sr_out: f32,
     resampled_buf: &Arc<RwLock<Vec<i16>>>,
-    cmd_tx: &mpsc::UnboundedSender<WsCmd>,
+    cmd_tx: &mpsc::Sender<WsCmd>,
     convert: impl Fn(T) -> i16,
 ) {
     let mut buf = resampled_buf.write();
@@ -289,7 +304,7 @@ fn process_pcm_chunk<T: Copy>(
     // 攒够 CHUNK_SAMPLES 就发一次
     while buf.len() >= CHUNK_SAMPLES {
         let chunk: Vec<i16> = buf.drain(..CHUNK_SAMPLES).collect();
-        let _ = cmd_tx.send(WsCmd::Audio(chunk));
+        let _ = cmd_tx.try_send(WsCmd::Audio(chunk));
     }
 }
 
@@ -297,7 +312,7 @@ fn process_pcm_chunk<T: Copy>(
 async fn run_ws_loop(
     ws_url: String,
     api_key: String,
-    mut cmd_rx: mpsc::UnboundedReceiver<WsCmd>,
+    mut cmd_rx: mpsc::Receiver<WsCmd>,
     event_tx: broadcast::Sender<AsrEvent>,
 ) -> VivianResult<()> {
     use futures::{SinkExt, StreamExt};
@@ -544,7 +559,7 @@ impl AsrEngine for WhisperRealtimeBackend {
         }
 
         let ws_url = self.build_ws_url()?;
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<WsCmd>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<WsCmd>(20);
         let event_tx = self
             .event_tx
             .clone()
@@ -581,8 +596,10 @@ impl AsrEngine for WhisperRealtimeBackend {
         // 发送 commit 指令，让 WS 任务发 input_audio_buffer.commit
         if let Some(tx) = &self.cmd_tx {
             let tail: Vec<i16> = self.pending_audio.write().drain(..).collect();
-            if !tail.is_empty() { let _ = tx.send(WsCmd::Audio(tail)); }
-            let _ = tx.send(WsCmd::Commit);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                if !tail.is_empty() { let _ = tx.send(WsCmd::Audio(tail)).await; }
+                let _ = tx.send(WsCmd::Commit).await;
+            }).await;
             // Keep the sender alive until completed arrives, then close the socket.
         }
 
@@ -614,11 +631,7 @@ impl AsrEngine for WhisperRealtimeBackend {
     }
 
     async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {
-        // Realtime 模式不支持一次性 transcribe，降级为不支持
-        let _ = audio;
-        Err(VivianError::NotImplemented(
-            "Realtime WebSocket 后端不支持 transcribe，请用 start_recording/stop_recording".into(),
-        ))
+        super::whisper_backend::WhisperBackend::from_config(self.config.clone(), self.whisper_cfg.clone()).transcribe(audio).await
     }
 
     fn is_available(&self) -> bool {
@@ -642,7 +655,7 @@ impl AsrEngine for WhisperRealtimeBackend {
         }
         self.stop_flag = None;
         if let Some(tx) = self.cmd_tx.take() {
-            let _ = tx.send(WsCmd::Clear);
+            let _ = tx.try_send(WsCmd::Clear);
         }
         if let Some(handle) = self.ws_task.take() {
             handle.abort();
@@ -706,7 +719,7 @@ mod tests {
             }).to_string())).await.unwrap();
         });
         let (events, mut received) = broadcast::channel(16);
-        let (commands, rx) = mpsc::unbounded_channel();
+        let (commands, rx) = mpsc::channel(20);
         let mut backend = WhisperRealtimeBackend::from_config(AsrConfig::default(), WhisperConfig::default());
         backend.event_tx = Some(events.clone());
         backend.cmd_tx = Some(commands);

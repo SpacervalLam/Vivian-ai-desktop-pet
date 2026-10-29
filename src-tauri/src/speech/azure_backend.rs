@@ -114,14 +114,14 @@ mod imp {
                 supported.max_sample_rate().0
             };
             let stream_config = StreamConfig {
-                channels: 1,
+                channels: supported.channels(),
                 sample_rate: SampleRate(actual_rate),
                 buffer_size: cpal::BufferSize::Default,
             };
             let stop_flag = Arc::new(AtomicBool::new(false));
             let buffer = self.buffer.clone();
-            let sr_in = actual_rate as f32;
-            let sr_out = 16000f32;
+
+
             let max_samples = (self.azure_cfg.max_audio_seconds * 16000) as usize;
             let stop_for_thread = stop_flag.clone();
             let stop_for_loop = stop_flag.clone();
@@ -131,7 +131,10 @@ mod imp {
                 tracing::error!("麦克风采集错误: {e}");
             };
 
-            let handle = std::thread::spawn(move || {
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let mut endpoint = crate::speech::endpoint::Endpoint::new(16000, &self.config.vad, self.config.silence_timeout_ms, self.event_tx.clone());
+        let mut capture = crate::speech::pcm::PcmCapture::new(actual_rate, 16000, supported.channels());
+        let handle = std::thread::spawn(move || {
                 let stream = match sample_format {
                     SampleFormat::I16 => device.build_input_stream(
                         &stream_config,
@@ -140,16 +143,10 @@ mod imp {
                                 return;
                             }
                             let mut buf = buffer.write();
-                            let ratio = sr_out / sr_in;
-                            for (i, &s) in data.iter().enumerate() {
-                                let out_idx = (i as f32 * ratio) as usize;
-                                if out_idx < max_samples {
-                                    while buf.len() <= out_idx {
-                                        buf.push_back(0);
-                                    }
-                                    buf[out_idx] = s;
-                                }
-                            }
+                            let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: i16| s);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                         },
                         err_fn,
                         None,
@@ -161,17 +158,10 @@ mod imp {
                                 return;
                             }
                             let mut buf = buffer.write();
-                            let ratio = sr_out / sr_in;
-                            for (i, &s) in data.iter().enumerate() {
-                                let out_idx = (i as f32 * ratio) as usize;
-                                let pcm = (s as i32 - 32768) as i16;
-                                if out_idx < max_samples {
-                                    while buf.len() <= out_idx {
-                                        buf.push_back(0);
-                                    }
-                                    buf[out_idx] = pcm;
-                                }
-                            }
+                            let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: u16| (s as i32 - 32768) as i16);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                         },
                         err_fn,
                         None,
@@ -183,17 +173,10 @@ mod imp {
                                 return;
                             }
                             let mut buf = buffer.write();
-                            let ratio = sr_out / sr_in;
-                            for (i, &s) in data.iter().enumerate() {
-                                let out_idx = (i as f32 * ratio) as usize;
-                                let pcm = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                                if out_idx < max_samples {
-                                    while buf.len() <= out_idx {
-                                        buf.push_back(0);
-                                    }
-                                    buf[out_idx] = pcm;
-                                }
-                            }
+                            let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                         },
                         err_fn,
                         None,
@@ -210,13 +193,16 @@ mod imp {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!("构建输入流失败: {e}");
+                    let _ = ready_tx.send(Err(e.to_string()));
                         return;
                     }
                 };
                 if let Err(e) = stream.play() {
                     tracing::error!("启动麦克风采集失败: {e}");
+                let _ = ready_tx.send(Err(e.to_string()));
                     return;
                 }
+                let _ = ready_tx.send(Ok(()));
                 // 阻塞线程直到 stop_flag 置位，Stream 在线程退出时 drop
                 while !stop_for_loop.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -224,7 +210,11 @@ mod imp {
                 drop(stream);
             });
 
-            self.stop_flag = Some(stop_flag);
+            match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {},
+            status => { stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech(format!("麦克风启动失败: {status:?}"))); }
+        }
+        self.stop_flag = Some(stop_flag);
             self.capture_thread = Some(handle);
             Ok(())
         }
@@ -372,7 +362,9 @@ mod imp {
             }
             let wav = Self::build_wav(&samples);
             // 调用 Azure REST API
-            match self.recognize(wav).await {
+            let recognition = self.recognize(wav).await;
+            let failure = recognition.as_ref().err().map(|error| error.to_string());
+            match recognition {
                 Ok(text) => {
                     if !text.is_empty() {
                         if let Some(tx) = &self.event_tx {
@@ -391,7 +383,7 @@ mod imp {
                 let _ = tx.send(AsrEvent::Stopped);
             }
             tracing::info!("Azure 录音已停止");
-            Ok(())
+            failure.map_or(Ok(()), |error| Err(VivianError::Speech(error)))
         }
 
         async fn transcribe(&self, audio: &[f32]) -> VivianResult<String> {
@@ -409,7 +401,7 @@ mod imp {
         }
 
         fn supports_silence_detection(&self) -> bool {
-            true
+        true
         }
 
         fn supports_partial_results(&self) -> bool {

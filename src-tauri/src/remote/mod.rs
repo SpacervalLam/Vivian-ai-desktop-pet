@@ -1034,6 +1034,9 @@ async fn asr_handler(
     Json(req): Json<AsrRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     use base64::Engine;
+    if req.samples_b64.len() > 10_240_000 {
+        return Err((StatusCode::BAD_REQUEST, "音频超过最大时长".into()));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(req.samples_b64.trim())
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("base64 解码失败: {e}")))?;
@@ -1047,7 +1050,7 @@ async fn asr_handler(
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
-    if samples.is_empty() {
+    if samples.is_empty() || samples.iter().any(|s| !s.is_finite()) {
         return Err((StatusCode::BAD_REQUEST, "音频为空".to_string()));
     }
     let text = state

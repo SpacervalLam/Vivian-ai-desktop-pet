@@ -307,6 +307,13 @@ impl EdgeTtsBackend {
         &self,
         ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     ) -> VivianResult<(Vec<u8>, Vec<WordBoundary>)> {
+        self.receive_stream(ws, None).await
+    }
+
+    async fn receive_stream(
+        &self, ws: &mut WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        output: Option<&vivian_speech_runtime::streaming::AudioWriter>,
+    ) -> VivianResult<(Vec<u8>, Vec<WordBoundary>)> {
         let mut audio_buf: Vec<u8> = Vec::new();
         let mut boundaries: Vec<WordBoundary> = Vec::new();
         let mut binary_count = 0u32;
@@ -360,7 +367,8 @@ impl EdgeTtsBackend {
                     }
                     if !audio_data.is_empty() {
                         audio_received = true;
-                        audio_buf.extend_from_slice(audio_data);
+                        if let Some(output) = output { output.write(audio_data).await.map_err(VivianError::Speech)?; }
+                        else { audio_buf.extend_from_slice(audio_data); }
                     }
                 }
                 tokio_tungstenite::tungstenite::Message::Text(text) => {
@@ -381,6 +389,7 @@ impl EdgeTtsBackend {
                         "response" | "turn.start" => {}
                         "audio.metadata" => {
                             if let Some(wb_list) = parse_audio_metadata(&text) {
+                                if let Some(output) = output { for word in &wb_list { output.word(word.text.clone(), word.offset_ms, word.duration_ms); } }
                                 boundaries.extend(wb_list);
                             }
                         }
@@ -492,6 +501,16 @@ impl TtsBackend for EdgeTtsBackend {
 
     fn supports_word_boundary(&self) -> bool {
         true
+    }
+
+    fn supports_streaming(&self) -> bool { true }
+
+    async fn stream_audio(&self, text: &str, config: &TtsConfig, output: vivian_speech_runtime::streaming::AudioWriter) -> VivianResult<()> {
+        let cached = self.cached_ws.lock().await.take();
+        let mut ws = if let Some(ws) = cached { ws } else { let mut ws = self.connect().await?; self.send_config(&mut ws).await?; ws };
+        self.send_ssml(&mut ws, &Self::build_ssml(text, config)).await?;
+        self.receive_stream(&mut ws, Some(&output)).await?;
+        Ok(())
     }
 
     async fn synthesize(&self, text: &str, config: &TtsConfig) -> VivianResult<TtsSynthesisResult> {

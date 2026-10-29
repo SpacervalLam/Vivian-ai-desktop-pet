@@ -3321,11 +3321,14 @@ const ChatWindow: React.FC = () => {
         setRecording(false);
       } else {
         asrBaseLenRef.current = inputRef.current?.value.length ?? 0;
+      asrListenerReadyRef.current = new Promise<void>(resolve => { asrListenerResolveRef.current = resolve; });
+      setRecording(true);
+      await Promise.race([asrListenerReadyRef.current, new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('语音事件监听未就绪')), 3000))]);
         await invoke('start_recognition', { characterId: privateCharId ?? undefined });
-        setRecording(true);
       }
     } catch (e) {
       const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : String(e));
+      setRecording(false);
       console.warn('语音识别切换失败:', e);
       void emit('toast:show', { message: msg, type: 'warning', duration: 8000, key: Date.now() });
     }
@@ -3335,6 +3338,8 @@ const ChatWindow: React.FC = () => {
   // - final_result：追加到已确认文本
   // - partial_result：替换尾部未确认片段
   const asrPartialRef = useRef('');
+  const asrListenerReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const asrListenerResolveRef = useRef<(() => void) | undefined>();
   // 本次录音开始时输入框已有文本长度（润色只处理 ASR 追加的尾部）
   const asrBaseLenRef = useRef(0);
   useEffect(() => {
@@ -3348,6 +3353,7 @@ const ChatWindow: React.FC = () => {
         confidence?: number;
         message?: string;
       }>('asr:event', (e) => {
+        if ((e.payload as { owner_window?: string }).owner_window && (e.payload as { owner_window?: string }).owner_window !== getCurrentWindow().label) return;
         const { type, text } = e.payload;
         if (type === 'final_result' && text) {
           setInput((prev) => {
@@ -3371,6 +3377,7 @@ const ChatWindow: React.FC = () => {
           setRecording(false);
         }
       });
+      asrListenerResolveRef.current?.();
       if (cancelled) unlisten?.();
     })();
     return () => {
@@ -3424,6 +3431,7 @@ const ChatWindow: React.FC = () => {
         confidence?: number;
         message?: string;
       }>('asr:event', (e) => {
+        if ((e.payload as { owner_window?: string }).owner_window && (e.payload as { owner_window?: string }).owner_window !== getCurrentWindow().label) return;
         const { type, text } = e.payload;
         if (type === 'final_result' && text) {
           // 移除已累积的 partial 尾部，再追加 final（与 recording 模式同样的去重逻辑）
@@ -3749,16 +3757,8 @@ const ChatWindow: React.FC = () => {
 
     // 停止 ASR（仅实时模式启动了 ASR；文件转写模式在录音结束后才调 transcribe_audio）
     const useRealtimeAsr = voiceRealtimeAsrRef.current;
-    if (useRealtimeAsr) {
-      void invoke('stop_recognition').catch(() => { /* ignore */ });
-    }
-
-    // 等待 ASR final 文本到达（stop_recognition 后后端会产生 final_result 事件）
     const waitForAsr = useRealtimeAsr
-      ? new Promise<void>((resolve) => {
-          // 给后端 600ms 把 final_result 事件送回来（IPC + WinRT StopAsync + 事件转发）
-          setTimeout(resolve, 600);
-        })
+      ? invoke('stop_recognition').catch(error => { console.warn('[voice] finalization failed', error); })
       : Promise.resolve();
 
     if (!recorder || recorder.state === 'inactive') {

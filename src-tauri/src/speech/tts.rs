@@ -616,11 +616,23 @@ impl TtsConfig {
     /// 通用后端直接用 `voice_id`；GPT-SoVITS 与 ElevenLabs 的音色/输出
     /// 由多个字段共同决定，走各自的 identity。
     fn voice_cache_identity(&self, engine_name: &str) -> String {
-        match engine_name {
+        let reference_versions: Vec<_> = self.gpt_sovits_ref_audio.iter().chain(self.fish_speech_ref_audio.iter()).chain(self.mimo_voice_audio_path.iter())
+            .chain(self.gpt_sovits_aux_ref_audios.iter().flatten()).map(|path| {
+                let version = std::fs::metadata(path).ok().map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_nanos().to_string())));
+                (path, version)
+            }).collect();
+        let identity = match engine_name {
             "gpt-sovits" => self.gpt_sovits_cache_identity(),
             "elevenlabs" => self.elevenlabs_cache_identity(),
-            _ => self.voice_id.clone().unwrap_or_default(),
-        }
+            _ => {
+                let mut value = serde_json::to_value(self).unwrap_or_default();
+                if let Some(fields) = value.as_object_mut() {
+                    fields.retain(|key, _| !key.ends_with("key") && !key.contains("token") && key != "enabled");
+                }
+                value.to_string()
+            },
+        };
+        serde_json::json!({"schema":3,"identity":identity,"references":reference_versions}).to_string()
     }
 
     /// 是否应在应用启动时拉起 GPT-SoVITS 本地服务。
@@ -810,7 +822,9 @@ pub struct TtsManager {
     persistence_path: std::path::PathBuf,
     speaking: Arc<std::sync::atomic::AtomicBool>,
     /// 播放取消标志(stop 时置位,MciPlayer 轮询检测)
-    cancel: Arc<std::sync::atomic::AtomicBool>,
+    cancel: RwLock<Arc<std::sync::atomic::AtomicBool>>,
+    playback_lock: tokio::sync::Mutex<()>,
+    synthesis_lock: tokio::sync::Mutex<()>,
     /// 口型同步回调(兼容旧接口,由 WordBoundary 驱动)
     mouth_callback: Arc<RwLock<Option<MouthCallback>>>,
     /// TTS 事件回调(用于向前端推送 tts:word / tts:started / tts:finished)
@@ -870,7 +884,9 @@ impl TtsManager {
             config: Arc::new(RwLock::new(config)),
             persistence_path,
             speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel: RwLock::new(Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            playback_lock: tokio::sync::Mutex::new(()),
+            synthesis_lock: tokio::sync::Mutex::new(()),
             mouth_callback: Arc::new(RwLock::new(None)),
             event_callback: Arc::new(RwLock::new(None)),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -921,13 +937,32 @@ impl TtsManager {
                 }
             }
         }
+        if let Some(fields) = value.as_object_mut() {
+            for (key, value) in fields.iter_mut() {
+                if key.ends_with("_key") || key.ends_with("_token") {
+                    if let Some(secret) = value.as_str() {
+                        *value = serde_json::Value::String(crate::config::secret_store::unprotect_secret(secret).map_err(VivianError::Speech)?);
+                    }
+                }
+            }
+        }
         serde_json::from_value::<TtsConfig>(value)
             .map_err(|e| VivianError::Memory(format!("解析 TTS 配置失败: {e}")))
     }
 
     fn save_to(&self) -> VivianResult<()> {
         let config = self.config.read();
-        let json = serde_json::to_string_pretty(&*config)
+        let mut value = serde_json::to_value(&*config).map_err(|e| VivianError::Speech(e.to_string()))?;
+        if let Some(fields) = value.as_object_mut() {
+            for (key, value) in fields.iter_mut() {
+                if key.ends_with("_key") || key.ends_with("_token") {
+                    if let Some(secret) = value.as_str().filter(|v| !v.is_empty()) {
+                        *value = serde_json::Value::String(crate::config::secret_store::protect_secret(secret).map_err(VivianError::Speech)?);
+                    }
+                }
+            }
+        }
+        let json = serde_json::to_string_pretty(&value)
             .map_err(|e| VivianError::Memory(format!("序列化 TTS 配置失败: {e}")))?;
         crate::utils::fs::write_atomic(&self.persistence_path, &json)
             .map_err(|e| VivianError::Memory(format!("持久化 TTS 配置失败: {e}")))?;
@@ -1032,8 +1067,7 @@ impl TtsManager {
         {
             Ok(_) => {
                 tracing::info!(
-                    "[TTS] prefetch 完成: {:?} ({}字)",
-                    text,
+                    "[TTS] prefetch 完成 ({}字)",
                     text.chars().count()
                 );
                 Ok(())
@@ -1170,6 +1204,7 @@ impl TtsManager {
         emotion: Option<&str>,
     ) -> VivianResult<TtsSynthesisResult> {
         // 清洗 Markdown / 富文本符号，避免 TTS 朗读星号、井号等格式标记
+        let _synthesis = self.synthesis_lock.lock().await;
         let text = strip_markdown_for_tts(text);
         let text = text.as_str();
         if text.trim().is_empty() {
@@ -1194,16 +1229,24 @@ impl TtsManager {
         }
 
         let mut last_err: Option<VivianError> = None;
-        let retries = config.retry_count.max(1);
+        let retries = config.retry_count.clamp(1, 3);
         for attempt in 0..retries {
             if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
                 tracing::warn!(
                     "[TTS] {} 第 {} 次重试",
                     engine_name,
                     attempt
                 );
             }
-            match backend.synthesize(text, config).await {
+            let cancellation = self.cancel.read().clone();
+            let synthesized = tokio::select! {
+                result = tokio::time::timeout(std::time::Duration::from_secs(60), backend.synthesize(text, config)) => result.unwrap_or_else(|_| Err(VivianError::Speech("语音合成超时".into()))),
+                _ = async { while !cancellation.load(Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } } => {
+                    return Err(VivianError::Speech("语音合成已取消".into()));
+                }
+            };
+            match synthesized {
                 Ok(result) if !result.audio.is_empty() => {
                     // 写入缓存
                     self.cache.put(
@@ -1282,25 +1325,6 @@ impl TtsManager {
             return Ok(());
         }
 
-        // 最近播放去重:防止 proactive tick / wake_from_presence 等多路径在短时间内
-        // 重复触发同一句合成(日志显示 5-10s 间隔重复合成)。
-        // 30s 窗口覆盖日志中观察到的所有重复间隔,又不至于误杀用户主动"再说一遍"场景。
-        const RECENT_SPOKEN_DEDUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-        if self
-            .speech_memory
-            .recently_spoken(text, RECENT_SPOKEN_DEDUP_WINDOW)
-        {
-            tracing::debug!(
-                "[TtsManager] 最近 {}s 已合成相同文本,跳过: \"{}\"",
-                RECENT_SPOKEN_DEDUP_WINDOW.as_secs(),
-                text
-            );
-            return Ok(());
-        }
-
-        // 记录到言语记忆(供 Brain 查询避免重复)
-        self.speech_memory.record(text);
-
         let config = self
             .config
             .read()
@@ -1310,29 +1334,122 @@ impl TtsManager {
             .with_context(context);
         let engine = Self::resolve_engine(&config)?;
 
-        // 停止上一次播放并递增 generation（序号防穿插）
-        self.stop_internal();
+        let requested_generation = self.generation.load(Ordering::SeqCst);
+        let _playback = self.playback_lock.lock().await;
+        if self.generation.load(Ordering::SeqCst) != requested_generation { return Ok(()); }
+        *self.cancel.write() = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _device_lease = super::session::AUDIO_SESSIONS.acquire(super::session::AudioMode::Playback, self.cancel.read().clone()).map_err(VivianError::Speech)?;
         let my_gen = self
             .generation
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
 
         self.speaking.store(true, Ordering::SeqCst);
-        self.cancel.store(false, Ordering::SeqCst);
+        struct SpeakingGuard(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for SpeakingGuard { fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); } }
+        let _speaking_guard = SpeakingGuard(self.speaking.clone());
+
 
         // 思考停顿：播放前静默 N 毫秒（[THINKING]/[PAUSE] 标记），让语气更像人
         if controls.pause_ms > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(controls.pause_ms)).await;
+            let pause_cancel = self.cancel.read().clone();
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(controls.pause_ms)) => {},
+                _ = super::session::cancelled(pause_cancel) => return Err(VivianError::Speech("朗读已取消".into())),
+            }
         }
 
         // 获取或创建缓存的后端实例（复用 prewarm 建立的连接）
-        let cached = self.get_cached_backend().await?;
+        let playback_cancel = self.cancel.read().clone();
+        let cached = tokio::select! {
+            backend = self.get_cached_backend() => backend?,
+            _ = super::session::cancelled(playback_cancel) => return Err(VivianError::Speech("朗读已取消".into())),
+        };
         let backend: &dyn TtsBackend = cached.1.as_ref();
         let engine_name = backend.name().to_string();
-        self.emit_event(&TtsEvent::Started {
-            text: text.to_string(),
-            engine: engine_name.clone(),
-        });
+
+
+        if backend.supports_streaming() {
+            let text = strip_markdown_for_tts(text);
+            let identity = config.voice_cache_identity(&engine_name);
+            if let Some(cached) = self.cache.get(&text, &identity, emotion, &engine_name, config.rate, config.volume, config.pitch) {
+                return self.finish_play(cached, &config, &text, &engine_name).await;
+            }
+            let cancel = self.cancel.read().clone();
+            let (mut writer, reader) = vivian_speech_runtime::streaming::pipe(cancel.clone());
+            let captured_audio = writer.capture();
+            let boundaries = Arc::new(RwLock::new(Vec::<super::tts_backend::WordBoundary>::new()));
+            let clock = Arc::new(RwLock::new(None::<std::time::Instant>));
+            let marker_clock = clock.clone();
+            let marker_boundaries = boundaries.clone();
+            let marker_cancel = cancel.clone();
+            let marker_events = self.event_callback.clone();
+            let marker_mouth = self.mouth_callback.clone();
+            struct WordTasks(Arc<parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>>);
+            impl Drop for WordTasks { fn drop(&mut self) { for task in self.0.lock().drain(..) { task.abort(); } } }
+            let word_tasks = WordTasks(Arc::new(parking_lot::Mutex::new(Vec::new())));
+            let task_handles = word_tasks.0.clone();
+            writer.on_boundary(Arc::new(move |text, offset_ms, duration_ms| {
+                marker_boundaries.write().push(super::tts_backend::WordBoundary { text: text.clone(), offset_ms, duration_ms });
+                let clock = marker_clock.clone(); let cancel = marker_cancel.clone();
+                let events = marker_events.clone(); let mouth = marker_mouth.clone();
+                task_handles.lock().push(tokio::spawn(async move {
+                    let started = loop {
+                        if cancel.load(Ordering::SeqCst) { return; }
+                        let started = *clock.read(); if let Some(started) = started { break started; }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    };
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(started + std::time::Duration::from_millis(offset_ms))).await;
+                    if cancel.load(Ordering::SeqCst) { return; }
+                    let mouth_open = word_to_mouth_open(&text);
+                    if let Some(callback) = mouth.read().as_ref() { callback(mouth_open as f64); }
+                    if let Some(callback) = events.read().as_ref() { callback(&TtsEvent::WordBoundary { text, offset_ms, duration_ms, mouth_open }); }
+                }));
+            }));
+            let did_start = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mark_started = did_start.clone();
+            let event = self.event_callback.clone();
+            let started_text = text.clone();
+            let started_engine = engine_name.clone();
+            let playback_cancel = cancel.clone();
+            let volume = config.volume as f32; let mp3 = engine_name == "edge-tts"; let ducking = self.ducking_factor.clone();
+            let playback = tokio::task::spawn_blocking(move || vivian_speech_runtime::streaming::play(reader, mp3, playback_cancel, Box::new(move || volume * *ducking.read() as f32), Box::new(move || {
+                mark_started.store(true, Ordering::SeqCst);
+                *clock.write() = Some(std::time::Instant::now());
+                if let Some(callback) = event.read().as_ref() { callback(&TtsEvent::Started { text: started_text.clone(), engine: started_engine.clone() }); }
+            })));
+            let synthesis = tokio::select! {
+                result = tokio::time::timeout(std::time::Duration::from_secs(120), backend.stream_audio(&text, &config, writer)) => result.unwrap_or_else(|_| Err(VivianError::Speech("流式合成超时".into()))),
+                _ = async { while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(std::time::Duration::from_millis(10)).await; } } => Err(VivianError::Speech("朗读已取消".into())),
+            };
+            let externally_cancelled = cancel.load(Ordering::SeqCst);
+            if synthesis.is_err() { cancel.store(true, Ordering::SeqCst); }
+            let played = playback.await.map_err(|e| VivianError::Speech(e.to_string()))?.map_err(VivianError::Speech);
+            drop(word_tasks);
+            self.reset_mouth();
+            let result = synthesis.and(played.map(|_| ()));
+            if let Err(error) = &result {
+                if !externally_cancelled && !did_start.load(Ordering::SeqCst) && self.generation.load(Ordering::SeqCst) == my_gen {
+                    *self.cancel.write() = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let _fallback_lease = super::session::AUDIO_SESSIONS.acquire(super::session::AudioMode::Playback, self.cancel.read().clone()).map_err(VivianError::Speech)?;
+                    if let Some(audio) = self.try_fallback(&config, &text, &engine, &engine_name, error).await {
+                        return self.finish_play(audio, &config, &text, &engine_name).await;
+                    }
+                }
+            }
+            match &result {
+                Ok(()) => {
+                    if let Some(audio) = captured_audio.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                        let format = if mp3 { AudioFormat::Mp3 } else { AudioFormat::Wav };
+                        let result = TtsSynthesisResult::new(audio, format).with_boundaries(boundaries.read().clone());
+                        self.cache.put(&text, &identity, emotion, &engine_name, config.rate, config.volume, config.pitch, &result);
+                    }
+                    self.speech_memory.record(&text); self.emit_event(&TtsEvent::Finished);
+                },
+                Err(error) => self.emit_event(&TtsEvent::Error { message: error.to_string(), engine: engine_name.clone() }),
+            }
+            return result;
+        }
 
         // 按句切分（早播放）
         let sentences = split_sentences(text);
@@ -1358,6 +1475,7 @@ impl TtsManager {
                     }
                 },
             };
+            if self.generation.load(Ordering::SeqCst) != my_gen { return Ok(()); }
             return self.finish_play(synthesis, &config, text, &engine_name).await;
         }
 
@@ -1371,7 +1489,7 @@ impl TtsManager {
                 tracing::debug!("[TTS] generation 变更，中止旧代次播放");
                 break;
             }
-            if self.cancel.load(Ordering::SeqCst) {
+            if self.cancel.read().load(Ordering::SeqCst) {
                 tracing::debug!("[TTS] 检测到 cancel，中止播放");
                 break;
             }
@@ -1382,12 +1500,13 @@ impl TtsManager {
                 match handle.await {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
-                        tracing::warn!("[TTS] 第 {} 句预合成失败，跳过: {}", idx + 1, e);
-                        continue;
+                        self.emit_event(&TtsEvent::Error { message: e.to_string(), engine: engine_name.clone() });
+                        return Err(e);
                     }
                     Err(e) => {
-                        tracing::warn!("[TTS] 第 {} 句预合成任务 panic: {}", idx + 1, e);
-                        continue;
+                        let error = VivianError::Speech(format!("预合成任务失败: {e}"));
+                        self.emit_event(&TtsEvent::Error { message: error.to_string(), engine: engine_name.clone() });
+                        return Err(error);
                     }
                 }
             } else {
@@ -1415,8 +1534,8 @@ impl TtsManager {
                                 }
                             }
                         } else {
-                            tracing::warn!("[TTS] 第 {} 句合成失败，跳过: {}", idx + 1, e);
-                            continue;
+                            self.emit_event(&TtsEvent::Error { message: e.to_string(), engine: engine_name.clone() });
+                            return Err(e);
                         }
                     }
                 }
@@ -1425,7 +1544,7 @@ impl TtsManager {
             // 预合成下一句（fire-and-forget spawn，播放期间并行执行）
             // 主后端失败时自动尝试 fallback 后端，避免预合成被直接跳过
             if idx + 1 < sentences.len() {
-                let next_sentence = sentences[idx + 1].clone();
+                let next_sentence = strip_markdown_for_tts(&sentences[idx + 1]);
                 let next_config = config.clone();
                 let next_engine = engine.clone();
                 let fallback_engine = config.fallback_engine.clone();
@@ -1451,17 +1570,24 @@ impl TtsManager {
                             }
                             Err(primary_err)
                         }
-                        Ok(empty) => Ok(empty),
+                        Ok(_) => Err(VivianError::Speech("预合成返回空音频".into())),
                     }
                 }));
             }
 
+            if self.generation.load(Ordering::SeqCst) != my_gen {
+                if let Some(task) = next_synth.take() { task.abort(); }
+                break;
+            }
             // 播放当前句（阻塞至播放完成）
             if let Err(e) = self
                 .play_audio(synthesis, &config, sentence, &engine_name)
                 .await
             {
-                tracing::warn!("[TTS] 第 {} 句播放失败: {}", idx + 1, e);
+                self.speaking.store(false, Ordering::SeqCst);
+                self.reset_mouth();
+                self.emit_event(&TtsEvent::Error { message: e.to_string(), engine: engine_name.clone() });
+                return Err(e);
             }
         }
 
@@ -1480,6 +1606,7 @@ impl TtsManager {
         engine_name: &str,
     ) -> VivianResult<()> {
         let play_result = self.play_audio(synthesis, config, text, engine_name).await;
+        if play_result.is_ok() && !self.cancel.read().load(Ordering::SeqCst) { self.speech_memory.record(text); }
         self.speaking.store(false, Ordering::SeqCst);
         self.reset_mouth();
         match play_result {
@@ -1557,17 +1684,36 @@ impl TtsManager {
     /// 播放音频:优先 MemoryPlayer（内存直接播放），失败回退 MCI（临时文件）
     async fn play_audio(
         &self,
-        synthesis: TtsSynthesisResult,
+        mut synthesis: TtsSynthesisResult,
         config: &TtsConfig,
         text: &str,
         engine_name: &str,
     ) -> VivianResult<()> {
+        if synthesis.format == AudioFormat::Pcm {
+            let rate = match engine_name {
+                "azure" => 24000,
+                "minimax" => config.minimax_sample_rate.unwrap_or(32000),
+                "doubao" => config.doubao_sample_rate.unwrap_or(24000),
+                "elevenlabs" => config.elevenlabs_output_format.as_deref().and_then(|f| f.strip_prefix("pcm_")).and_then(|n| n.parse::<u32>().ok())
+                    .ok_or_else(|| VivianError::Speech("此裸音频格式缺少可解码的 PCM 描述".into()))?,
+                _ => return Err(VivianError::Speech("裸 PCM 缺少采样率，请选择 WAV 输出".into())),
+            };
+            if synthesis.audio.len() % 2 != 0 { return Err(VivianError::Speech("PCM16 音频长度无效".into())); }
+            let mut wav = Vec::with_capacity(44 + synthesis.audio.len());
+            let length = synthesis.audio.len() as u32;
+            wav.extend_from_slice(b"RIFF"); wav.extend_from_slice(&(length + 36).to_le_bytes()); wav.extend_from_slice(b"WAVEfmt ");
+            wav.extend_from_slice(&16u32.to_le_bytes()); wav.extend_from_slice(&1u16.to_le_bytes()); wav.extend_from_slice(&1u16.to_le_bytes());
+            wav.extend_from_slice(&rate.to_le_bytes()); wav.extend_from_slice(&(rate * 2).to_le_bytes()); wav.extend_from_slice(&2u16.to_le_bytes());
+            wav.extend_from_slice(&16u16.to_le_bytes()); wav.extend_from_slice(b"data"); wav.extend_from_slice(&length.to_le_bytes()); wav.extend_from_slice(&synthesis.audio);
+            synthesis.audio = wav; synthesis.format = AudioFormat::Wav;
+        }
         tracing::info!(
             "[TTS] play_audio: engine={} audio={}字节 format={:?} boundaries={}",
             engine_name, synthesis.audio.len(), synthesis.format, synthesis.word_boundaries.len()
         );
 
-        let cancel = self.cancel.clone();
+        let cancel = self.cancel.read().clone();
+        if cancel.load(Ordering::SeqCst) { return Ok(()); }
         let speaking = self.speaking.clone();
         // 单句播放完成标志，用于通知 watcher 线程退出
         let play_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1586,7 +1732,8 @@ impl TtsManager {
             // 尝试 MemoryPlayer (rodio 内存直接播放)
             match MemoryPlayer::play_from_memory(audio_data, format) {
                 Ok(player) => {
-                    tracing::info!("[TTS] 使用 MemoryPlayer 播放");
+                    if cancel.load(Ordering::SeqCst) { player.stop(); return Ok(()); }
+                    if let Some(cb) = event_cb.read().as_ref() { cb(&TtsEvent::Started { text: text_owned.clone(), engine: engine_owned.clone() }); }
 
                     // 设置初始音量
                     let init_duck = *ducking_factor.read();
@@ -1836,6 +1983,7 @@ impl TtsManager {
                         None
                     };
 
+                    if let Some(cb) = event_cb.read().as_ref() { cb(&TtsEvent::Started { text: text_owned.clone(), engine: engine_owned.clone() }); }
                     mci_player.wait_until_done(&cancel);
 
                     play_done.store(true, Ordering::SeqCst);
@@ -1875,17 +2023,8 @@ impl TtsManager {
     }
 
     fn stop_internal(&self) {
-        self.cancel.store(true, Ordering::SeqCst);
-        // 等待 speaking 标志清零(最多 200ms)
-        // 使用 yield_now 而非 thread::sleep，避免阻塞 Tokio async worker 线程
-        for _ in 0..20 {
-            if !self.speaking.load(Ordering::SeqCst) {
-                break;
-            }
-            std::hint::spin_loop();
-        }
-        self.speaking.store(false, Ordering::SeqCst);
-        self.cancel.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.cancel.read().store(true, Ordering::SeqCst);
     }
 
     /// 设置 ducking 因子(0.0-1.0)
@@ -1934,7 +2073,9 @@ impl Default for TtsManager {
             config: Arc::new(RwLock::new(TtsConfig::default())),
             persistence_path: std::path::PathBuf::from("config.json"),
             speaking: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel: RwLock::new(Arc::new(std::sync::atomic::AtomicBool::new(false))),
+            playback_lock: tokio::sync::Mutex::new(()),
+            synthesis_lock: tokio::sync::Mutex::new(()),
             mouth_callback: Arc::new(RwLock::new(None)),
             event_callback: Arc::new(RwLock::new(None)),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2100,7 +2241,7 @@ fn split_sentences(text: &str) -> Vec<String> {
         current.push(ch);
 
         let is_newline = matches!(ch, '\n' | '\r');
-        let is_punct_boundary = matches!(ch, '。' | '！' | '？' | '!' | '?');
+        let is_punct_boundary = matches!(ch, '。' | '！' | '？' | '!' | '?' | '.');
 
         if is_newline || is_punct_boundary {
             let trimmed = current.trim().to_string();
@@ -2210,5 +2351,20 @@ mod auto_start_tests {
 
         config.fish_speech_install_path = Some("   ".to_string());
         assert!(!config.should_auto_start_fish_speech());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn stop_keeps_the_current_token_cancelled() {
+        let manager = TtsManager::default();
+        let token = manager.cancel.read().clone();
+        let generation = manager.generation.load(Ordering::SeqCst);
+        manager.stop().unwrap();
+        assert!(token.load(Ordering::SeqCst));
+        assert!(manager.generation.load(Ordering::SeqCst) > generation);
+        assert!(manager.cancel.read().load(Ordering::SeqCst));
     }
 }

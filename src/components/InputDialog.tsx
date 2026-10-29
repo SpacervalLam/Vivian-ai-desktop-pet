@@ -285,9 +285,12 @@ const InputDialog: React.FC<InputDialogProps> = ({
       userStoppedRef.current = false;
       manualStopRef.current = false;
       asrBaseLenRef.current = inputRef.current?.value.length ?? 0;
-      await invoke('start_recognition', { characterId: charId ?? undefined });
+      asrListenerReadyRef.current = new Promise<void>(resolve => { asrListenerResolveRef.current = resolve; });
       setRecording(true);
+      await Promise.race([asrListenerReadyRef.current, new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('语音事件监听未就绪')), 3000))]);
+      await invoke('start_recognition', { characterId: charId ?? undefined });
     } catch (e) {
+      setRecording(false);
       const msg = typeof e === 'string' ? e : (e instanceof Error ? e.message : String(e));
       console.warn('语音识别启动失败:', e);
       // 语音启动失败常含多行诊断 hint（如 WinRT 0x800455A0 的修复建议），
@@ -327,6 +330,8 @@ const InputDialog: React.FC<InputDialogProps> = ({
   //   静音超时自动停止时自动发送已识别内容
   // - error：打印警告日志
   const asrPartialRef = useRef('');
+  const asrListenerReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const asrListenerResolveRef = useRef<(() => void) | undefined>();
   const valueRef = useRef('');
   const autoSendTriggeredRef = useRef(false);
   useEffect(() => { valueRef.current = value; }, [value]);
@@ -347,6 +352,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
         confidence?: number;
         message?: string;
       }>('asr:event', (e) => {
+        if ((e.payload as { owner_window?: string }).owner_window && (e.payload as { owner_window?: string }).owner_window !== getCurrentWindow().label) return;
         const { type, text } = e.payload;
         if (type === 'started') {
           // 后端确认识别已启动（包括异常后自动重启的场景），同步前端状态
@@ -370,7 +376,8 @@ const InputDialog: React.FC<InputDialogProps> = ({
         } else if (type === 'stopped') {
           if (cancelled || autoSendTriggeredRef.current) return;
           asrPartialRef.current = '';
-          setRecording(false);
+          // Keep the listener alive until finalization and auto-send complete.
+          if (userStoppedRef.current) setRecording(false);
           // 非用户主动停止（静音超时自动停止）→ 自动发送已识别的内容
           if (!userStoppedRef.current) {
             autoSendTriggeredRef.current = true;
@@ -414,6 +421,7 @@ const InputDialog: React.FC<InputDialogProps> = ({
                       }
                     }, 200);
                   }
+                  setRecording(false);
                   return '';
                 });
               })();
@@ -421,9 +429,11 @@ const InputDialog: React.FC<InputDialogProps> = ({
           }
           userStoppedRef.current = false;
         } else if (type === 'error') {
+          userStoppedRef.current = true;
           console.warn('ASR 错误:', e.payload.message);
         }
       });
+      asrListenerResolveRef.current?.();
       if (cancelled) unlisten?.();
     })();
     return () => {

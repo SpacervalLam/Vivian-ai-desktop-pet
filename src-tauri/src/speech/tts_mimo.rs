@@ -186,10 +186,12 @@ impl TtsBackend for MimoBackend {
         &self,
         text: &str,
         config: &TtsConfig,
-        _callback: super::tts_backend::StreamCallback,
+        callback: super::tts_backend::StreamCallback,
     ) -> VivianResult<()> {
         // MiMo 为一次性合成接口，流式路径回退到批量合成
-        let _ = self.synthesize(text, config).await?;
+        let result = self.synthesize(text, config).await?;
+        callback(super::tts_backend::AudioChunk::Audio { data: result.audio, format: result.format });
+        callback(super::tts_backend::AudioChunk::End);
         Ok(())
     }
 }

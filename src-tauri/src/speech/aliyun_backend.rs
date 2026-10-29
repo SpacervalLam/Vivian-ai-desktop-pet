@@ -77,6 +77,9 @@ pub struct AliyunBackend {
     read_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// 复用的 HTTP 客户端（直连，绕过代理；阿里云 NLS 服务国内可直连）
     client: reqwest::Client,
+    task_id: RwLock<String>,
+    upload_stop: Arc<AtomicBool>,
+    upload_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl AliyunBackend {
@@ -98,6 +101,9 @@ impl AliyunBackend {
             ws_writer: Arc::new(Mutex::new(None)),
             read_task: Arc::new(Mutex::new(None)),
             client,
+            task_id: RwLock::new(String::new()),
+            upload_stop: Arc::new(AtomicBool::new(false)),
+            upload_task: Mutex::new(None),
         }
     }
 
@@ -126,14 +132,14 @@ impl AliyunBackend {
             supported.max_sample_rate().0
         };
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: supported.channels(),
             sample_rate: SampleRate(actual_rate),
             buffer_size: cpal::BufferSize::Default,
         };
         let stop_flag = Arc::new(AtomicBool::new(false));
         let buffer = self.buffer.clone();
-        let sr_in = actual_rate as f32;
-        let sr_out = 16000f32;
+
+
         let max_samples = (self.aliyun_cfg.max_audio_seconds * 16000) as usize;
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
@@ -142,6 +148,9 @@ impl AliyunBackend {
             tracing::error!("麦克风采集错误: {e}");
         };
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let mut endpoint = crate::speech::endpoint::Endpoint::new(16000, &self.config.vad, self.config.silence_timeout_ms, self.event_tx.clone());
+        let mut capture = super::pcm::PcmCapture::new(actual_rate, 16000, supported.channels());
         let handle = std::thread::spawn(move || {
             let stream = match sample_format {
                 SampleFormat::I16 => device.build_input_stream(
@@ -151,16 +160,10 @@ impl AliyunBackend {
                             return;
                         }
                         let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = s;
-                            }
-                        }
+                        let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: i16| s);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
@@ -172,17 +175,10 @@ impl AliyunBackend {
                             return;
                         }
                         let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s as i32 - 32768) as i16;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = pcm;
-                            }
-                        }
+                        let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: u16| (s as i32 - 32768) as i16);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
@@ -194,23 +190,17 @@ impl AliyunBackend {
                             return;
                         }
                         let mut buf = buffer.write();
-                        let ratio = sr_out / sr_in;
-                        for (i, &s) in data.iter().enumerate() {
-                            let out_idx = (i as f32 * ratio) as usize;
-                            let pcm = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                            if out_idx < max_samples {
-                                while buf.len() <= out_idx {
-                                    buf.push_back(0);
-                                }
-                                buf[out_idx] = pcm;
-                            }
-                        }
+                        let remaining = max_samples.saturating_sub(buf.len());
+                            let converted = capture.convert(data, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                            let converted = endpoint.filter(&converted);
+                            buf.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
                 ),
                 _ => {
                     tracing::error!("不支持的采样格式: {:?}", sample_format);
+                    let _ = ready_tx.send(Err("不支持的采样格式".into()));
                     return;
                 }
             };
@@ -218,19 +208,26 @@ impl AliyunBackend {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("构建输入流失败: {e}");
+                    let _ = ready_tx.send(Err(e.to_string()));
                     return;
                 }
             };
             if let Err(e) = stream.play() {
                 tracing::error!("启动麦克风采集失败: {e}");
+                let _ = ready_tx.send(Err(e.to_string()));
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
             while !stop_for_loop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             drop(stream);
         });
 
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {},
+            status => { stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech(format!("麦克风启动失败: {status:?}"))); }
+        }
         self.stop_flag = Some(stop_flag);
         self.capture_thread = Some(handle);
         Ok(())
@@ -336,10 +333,13 @@ impl AliyunBackend {
             })?;
 
         let (mut write, mut read) = ws_stream.split();
+        let task_id = uuid_str();
         let _ = write.send(Message::Text(start_transcription_json(
             &self.aliyun_cfg.app_key,
-            &self.config.language,
-        ))).await;
+            &self.config.language, &task_id,
+        ))).await.map_err(|e| VivianError::Network(e.to_string()))?;
+        await_started(&mut read).await?;
+        *self.task_id.write() = task_id;
 
         // 启动读取任务，解析服务端事件并广播
         let event_tx = self.event_tx.clone();
@@ -351,6 +351,7 @@ impl AliyunBackend {
                     Ok(Message::Close(_)) | Err(_) => break,
                     _ => continue,
                 };
+                if serde_json::from_str::<serde_json::Value>(&msg).ok().is_some_and(|v| v["header"]["name"] == "TranscriptionCompleted") { break; }
                 if let Some(event) = parse_nls_message(&msg) {
                     if let Some(tx) = &event_tx {
                         let _ = tx.send(event);
@@ -361,11 +362,33 @@ impl AliyunBackend {
 
         *self.ws_writer.lock().await = Some(write);
         *self.read_task.lock().await = Some(read_task);
+        self.upload_stop.store(false, Ordering::SeqCst);
+        let stop = self.upload_stop.clone();
+        let buffer = self.buffer.clone();
+        let writer = self.ws_writer.clone();
+        let events = self.event_tx.clone();
+        *self.upload_task.lock().await = Some(tokio::spawn(async move {
+            while !stop.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let bytes: Vec<u8> = { let mut b = buffer.write(); let n = b.len().min(3200); b.drain(..n).flat_map(i16::to_le_bytes).collect() };
+                if bytes.is_empty() { continue; }
+                if let Some(w) = writer.lock().await.as_mut() {
+                    if let Err(error) = w.send(Message::Binary(bytes)).await {
+                        if let Some(tx) = &events { let _ = tx.send(AsrEvent::error(error.to_string())); }
+                        break;
+                    }
+                }
+            }
+        }));
         Ok(())
     }
 
     /// 发送剩余 PCM 音频 + StopTranscription 指令并关闭连接
     async fn stop_ws_session(&self) {
+        self.upload_stop.store(true, Ordering::SeqCst);
+        if let Some(mut task) = self.upload_task.lock().await.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await.is_err() { task.abort(); }
+        }
         // 发送剩余音频
         let remaining: Vec<i16> = {
             let mut buf = self.buffer.write();
@@ -385,21 +408,25 @@ impl AliyunBackend {
         // 发送 StopTranscription
         let mut writer = self.ws_writer.lock().await;
         if let Some(w) = writer.as_mut() {
-            let _ = w.send(Message::Text(stop_transcription_json(&self.aliyun_cfg.app_key))).await;
-            let _ = w.close().await;
+            let task_id = self.task_id.read().clone(); let command = stop_transcription_json(&self.aliyun_cfg.app_key, &task_id); let _ = w.send(Message::Text(command)).await;
+
         }
         drop(writer);
 
         // 等待读取任务结束（最多 2 秒）
         let mut read_guard = self.read_task.lock().await;
-        if let Some(handle) = read_guard.take() {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        if let Some(mut handle) = read_guard.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await.is_err() {
+                handle.abort();
+                if let Some(tx) = &self.event_tx { let _ = tx.send(AsrEvent::error("等待最终识别超时")); }
+            }
         }
+        if let Some(mut writer) = self.ws_writer.lock().await.take() { let _ = writer.close().await; }
     }
 }
 
 /// 生成 StartTranscription JSON 指令
-fn start_transcription_json(app_key: &str, language: &str) -> String {
+fn start_transcription_json(app_key: &str, language: &str, task_id: &str) -> String {
     let lang_map = match language {
         "zh-CN" | "zh" => "zh-CN",
         "en-US" | "en" => "en-US",
@@ -408,7 +435,7 @@ fn start_transcription_json(app_key: &str, language: &str) -> String {
     let msg = serde_json::json!({
         "header": {
             "message_id": uuid_str(),
-            "task_id": uuid_str(),
+            "task_id": task_id,
             "namespace": "SpeechTranscriber",
             "name": "StartTranscription",
             "appkey": app_key,
@@ -427,11 +454,11 @@ fn start_transcription_json(app_key: &str, language: &str) -> String {
 }
 
 /// 生成 StopTranscription JSON 指令
-fn stop_transcription_json(app_key: &str) -> String {
+fn stop_transcription_json(app_key: &str, task_id: &str) -> String {
     let msg = serde_json::json!({
         "header": {
             "message_id": uuid_str(),
-            "task_id": uuid_str(),
+            "task_id": task_id,
             "namespace": "SpeechTranscriber",
             "name": "StopTranscription",
             "appkey": app_key,
@@ -610,7 +637,10 @@ impl AsrEngine for AliyunBackend {
         self.start_ws_session(&token).await?;
 
         // 3. 启动麦克风采集
-        self.start_capture()?;
+        if let Err(error) = self.start_capture() {
+            self.stop_ws_session().await;
+            return Err(error);
+        }
         self.is_running = true;
         if let Some(tx) = &self.event_tx {
             let _ = tx.send(AsrEvent::Started);
@@ -660,15 +690,17 @@ impl AsrEngine for AliyunBackend {
             })?;
         let (mut write, mut read) = ws_stream.split();
 
+        let task_id = uuid_str();
         // 发 StartTranscription
         write
             .send(Message::Text(start_transcription_json(
                 &self.aliyun_cfg.app_key,
-                &self.config.language,
+                &self.config.language, &task_id,
             )))
             .await
             .map_err(|e| VivianError::Network(format!("发送 StartTranscription 失败: {e}")))?;
 
+        await_started(&mut read).await?;
         // 分帧发送 PCM（200ms = 3200 samples @ 16kHz）
         let i16_samples: Vec<i16> = audio
             .iter()
@@ -688,20 +720,21 @@ impl AsrEngine for AliyunBackend {
         // 发 StopTranscription
         write
             .send(Message::Text(stop_transcription_json(
-                &self.aliyun_cfg.app_key,
+                &self.aliyun_cfg.app_key, &task_id,
             )))
             .await
             .map_err(|e| VivianError::Network(format!("发送 StopTranscription 失败: {e}")))?;
 
         // 读取消息，累积 SentenceEnd 的 result，直到 TranscriptionCompleted 或连接关闭
         let mut result = String::new();
-        while let Some(msg) = read.next().await {
+        while let Some(msg) = tokio::time::timeout(std::time::Duration::from_secs(15), read.next()).await.map_err(|_| VivianError::Speech("阿里云最终识别超时".into()))? {
             match msg {
                 Ok(Message::Text(t)) => {
                     let v: serde_json::Value = match serde_json::from_str(&t) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
+                    if let Some(AsrEvent::Error { message }) = parse_nls_message(&t) { return Err(VivianError::Speech(message)); }
                     let name = v
                         .get("header")
                         .and_then(|h| h.get("name"))
@@ -774,4 +807,18 @@ impl std::fmt::Debug for AliyunBackend {
             .field("is_running", &self.is_running)
             .finish()
     }
+}
+
+async fn await_started<R>(read: &mut R) -> VivianResult<()>
+where R: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(message) = read.next().await {
+            let message = message.map_err(|e| VivianError::Network(e.to_string()))?;
+            if let Message::Text(text) = message {
+                if let Some(AsrEvent::Error { message }) = parse_nls_message(&text) { return Err(VivianError::Speech(message)); }
+                if serde_json::from_str::<serde_json::Value>(&text).ok().is_some_and(|v| v["header"]["name"] == "TranscriptionStarted") { return Ok(()); }
+            }
+        }
+        Err(VivianError::Speech("阿里云握手前连接关闭".into()))
+    }).await.map_err(|_| VivianError::Speech("阿里云握手超时".into()))?
 }

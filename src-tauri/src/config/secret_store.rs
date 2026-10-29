@@ -75,7 +75,7 @@ fn transform(value: &mut serde_yaml::Value, protect: bool) -> Result<(), String>
 }
 
 #[cfg(windows)]
-fn protect_secret(secret: &str) -> Result<String, String> {
+pub(crate) fn protect_secret(secret: &str) -> Result<String, String> {
     if secret.starts_with(PREFIX) {
         return Ok(secret.to_string());
     }
@@ -111,7 +111,7 @@ fn protect_secret(secret: &str) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn unprotect_secret(secret: &str) -> Result<String, String> {
+pub(crate) fn unprotect_secret(secret: &str) -> Result<String, String> {
     let Some(encoded) = secret.strip_prefix(PREFIX) else {
         return Ok(secret.to_string());
     };
@@ -149,11 +149,11 @@ fn unprotect_secret(secret: &str) -> Result<String, String> {
 }
 
 #[cfg(not(windows))]
-fn protect_secret(secret: &str) -> Result<String, String> {
+pub(crate) fn protect_secret(secret: &str) -> Result<String, String> {
     Ok(secret.to_string())
 }
 
 #[cfg(not(windows))]
-fn unprotect_secret(secret: &str) -> Result<String, String> {
+pub(crate) fn unprotect_secret(secret: &str) -> Result<String, String> {
     Ok(secret.to_string())
 }

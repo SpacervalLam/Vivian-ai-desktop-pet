@@ -172,3 +172,9 @@ pub mod coding_cancel;
 pub mod work_memory;
 #[path = "../src/brain/work_instructions.rs"]
 pub mod work_instructions;
+
+#[path = "../src/speech/pcm.rs"]
+mod speech_pcm;
+
+#[path = "../src/utils/playback_gate.rs"]
+mod speech_playback_gate;

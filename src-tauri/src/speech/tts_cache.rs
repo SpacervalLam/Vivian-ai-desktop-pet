@@ -175,7 +175,12 @@ impl SpeechCache {
                         key,
                         path.display()
                     );
-                    return Some(TtsSynthesisResult::new(audio, *format));
+                    let boundaries = std::fs::read(path.with_extension("timing.json"))
+                        .ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+                    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+                        let _ = file.set_modified(std::time::SystemTime::now());
+                    }
+                    return Some(TtsSynthesisResult::new(audio, *format).with_boundaries(boundaries));
                 }
                 Ok(_) => {
                     tracing::warn!("[SpeechCache] 缓存文件为空: {}", path.display());
@@ -206,7 +211,7 @@ impl SpeechCache {
         pitch: Option<f64>,
         result: &TtsSynthesisResult,
     ) {
-        if result.audio.is_empty() { return; }
+        if result.audio.is_empty() || result.audio.len() > 16 * 1024 * 1024 { return; }
         let key = Self::compute_key(text, voice, emotion, engine_name, rate, volume, pitch);
         let ext = match result.format {
             AudioFormat::Mp3 => "mp3",
@@ -228,12 +233,22 @@ impl SpeechCache {
             Ok(()) => {
                 // LRU 淘汰:超过上限时删除最旧的文件
                 if index.len() >= self.max_entries && !index.contains_key(&key) {
-                    if let Some((&old_key, (old_path, _))) = index.iter().next() {
+                    if let Some((&old_key, (old_path, _))) = index.iter().min_by_key(|(_, (path, _))| std::fs::metadata(path).and_then(|m| m.modified()).ok()) {
+                        let _ = std::fs::remove_file(old_path.with_extension("timing.json"));
                         let _ = std::fs::remove_file(old_path);
                         index.remove(&old_key);
                     }
                 }
+                if let Ok(timing) = serde_json::to_vec(&result.word_boundaries) {
+                    let _ = crate::utils::fs::atomic_write(&path.with_extension("timing.json"), &timing);
+                }
                 index.insert(key, (path, result.format));
+                while index.values().map(|(path, _)| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)).sum::<u64>() > 128 * 1024 * 1024 {
+                    let victim = index.iter().min_by_key(|(_, (path, _))| std::fs::metadata(path).and_then(|m| m.modified()).ok()).map(|(key, (path, _))| (*key, path.clone()));
+                    let Some((key, path)) = victim else { break; };
+                    let _ = std::fs::remove_file(path.with_extension("timing.json"));
+                    let _ = std::fs::remove_file(path); index.remove(&key);
+                }
                 tracing::debug!("[SpeechCache] 写入缓存: key={} entries={}", key, index.len());
             }
             Err(e) => {
@@ -247,6 +262,7 @@ impl SpeechCache {
     pub fn clear(&self) -> VivianResult<()> {
         let mut index = self.index.write();
         for (_, (path, _)) in index.drain() {
+            let _ = std::fs::remove_file(path.with_extension("timing.json"));
             let _ = std::fs::remove_file(&path);
         }
         Ok(())

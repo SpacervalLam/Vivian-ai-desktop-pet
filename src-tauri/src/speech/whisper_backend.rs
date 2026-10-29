@@ -28,6 +28,7 @@ use super::asr::{AsrBackendType, AsrConfig, AsrEngine, AsrEvent};
 
 /// Append each capture callback, rather than indexing from the beginning of the
 /// whole recording. Cap the total recording, not each individual callback.
+#[cfg(test)]
 fn append_pcm<T: Copy>(buffer: &mut VecDeque<i16>, data: &[T], input_rate: f32,
     max_samples: usize, convert: impl Fn(T) -> i16) {
     let count = ((data.len() as f32 * 16000.0 / input_rate) as usize)
@@ -225,7 +226,7 @@ impl WhisperBackend {
             supported.max_sample_rate().0
         };
         let stream_config = StreamConfig {
-            channels: 1,
+            channels: supported.channels(),
             sample_rate: SampleRate(actual_rate),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -233,13 +234,16 @@ impl WhisperBackend {
         let buffer = self.buffer.clone();
         let stop_for_thread = stop_flag.clone();
         let stop_for_loop = stop_flag.clone();
-        let sr_in = actual_rate as f32;
+
         let max_samples = (self.whisper_cfg.max_audio_seconds * 16000) as usize;
 
         let err_fn = |e: cpal::StreamError| {
             tracing::error!("麦克风采集错误: {e}");
         };
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let mut endpoint = crate::speech::endpoint::Endpoint::new(16000, &self.config.vad, self.config.silence_timeout_ms, self.event_tx.clone());
+        let mut capture = super::pcm::PcmCapture::new(actual_rate, 16000, supported.channels());
         let handle = std::thread::spawn(move || {
             let stream = match sample_format {
                 SampleFormat::I16 => device.build_input_stream(
@@ -248,7 +252,11 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s| s);
+                        let converted = capture.convert(data, |s| s);
+                        let converted = endpoint.filter(&converted);
+                        let mut buffer = buffer.write();
+                        let remaining = max_samples.saturating_sub(buffer.len());
+                        buffer.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
@@ -259,7 +267,11 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s| (s as i32 - 32768) as i16);
+                        let converted = capture.convert(data, |s| (s as i32 - 32768) as i16);
+                        let converted = endpoint.filter(&converted);
+                        let mut buffer = buffer.write();
+                        let remaining = max_samples.saturating_sub(buffer.len());
+                        buffer.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
@@ -270,13 +282,18 @@ impl WhisperBackend {
                         if stop_for_thread.load(Ordering::SeqCst) {
                             return;
                         }
-                        append_pcm(&mut buffer.write(), data, sr_in, max_samples, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                        let converted = capture.convert(data, |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16);
+                        let converted = endpoint.filter(&converted);
+                        let mut buffer = buffer.write();
+                        let remaining = max_samples.saturating_sub(buffer.len());
+                        buffer.extend(converted.into_iter().take(remaining));
                     },
                     err_fn,
                     None,
                 ),
                 _ => {
                     tracing::error!("不支持的采样格式: {:?}", sample_format);
+                    let _ = ready_tx.send(Err("不支持的采样格式".into()));
                     return;
                 }
             };
@@ -284,13 +301,16 @@ impl WhisperBackend {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("构建输入流失败: {e}");
+                    let _ = ready_tx.send(Err(e.to_string()));
                     return;
                 }
             };
             if let Err(e) = stream.play() {
                 tracing::error!("启动麦克风采集失败: {e}");
+                let _ = ready_tx.send(Err(e.to_string()));
                 return;
             }
+            let _ = ready_tx.send(Ok(()));
             // 阻塞线程直到 stop_flag 置位，Stream 在线程退出时 drop
             while !stop_for_loop.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -298,6 +318,10 @@ impl WhisperBackend {
             drop(stream);
         });
 
+        match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {},
+            status => { stop_flag.store(true, Ordering::SeqCst); return Err(VivianError::Speech(format!("麦克风启动失败: {status:?}"))); }
+        }
         self.stop_flag = Some(stop_flag);
         self.capture_thread = Some(handle);
         Ok(())

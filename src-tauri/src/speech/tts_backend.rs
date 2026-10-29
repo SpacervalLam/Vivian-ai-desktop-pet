@@ -129,6 +129,11 @@ pub trait TtsBackend: Send + Sync {
         Ok(())
     }
 
+    async fn stream_audio(&self, text: &str, config: &TtsConfig, output: vivian_speech_runtime::streaming::AudioWriter) -> VivianResult<()> {
+        let result = self.synthesize(text, config).await?;
+        output.write(&result.audio).await.map_err(crate::error::VivianError::Speech)
+    }
+
     /// 预热连接
     ///
     /// 在 LLM 首 token 到达时调用,提前建立 WSS/HTTP 连接。

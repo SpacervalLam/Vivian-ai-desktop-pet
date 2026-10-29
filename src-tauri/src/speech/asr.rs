@@ -194,6 +194,9 @@ impl AsrConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AsrEvent {
+    EndpointDetected,
+    NoSpeech,
+    Scoped { session_id: u64, owner_window: Option<String>, event: Box<AsrEvent> },
     /// 识别已开始
     Started,
     /// 部分识别结果（流式）
@@ -320,11 +323,15 @@ pub struct AsrManager {
 struct AsrManagerInner {
     /// Serialize complete lifecycle operations, including lazy initialization.
     lifecycle: Mutex<()>,
+    session: std::sync::atomic::AtomicU64,
+    owner: RwLock<Option<String>>,
     config: RwLock<AsrConfig>,
     backend: Mutex<Option<Box<dyn AsrEngine + Send + Sync>>>,
     is_recording: AtomicBool,
     available: AtomicBool,
     event_tx: broadcast::Sender<AsrEvent>,
+    active_events: RwLock<Option<broadcast::Sender<AsrEvent>>>,
+    device_lease: RwLock<Option<super::session::AudioLease>>,
 }
 
 impl AsrManager {
@@ -339,11 +346,15 @@ impl AsrManager {
         Self {
             inner: Arc::new(AsrManagerInner {
                 lifecycle: Mutex::new(()),
+                session: std::sync::atomic::AtomicU64::new(0),
+                owner: RwLock::new(None),
                 config: RwLock::new(config),
                 backend: Mutex::new(None),
                 is_recording: AtomicBool::new(false),
                 available: AtomicBool::new(true),
                 event_tx,
+                active_events: RwLock::new(None),
+                device_lease: RwLock::new(None),
             }),
         }
     }
@@ -401,7 +412,12 @@ impl AsrManager {
     }
 
     /// 开始语音识别。
-    pub async fn start_recognition(&self) -> VivianResult<()> {
+    pub fn session_id(&self) -> u64 { self.inner.session.load(Ordering::SeqCst) }
+    pub fn owner_window(&self) -> Option<String> { self.inner.owner.read().clone() }
+
+    pub async fn start_recognition(&self) -> VivianResult<()> { self.start_owned(None).await }
+
+    pub async fn start_owned(&self, owner: Option<String>) -> VivianResult<()> {
         let _operation = self.inner.lifecycle.lock().await;
         if self.inner.is_recording.load(Ordering::SeqCst) {
             return Err(VivianError::Speech(
@@ -413,11 +429,47 @@ impl AsrManager {
         // - 后端未创建时尝试初始化，成功则 available=true，失败则 available=false 并返回 Err
         // - 之前初始化失败（available=false）时，这里仍会重新尝试初始化，允许用户切换后端后重试
         self.ensure_initialized().await?;
+        let device_lease = super::session::capture(super::session::AudioMode::Dictation).await.map_err(VivianError::Speech)?;
 
+        let session = self.inner.session.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.inner.owner.write() = owner.clone();
+        let (events, mut receiver) = broadcast::channel(128);
+        *self.inner.active_events.write() = Some(events.clone());
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                let event = match receiver.recv().await {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let Some(inner) = weak.upgrade() else { break; };
+                if inner.session.load(Ordering::SeqCst) != session { break; }
+                if matches!(event, AsrEvent::NoSpeech) {
+                    let manager = AsrManager { inner: inner.clone() };
+                    let _lifecycle = inner.lifecycle.lock().await;
+                    if manager.session_id() != session { continue; }
+                    if let Some(mut backend) = inner.backend.lock().await.take() { backend.dispose(); }
+                    inner.device_lease.write().take();
+                    inner.is_recording.store(false, Ordering::SeqCst);
+                    let _ = inner.event_tx.send(AsrEvent::Scoped { session_id: session, owner_window: owner.clone(), event: Box::new(AsrEvent::error("未检测到语音")) });
+                    let _ = inner.event_tx.send(AsrEvent::Scoped { session_id: session, owner_window: owner.clone(), event: Box::new(AsrEvent::Stopped) });
+                    continue;
+                }
+                if matches!(event, AsrEvent::EndpointDetected) {
+                    let manager = AsrManager { inner: inner.clone() };
+                    if let Err(error) = manager.stop_recognition().await { let _ = inner.event_tx.send(AsrEvent::error(error.to_string())); }
+                    continue;
+                }
+                let _ = inner.event_tx.send(AsrEvent::Scoped { session_id: session, owner_window: owner.clone(), event: Box::new(event) });
+            }
+        });
         let mut backend_guard = self.inner.backend.lock().await;
         if let Some(backend) = backend_guard.as_mut() {
+            backend.set_event_sender(events);
             backend.start_recording().await?;
         }
+        *self.inner.device_lease.write() = Some(device_lease);
         self.inner.is_recording.store(true, Ordering::SeqCst);
         let _ = self.inner.event_tx.send(AsrEvent::Started);
         tracing::info!("语音识别已启动");
@@ -435,8 +487,9 @@ impl AsrManager {
         if let Some(backend) = backend_guard.as_mut() {
             result = backend.stop_recording().await;
         }
+        self.inner.device_lease.write().take();
         self.inner.is_recording.store(false, Ordering::SeqCst);
-        let _ = self.inner.event_tx.send(AsrEvent::Stopped);
+        if let Some(tx) = self.inner.active_events.read().as_ref() { let _ = tx.send(AsrEvent::Stopped); } else { let _ = self.inner.event_tx.send(AsrEvent::Stopped); }
         tracing::info!("语音识别已停止");
         result
     }
