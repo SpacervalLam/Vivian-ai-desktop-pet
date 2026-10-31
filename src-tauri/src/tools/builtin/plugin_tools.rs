@@ -9,7 +9,7 @@
 //! - `create_tool`：单个可执行原语
 //! - `create_plugin`：**一组能力的打包分发单元**（能被整体装载/卸载/删除）
 //!
-//! 设计要点（对齐 update_provider_preset 的结构化传统）：
+//! 设计要点（对齐 manage_provider_preset 的结构化传统）：
 //! - **写不出坏数据**：全部校验先于落盘（名字、schema、脚本黑名单、
 //!   MCP 声明、预设行），临时目录写满后才替换正式目录
 //! - **内置插件禁改**：llm-providers / plugin-authoring 是播种体系所有，
@@ -503,7 +503,7 @@ impl Tool for CreatePluginTool {
                 },
                 "providers": {
                     "type": "array",
-                    "description": "LLM provider presets (same semantics as update_provider_preset rows); field names camelCase (id, providerType, endpoint, defaultModel, mainModels, ...)",
+                    "description": "LLM provider presets (same semantics as manage_provider_preset upsert rows); field names camelCase (id, providerType, endpoint, defaultModel, mainModels, ...)",
                     "items": { "type": "object" }
                 },
                 "embeddings": {
@@ -582,7 +582,7 @@ impl Tool for CreatePluginTool {
                     },
                     "providers": {
                         "type": "array",
-                        "description": "LLM 供应商预设（语义同 update_provider_preset 的行）；字段名 camelCase（id、providerType、endpoint、defaultModel、mainModels、…）",
+                        "description": "LLM 供应商预设（语义同 manage_provider_preset upsert 的行）；字段名 camelCase（id、providerType、endpoint、defaultModel、mainModels、…）",
                         "items": { "type": "object" }
                     },
                     "embeddings": {

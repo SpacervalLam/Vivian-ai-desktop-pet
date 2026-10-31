@@ -115,3 +115,24 @@ test('login redirects cannot become platform article evidence', () => {
   context.document.querySelectorAll = () => [{textContent:'Sign in to your account '.repeat(50)}];
   assert.throws(() => vm.runInContext('vivianExtractDetail()', context), /sign-in manually/);
 });
+
+test('condition waits observe asynchronous DOM state, fail on timeout and reject ambiguous targets', async () => {
+  const {context, invoke} = page('example.com');
+  Object.assign(context, {setTimeout, performance,
+    getComputedStyle: el => ({display:el.hidden ? 'none' : 'block',visibility:'visible',opacity:'1'})});
+  const status = Object.assign(new context.HTMLElement(), {isConnected:true, textContent:'loading',
+    getBoundingClientRect:()=>({width:100,height:20})});
+  let matches = [status];
+  context.document.querySelectorAll = selector => selector === '#status' ? matches : [];
+  setTimeout(() => {status.textContent = 'ready';}, 20);
+  assert.match((await invoke('browser_wait',{selector:'#status',text:'ready',timeout_ms:500})).text, /condition is satisfied/);
+  status.hidden = true;
+  assert.match((await invoke('browser_wait',{selector:'#status',state:'hidden',timeout_ms:0})).text, /satisfied/);
+  await assert.rejects(invoke('browser_wait',{selector:'#status',timeout_ms:20}), /condition.*timeout/i);
+  matches = [];
+  assert.match((await invoke('browser_wait',{selector:'#status',state:'detached',timeout_ms:0})).text, /satisfied/);
+  matches = [status, status];
+  await assert.rejects(invoke('browser_wait',{selector:'#status'}), /more than one/);
+  await assert.rejects(invoke('browser_wait',{text:'ready',state:'hidden'}), /require visible or attached/);
+  await assert.rejects(invoke('browser_wait',{selector:'#status',timeout_ms:-1}), /timeout_ms/);
+});

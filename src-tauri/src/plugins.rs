@@ -1373,7 +1373,7 @@ pub fn ensure_builtin_plugins() {
 
 /// 运行时 upsert 一条供应商预设到内置 llm-providers 插件（用户目录数据文件）。
 ///
-/// 语义（`update_provider_preset` 工具的核心实现）：
+/// 语义（`manage_provider_preset` 工具的核心实现）：
 /// - 按 id **整行替换**；id 不存在则追加（新增供应商预设走此路径）
 /// - `verified_at` 由本地系统时间写入——不信任调用方给出的日期，
 ///   模型对"今天几号"的先验不可靠

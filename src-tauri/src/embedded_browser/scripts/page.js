@@ -3,7 +3,7 @@
  *
  * 在受控标签页内运行（每份文档一个实例），把页面渲染成结构化文本快照，并按
  * 稳定编号在真实页面里执行点击 / 输入 / 按键 / 滚动 / 导航等动作，保留登录态。
- * 整条管线纯文本，无截图——页面文字的份额由快照/动作结果承载。
+ * 脚本负责观察与输入前检查；鼠标和文字输入由宿主通过 CDP Input 发送。
  *
  * 能力面：extract（元素提取）/ ids（稳定编号）/ snapshot（结构化快照）/
  * actions（页面动作）/ privacy（敏感字段掩码）。
@@ -258,7 +258,7 @@ globalThis.vivianCreatePage = () => {
       const index = ids.indexOf(el);
       if (index === undefined) continue;
       const item = { index, role: roleOf(el), name: nameOf(el), inViewport };
-      if (el instanceof HTMLButtonElement && el.disabled) item.disabled = true;
+      if (isDisabled(el)) item.disabled = true;
       if (el instanceof HTMLInputElement) {
         if (el.disabled) item.disabled = true;
         if (el.type === 'checkbox' || el.type === 'radio') item.checked = el.checked;
@@ -295,6 +295,16 @@ globalThis.vivianCreatePage = () => {
       };
       if (checkable) field.checked = el.checked;
       if (el instanceof HTMLInputElement && el.required) field.required = true;
+      field.disabled = isDisabled(el);
+      field.readonly = Boolean(el.readOnly || el.closest('[aria-readonly="true"]'));
+      if (el instanceof HTMLSelectElement && !masked) {
+        field.options = [...el.options].slice(0, 40).map(option => ({
+          value: option.value.slice(0, 128), label: clean(option.textContent ?? '').slice(0, 80),
+          disabled: option.disabled || (option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled),
+          selected: option.selected,
+        }));
+        field.optionsOmitted = Math.max(0, el.options.length - 40);
+      }
       forms.push(field);
     }
 
@@ -353,7 +363,8 @@ globalThis.vivianCreatePage = () => {
 
   function sameForm(a, b) {
     return a.label === b.label && a.kind === b.kind && a.value === b.value && a.masked === b.masked
-      && a.checked === b.checked && a.required === b.required;
+      && a.checked === b.checked && a.required === b.required && a.disabled === b.disabled && a.readonly === b.readonly
+      && JSON.stringify(a.options) === JSON.stringify(b.options) && a.optionsOmitted === b.optionsOmitted;
   }
 
   function capRendered(text, budgetChars) {
@@ -377,7 +388,8 @@ globalThis.vivianCreatePage = () => {
     const text = form.checked === undefined
       ? `value="${form.masked ? '••••' : form.value}"`
       : `checked=${String(form.checked)}`;
-    return `  [${form.index}] ${identity}${text}${form.required === true ? ' required' : ''}`;
+    const options = form.options ? ` options=${JSON.stringify(form.options)}${form.optionsOmitted ? ` (${form.optionsOmitted} omitted)` : ''}` : '';
+    return `  [${form.index}] ${identity}${text}${form.required === true ? ' required' : ''}${form.disabled ? ' disabled' : ''}${form.readonly ? ' readonly' : ''}${options}`;
   }
 
   function appendTruncationNotes(lines, view) {
@@ -448,7 +460,6 @@ globalThis.vivianCreatePage = () => {
 
   // ── actions ───────────────────────────────────────────────
 
-  const TYPE_SETTLE = { minimumMs: 32, quietMs: 32, maxAfterReadyMs: 100, timeoutMs: 5000 };
   const ACTION_SETTLE = { minimumMs: 100, quietMs: 50, maxAfterReadyMs: 250, timeoutMs: 5000 };
   const SCROLL_SETTLE = { minimumMs: 50, quietMs: 50, maxAfterReadyMs: 150, timeoutMs: 5000 };
   const EXPLICIT_WAIT_SETTLE = { minimumMs: 100, quietMs: 100, maxAfterReadyMs: 1000, timeoutMs: 5000 };
@@ -530,16 +541,11 @@ globalThis.vivianCreatePage = () => {
     }
   }
 
-  function setNativeValue(input, value) {
-    const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-    if (setter === undefined) input.value = value;
-    else setter.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
   const ids = new ElementIds();
+
+  function isDisabled(el) {
+    return el.matches(':disabled') || el.closest('[aria-disabled="true"], [inert]') !== null;
+  }
 
   function elementOrThrow(index) {
     const el = ids.elementByIndex(index);
@@ -555,6 +561,25 @@ globalThis.vivianCreatePage = () => {
       throw new ActionError('bad-args', `${name} must be a non-negative integer; received ${String(value)}.`);
     }
     return value;
+  }
+
+  function resolveTargetAction(args) {
+    const locator = args.locator;
+    if (!locator || typeof locator !== 'object') throw new ActionError('bad-args', 'A locator is required.');
+    let root = document;
+    if (locator.scope) {
+      const scopes = [...document.querySelectorAll(locator.scope)];
+      if (scopes.length !== 1) throw new ActionError('ambiguous-target', 'Scope must match exactly one region.');
+      root = scopes[0];
+    }
+    let matches = [...root.querySelectorAll(locator.selector || INTERACTIVE_SELECTOR)];
+    if (locator.role) matches = matches.filter(el => roleOf(el) === locator.role);
+    if (locator.name !== undefined) matches = matches.filter(el => accessibleName(el) === locator.name);
+    if (matches.length !== 1) throw new ActionError('ambiguous-target', `Locator matched ${matches.length} elements; refine selector, role, name or scope. No input sent.`);
+    ids.assign(collectInteractive(document));
+    const index = ids.indexOf(matches[0]);
+    if (index === undefined) throw new ActionError('bad-target', 'Locator must resolve to an interactive snapshot target.');
+    return { index };
   }
 
   function snapshotAction(args) {
@@ -577,7 +602,7 @@ globalThis.vivianCreatePage = () => {
 
   function selectOptionAction(args) {
     const el = elementOrThrow(numberArg(args, 'index'));
-    if (el.tagName !== 'SELECT' || el.disabled) throw new ActionError('bad-target', 'Target must be an enabled native select control.');
+    if (el.tagName !== 'SELECT' || isDisabled(el)) throw new ActionError('bad-target', 'Target must be an enabled native select control.');
     if (typeof args.value !== 'string') throw new ActionError('bad-args', 'value must be a string.');
     const choices = Array.from(el.options).filter(option => option.value === args.value && !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled));
     if (choices.length !== 1) throw new ActionError('bad-target', 'Expected exactly one enabled option with that value.');
@@ -587,103 +612,46 @@ globalThis.vivianCreatePage = () => {
     return withPageDelta('Selected the requested option; inspect the resulting state.');
   }
 
-  function hoverTargetAction(args) {
-    const el = elementOrThrow(numberArg(args, 'index'));
-    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
-    const rect = el.getBoundingClientRect();
-    const x = Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2));
-    const y = Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2));
-    const hit = document.elementFromPoint(x, y);
-    if (!hit || (hit !== el && !el.contains(hit))) throw new ActionError('obscured-target', 'Element is covered; read a fresh snapshot.');
-    return { x, y };
-  }
-
-  async function clickAction(args) {
+  // Only preparation runs in this isolated script. Do not synthesize click/key/input
+  // events or assign value/textContent: that bypasses browser editing and isTrusted.
+  async function inputTargetAction(args, kind) {
     const index = numberArg(args, 'index');
-    const el = elementOrThrow(index);
-    el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    if (el instanceof HTMLAnchorElement) {
-      const target = el.target.trim().toLowerCase();
-      const sameFrameTarget = target === '' || target === '_self';
-      let href;
-      try { href = new URL(el.href); } catch (_) { /* 异常链接交给原生点击 */ }
-      const controlledNavigation = sameFrameTarget
-        && !el.hasAttribute('download')
-        && (href?.protocol === 'http:' || href?.protocol === 'https:');
-      if (controlledNavigation && href !== undefined) {
-        const hasReferrerPolicy = typeof el.referrerPolicy === 'string' && el.referrerPolicy !== '';
-        const requiresNativeActivation = el.relList.contains('noreferrer')
-          || hasReferrerPolicy
-          || el.hasAttribute('ping')
-          || el.hasAttribute('attributionsrc');
-        if (requiresNativeActivation) {
-          setTimeout(() => { el.click(); }, 0);
-          return { text: `Clicked link [${index}] using native browser activation. Call browser_snapshot to read the resulting state.` };
+    const el = ids.elementByIndex(index);
+    const timeout = args.timeout_ms ?? 1500;
+    if (!Number.isInteger(timeout) || timeout < 0 || timeout > 5000) throw new ActionError('bad-args', 'timeout_ms must be an integer between 0 and 5000.');
+    const deadline = performance.now() + timeout;
+    let previous = '';
+    let reason = 'Target is not actionable';
+    do {
+      if (!el?.isConnected) throw new ActionError('stale-target', 'Target was detached; read a fresh snapshot.');
+      if (isVisible(el)) {
+        el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+        const rect = el.getBoundingClientRect();
+        // Use the visible intersection, not a clamped off-screen center.
+        const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+        const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+        const x = (left + right) / 2, y = (top + bottom) / 2;
+        const hit = document.elementFromPoint(x, y);
+        const position = [rect.left, rect.top, rect.width, rect.height].join(',');
+        const enabled = kind === 'hover' || !isDisabled(el);
+        const uncovered = left < right && top < bottom && hit && (hit === el || el.contains(hit));
+        if (enabled && uncovered && previous === position) {
+          if (kind === 'type') {
+            const editable = el instanceof HTMLTextAreaElement || el.isContentEditable
+              || (el instanceof HTMLInputElement && ['text', 'search', 'email', 'url', 'tel', 'password'].includes(el.type));
+            if (!editable || el.readOnly || el.closest('[aria-readonly="true"]')) throw new ActionError('not-editable', 'Target must be an enabled, writable text field or contenteditable.');
+            el.focus({ preventScroll: true });
+            if (document.activeElement !== el && !el.contains(document.activeElement)) throw new ActionError('focus-failed', 'Editable target did not receive focus.');
+          }
+          return { x, y };
         }
-        const shouldNavigate = el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
-        if (!shouldNavigate) {
-          await waitForPageSettled(ACTION_SETTLE);
-          return withPageDelta(`Clicked link [${index}].`);
-        }
-        const sameDocument = href.origin === location.origin
-          && href.pathname === location.pathname
-          && href.search === location.search;
-        if (sameDocument) {
-          if (href.hash !== location.hash) location.hash = href.hash;
-          await waitForPageSettled(ACTION_SETTLE);
-          return withPageDelta(`Clicked link [${index}].`);
-        }
-        setTimeout(() => { location.href = href.href; }, 0);
-        return {
-          text: `Clicked link [${index}]. Call browser_snapshot again after navigation settles.`,
-          navigationPending: true,
-        };
-      }
-      setTimeout(() => { el.click(); }, 0);
-      return { text: `Clicked link [${index}]. The link may open outside the controlled frame.` };
-    }
-    if (el instanceof HTMLButtonElement && el.disabled) {
-      throw new ActionError('action-failed', `Button [${index}] is disabled.`);
-    }
-    el.click();
-    await waitForPageSettled(ACTION_SETTLE);
-    return withPageDelta(`Clicked [${index}].`);
-  }
-
-  async function typeAction(args) {
-    const index = numberArg(args, 'index');
-    const text = typeof args.text === 'string' ? args.text : '';
-    if (text === '') throw new ActionError('bad-args', 'text must not be empty.');
-    const replace = args.replace === true;
-    const el = elementOrThrow(index);
-    const contentEditable = el instanceof HTMLElement && el.isContentEditable;
-    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || contentEditable)) {
-      throw new ActionError('action-failed', `Element [${index}] is not editable (${el.tagName.toLowerCase()}).`);
-    }
-    el.focus();
-    if (contentEditable) {
-      if (replace) el.textContent = '';
-      el.textContent = `${el.textContent ?? ''}${text}`;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-    } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      if (replace) setNativeValue(el, '');
-      setNativeValue(el, `${el.value}${text}`);
-    }
-    await waitForPageSettled(TYPE_SETTLE);
-    return withPageDelta(`Entered ${text.length} characters into [${index}].`);
-  }
-
-  async function pressAction(args) {
-    const key = typeof args.key === 'string' && args.key !== '' ? args.key : '';
-    if (key === '') throw new ActionError('bad-args', 'key must not be empty.');
-    const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
-    target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
-    target.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
-    if (key === 'Enter' && target instanceof HTMLInputElement && target.form !== null) {
-      target.form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
-    }
-    await waitForPageSettled(ACTION_SETTLE);
-    return withPageDelta(`Sent key "${key}".`);
+        reason = !enabled ? 'Target is disabled or inert' : !uncovered ? 'Target is covered or outside the viewport' : 'Target is moving';
+        previous = position;
+      } else { previous = ''; reason = 'Target is hidden'; }
+      if (performance.now() >= deadline) break;
+      await sleep(Math.min(50, Math.max(1, deadline - performance.now())));
+    } while (true);
+    throw new ActionError('not-actionable', `${reason}; no input sent. Observe again.`);
   }
 
   async function scrollAction(args) {
@@ -744,6 +712,27 @@ globalThis.vivianCreatePage = () => {
   }
 
   async function waitAction(args) {
+    if (args.selector !== undefined || args.text !== undefined) {
+      if (args.selector !== undefined && (typeof args.selector !== 'string' || !args.selector.trim())) throw new ActionError('bad-args', 'selector must be non-empty.');
+      if (args.text !== undefined && (typeof args.text !== 'string' || !args.text)) throw new ActionError('bad-args', 'text must be non-empty.');
+      const state = args.state ?? 'visible';
+      if (!['attached', 'detached', 'visible', 'hidden'].includes(state)) throw new ActionError('bad-args', 'Unsupported wait state.');
+      if (args.text !== undefined && ['hidden', 'detached'].includes(state)) throw new ActionError('bad-args', 'Text conditions require visible or attached state.');
+      const timeout = args.timeout_ms ?? 5000;
+      if (!Number.isInteger(timeout) || timeout < 0 || timeout > 10000) throw new ActionError('bad-args', 'timeout_ms must be between 0 and 10000.');
+      const deadline = performance.now() + timeout;
+      do {
+        const matches = args.selector === undefined ? [document.body] : [...document.querySelectorAll(args.selector)];
+        if (matches.length > 1) throw new ActionError('ambiguous-target', 'Wait selector matched more than one element.');
+        const el = matches[0];
+        const attached = Boolean(el?.isConnected), visible = attached && isVisible(el);
+        const matched = state === 'attached' ? attached : state === 'detached' ? !attached : state === 'visible' ? visible : !visible;
+        if (matched && (args.text === undefined || redactFields(pageText(el)).includes(args.text))) return withPageDelta('Requested page condition is satisfied.');
+        if (performance.now() >= deadline) break;
+        await sleep(Math.min(50, Math.max(1, deadline - performance.now())));
+      } while (true);
+      throw new ActionError('condition-timeout', 'Page condition was not satisfied before timeout.');
+    }
     const ms = typeof args.ms === 'number' && args.ms > 0 ? Math.min(args.ms, 10000) : 0;
     await waitForPageSettled(EXPLICIT_WAIT_SETTLE);
     if (ms > 0) await sleep(ms);
@@ -753,11 +742,11 @@ globalThis.vivianCreatePage = () => {
   async function runAction(action, args) {
     switch (action) {
       case 'browser_snapshot': return snapshotAction(args);
+      case 'browser_resolve_target': return resolveTargetAction(args);
       case 'browser_select_option': return selectOptionAction(args);
-      case 'browser_hover_target': return hoverTargetAction(args);
-      case 'browser_click': return clickAction(args);
-      case 'browser_type': return typeAction(args);
-      case 'browser_press': return pressAction(args);
+      case 'browser_hover_target': return inputTargetAction(args, 'hover');
+      case 'browser_click_target': return inputTargetAction(args, 'click');
+      case 'browser_type_target': return inputTargetAction(args, 'type');
       case 'browser_scroll': return scrollAction(args);
       case 'browser_navigate': return navigateAction(args);
       case 'browser_back': return historyAction(-1);

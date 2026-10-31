@@ -104,6 +104,16 @@ pub fn prepend_heading(name: &str, section: CharacterSection, body: &str) -> Str
     }
 }
 
+fn prepend_heading_localized(name: &str, section: CharacterSection, body: &str, lang: &str) -> String {
+    use CharacterSection::*;
+    let title = match crate::pipeline::prompt_templates::language(lang) {
+        "en" => section.heading_title(),
+        "ja" => match section { Identity=>"身元",Personality=>"性格",Background=>"背景",Interests=>"興味",Appearance=>"外見",Speech=>"話し方",CanonQuotes=>"台詞資料",Relationships=>"関係",Examples=>"表現例",PersonaConfig=>"人格設定" },
+        _ => match section { Identity=>"身份",Personality=>"性格",Background=>"背景",Interests=>"兴趣",Appearance=>"外观",Speech=>"说话方式",CanonQuotes=>"台词参考",Relationships=>"关系",Examples=>"表达示例",PersonaConfig=>"人格配置" },
+    };
+    format!("# {name} · {title}\n\n{body}")
+}
+
 /// 一个角色的所有出厂段落内容
 struct CharacterDefaults {
     identity: &'static str,
@@ -171,6 +181,52 @@ pub fn default_section_for(name: &str, section: CharacterSection) -> &'static st
     }
 }
 
+pub fn localized_section_for(name: &str, section: CharacterSection, lang: &str) -> &'static str {
+    match (name, crate::pipeline::prompt_templates::language(lang), section) {
+        ("Vivian", "en", CharacterSection::Identity) => include_str!("../../prompts/characters/vivian/identity.en.md"),
+        ("Vivian", "en", CharacterSection::Personality) => include_str!("../../prompts/characters/vivian/personality.en.md"),
+        ("Vivian", "en", CharacterSection::Background) => include_str!("../../prompts/characters/vivian/background.en.md"),
+        ("Vivian", "en", CharacterSection::Interests) => include_str!("../../prompts/characters/vivian/interests.en.md"),
+        ("Vivian", "en", CharacterSection::Appearance) => include_str!("../../prompts/characters/vivian/appearance.en.md"),
+        ("Vivian", "en", CharacterSection::Speech) => include_str!("../../prompts/characters/vivian/speech.en.md"),
+        ("Vivian", "en", CharacterSection::CanonQuotes) => include_str!("../../prompts/characters/vivian/canon_quotes.en.md"),
+        ("Vivian", "en", CharacterSection::Relationships) => include_str!("../../prompts/characters/vivian/relationships.en.md"),
+        ("Vivian", "en", CharacterSection::Examples) => include_str!("../../prompts/characters/vivian/examples.en.md"),
+        ("Vivian", "en", CharacterSection::PersonaConfig) => include_str!("../../prompts/characters/vivian/persona_config.en.md"),
+        ("Vivian", "ja", CharacterSection::Identity) => include_str!("../../prompts/characters/vivian/identity.ja.md"),
+        ("Vivian", "ja", CharacterSection::Personality) => include_str!("../../prompts/characters/vivian/personality.ja.md"),
+        ("Vivian", "ja", CharacterSection::Background) => include_str!("../../prompts/characters/vivian/background.ja.md"),
+        ("Vivian", "ja", CharacterSection::Interests) => include_str!("../../prompts/characters/vivian/interests.ja.md"),
+        ("Vivian", "ja", CharacterSection::Appearance) => include_str!("../../prompts/characters/vivian/appearance.ja.md"),
+        ("Vivian", "ja", CharacterSection::Speech) => include_str!("../../prompts/characters/vivian/speech.ja.md"),
+        ("Vivian", "ja", CharacterSection::CanonQuotes) => include_str!("../../prompts/characters/vivian/canon_quotes.ja.md"),
+        ("Vivian", "ja", CharacterSection::Relationships) => include_str!("../../prompts/characters/vivian/relationships.ja.md"),
+        ("Vivian", "ja", CharacterSection::Examples) => include_str!("../../prompts/characters/vivian/examples.ja.md"),
+        ("Vivian", "ja", CharacterSection::PersonaConfig) => include_str!("../../prompts/characters/vivian/persona_config.ja.md"),
+        ("Nana", "en", CharacterSection::Identity) => include_str!("../../prompts/characters/nana/identity.en.md"),
+        ("Nana", "en", CharacterSection::Personality) => include_str!("../../prompts/characters/nana/personality.en.md"),
+        ("Nana", "en", CharacterSection::Background) => include_str!("../../prompts/characters/nana/background.en.md"),
+        ("Nana", "en", CharacterSection::Interests) => include_str!("../../prompts/characters/nana/interests.en.md"),
+        ("Nana", "en", CharacterSection::Appearance) => include_str!("../../prompts/characters/nana/appearance.en.md"),
+        ("Nana", "en", CharacterSection::Speech) => include_str!("../../prompts/characters/nana/speech.en.md"),
+        ("Nana", "en", CharacterSection::CanonQuotes) => include_str!("../../prompts/characters/nana/canon_quotes.en.md"),
+        ("Nana", "en", CharacterSection::Relationships) => include_str!("../../prompts/characters/nana/relationships.en.md"),
+        ("Nana", "en", CharacterSection::Examples) => include_str!("../../prompts/characters/nana/examples.en.md"),
+        ("Nana", "en", CharacterSection::PersonaConfig) => include_str!("../../prompts/characters/nana/persona_config.en.md"),
+        ("Nana", "ja", CharacterSection::Identity) => include_str!("../../prompts/characters/nana/identity.ja.md"),
+        ("Nana", "ja", CharacterSection::Personality) => include_str!("../../prompts/characters/nana/personality.ja.md"),
+        ("Nana", "ja", CharacterSection::Background) => include_str!("../../prompts/characters/nana/background.ja.md"),
+        ("Nana", "ja", CharacterSection::Interests) => include_str!("../../prompts/characters/nana/interests.ja.md"),
+        ("Nana", "ja", CharacterSection::Appearance) => include_str!("../../prompts/characters/nana/appearance.ja.md"),
+        ("Nana", "ja", CharacterSection::Speech) => include_str!("../../prompts/characters/nana/speech.ja.md"),
+        ("Nana", "ja", CharacterSection::CanonQuotes) => include_str!("../../prompts/characters/nana/canon_quotes.ja.md"),
+        ("Nana", "ja", CharacterSection::Relationships) => include_str!("../../prompts/characters/nana/relationships.ja.md"),
+        ("Nana", "ja", CharacterSection::Examples) => include_str!("../../prompts/characters/nana/examples.ja.md"),
+        ("Nana", "ja", CharacterSection::PersonaConfig) => include_str!("../../prompts/characters/nana/persona_config.ja.md"),
+        _ => default_section_for(name, section),
+    }
+}
+
 /// 用户覆盖字段名 → 段落映射
 ///
 /// CanonQuotes / PersonaConfig 无用户覆盖字段——它们作为出厂常驻骨架，不可编辑
@@ -192,18 +248,18 @@ fn user_override_for<'a>(config: &'a PersonaConfig, section: CharacterSection) -
 /// 获取某个段落的最终生效文本（用户覆盖或出厂默认）
 ///
 /// Examples 与 CanonQuotes 永远使用出厂默认：示例由每轮检索提供，语气基准不可覆盖
-pub fn resolve_section(config: &PersonaConfig, section: CharacterSection, _lang: &str) -> String {
+pub fn resolve_section(config: &PersonaConfig, section: CharacterSection, lang: &str) -> String {
     match section {
         CharacterSection::Examples | CharacterSection::CanonQuotes => {
-            default_section_for(&config.identity.name, section).to_string()
+            prepend_heading_localized(&config.identity.name,section,&strip_heading(localized_section_for(&config.identity.name,section,lang)),lang)
         }
         _ => {
             let override_text = user_override_for(config, section);
             if override_text.trim().is_empty() {
-                default_section_for(&config.identity.name, section).to_string()
+                prepend_heading_localized(&config.identity.name,section,&strip_heading(localized_section_for(&config.identity.name,section,lang)),lang)
             } else {
                 let body = strip_heading(override_text);
-                prepend_heading(&config.identity.name, section, &body)
+                prepend_heading_localized(&config.identity.name, section, &body,lang)
             }
         }
     }
@@ -386,6 +442,26 @@ impl Default for StylePreset {
     }
 }
 
+pub fn load_style_preset_localized(name: &str, lang: &str) -> &'static str {
+    match (name, crate::pipeline::prompt_templates::language(lang)) {
+        ("default","zh") => include_str!("../../prompts/styles/01_default.zh.md"),
+        ("default","ja") => include_str!("../../prompts/styles/01_default.ja.md"),
+        ("default","en") => include_str!("../../prompts/styles/01_default.md"),
+        ("lively","zh") => include_str!("../../prompts/styles/02_lively.zh.md"),
+        ("lively","ja") => include_str!("../../prompts/styles/02_lively.ja.md"),
+        ("lively","en") => include_str!("../../prompts/styles/02_lively.md"),
+        ("healing","zh") => include_str!("../../prompts/styles/03_healing.zh.md"),
+        ("healing","ja") => include_str!("../../prompts/styles/03_healing.ja.md"),
+        ("healing","en") => include_str!("../../prompts/styles/03_healing.md"),
+        ("focused","zh") => include_str!("../../prompts/styles/04_focused.zh.md"),
+        ("focused","ja") => include_str!("../../prompts/styles/04_focused.ja.md"),
+        ("focused","en") => include_str!("../../prompts/styles/04_focused.md"),
+        ("sweet","zh") => include_str!("../../prompts/styles/05_sweet.zh.md"),
+        ("sweet","ja") => include_str!("../../prompts/styles/05_sweet.ja.md"),
+        ("sweet","en") => include_str!("../../prompts/styles/05_sweet.md"),
+        _ => "",
+    }
+}
 /// 编译时嵌入所有风格预设文件
 fn style_preset_text(preset: StylePreset) -> &'static str {
     match preset {
@@ -501,18 +577,20 @@ fn extract_between<'a>(text: &'a str, start_marker: &str, end_marker: &str) -> &
 /// 完整协议文档（§1–§5，约 3KB）讲的是配置解析与优先级链，属于运行时契约而不是
 /// 说话方式；每轮注入会把模型推向"执行配置"的语域，故不再整段进入 prompt。
 pub fn render_persona_protocol_block() -> String {
-    "[PERSONA_PROTOCOL]\nValues in 【PERSONA_CONFIG】 are tendencies, not per-turn quotas. \
-     Scene rules apply only inside that scene; current user corrections and explicit requests \
-     override factory text.\n[/PERSONA_PROTOCOL]".to_string()
+    crate::pipeline::prompt_templates::text("en", "persona_protocol").to_owned()
 }
 
 /// 渲染角色结构化人格配置块：从 `persona_config.md` 提取底层 `【PERSONA_CONFIG】`
 /// 与上层 `【PERSONA_RULES】`，跳过文档头部与中层自然语言释义（后者由
 /// identity.md / personality.md / speech.md 等段落承担）。
-pub fn render_persona_config_block(config: &PersonaConfig) -> String {
-    let md = default_section_for(&config.identity.name, CharacterSection::PersonaConfig);
+pub fn render_persona_config_block(config: &PersonaConfig) -> String { render_persona_config_block_localized(config,"zh") }
+pub fn render_persona_config_block_localized(config: &PersonaConfig, lang: &str) -> String {
+    let md = localized_section_for(&config.identity.name, CharacterSection::PersonaConfig,lang);
     // 终止到「## 中层」前的分隔线，避免把 markdown `---` 一并注入
-    let cfg_block = extract_between(md, "【PERSONA_CONFIG】", "\n---\n\n## 中层").trim();
+    let end = match crate::pipeline::prompt_templates::language(lang) {
+        "en" => "\n---\n\n## Middle Layer", "ja" => "\n---\n\n## 中層", _ => "\n---\n\n## 中层",
+    };
+    let cfg_block = extract_between(md, "【PERSONA_CONFIG】", end).trim();
     let rules_block = extract_between(md, "【PERSONA_RULES】", "").trim();
 
     let mut parts: Vec<String> = Vec::new();
@@ -532,74 +610,32 @@ pub fn render_persona_config_block(config: &PersonaConfig) -> String {
 /// 代码消费——卡片里设的口头禅 / 语气词 / 长度偏好全部空转，实际只有自然语言
 /// `speech.md` 生效。此处把它压成紧凑规则块，补上这条通路。
 ///
-/// 这里统一用英文：它是口癖配置的紧凑规则块（结构类），语气框架的三语化
-/// 由 `pipeline::prompt_modules::tone_rule` 负责，两者分工不同。
+/// 结构标识保持英文；表达说明按界面语言从三语模板读取。
 ///
 /// 只输出有信息量的行：空列表与关闭项不占 token。整个块最多 7 行。
-pub fn render_language_style_block(config: &PersonaConfig) -> String {
+pub fn render_language_style_block(config: &PersonaConfig) -> String { render_language_style_block_localized(config, "en") }
+pub fn render_language_style_block_localized(config: &PersonaConfig, lang: &str) -> String {
+    use crate::pipeline::prompt_templates::{text, render};
     let ls = &config.language_style;
-    let mut lines: Vec<String> = Vec::new();
-
-    if !ls.catchphrases.is_empty() {
-        lines.push(format!(
-            "CATCHPHRASES     {} — optional vocabulary when it fits; ordinary wording is equally valid",
-            ls.catchphrases.join(" / ")
-        ));
-    }
-
-    if ls.use_sentence_final_particles && !ls.preferred_sentence_final_particles.is_empty() {
-        lines.push(format!(
-            "SENTENCE_FINAL   {} — optional particles, not a required ending",
-            ls.preferred_sentence_final_particles.join(" ")
-        ));
-    }
-
-    match ls.response_length_bias.trim().to_ascii_lowercase().as_str() {
-        "long" => lines.push(
-            "LENGTH_BIAS      longer is fine when the moment calls for it".to_string(),
-        ),
-        "medium" => {
-            lines.push("LENGTH_BIAS      mid-length in casual chat; give tasks the detail they need".to_string())
-        }
-        "short" => lines.push(
-            "LENGTH_BIAS      concise in casual chat; do not cut requested explanation or task results".to_string(),
-        ),
-        _ => {}
-    }
-
-    if ls.prefer_rhetorical_questions {
-        lines.push(
-            "RHETORICAL_OK    a rhetorical question sometimes beats a statement".to_string(),
-        );
-    }
-
-    if !ls.allow_teasing {
-        lines.push("NO_TEASING       don't tease or poke fun".to_string());
-    } else if ls.teasing_cooldown > 0 {
-        lines.push(format!(
-            "TEASE_SPARINGLY  at most one tease per {} exchanges",
-            ls.teasing_cooldown
-        ));
-    }
-
-    lines.push(if ls.max_consecutive_questions <= 1 {
-        "ONE_QUESTION     avoid piling on questions in casual chat; ask necessary task questions together".to_string()
-    } else {
-        format!(
-            "QUESTION_LIMIT   at most {} questions per message",
-            ls.max_consecutive_questions
-        )
-    });
-
-    if ls.use_action_descriptions {
-        lines.push("ACTION_DESC_OK   *action* descriptions are allowed".to_string());
-    }
-
-    if lines.is_empty() {
-        return String::new();
-    }
-
-    format!("[LANGUAGE_STYLE]\n{}\n[/LANGUAGE_STYLE]", lines.join("\n"))
+    let factory = if config.identity.name == "Nana" { &*super::schemas::DEFAULT_NANA_PERSONA } else { &*super::schemas::DEFAULT_PERSONA };
+    let catchphrases = if config.identity.name == "Vivian" && ls.catchphrases == factory.language_style.catchphrases {
+        match crate::pipeline::prompt_templates::language(lang) { "zh"=>"哈哈 / 说真的 / …", "ja"=>"あはは / 正直 / …",_=>"lol / ngl / tbh / …" }.to_string()
+    } else { ls.catchphrases.join(" / ") };
+    let particles = if config.identity.name == "Nana" && ls.preferred_sentence_final_particles == factory.language_style.preferred_sentence_final_particles {
+        match crate::pipeline::prompt_templates::language(lang) { "en"=>"hmm …", "ja"=>"ね かな …",_=>"呀 呢 …" }.to_string()
+    } else { ls.preferred_sentence_final_particles.join(" ") };
+    let mut lines = Vec::new();
+    if !ls.catchphrases.is_empty() { lines.push(format!("CATCHPHRASES     {}", render(lang,"catchphrases",&[("value",&catchphrases)]))); }
+    if ls.use_sentence_final_particles && !ls.preferred_sentence_final_particles.is_empty() { lines.push(format!("SENTENCE_FINAL   {}",render(lang,"particles",&[("value",&particles)]))); }
+    let length = match ls.response_length_bias.trim().to_ascii_lowercase().as_str() { "long"=>Some("length_long"),"medium"=>Some("length_medium"),"short"=>Some("length_short"),_=>None };
+    if let Some(key)=length { lines.push(format!("LENGTH_BIAS      {}",text(lang,key))); }
+    if ls.prefer_rhetorical_questions { lines.push(format!("RHETORICAL_OK    {}",text(lang,"rhetorical"))); }
+    if !ls.allow_teasing { lines.push(format!("NO_TEASING       {}",text(lang,"no_teasing"))); }
+    else if ls.teasing_cooldown > 0 { lines.push(format!("TEASE_SPARINGLY  {}",render(lang,"teasing",&[("value",&ls.teasing_cooldown.to_string())]))); }
+    lines.push(if ls.max_consecutive_questions <= 1 { format!("ONE_QUESTION     {}",text(lang,"one_question")) }
+        else { format!("QUESTION_LIMIT   {}",render(lang,"question_limit",&[("value",&ls.max_consecutive_questions.to_string())])) });
+    if ls.use_action_descriptions { lines.push(format!("ACTION_DESC_OK   {}",text(lang,"actions"))); }
+    format!("[LANGUAGE_STYLE]\n{}\n[/LANGUAGE_STYLE]",lines.join("\n"))
 }
 
 /// 渲染 Character 块：协议 + 结构化配置 + 语言风格 + 身份 + 人格 + 背景 + 兴趣 + 外观 + 说话风格 + 经典台词 + 关系
@@ -653,6 +689,13 @@ pub fn render_character_block_tiered(
     render_character_block_growing(config, lang, tier, &[])
 }
 
+fn localized_taboo(config: &PersonaConfig, taboo: &super::schemas::TabooRule, lang: &str) -> String {
+    let factory = if config.identity.name == "Nana" { &*super::schemas::DEFAULT_NANA_PERSONA } else { &*super::schemas::DEFAULT_PERSONA };
+    let Some(index) = factory.identity.taboos.iter().position(|t| t.prompt_instruction == taboo.prompt_instruction) else { return taboo.prompt_instruction.clone(); };
+    let key = match index { 0=>"taboo_name",1=>"taboo_service",2=>"taboo_actions",_=>return taboo.prompt_instruction.clone() };
+    crate::pipeline::prompt_templates::render(lang,key,&[("name",&config.identity.name)])
+}
+
 /// Conversation card: readable character material, without configuration protocols
 /// or a second library of scripted reactions. Explicit overrides and learned scopes apply.
 pub fn render_dialogue_card(
@@ -668,9 +711,9 @@ pub fn render_dialogue_card(
             filter_seed_scenes(&text, &scopes)
         } else { text });
     }
-    sections.push(render_language_style_block(config));
+    sections.push(render_language_style_block_localized(config, lang));
     for taboo in config.identity.taboos.iter().filter(|t| t.enabled) {
-        sections.push(taboo.prompt_instruction.clone());
+        sections.push(localized_taboo(config,taboo,lang));
     }
     sections.into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
 }
@@ -679,8 +722,8 @@ pub fn render_dialogue_card(
 /// depth note). No invented scene, relationship event or compulsory catchphrase.
 pub fn render_dialogue_note(config: &PersonaConfig, lang: &str) -> String {
     let clip = |section, limit| resolve_section(config, section, lang).chars().take(limit).collect::<String>();
-    format!("[CURRENT CHARACTER NOTE]\nThe selected speaker is {}. Keep this character's identity and voice separate from other participants; never borrow their private experiences or speak their next turn.\nConfigured temperament reference:\n{}\nConfigured speech reference:\n{}\nThese are voice references, not lines to recite or new events. Current explicit corrections and the active output protocol still apply.\n[/CURRENT CHARACTER NOTE]",
-        config.identity.name, clip(CharacterSection::Personality, 180), clip(CharacterSection::Speech, 260))
+    crate::pipeline::prompt_templates::render(lang, "character_note", &[("name",&config.identity.name),
+        ("personality",&clip(CharacterSection::Personality,180)),("speech",&clip(CharacterSection::Speech,260))])
 }
 
 /// Keep explicit scene edits without repeating factory response scripts.
@@ -725,8 +768,8 @@ pub fn render_character_block_growing(
     entries: &[super::evolution::EvolutionEntry],
 ) -> String {
     let scopes: Vec<&str> = entries.iter().filter(|e| e.active()).map(|e| e.scope.as_str()).collect();
-    let protocol = render_persona_protocol_block();
-    let persona_config = filter_seed_config(&render_persona_config_block(config), &scopes);
+    let protocol = crate::pipeline::prompt_templates::text(lang, "persona_protocol").to_owned();
+    let persona_config = filter_seed_config(&render_persona_config_block_localized(config,lang), &scopes);
     let mut sections = match tier {
         CharacterBlockTier::Full => vec![
             resolve_section(config, CharacterSection::Identity, lang),
@@ -755,7 +798,7 @@ pub fn render_character_block_growing(
     // are already expressed by speech/banned_phrases/output rules, and leading with
     // a config block trained the model to answer like a spec executor.
     let mut head: Vec<String> = vec![
-        include_str!("../../prompts/framework/character_perspective.en.md").trim().to_string()];
+        crate::pipeline::prompt_templates::text(lang, "character_perspective").to_owned()];
     if !protocol.trim().is_empty() {
         head.push(protocol);
     }
@@ -764,7 +807,7 @@ pub fn render_character_block_growing(
     }
     // 结构化语言风格：紧跟在 persona_config 之后，同属"可被卡片覆盖的结构化配置"，
     // 与后面的自然语言 speech.md 互补（前者是可调旋钮，后者是语感长文）。
-    let language_style = render_language_style_block(config);
+    let language_style = render_language_style_block_localized(config, lang);
     if !language_style.is_empty() {
         head.push(language_style);
     }
@@ -814,6 +857,21 @@ pub fn render_examples_block_tiered(config: &PersonaConfig, lang: &str, _tier: C
 #[cfg(test)]
 mod example_budget_tests {
     use super::*;
+    #[test]
+    fn dialogue_resources_follow_locale_and_keep_authored_overrides() {
+        for config in [super::super::DEFAULT_PERSONA.clone(), super::super::DEFAULT_NANA_PERSONA.clone()] {
+            for (lang, identity, note, style) in [("zh-CN","身份","当前说话者","默认风格"),
+                ("en-US","Identity","The selected speaker","Default Style"),("ja-JP","身元","現在の話者","デフォルトスタイル")] {
+                let card = render_dialogue_card(&config,lang,&[]);
+                assert!(card.contains(identity),"{lang}");
+                assert!(render_dialogue_note(&config,lang).contains(note),"{lang}");
+                assert!(render_style_preset_block(&config,lang).contains(style),"{lang}");
+                let mut custom = config.clone(); custom.personality_definition = "User-authored preference 保留原文".into();
+                assert!(render_dialogue_card(&custom,lang,&[]).contains("User-authored preference 保留原文"));
+                assert_eq!(custom.personality_definition,"User-authored preference 保留原文");
+            }
+        }
+    }
     use crate::persona::schemas::default_persona_for;
 
     #[test]
@@ -826,6 +884,79 @@ mod example_budget_tests {
                 assert!(!full.contains("**Example ") && !full.contains("Response:"));
                 assert!(render_dialogue_seed_examples_localized(&config, &[], false, lang).is_none());
                 assert!(render_dialogue_seed_examples_localized(&config, &[], true, lang).is_none());
+            }
+        }
+    }
+}
+
+/// 人设叙述段落统一第二人称；第一人称只属于记忆、台词和示例原文。
+///
+/// 之前 personality.* 用“我”叙述、speech.* 用“你”发出指令，同一张卡里两种视角，
+/// 模型每轮都在“扮演一个人”和“执行一份说明”之间切换。内容压缩后更需要守卫：
+/// 人设省下的 token 要留给真实召回和近期对话，而不是继续写长段预设。
+#[cfg(test)]
+mod persona_voice_tests {
+    use super::*;
+    use crate::persona::schemas::default_persona_for;
+
+    static EN_FIRST_PERSON: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"\b(I|my|me|mine|myself)\b").expect("valid first-person matcher")
+    });
+
+    fn narrative_sections() -> [CharacterSection; 7] {
+        [
+            CharacterSection::Identity,
+            CharacterSection::Personality,
+            CharacterSection::Speech,
+            CharacterSection::Background,
+            CharacterSection::Interests,
+            CharacterSection::Relationships,
+            CharacterSection::Appearance,
+        ]
+    }
+
+    #[test]
+    fn character_narrative_sections_use_second_person_in_every_language() {
+        for name in ["vivian", "nana"] {
+            let config = default_persona_for(name);
+            for lang in ["zh", "en", "ja"] {
+                for section in narrative_sections() {
+                    let body = strip_heading(&resolve_section(&config, section, lang));
+                    let label = format!("{name}/{lang}/{section:?}");
+                    match crate::pipeline::prompt_templates::language(lang) {
+                        "en" => assert!(
+                            !EN_FIRST_PERSON.is_match(&body),
+                            "{label} must address the character in second person: {body}"
+                        ),
+                        "ja" => {
+                            for marker in ["私", "僕", "俺", "あたし"] {
+                                assert!(
+                                    !body.contains(marker),
+                                    "{label} must address the character in second person; found {marker}: {body}"
+                                );
+                            }
+                        }
+                        _ => assert!(
+                            !body.contains('我'),
+                            "{label} must address the character in second person: {body}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn persona_cards_stay_lean_across_languages() {
+        for name in ["vivian", "nana"] {
+            for (lang, max_chars) in [("zh", 5_000), ("en", 12_000), ("ja", 7_000)] {
+                let card = render_dialogue_card(&default_persona_for(name), lang, &[]);
+                assert!(
+                    card.chars().count() <= max_chars,
+                    "{name}/{lang} persona card is too long ({} chars > {max_chars}); \
+                     spend the budget on recall and recent history instead",
+                    card.chars().count()
+                );
             }
         }
     }
@@ -850,7 +981,7 @@ pub fn render_style_block(config: &PersonaConfig, scene_mode: SceneMode, lang: &
     };
 
     blocks.push(format!("{}: {}", mode_header, scene_mode.as_str()));
-    blocks.push("Scene cues are optional delivery tendencies, not facts or duties. The current dialogue, character perspective and explicit user preferences take precedence. Do not manufacture greetings, caretaking, teasing, intimacy or shortness to fit a mode.".to_string());
+    blocks.push(crate::pipeline::prompt_templates::text(lang, "scene_cues").to_owned());
     if let Some(mc) = mode_config {
         blocks.push(mc.description.clone());
     }
@@ -882,7 +1013,7 @@ pub fn render_style_block(config: &PersonaConfig, scene_mode: SceneMode, lang: &
 /// 渲染风格预设块（tone baseline），独立于场景模式，属于 Chat Style 框架层
 pub fn render_style_preset_block(config: &PersonaConfig, lang: &str) -> String {
     let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
-    let preset_text = load_style_preset(&config.style_preset);
+    let preset_text = load_style_preset_localized(&config.style_preset, lang);
     if preset_text.is_empty() {
         String::new()
     } else {
@@ -986,7 +1117,7 @@ mod tests {
         assert!(block.starts_with("[CHARACTER PERSPECTIVE]"));
         assert!(!block.contains("[PERSONA_LOAD]"));
         assert!(block.contains("[PERSONA_PROTOCOL]"));
-        assert!(block.contains("# Vivian · Identity"));
+        assert!(block.contains("# Vivian · 身份"));
     }
 
     #[test]
@@ -996,14 +1127,14 @@ mod tests {
         let compact = render_character_block_tiered(&config, "zh", CharacterBlockTier::Compact);
 
         // 完整档包含自我介绍型段落，精简档裁掉
-        assert!(full.contains("# Vivian · Background"));
-        assert!(full.contains("# Vivian · Appearance"));
-        assert!(!compact.contains("# Vivian · Background"));
-        assert!(!compact.contains("# Vivian · Appearance"));
+        assert!(full.contains("# Vivian · 背景"));
+        assert!(full.contains("# Vivian · 外观"));
+        assert!(!compact.contains("# Vivian · 背景"));
+        assert!(!compact.contains("# Vivian · 外观"));
 
         // 核心段落两档都保留
-        assert!(compact.contains("# Vivian · Identity"));
-        assert!(compact.contains("# Vivian · Speech Style"));
+        assert!(compact.contains("# Vivian · 身份"));
+        assert!(compact.contains("# Vivian · 说话方式"));
         assert!(compact.starts_with("[CHARACTER PERSPECTIVE]"));
         assert!(!compact.contains("[PERSONA_LOAD]"));
 

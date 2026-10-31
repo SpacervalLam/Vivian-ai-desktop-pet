@@ -46,6 +46,7 @@
       "icons/icon.ico"
     ],
     "resources": {
+      "browser-runtime": "browser-runtime/",
       "src/remote/frontend": "remote/frontend/",
       "vivian.bundle.enc": "vivian.bundle.enc"
     },

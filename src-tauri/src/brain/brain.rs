@@ -146,8 +146,10 @@ impl Brain {
             memory.set_episode_store(episode_store);
         }
 
-        // 初始化对话管理器（注入 LLM 意图判断函数）
-        let mut dialogue_inner = DialogueManager::new(10, char_id);
+        // 初始化对话管理器（注入 LLM 意图判断函数）。
+        // 保留最近 20 条消息（约 10 轮）：连续对话本身就是人格延续的主要素材，
+        // 人设卡压缩后把窗口让给真实历史，而不是每轮重读更长的预设文本。
+        let mut dialogue_inner = DialogueManager::new(20, char_id);
         if let Err(e) = dialogue_inner.load_history() {
             tracing::error!("加载对话历史失败: {}", e);
         }

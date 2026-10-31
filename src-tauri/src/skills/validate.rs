@@ -1,6 +1,6 @@
 //! 技能校验：front-matter、命名、占位符与目录卫生检查。
 //!
-//! 三处共用同一套规则：`create_skill` 工具写入前自检、`validate_skill` 工具按需调用、
+//! 三处共用同一套规则：`create_skill` 工具写入前自检、`use_skill` 的 validate 动作、
 //! 设置页命令保存前校验。`error` 阻断写入，`warning` 只作提示。
 
 use std::path::Path;

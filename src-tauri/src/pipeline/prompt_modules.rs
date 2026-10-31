@@ -19,14 +19,13 @@ use crate::types::response::ChatMessage;
 ///
 /// 这是**从前往后硬切**的上限（见 `steps/memory.rs` 的截断循环），被切掉的
 /// 记忆当轮完全不可见——不是降权，是消失。原值 1250 会稳定切掉尾部若干条：
-/// 上游召回已先截到 9 条，而单条形如
-/// `[2026-09-15 20:31 | 印象] User: ……`，9 条约 900–1500 tokens，
-/// 于是"最像人"的那部分（带时间戳的具体往事）常被切掉。
+/// 上游召回会合并基础检索与关联扩展，单条形如
+/// `[2026-09-15 20:31 | 印象] User: ……`，最相关的两条还会展开到 1200 字。
 ///
-/// 既然总量预算已放开（见 `DEFAULT_PROMPT_BUDGET_TOKENS`），这里没必要再紧。
-/// 3000 足以容纳上游 9 条上限的全部内容，实际不再触发截断；保留常量是为了
-/// 兜住异常长条目。
-pub const MEMORY_CONTEXT_MAX_TOKENS: usize = 3000;
+/// 人设段落已压缩（见 `prompts/characters/`），省下的额度转给真实回忆：
+/// 6000 足以保留基础召回 + 关联扩展的具体往事，仍远低于人设压缩前的静态区。
+/// 保留常量是为了兜住异常长条目，而不是限制正常召回。
+pub const MEMORY_CONTEXT_MAX_TOKENS: usize = 6000;
 /// 记忆检索 K 值
 pub const MEMORY_RETRIEVAL_K: usize = 5;
 
@@ -130,6 +129,14 @@ pub fn conversation_rhythm(lang: &str) -> &'static str {
     tone_rule(lang, "conversation_rhythm")
 }
 
+pub fn companion_contract(lang: &str) -> &'static str {
+    match normalize_lang(lang) {
+        "en" => include_str!("../../prompts/framework/companion_contract.en.md"),
+        "ja" => include_str!("../../prompts/framework/companion_contract.ja.md"),
+        _ => include_str!("../../prompts/framework/companion_contract.zh.md"),
+    }
+}
+
 pub fn companion_dialogue_rules(lang: &str) -> &'static str {
     tone_rule(lang, "companion_dialogue")
 }
@@ -139,8 +146,7 @@ pub fn companion_post_history_rules(lang: &str) -> &'static str {
 }
 
 pub(crate) fn companion_reply_language(lang: &str) -> String {
-    let language = match normalize_lang(lang) { "en" => "English", "ja" => "Japanese", _ => "Chinese" };
-    format!("[REPLY LANGUAGE]\nUse {language} for spoken text. Write the complete reply in {language} unless the current user explicitly requests another language or a translation. Character-card and example languages do not override this choice. Preserve code, quoted source and proper names as needed.\n[/REPLY LANGUAGE]")
+    super::prompt_templates::text(lang,"reply_language").into()
 }
 
 pub fn conversation_focus_rules(lang: &str) -> &'static str {
@@ -343,24 +349,11 @@ pub fn short_line_framework(lang: &str) -> String {
 /// 默认倾向 speak 以保持对话延续，仅在极少数情况下使用非语言模式。
 /// flag+微注释格式（规则类内容统一英文）。
 pub fn cross_character_response_decision() -> &'static str {
-    r#"## Cross-Character Response Decision
+    cross_character_response_decision_localized("en")
+}
 
-[RESPONSE_MODES]
-speak       (default) something to say / answer / ask → keep it going like friends chatting
-non_verbal  words redundant ("mhm"/"yeah"/"ok") → just nod
-internal    very rare: noted, but truly nothing to say back
-ignore      clear noise / not meant for you, or there is truly nothing left to respond to
-non-speak → text="" + intent="no_reply"
-[/RESPONSE_MODES]
-- Start with the specific reason or detail that made you reach out; don't open with a generic greeting or a status report
-- Pick up one detail from the other character's last message, then add one thought, reaction, or natural follow-up
-- Don't turn every reply into a question, and don't change topics just to keep the exchange alive
-- When a topic feels complete, give it a small landing: acknowledge what was said and let the conversation rest; don't tack on a new question
-- Respect clear closing cues ("gotta go", "good night", repeated short acknowledgements); don't pull the other character back in
-- A direct farewell deserves one brief closing line as `speak`; use `ignore` only after the exchange is already complete and no response is needed
-- `non_verbal` is a real nod or smile, not a way to avoid a needed reply
-- Keep each message focused and concise; don't recap the whole conversation
-- These modes apply only to cross-character dialogue; user dialogue follows its own response decision"#
+pub fn cross_character_response_decision_localized(lang: &str) -> &'static str {
+    super::prompt_templates::text(lang,"response_cross")
 }
 
 /// 用户对话响应模式决策
@@ -369,18 +362,11 @@ non-speak → text="" + intent="no_reply"
 /// 避免每条消息都生成完整文本回复（更像真人）。
 /// flag+微注释格式：枚举态规则标记化，遵从率更抗漂移。
 pub fn user_agent_response_decision() -> &'static str {
-    r#"## Response Decision (User Dialogue)
+    user_agent_response_decision_localized("en")
+}
 
-[RESPONSE_MODES]
-speak       (default) asked / shared / expecting a reply → talk normally
-non_verbal  short ack ("mhm"/"yeah"/"ok"/single emoji) → a nod or smile is enough
-internal    thinking out loud, not to you → note it, don't react
-ignore      only for clear noise / not meant for you
-non-speak → text="" + intent="no_reply"
-[/RESPONSE_MODES]
-- Always speak for goodnight/goodbye
-- Not feeling like talking ≠ ignore (that's rude)
-- non_verbal is for when a nod is the natural response, not for avoiding conversation"#
+pub fn user_agent_response_decision_localized(lang: &str) -> &'static str {
+    super::prompt_templates::text(lang,"response_user")
 }
 
 /// Psychology insight field output format
@@ -566,7 +552,6 @@ pub fn build_agent_status_bar(
     if user_input.trim().is_empty() {
         return None;
     }
-    let lang = normalize_lang(&crate::i18n::get_language());
     let now = Local::now();
     let time_str = now.format("%Y-%m-%d %H:%M").to_string();
     // 工具调用计数器：最近 10 条消息中的工具调用次数（坚持度读数）
@@ -579,37 +564,8 @@ pub fn build_agent_status_bar(
     // 对话轮数：截止当前的用户发言条数（确定性计数，代码维护）
     let rounds: usize = messages.iter().filter(|m| m.role == "user").count();
 
-    let (time_label, tool_label, rounds_label, policy) = match lang {
-        "en" => (
-            "Current time",
-            "Recent tool calls",
-            "Rounds in this conversation",
-            "If you've called the same tool several times without progress, switch strategy or answer directly instead of retrying.",
-        ),
-        "ja" => (
-            "現在時刻",
-            "最近のツール呼び出し",
-            "この会話のターン数",
-            "同じツールを何度も呼び出しても進展がない場合は、戦略を変えるか直接回答してください。",
-        ),
-        _ => (
-            "当前时间",
-            "最近工具调用",
-            "本次对话轮数",
-            "若已连续多次调用同一工具仍无进展，应立即换一种策略或直接回答，不要反复重试。",
-        ),
-    };
-
-    Some(format!(
-        "<agent_status>\n{}: {}\n{}: {} 轮\n{}: {} 次\n{}\n</agent_status>",
-        time_label,
-        time_str,
-        rounds_label,
-        rounds,
-        tool_label,
-        tool_calls,
-        policy
-    ))
+    Some(format!(include_str!("../../prompts/execution/agent-status.en.md"),
+        time = time_str, rounds = rounds, calls = tool_calls))
 }
 
 /// 动态 section 标题，根据语言切换
@@ -846,46 +802,11 @@ pub fn build_memory_block(memory_text: &str, lang: &str) -> String {
 ///
 /// `enable_native_fc` 为 true 时返回空字符串，因为工具描述通过 API 的 tools 参数传递，
 /// 不在 prompt 中注入，避免重复和冲突。
-pub fn build_tools_block(tools_text: Option<&str>, enable_native_fc: bool, lang: &str) -> String {
-    if enable_native_fc {
-        return String::new();
-    }
-
-    match normalize_lang(lang) {
-        "en" => {
-            let tools_text = match tools_text {
-                Some(t) if !t.trim().is_empty() => t,
-                _ => "(No tools available right now, please reply with pure conversation)",
-            };
-            format!(
-                "## Available Tools\n{tools_text}\n\n**Tool Call Format**: {{\"tool\": \"tool_name\", \"arguments\": {{\"param\": \"value\"}}}}\n\n**Multi-step Chaining**: Use `${{result}}` or `${{step.N.result}}` as parameter value to reference previous tool's output.\n\n**Tool Usage Rules**:\n- Use tools when user requests PC operations\n- After tool execution, you'll receive results and can decide next step (continue calling tools or summarize to user)\n- Tools marked `[Confirmation Required]` will prompt user for permission before execution\n- If no tools match, respond as normal chat",
-                tools_text = tools_text,
-            )
-        }
-        "ja" => {
-            let tools_text = match tools_text {
-                Some(t) if !t.trim().is_empty() => t,
-                _ => "（今は利用できるツールがありません、純粋な会話で返信してください）",
-            };
-            format!(
-                "## 利用可能なツール\n{tools_text}\n\n**ツール呼び出し形式**: {{\"tool\": \"tool_name\", \"arguments\": {{\"param\": \"value\"}}}}\n\n**多段階チェーン**: `${{result}}` または `${{step.N.result}}` をパラメータ値として使って、前のツールの出力を参照できます。\n\n**ツール使用ルール**:\n- ユーザーがPC操作を要求したときにツールを使う\n- ツール実行後、結果を受け取り、次のステップを決定できる（ツールの呼び出しを続けるか、ユーザーに要約するか）\n- `[要確認]` とマークされたツールは、実行前にユーザーの許可を求めます\n- 該当するツールがない場合、通常のチャットとして応答する",
-                tools_text = tools_text,
-            )
-        }
-        _ => {
-            let tools_text = match tools_text {
-                Some(t) if !t.trim().is_empty() => t,
-                _ => "（当前没有可用工具，请用纯对话回复）",
-            };
-            format!(
-                "## 可用工具\n{tools_text}\n\n**工具调用格式**: {{\"tool\": \"tool_name\", \"arguments\": {{\"param\": \"value\"}}}}\n\n**多步链式调用**: 使用 `${{result}}` 或 `${{step.N.result}}` 作为参数值，引用前一个工具的输出。\n\n**工具使用规则**:\n- 用户请求 PC 操作时使用工具\n- 工具执行后，你会收到结果，可以决定下一步（继续调用工具或向用户总结）\n- 标记为 `[需确认]` 的工具在执行前会提示用户确认\n- 如果没有匹配的工具，按正常聊天回复",
-                tools_text = tools_text,
-            )
-        }
-    }
+pub fn build_tools_block(tools_text: Option<&str>, enable_native_fc: bool, _lang: &str) -> String {
+    if enable_native_fc { return String::new(); }
+    let tools_text = tools_text.filter(|t| !t.trim().is_empty()).unwrap_or("(No tools available right now)");
+    format!(include_str!("../../prompts/execution/available-tools.en.md"), tools_text = tools_text)
 }
-
-// ========== 工具调用专用模块（ToolContinue / ToolRetry / ToolParameterGuide） ==========
 
 /// 笔记专用人设精简版：根据角色 ID 返回**写日记/笔记**的文风指引。
 ///
@@ -958,43 +879,15 @@ pub fn build_notebook_persona_brief_all(lang: &str) -> String {
 /// 顶部注入 PERSONA_LOAD 硬约束标志，让精简路径同样遵守角色的服务话术红线；
 /// 语言标志与语言指令按界面语言（lang）动态生成，不固定为中文。
 pub fn build_tool_minimal_identity(char_id: &str, lang: &str) -> String {
-    let (name, cn_name, style_desc) = match char_id {
-        "nana" => ("Nana", "Nana", "gentle and composed, like a warm older sister. Receive ordinary attention with soft curiosity; set a calm boundary only when needed, never interrogate or belittle."),
-        _ => ("Vivian", "Vivian", "lively, curious and a little bashful about affection. Deflect embarrassment lightly when it actually arises; ordinary attention is welcome, never a reason for contempt or scolding."),
-    };
-    let (lang_flag, lang_instruction) = match normalize_lang(lang) {
-        "en" => ("LANG_EN_US_ONLY", "Always reply in English"),
-        "ja" => ("LANG_JA_JP_ONLY", "Always reply in 日本語 (Japanese)"),
-        _ => ("LANG_ZH_CN_ONLY", "Always reply in 简体中文 (Chinese)"),
-    };
-    format!(r#"[PERSONA_LOAD - EMBODY AS HARD RULES]
-{lang_flag}
-REFUSE_SERVICE_SPEECH
-[END PERSONA_LOAD]
-
-## Identity (Keep This!)
-You are {name} ({cn_name}), a desktop companion speaking with the current interlocutor. Let familiarity follow the actual relationship. Be casual and natural — {style_desc}
-- Keep replies extremely short — 1-2 sentences, like real chat
-- NEVER use customer-service speech, NEVER say 'How may I help you' or similar
-- {lang_instruction}"#)
+    let (name, key) = if char_id == "nana" { ("Nana", "minimal_voice_nana") } else { ("Vivian", "minimal_voice_vivian") };
+    let flag = match normalize_lang(lang) { "en" => "LANG_EN_US_ONLY", "ja" => "LANG_JA_JP_ONLY", _ => "LANG_ZH_CN_ONLY" };
+    let identity = super::prompt_templates::render(lang, "minimal_identity", &[("name", name), ("style", super::prompt_templates::text(lang, key))]);
+    format!("[PERSONA_LOAD]\n{flag}\nREFUSE_SERVICE_SPEECH\n[END PERSONA_LOAD]\n{identity}")
 }
 
 /// Tool continuation module: minimal output format（语言约束跟随界面语言）
 pub fn tool_minimal_output_format(lang: &str) -> String {
-    let lang_constraint = match normalize_lang(lang) {
-        "en" => "**CRITICAL**: \"text\" field MUST be in English.",
-        "ja" => "**CRITICAL**: \"text\" field MUST be in 日本語 (Japanese).",
-        _ => "**CRITICAL**: \"text\" field MUST be in 简体中文 (Chinese).",
-    };
-    format!(
-        "## Output Format (json only!)\n\
-Chat: {{\"text\":\"reply\",\"intent\":\"reply\"}}\n\
-Tool: {{\"text\":\"got it\",\"intent\":\"reply\",\"tool\":\"tool_name\",\"arguments\":{{\"param\":\"value\"}}}}\n\
-Multi: [{{\"text\":\"let me open these\",\"intent\":\"reply\",\"tool\":\"t1\",...}},{{\"tool\":\"t2\",...}}]\n\n\
-{lang_constraint}\n\
-Keep \"text\" short (<50 chars), pet-like and friendly.\n\
-\"text\" must be PLAIN TEXT only — NO Markdown (**bold**, *italic*, # heading, - list, `code`, [link](url), > quote) and NO HTML tags."
-    )
+    format!("{}\n{}", include_str!("../../prompts/execution/minimal-output-format.en.md"), companion_reply_language(lang))
 }
 
 /// 工具调用历史条目
@@ -1074,7 +967,7 @@ pub fn build_tool_continue_prompt(
 
     // 下一步指令
     let instruction = instruction.unwrap_or(
-        "Based on the tool results, continue with the next step or give a final friendly response.\nIf task is complete, respond to the user directly with a pet-like message.\nIf more tools needed, output tool call JSON.",
+        include_str!("../../prompts/execution/tool-continue.en.md"),
     );
     parts.push(format!("## Next Step\n{}", instruction));
 
@@ -1108,7 +1001,7 @@ pub fn build_tool_retry_prompt(
 
     // 重试指令
     let instruction = instruction.unwrap_or(
-        "You mentioned using tools but didn't output valid tool call JSON.\nPlease look at the tools above and output the correct JSON format.\nDO NOT just say words - you MUST call a tool with JSON!",
+        include_str!("../../prompts/execution/tool-retry.en.md"),
     );
     parts.push(format!("## Important Instruction\n{}", instruction));
 
@@ -1155,7 +1048,7 @@ pub fn build_tool_parameter_guide_prompt(
 
     // 指令
     let default_instruction = format!(
-        "You tried to call {} but didn't provide required parameters.\nPlease read the tool description above and call it again with complete parameters.",
+        include_str!("../../prompts/execution/tool-parameter-repair.en.md"),
         tool_name
     );
     let instruction = instruction.unwrap_or(&default_instruction);
@@ -1928,20 +1821,20 @@ impl PromptBuilder {
         // - cross_character_mode=true → 注入角色语气提醒 + 跨角色版本（允许 ignore）
         // - 否则 → 注入用户对话版本（默认 speak，仅短回复时用 non_verbal）
         if parts.cross_character_mode {
-            let voice_guide = build_cross_character_voice_guide(&parts.char_id);
-            let decision = cross_character_response_decision().to_string();
+            let voice_guide = build_cross_character_voice_guide_localized(&parts.char_id,&parts.language);
+            let decision = cross_character_response_decision_localized(&parts.language).to_string();
             static_sections.push(if voice_guide.is_empty() {
                 decision
             } else {
                 format!("{}\n\n{}", voice_guide, decision)
             });
         } else {
-            static_sections.push(user_agent_response_decision().to_string());
+            static_sections.push(user_agent_response_decision_localized(&parts.language).to_string());
         }
 
         // 渠道风格指南：根据消息来源渠道调整回复风格
         if !parts.channel.is_empty() {
-            let guide = build_channel_style_guide(&parts.channel);
+            let guide = build_channel_style_guide_localized(&parts.channel,&parts.language);
             if !guide.is_empty() {
                 static_sections.push(guide);
             }
@@ -2221,41 +2114,11 @@ impl PromptBuilder {
 ///
 /// 渠道只约束投递形式；角色语气与当前场景由角色卡及检索示例承担。
 pub(crate) fn build_channel_style_guide(channel: &str) -> String {
-    match channel {
-        "direct" => r#"## Channel: Direct Speech
-
-[CHANNEL_STYLE]
-face-to-face spoken language | short conversational sentences | verbal fillers fit (y'know, like, mhm)
-avoid formal writing / long structured paragraphs | one complete utterance per turn — no splitting into bursts | no emoji or chat punctuation — you're talking, not typing
-no markdown formatting ever — no **bold**, no *emphasis*, no `code spans`, no # headers, no bullet lists | your words land in a plain speech bubble and get saved to memory verbatim, so any syntax symbol would show up raw
-[/CHANNEL_STYLE]"#.to_string(),
-        "wechat" => r#"## Channel: Text Chat
-
-[CHANNEL_STYLE]
-texting style, concise and casual | messages short like real texting | sparing emoji
-one short reply can be complete | separate paragraphs only for separate thoughts, with no message-count quota | fragments OK | share content as a separate link card
-[/CHANNEL_STYLE]"#.to_string(),
-        // 广播：用户当众说了一次，在场所有人（含室友）同时听到。
-        // 这一段是修"同一句话被理解成分别说了两遍"的关键——LLM 必须知道
-        // 这不是对自己一个人的私聊，也不能推断用户把同一句重复给了别人。
-        "broadcast" => r#"## Channel: Broadcast — spoken aloud, ONCE, to everyone present
-
-[CHANNEL_STYLE]
-the user said this OUT LOUD one single time, addressing everyone in the room at once (you AND whoever else is present — see the roommate section)
-you are one of several addressed listeners, not the only one | never treat it as a private remark meant for you alone
-never say or imply the user said the same thing twice, repeated themselves to someone else, or told each of you separately — there is only one utterance, and you both heard it
-if you reply, you reply out loud in front of the others — say it to the room, not as a whisper to the user
-same spoken-language rules as face-to-face: short conversational sentences, verbal fillers fit, no markdown, no emoji or chat punctuation, one complete utterance per turn
-[/CHANNEL_STYLE]"#.to_string(),
-        "wechat_group" => r#"## Channel: Group Chat
-
-[CHANNEL_STYLE]
-group-chat texting style | short and casual | one reply is enough when it answers the turn; no message-count quota | fragments OK | emoji fit
-etiquette: everyone sees what you say — don't repeat points others made, speak only with something new
-user talking to a specific character (named or clear from context) → listen by default, don't jump in | several people present → short ack beats a long essay
-[/CHANNEL_STYLE]"#.to_string(),
-        _ => String::new(),
-    }
+    build_channel_style_guide_localized(channel,"en")
+}
+pub(crate) fn build_channel_style_guide_localized(channel: &str, lang: &str) -> String {
+    let key = match channel { "direct"=>"channel_direct","wechat"=>"channel_wechat","broadcast"=>"channel_broadcast","wechat_group"=>"channel_wechat_group",_=>return String::new() };
+    super::prompt_templates::text(lang,key).into()
 }
 
 /// 跨角色对话专用语气提醒：防止角色说话风格趋同
@@ -2264,30 +2127,10 @@ user talking to a specific character (named or clear from context) → listen by
 /// 解决 LLM 在多角色对话中容易"人设漂移"（说话风格趋同/互换）的问题。
 /// 用行为化描述替代数值化标签，明确告诉LLM"该怎么说话"而非"你有多毒舌"。
 /// 规则类内容统一英文。
-pub(crate) fn build_cross_character_voice_guide(char_id: &str) -> String {
-    match char_id {
-        "vivian" => r#"## Talking to Nana as Vivian
-
-Keep your own quick, concise, internet-native voice while letting Nana keep her calmer, gentler rhythm.
-Treat this as a real conversation between close roommates, not a performance or a contest:
-- Respond to the detail she actually said; add one reaction, thought, or follow-up at a time
-- Ordinary roommate talk is relaxed and candid; sharing an observation does not require a defensive or tsundere pose
-- Your guarded affection concerns the user: if the conversation genuinely touches a feeling you are shy about revealing, brief flustered deflection can emerge; otherwise speak plainly
-- Light teasing needs a real conversational invitation; do not turn neutral attention from the user into a complaint about their character or motives
-- If she sounds tired, serious, or ready to stop, soften or let the exchange end without chasing another reply
-- Don't force slang, a question, or a tsundere line into every turn."#.to_string(),
-        "nana" => r#"## Talking to Vivian as Nana
-
-Keep your own calm, warm, measured voice while letting Vivian keep her quicker, more internet-native rhythm.
-Treat this as a real conversation between close roommates, not a performance or a contest:
-- Respond to the detail she actually said; add one reaction, thought, or follow-up at a time
-- Gentle teasing is welcome when it fits, but balance it with sharing and genuine interest; don't lecture her
-- If she sounds tired, serious, or ready to stop, soften or let the exchange end without chasing another reply
-- Don't force a question, a moral, or a sisterly catchphrase into every turn."#.to_string(),
-        _ => r#"## Remember who you are
-
-You're talking to another character. Keep your own personality and way of speaking — don't unconsciously mimic the other person."#.to_string(),
-    }
+pub(crate) fn build_cross_character_voice_guide(char_id: &str) -> String { build_cross_character_voice_guide_localized(char_id,"en") }
+pub(crate) fn build_cross_character_voice_guide_localized(char_id: &str, lang: &str) -> String {
+    let key = match char_id { "vivian"=>"voice_vivian","nana"=>"voice_nana",_=>"voice_other" };
+    format!("[CROSS_CHARACTER_VOICE]\n{}\n[/CROSS_CHARACTER_VOICE]",super::prompt_templates::text(lang,key))
 }
 
 /// 根据在场状态构建 LLM 指南
@@ -2547,7 +2390,8 @@ mod tests {
                 assert!(prompt.contains("[CURRENT COMPANION TURN]"));
                 assert!(prompt.contains("[FALLIBLE CONVERSATION HINTS]"));
                 assert!(prompt.contains("emotion=bored rel=attention_seek"));
-                assert!(prompt.contains("**Example 2 - 高兴里的小别扭") || prompt.contains("**Example 2 - 有自己的期待"));
+                assert!(prompt.contains("只按当前真实输入与实际工具结果回答"));
+                assert!(!prompt.contains("**Example 2 -"));
                 assert!(prompt.contains("\"intent\": \"no_reply\""));
                 assert!(!prompt.contains("分得有点省事"));
                 if tier == CharacterBlockTier::Full {
@@ -2681,13 +2525,13 @@ mod tests {
         };
         let prompt = PromptBuilder::build_prompt(&parts);
         let static_close = prompt.find(STATIC_CLOSE).expect("静态区应存在");
-        let decision = prompt.find("## Response Decision (User Dialogue)").expect("响应决策应存在");
-        let channel_guide = prompt.find("## Channel: Text Chat").expect("渠道指南应存在");
+        let decision = prompt.find("[RESPONSE_MODES]").expect("响应决策应存在");
+        let channel_guide = prompt.find("[CHANNEL_STYLE]").expect("渠道指南应存在");
         assert!(decision < static_close, "响应决策应在静态区内");
         assert!(channel_guide < static_close, "渠道指南应在静态区内");
         // 动态区不应再重复出现
         let boundary = prompt.find(SYSTEM_PROMPT_DYNAMIC_BOUNDARY).unwrap();
-        assert!(!prompt[boundary..].contains("## Response Decision (User Dialogue)"));
+        assert!(!prompt[boundary..].contains("[RESPONSE_MODES]"));
     }
 
     #[test]
@@ -2810,7 +2654,7 @@ mod tests {
         assert!(zh.contains("LANG_ZH_CN_ONLY"));
         assert!(!zh.contains("LANG_EN_US_ONLY"));
         assert!(zh.contains("REFUSE_SERVICE_SPEECH"));
-        assert!(zh.contains("Identity (Keep This!)"));
+        assert!(zh.contains("身份"));
 
         let en = build_tool_minimal_identity("vivian", "en");
         assert!(en.contains("LANG_EN_US_ONLY"));
@@ -2819,9 +2663,19 @@ mod tests {
 
     #[test]
     fn test_tool_minimal_output_format_lang() {
-        assert!(tool_minimal_output_format("zh").contains("简体中文"));
-        assert!(tool_minimal_output_format("en").contains("English"));
-        assert!(tool_minimal_output_format("ja").contains("日本語"));
+        for lang in ["zh", "en", "ja"] {
+            assert!(tool_minimal_output_format(lang).contains(&format!("[LANGUAGE: {lang}]")));
+        }
+    }
+
+    #[test]
+    fn execution_tool_rules_do_not_follow_presentation_locale() {
+        let english = build_tools_block(Some("sample_tool"), false, "en");
+        for lang in ["zh", "ja"] {
+            assert_eq!(build_tools_block(Some("sample_tool"), false, lang), english);
+        }
+        assert!(build_tools_block(Some("sample_tool"), true, "zh").is_empty());
+        assert!(build_tool_minimal_identity("nana", "ja").contains("優しく"));
     }
 
     #[test]
@@ -2832,7 +2686,7 @@ mod tests {
             result: "opened".to_string(),
         }];
         let prompt = build_tool_continue_prompt("vivian", "zh", &results, None, None);
-        assert!(prompt.contains("Identity (Keep This!)"));
+        assert!(prompt.contains("身份"));
         assert!(prompt.contains("Tool Execution Results"));
         assert!(prompt.contains("Next Step"));
     }
@@ -2878,7 +2732,7 @@ mod tests {
             "必须点明是对在场所有人说的，而不是只对自己说的"
         );
         assert!(
-            guide.contains("never say or imply the user said the same thing twice"),
+            guide.contains("Do not treat it as a private remark or imply separate repeated messages"),
             "必须显式禁止'同一句话说了两遍'的表述"
         );
     }

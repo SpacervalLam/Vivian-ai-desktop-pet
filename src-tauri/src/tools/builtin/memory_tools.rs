@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::diary;
-use crate::memory::{MemoryManager, MemoryType, RetrievalStrategy};
+use crate::memory::agentic_recall::{
+    recall_in_parallel, sanitize_queries, RecallQuery, RecallScope,
+};
+use crate::memory::{MemoryItem, MemoryManager, MemoryType, RetrievalStrategy};
 use crate::tools::services::MemoryService;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
@@ -36,6 +39,69 @@ fn parse_memory_type(category: &str) -> MemoryType {
         "short_term" => MemoryType::ShortTerm,
         _ => MemoryType::General,
     }
+}
+
+/// 单条检索与深查共用的结果整理：可见性过滤、类别过滤、截断、序列化与快速笔记。
+async fn render_recall_results(
+    mgr: &MemoryManager,
+    items: Vec<MemoryItem>,
+    limit: usize,
+    category: Option<&str>,
+    query: Option<&str>,
+    scope: Option<&str>,
+    plan: Vec<Value>,
+    quick_notes_query: &str,
+) -> ToolResult {
+    let mut filtered = items;
+    filtered.retain(|item| {
+        !item.tags.iter().any(|tag| tag == "quick_note")
+            && crate::memory::provenance::visible_to(&item.metadata, mgr.char_id())
+    });
+    if let Some(cat) = category.filter(|cat| !cat.is_empty()) {
+        let cat_type = parse_memory_type(cat);
+        filtered.retain(|item| {
+            item.tags.iter().any(|tag| tag == cat)
+                || parse_memory_type(&item.granularity) == cat_type
+        });
+    }
+    filtered.truncate(limit);
+    let total = filtered.len();
+    let serialized: Vec<Value> = filtered
+        .into_iter()
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "content": item.content,
+                "importance": item.importance,
+                "tags": item.tags,
+                "timestamp": crate::utils::prompt_time::format_prompt_time(item.timestamp),
+                "record_type": crate::memory::provenance::recall_label(&item.metadata),
+                "attribution": crate::memory::provenance::attribution(&item.metadata),
+                "source_time": item.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0).map(crate::utils::prompt_time::format_prompt_time),
+            })
+        })
+        .collect();
+    let quick_notes_query = quick_notes_query.to_string();
+    let embedding = mgr.embedding();
+    let user_notes = tokio::task::spawn_blocking(move || {
+        crate::user_quick_notes::search(&quick_notes_query, 3, Some(embedding))
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or_default();
+    ToolResult::standard_success(
+        &format!("找到 {} 条记忆", total),
+        Some(json!({
+            "query": query,
+            "scope": scope,
+            "queries": plan,
+            "category": category,
+            "results": serialized,
+            "total": total,
+            "user_quick_notes": crate::user_quick_notes::context(&user_notes),
+        })),
+    )
 }
 
 pub struct SaveMemoryTool;
@@ -307,14 +373,13 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Search the long-term memory store for memories containing the specified keywords. Results are sorted by importance.\
-         Use when you need to recall what was said/done in the past. Do NOT use to store new info (that's save_memory), and do not search when the answer is already in recent conversation."
+        "Deep keyword recall over one unified index covering dialogues, session summaries, user facts, notes/knowledge, and diary entries. Call it only when your own evidence feels thin: the user refers to something you cannot place, a detail is fuzzy, or you are about to guess. Not needed when the answer is already in recent conversation. Give concrete keywords (names, places, dates, objects, events), not sentences or questions. You may pass up to 3 different keyword/scope pairs in one call; they are searched in parallel."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "在长期记忆库中搜索包含指定关键词的记忆，结果按重要性排序。当你需要回忆过去说过/做过的事时使用。不要用它来保存新信息（那是 save_memory 的职责）；如果答案已经在最近的对话里，也不必搜索。",
-            "ja" => "長期記憶ストアから指定キーワードを含む記憶を検索し、重要度順でソートする。過去に話した・行ったことを思い出すときに使用。新しい情報の保存には使わないこと（それは save_memory の役割）。答えが最近の会話にすでにある場合は検索不要。",
+            "zh" => "在统一记忆索引中按关键词深入回忆，覆盖对话原文、会话摘要、用户事实、笔记/采集资料和日记。只在你自己的证据不够时才调用：用户提到你想不起来的事、细节模糊、或你正要靠猜的时候；答案已经在最近对话里就不必搜索。查询词由你自己决定，用人名、地点、日期、物品、事件等具体关键词，不要照抄整句或写成问句。一次最多给 3 组关键词/渠道，它们会并行检索。不要用它保存新信息（那是 save_memory 的职责）。",
+            "ja" => "会話原文・セッション要約・ユーザー事実・ノート/収集資料・日記を横断する統一インデックスをキーワードで深く検索する。自分の根拠が薄いときだけ呼ぶ：ユーザーが思い出せない話をした、細部が曖昧、当て推量になりそうなとき。答えが最近の会話にすでにある場合は検索不要。検索語は自分で決め、人名・場所・日付・物・出来事などの具体的なキーワードを使う（文章丸ごとや疑問文は使わない）。1 回で最大 3 組のキーワード/スコープを渡せ、並列で検索される。新しい情報の保存には使わないこと（それは save_memory の役割）。",
             _ => self.description(),
         }
     }
@@ -333,11 +398,16 @@ impl Tool for SearchMemoryTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keywords"
+                    "description": "Single search: concrete keywords"
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "diary", "note", "summary", "fact", "dialogue"],
+                    "description": "Channel for the single query, default all"
                 },
                 "category": {
                     "type": "string",
-                    "description": "Filter by category (optional)"
+                    "description": "Legacy category filter (optional)"
                 },
                 "limit": {
                     "type": "integer",
@@ -345,7 +415,7 @@ impl Tool for SearchMemoryTool {
                     "minimum": 1
                 }
             },
-            "required": ["query"]
+            "required": []
         })
     }
 
@@ -356,11 +426,16 @@ impl Tool for SearchMemoryTool {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词"
+                        "description": "单条检索：具体关键词"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all", "diary", "note", "summary", "fact", "dialogue"],
+                        "description": "单条检索的渠道，默认 all"
                     },
                     "category": {
                         "type": "string",
-                        "description": "按类别过滤（可选）"
+                        "description": "旧版类别过滤（可选）"
                     },
                     "limit": {
                         "type": "integer",
@@ -368,18 +443,23 @@ impl Tool for SearchMemoryTool {
                         "minimum": 1
                     }
                 },
-                "required": ["query"]
+                "required": []
             }),
             "ja" => json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "検索キーワード"
+                        "description": "単一検索：具体的なキーワード"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all", "diary", "note", "summary", "fact", "dialogue"],
+                        "description": "単一検索のスコープ（デフォルト all）"
                     },
                     "category": {
                         "type": "string",
-                        "description": "カテゴリで絞り込み（任意）"
+                        "description": "旧カテゴリフィルター（任意）"
                     },
                     "limit": {
                         "type": "integer",
@@ -387,18 +467,17 @@ impl Tool for SearchMemoryTool {
                         "minimum": 1
                     }
                 },
-                "required": ["query"]
+                "required": []
             }),
             _ => self.parameters_schema(),
         }
     }
 
     async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
-        let query = match input.get("query").and_then(|v| v.as_str()) {
-            Some(q) if !q.is_empty() => q.to_string(),
-            _ => return ValidationResult::failure("query 是必填项且不能为空", 2),
-        };
-        let _ = query;
+        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        if query.trim().is_empty() {
+            return ValidationResult::failure("query 是必填项且不能为空", 2);
+        }
         let mut data = input.clone();
         if data.get("limit").is_none() {
             data["limit"] = json!(10);
@@ -415,80 +494,66 @@ impl Tool for SearchMemoryTool {
     }
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
-        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .unwrap_or("")
+            .to_string();
+        let scope = args
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .and_then(RecallScope::parse);
         let category = args.get("category").and_then(|v| v.as_str());
         let limit = args
             .get("limit")
             .and_then(|v| v.as_u64())
             .unwrap_or(10) as usize;
 
-        if let Some(mgr) = get_manager_for_context(context) {
-            // Fetch extra results so category filtering doesn't starve the result set
-            let fetch_limit = if category.is_some() { limit * 3 + 20 } else { limit };
-            match mgr
-                .search_memories(query, RetrievalStrategy::Auto, fetch_limit)
+        let Some(mgr) = get_manager_for_context(context) else {
+            return ToolResult::standard_error("记忆系统未初始化", None, None);
+        };
+
+        // Fetch extra results so category filtering doesn't starve the result set
+        let fetch_limit = if category.is_some() { limit * 3 + 20 } else { limit };
+        let recalled = match scope {
+            Some(scope) => {
+                mgr.search_memories_filtered(
+                    &query,
+                    RetrievalStrategy::Auto,
+                    fetch_limit,
+                    &scope.filter(),
+                )
                 .await
-            {
-                Ok(items) => {
-                    let mut filtered = items;
-                    filtered.retain(|item| !item.tags.iter().any(|tag| tag == "quick_note")
-                        && crate::memory::provenance::visible_to(&item.metadata, mgr.char_id()));
-                    if let Some(cat) = category {
-                        if !cat.is_empty() {
-                            let cat_type = parse_memory_type(cat);
-                            filtered.retain(|item| {
-                                item.tags.iter().any(|t| t == cat)
-                                    || parse_memory_type(&item.granularity) == cat_type
-                            });
-                        }
-                    }
-
-                    // Truncate to the requested limit after filtering
-                    filtered.truncate(limit);
-
-                    let total = filtered.len();
-                    let serialized: Vec<Value> = filtered
-                        .into_iter()
-                        .map(|item| {
-                            json!({
-                                "id": item.id,
-                                "content": item.content,
-                                "importance": item.importance,
-                                "tags": item.tags,
-                                "timestamp": crate::utils::prompt_time::format_prompt_time(item.timestamp),
-                                "record_type": crate::memory::provenance::recall_label(&item.metadata),
-                                "attribution": crate::memory::provenance::attribution(&item.metadata),
-                                "source_time": item.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0).map(crate::utils::prompt_time::format_prompt_time),
-                            })
-                        })
-                        .collect();
-
-                    let query_owned = query.to_owned();
-                    let embedding = mgr.embedding();
-                    let user_notes = tokio::task::spawn_blocking(move || crate::user_quick_notes::search(&query_owned, 3, Some(embedding)))
-                        .await.ok().and_then(Result::ok).unwrap_or_default();
-                    return ToolResult::standard_success(
-                        &format!("找到 {} 条记忆", total),
-                        Some(json!({
-                            "query": query,
-                            "category": category,
-                            "results": serialized,
-                            "total": total,
-                            "user_quick_notes": crate::user_quick_notes::context(&user_notes),
-                        })),
-                    );
-                }
-                Err(e) => {
-                    return ToolResult::standard_error(
-                        &format!("搜索记忆失败: {e}"),
-                        None,
-                        None,
-                    );
-                }
             }
-        }
+            None => {
+                mgr.search_memories(&query, RetrievalStrategy::Auto, fetch_limit)
+                    .await
+            }
+        };
+        let items = match recalled {
+            Ok(items) => items,
+            Err(error) => {
+                return ToolResult::standard_error(
+                    &format!("搜索记忆失败: {error}"),
+                    None,
+                    None,
+                );
+            }
+        };
 
-        ToolResult::standard_error("记忆系统未初始化", None, None)
+        render_recall_results(
+            &mgr,
+            items,
+            limit,
+            category,
+            Some(&query),
+            scope.map(RecallScope::as_str),
+            Vec::new(),
+            &query,
+        )
+        .await
     }
 
     fn is_read_only(&self) -> bool {
@@ -515,9 +580,411 @@ impl Tool for SearchMemoryTool {
     }
 }
 
+/// deep_recall 工具 —— 一次并行查多组关键词/渠道（比 search_memory 更彻底）。
+pub struct DeepRecallTool;
+
+impl DeepRecallTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DeepRecallTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for DeepRecallTool {
+    fn name(&self) -> &str {
+        "deep_recall"
+    }
+
+    fn description(&self) -> &str {
+        "Deep recall across diary, notes, summaries, facts and original dialogue in one call. Use ONLY when a single search_memory query or the recent conversation is not enough: the reference is fuzzy, several angles may matter, or you are about to guess. Provide 1-3 concrete keyword/scope pairs; they are searched in parallel. Prefer search_memory for a single straightforward lookup."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "一次并行深查日记、笔记、会话摘要、事实与对话原文。只在你已经查过一次、最近对话不够、指代模糊、需要多个侧面，或正要靠猜时使用。给 1-3 组具体关键词/渠道，它们会并行检索；单条简单查询优先用 search_memory。",
+            "ja" => "日記・ノート・セッション要約・事実・会話原文を一度に並列で深く検索する。単発の search_memory や最近の会話では足りないとき（指代が曖昧、複数の側面が必要、当て推量になりそうなとき）だけ使う。1〜3 組の具体的なキーワード/スコープを渡すと並列検索される。単純な一回の検索には search_memory を使うこと。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我一直想不起来那件事\n你翻翻日记和笔记\n上次那个到底是怎么回事\n把相关的记忆都找一下\n我是不是跟你说过",
+            "en" => "I can't quite remember that\ncheck your diary and notes\nwhat was that thing again\nlook through everything related",
+            "ja" => "あれ思い出せない\n日記とノートも見て\n前のあれって何だったっけ\n関係する記憶を全部探して",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 3,
+                    "description": "Up to 3 keyword/scope pairs searched in parallel",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "keywords": {"type": "string"},
+                            "scope": {
+                                "type": "string",
+                                "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
+                            }
+                        },
+                        "required": ["keywords"]
+                    }
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of merged results, default 10",
+                    "minimum": 1
+                }
+            },
+            "required": ["queries"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "description": "最多 3 组关键词/渠道，并行检索",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "keywords": {"type": "string"},
+                                "scope": {
+                                    "type": "string",
+                                    "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
+                                }
+                            },
+                            "required": ["keywords"]
+                        }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "合并后的最大结果数，默认 10",
+                        "minimum": 1
+                    }
+                },
+                "required": ["queries"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "queries": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "description": "最大 3 組のキーワード/スコープを並列検索",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "keywords": {"type": "string"},
+                                "scope": {
+                                    "type": "string",
+                                    "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
+                                }
+                            },
+                            "required": ["keywords"]
+                        }
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "統合後の最大件数、デフォルト 10",
+                        "minimum": 1
+                    }
+                },
+                "required": ["queries"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
+        let has_keywords = input
+            .get("queries")
+            .and_then(|v| v.as_array())
+            .is_some_and(|queries| {
+                queries.iter().any(|query| {
+                    query
+                        .get("keywords")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|keywords| !keywords.trim().is_empty())
+                })
+            });
+        if !has_keywords {
+            return ValidationResult::failure("queries 至少提供一个非空关键词", 2);
+        }
+        let mut data = input.clone();
+        if data.get("limit").is_none() {
+            data["limit"] = json!(10);
+        }
+        ValidationResult::success(Some(data))
+    }
+
+    async fn check_permissions(
+        &self,
+        _input: &Value,
+        _context: &ToolUseContext,
+    ) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
+        let queries: Vec<RecallQuery> = args
+            .get("queries")
+            .and_then(|v| v.as_array())
+            .map(|queries| {
+                queries
+                    .iter()
+                    .filter_map(|query| {
+                        let keywords = query.get("keywords").and_then(|v| v.as_str())?.trim();
+                        if keywords.is_empty() {
+                            return None;
+                        }
+                        let scope = query
+                            .get("scope")
+                            .and_then(|v| v.as_str())
+                            .and_then(RecallScope::parse)
+                            .unwrap_or_default();
+                        Some(RecallQuery {
+                            keywords: keywords.to_string(),
+                            scope,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let queries = sanitize_queries(queries);
+        if queries.is_empty() {
+            return ToolResult::standard_error("queries 至少提供一个非空关键词", None, None);
+        }
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as usize;
+        let Some(mgr) = get_manager_for_context(context) else {
+            return ToolResult::standard_error("记忆系统未初始化", None, None);
+        };
+
+        let items = recall_in_parallel(&mgr, &queries, mgr.char_id(), limit).await;
+        let plan: Vec<Value> = queries
+            .iter()
+            .map(|query| json!({
+                "keywords": query.keywords,
+                "scope": query.scope.as_str(),
+            }))
+            .collect();
+        let quick_notes_query = queries
+            .first()
+            .map(|query| query.keywords.as_str())
+            .unwrap_or_default();
+        render_recall_results(&mgr, items, limit, None, None, None, plan, quick_notes_query).await
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "deep memory recall across diary notes summaries facts dialogues"
+    }
+}
+
+/// recall_time 工具 —— 合并最近互动、按日期/时段回忆、日记与今日总结。
+pub struct RecallTimeTool;
+
+impl RecallTimeTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for RecallTimeTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 旧工具没有 action 参数，按参数形状推断。
+fn effective_recall_action(args: &Value) -> String {
+    if let Some(action) = args.get("action").and_then(|v| v.as_str()).filter(|a| !a.is_empty()) {
+        return action.to_string();
+    }
+    if args.get("date").is_some() || args.get("time_of_day").is_some() {
+        "date".to_string()
+    } else if args.get("hours").is_some() {
+        "recent".to_string()
+    } else {
+        "today".to_string()
+    }
+}
+
+#[async_trait]
+impl Tool for RecallTimeTool {
+    fn name(&self) -> &str {
+        "recall_time"
+    }
+
+    fn description(&self) -> &str {
+        "Recall past context by time: action=recent (hours/limit), action=date (date and/or time_of_day; returns both session summaries and diary entries), action=today (today's context summary). Use when the user points at a specific time or asks what happened that day."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "按时间回忆过去：action=recent（hours/limit，最近互动）、action=date（date 和/或 time_of_day，同时返回会话摘要与当天日记）、action=today（今日上下文总结）。用户指向具体时间或问\"那天/上周/昨天发生了什么\"时使用。",
+            "ja" => "時間で過去を振り返る：action=recent（hours/limit、最近のやり取り）、action=date（date と time_of_day のいずれか／両方。セッション要約と当日の日記をまとめて返す）、action=today（今日のコンテキスト要約）。特定の時点を指す質問で使う。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我们刚才聊了什么\n前几天我们说了啥\n昨天下午我在干嘛\n那天发生了什么\n今天都做了什么",
+            "en" => "what were we just talking about\nwhat did we do that day\nyesterday afternoon\nwhat happened last week\ntoday's summary",
+            "ja" => "さっき何を話した\nあの日何があった\n昨日の午後は\n先週の出来事\n今日のまとめ",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["recent", "date", "today"], "description": "Which time view to recall"},
+                "hours": {"type": "integer", "minimum": 1, "description": "Lookback hours for action=recent, default 24"},
+                "date": {"type": "string", "description": "YYYY-MM-DD for action=date"},
+                "time_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night"], "description": "Optional time-of-day filter for action=date"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Maximum results, default 10"}
+            },
+            "required": ["action"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["recent", "date", "today"], "description": "要回忆的时间视图"},
+                    "hours": {"type": "integer", "minimum": 1, "description": "action=recent 时回溯多少小时，默认 24"},
+                    "date": {"type": "string", "description": "action=date 的日期（YYYY-MM-DD）"},
+                    "time_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night"], "description": "action=date 的可选时段过滤"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 30, "description": "返回条数上限，默认 10"}
+                },
+                "required": ["action"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["recent", "date", "today"], "description": "振り返る時間ビュー"},
+                    "hours": {"type": "integer", "minimum": 1, "description": "action=recent の遡り時間（デフォルト 24）"},
+                    "date": {"type": "string", "description": "action=date の日付（YYYY-MM-DD）"},
+                    "time_of_day": {"type": "string", "enum": ["morning", "afternoon", "evening", "night"], "description": "action=date の任意の時間帯フィルター"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 30, "description": "最大件数、デフォルト 10"}
+                },
+                "required": ["action"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_recall_action(input);
+        match action.as_str() {
+            "recent" => GetRecentInteractionsTool.validate_input(input, ctx).await,
+            "today" => SummarizeTodayContextTool.validate_input(input, ctx).await,
+            "date" => {
+                let summaries = RecallByDateTimeTool.validate_input(input, ctx).await;
+                if !summaries.result { return summaries; }
+                if input.get("date").and_then(|v| v.as_str()).is_some_and(|date| !date.is_empty()) {
+                    ReadDiaryByDateTool.validate_input(input, ctx).await
+                } else {
+                    ValidationResult::success(Some(input.clone()))
+                }
+            }
+            other => ValidationResult::failure(
+                format!("action must be recent/date/today (got {other})"), 2),
+        }
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_recall_action(&args);
+        match action.as_str() {
+            "recent" => GetRecentInteractionsTool.call(args, ctx).await,
+            "today" => SummarizeTodayContextTool.call(args, ctx).await,
+            "date" => {
+                let has_date = args.get("date").and_then(|v| v.as_str()).is_some_and(|date| !date.is_empty());
+                let summaries = RecallByDateTimeTool.call(args.clone(), ctx).await;
+                let diary = if has_date {
+                    ReadDiaryByDateTool.call(args, ctx).await
+                } else {
+                    ToolResult::standard_success("没有指定日期，跳过日记检索", Some(json!({"diaries": []})))
+                };
+                let message = format!(
+                    "{}；{}",
+                    summaries.data.as_ref().and_then(|data| data["message"].as_str()).unwrap_or("会话摘要"),
+                    diary.data.as_ref().and_then(|data| data["message"].as_str()).unwrap_or("日记"),
+                );
+                ToolResult::standard_success(
+                    &message,
+                    Some(json!({
+                        "diary": diary.data,
+                        "summaries": summaries.data,
+                    })),
+                )
+            }
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"), Some("InvalidAction"), None),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "recall time yesterday that day recent interactions diary today summary"
+    }
+}
+
 /// get_recent_interactions 工具 - 获取最近互动
 pub struct GetRecentInteractionsTool;
-
 impl GetRecentInteractionsTool {
     pub fn new() -> Self {
         Self
@@ -1615,5 +2082,19 @@ fn weekday_to_chinese(weekday: &str) -> String {
         "Saturday" => "星期六".to_string(),
         "Sunday" => "星期日".to_string(),
         _ => weekday.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_time_arguments_infer_actions() {
+        assert_eq!(effective_recall_action(&json!({})), "today");
+        assert_eq!(effective_recall_action(&json!({"hours": 6})), "recent");
+        assert_eq!(effective_recall_action(&json!({"date": "2026-10-29"})), "date");
+        assert_eq!(effective_recall_action(&json!({"time_of_day": "evening"})), "date");
+        assert_eq!(effective_recall_action(&json!({"action": "today"})), "today");
     }
 }

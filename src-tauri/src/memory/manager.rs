@@ -180,6 +180,25 @@ fn is_indexable_entry(e: &MemoryItem) -> bool {
     }
 }
 
+/// 补齐旧日记条目缺失的类别标记，返回是否有改动。
+///
+/// 早期 `add_diary_entry` 只写了 `kind="diary"` 而没有 `record_kind`，这些行在加载时
+/// 会被 `kinds::kind` 判成 Internal：既不常驻内存，也进不了检索索引。这里只认
+/// "带明确 `kind="diary"` 且带 diary 标签"的日记行，不从内容或其他字段推断类别。
+fn stamp_legacy_diary_record(entry: &mut MemoryItem) -> bool {
+    if entry.consolidated || entry.metadata.get("record_kind").is_some() {
+        return false;
+    }
+    let is_legacy_diary = entry.metadata.get("kind").and_then(|value| value.as_str())
+        == Some("diary")
+        && entry.tags.iter().any(|tag| tag == "diary");
+    if !is_legacy_diary {
+        return false;
+    }
+    entry.metadata["record_kind"] = serde_json::json!("diary");
+    true
+}
+
 /// 统一的向量嵌入输入构造：上下文前缀 + 内容 + 描述。
 ///
 /// 播种、向量补建、全量重建三路共用，保证同一条记忆在任何路径下产生
@@ -3005,8 +3024,9 @@ impl MemoryManager {
 
     /// 将日记内容索引到记忆系统，使 RAG 检索能覆盖日记。
     ///
-    /// 以 `MemoryType::LongTerm` 入库，metadata 携带 `kind="diary"` 与 `diary_id`，
-    /// 强制建向量索引（不依赖 should_index 准入）。importance 0.8（日记视为重要）。
+    /// metadata 显式携带 `record_kind="diary"`（以及 `kind="diary"` 与 `diary_id`），
+    /// 让条目进入可召回类别而不是被归为 Internal；强制建向量索引
+    /// （不依赖 should_index 准入）。importance 0.8（日记视为重要）。
     pub async fn add_diary_entry(
         &self,
         diary_id: &str,
@@ -3027,6 +3047,8 @@ impl MemoryManager {
         };
         item.metadata = serde_json::json!({
             "kind": "diary",
+            // 明确类别：日记可被检索召回，但不参与事实合并与共享世界路由。
+            "record_kind": "diary",
             "diary_id": diary_id,
             "date": date,
             "mood_tag": mood_tag,
@@ -3360,8 +3382,15 @@ impl MemoryManagerInner {
     }
 
     fn load_from_disk(&mut self) -> VivianResult<()> {
-        // SQLite 是唯一条目存储，不导入旧文件或补写旧记录类别。
-        let entries = self.entry_store.load_all()?;
+        // SQLite 是唯一条目存储，不导入旧文件、也不推断任意旧记录类别；
+        // 唯一的例外是日记行：它自带明确 `kind="diary"` 标记，当初只是漏写了
+        // `record_kind`，导致这一类记录永远无法召回。补齐后随首次落盘重新索引。
+        let mut entries = self.entry_store.load_all()?;
+        for entry in entries.iter_mut() {
+            if stamp_legacy_diary_record(entry) {
+                self.mark_changed(&entry.id);
+            }
+        }
         // 完全归档记录保留在 SQLite 作为审计/恢复材料，但不在每次启动时
         // 重新常驻内存；会话摘要始终基于原始历史生成。
         self.data.entries = entries
@@ -4140,6 +4169,44 @@ mod tagging_tests {
         let content = "some content";
         let tags = infer_tags_for_content(content, &MemoryType::Preference);
         assert!(tags.contains(&"preference".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod diary_record_tests {
+    use super::*;
+    use crate::memory::kinds;
+    use crate::memory::types::Granularity;
+
+    fn legacy_diary() -> MemoryItem {
+        let mut item = MemoryItem::new("今天和用户去了海边".into(), Granularity::Summary, 0.8);
+        item.tags = vec!["diary".into(), "2026-10-29".into(), "开心".into()];
+        item.metadata = serde_json::json!({
+            "kind": "diary", "diary_id": "d1", "date": "2026-10-29", "mood_tag": "开心",
+        });
+        item
+    }
+
+    #[test]
+    fn legacy_diary_is_stamped_and_becomes_recallable() {
+        let mut item = legacy_diary();
+        assert_eq!(kinds::kind(&item), kinds::RecordKind::Internal);
+        assert!(stamp_legacy_diary_record(&mut item));
+        assert_eq!(kinds::kind(&item), kinds::RecordKind::Diary);
+        assert!(kinds::recallable(&item));
+        // 幂等：已经补齐的条目不会被再次改写。
+        assert!(!stamp_legacy_diary_record(&mut item));
+    }
+
+    #[test]
+    fn stamping_does_not_infer_other_legacy_categories() {
+        let mut note = MemoryItem::new("随手笔记".into(), Granularity::Summary, 0.8);
+        note.metadata = serde_json::json!({"kind": "quick_note"});
+        assert!(!stamp_legacy_diary_record(&mut note));
+        assert_eq!(kinds::kind(&note), kinds::RecordKind::Internal);
+        let mut consolidated = legacy_diary();
+        consolidated.consolidated = true;
+        assert!(!stamp_legacy_diary_record(&mut consolidated));
     }
 }
 

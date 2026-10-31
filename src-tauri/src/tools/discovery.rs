@@ -292,8 +292,8 @@ mod tests {
     #[test]
     fn bm25_recalls_tool_from_chinese_phrase() {
         let preset = DiscoverableTool {
-            name: "update_provider_preset".into(),
-            label: "update_provider_preset".into(),
+            name: "manage_provider_preset".into(),
+            label: "manage_provider_preset".into(),
             summary: "更新或新增一条 LLM 供应商预设".into(),
             description: "更新或新增一条 LLM 供应商预设（写入 llm-providers 插件数据文件）。\
                           联网核对某供应商官方 API 文档后用它落修正：过期端点、已退役模型 ID、上下文窗口。"
@@ -321,7 +321,7 @@ mod tests {
             "自然中文短语应召回工具（旧手写打分器此处返回空）"
         );
         assert_eq!(
-            hits[0].0.name, "update_provider_preset",
+            hits[0].0.name, "manage_provider_preset",
             "首位应命中目标工具，实际排序：{:?}",
             hits.iter().map(|(d, s)| (d.name.clone(), *s)).collect::<Vec<_>>()
         );

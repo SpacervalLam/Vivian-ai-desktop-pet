@@ -22,9 +22,8 @@ description: 当要创建或修改 vivian 插件、维护 LLM/嵌入 Provider �
 | 一条可复用的方法论 | `create_skill` |
 | 一个可执行原语 | `create_tool` |
 | **一组相关能力**（要整体装卸/分享） | `create_plugin` |
-| 修正供应商预设数据 | `update_provider_preset` |
 | 盘点 LLM/嵌入预设 | `list_provider_presets` |
-| 新增、更新或删除 LLM/嵌入预设 | `manage_provider_preset` |
+| 新增、更新或删除 LLM/嵌入预设 | `manage_provider_preset`（action=upsert/delete） |
 | 删除整个自建插件 | 委派工作智能体调用 `delete_plugin`（需要用户确认） |
 
 判断口诀：用户要的是"一个能力"还是"一套能力"。单个 PowerShell 工具能解决的不要打包成插件；打包的动机是**内聚**——技能文档教怎么用、工具执行、MCP 提供外部数据，三者围绕同一主题。

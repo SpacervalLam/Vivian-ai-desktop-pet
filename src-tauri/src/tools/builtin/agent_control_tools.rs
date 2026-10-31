@@ -2,10 +2,18 @@
 //!
 //! 设计前提：Vivian 的「队友」就是后台子 agent（`work_jobs` 注册表里的一条任务），
 //! 没有独立的进程模型。所以这一层只做三件事：
-//! - **看见**：`list_agents` / `wait_agent` 读注册表
-//! - **干预**：`interrupt_agent` 置协作式取消位；`send_message` 投递到轮次边界收件箱
-//! - **协作**：`spawn_teammate` 复用 `work_delegate` 的派发路径；`team_task_*` 维护
+//! - **看见**：`team` 的 list / wait / models 读注册表
+//! - **干预**：`team` 的 interrupt 置协作式取消位；message 投递到轮次边界收件箱
+//! - **协作**：`team` 的 spawn 复用 `work_delegate` 的派发路径；`team_task` 维护
 //!   一张只在会话内可见的任务板，用来协调"谁做哪块"
+//!
+//! 模型可见面只有两个工具：`team`（7 个动作）与 `team_task`（4 个动作）。
+//! 原先的 `list_agents` / `wait_agent` / `interrupt_agent` / `send_message` /
+//! `spawn_teammate` / `list_subagent_models` / `ralph` / `team_task_*` 都保留为
+//! 内部实现与旧名别名，避免历史对话和 few-shot 里的旧名失效。
+//!
+//! 子 agent 仍只能看同伴、递一句话：`team` 在 `subagent_depth > 0` 时只放行
+//! list / message，spawn / ralph / interrupt 一律拒绝。
 //!
 //! 刻意不做：跨进程广播、队友之间直接对话。子 agent 只有「最终文本回传 + 轮次边界收信」
 //! 两条通道，多一条都不该假装有。
@@ -1455,6 +1463,382 @@ impl Tool for RalphTool {
     }
 }
 
+// ============================================================================
+// team —— 7 个协作动作的统一入口
+// ============================================================================
+
+/// 合并协作工具后的动作解析（旧工具没有 action 参数）。
+///
+/// 旧参数形状：`goal` → ralph；`name`+`task` → spawn；`message` → message；
+/// `job_id` → wait（`interrupt` 与 `wait` 的旧形状无法区分，选代价更小的 wait：
+/// 等待只是阻塞，误中断会丢掉正在跑的工作）。空参数 → list。
+/// `action=models` 必须显式给出——旧 `list_subagent_models` 的空参数形状
+/// 与 `list_agents` 完全相同。
+pub(crate) fn effective_team_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("goal").is_some() {
+        "ralph".to_string()
+    } else if args.get("name").is_some() && args.get("task").is_some() {
+        "spawn".to_string()
+    } else if args.get("message").is_some() {
+        "message".to_string()
+    } else if args.get("job_id").is_some() {
+        "wait".to_string()
+    } else {
+        "list".to_string()
+    }
+}
+
+const TEAM_ACTIONS: &[&str] = &[
+    "list",
+    "wait",
+    "interrupt",
+    "message",
+    "spawn",
+    "models",
+    "ralph",
+];
+
+fn team_action_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": TEAM_ACTIONS,
+                "description": "list: see spawned agents; wait: block for one result; interrupt: cooperative stop; \
+                                message: queue an instruction at the next round boundary; spawn: start a named teammate; \
+                                models: what model sub-agents run on; ralph: iterate a fresh sub-agent on one goal."
+            },
+            "job_id": { "type": "string", "description": "Target job id for wait / interrupt / message." },
+            "to": { "type": "string", "description": "Recipient for action=message: teammate name or job id." },
+            "message": { "type": "string", "description": "Instruction for action=message. One sentence, no pleasantries." },
+            "timeout_secs": { "type": "integer", "minimum": 5, "description": "For action=wait: max seconds (default 60, cap 600)." },
+            "name": { "type": "string", "description": "For action=spawn: teammate name (e.g. tester, doc-writer)." },
+            "role": { "type": "string", "description": "For action=spawn: one-line role framing — what it owns and does not own." },
+            "task": { "type": "string", "description": "For action=spawn: self-contained task (the teammate cannot see this conversation)." },
+            "context": { "type": "string", "description": "For action=spawn / ralph: background and constraints that must be repeated." },
+            "max_rounds": { "type": "integer", "description": "For action=spawn: round budget (inherits the delegate default)." },
+            "goal": { "type": "string", "description": "For action=ralph: immutable goal; every iteration receives it verbatim." },
+            "iterations": { "type": "integer", "minimum": 1, "description": "For action=ralph: max iterations (default 3, cap 5)." },
+            "include_finished": { "type": "boolean", "description": "For action=list: include terminal jobs (default true)." }
+        },
+        "required": ["action"]
+    })
+}
+
+pub struct TeamTool;
+
+impl TeamTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for TeamTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 子 agent 的协作动作白名单：只能看见同伴、给同伴递话。
+fn subagent_allows_team_action(action: &str) -> bool {
+    matches!(action, "list" | "message")
+}
+
+#[async_trait]
+impl Tool for TeamTool {
+    fn name(&self) -> &str {
+        "team"
+    }
+
+    fn description(&self) -> &str {
+        "Work with the sub-agents this session spawned. Actions: \
+         list (status, rounds, tool counts, job ids; include_finished), \
+         wait (block until one finishes and return its final text; only when the next step depends on it), \
+         interrupt (cooperative stop at the next round boundary — already-running tool calls finish), \
+         message (queue an instruction to a teammate name or job id; delivered at its next round boundary, \
+         priority over the original task, without interrupting it), \
+         spawn (start a named teammate with a role, tracked on the team task board; the task must be self-contained), \
+         models (report which model sub-agents inherit and the default round budget), \
+         ralph (iterate a fresh-context sub-agent around one immutable goal until it converges).\n\
+         A teammate is just a background job: final text plus round-boundary messages are the only channels."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "与本会话派出的子 agent 协作。action 取值：\
+                     list（看谁在跑/已结束，含 job_id、轮次、工具次数）、\
+                     wait（阻塞等某个跑完并返回最终文本；只有下一步确实依赖它时才用）、\
+                     interrupt（协作式叫停，在下一个轮次边界收手，已发出的工具调用会跑完）、\
+                     message（按队友名字或 job_id 投递补充指示，不打断，下一轮边界生效）、\
+                     spawn（派出有名字、有角色设定的队友，并登记到团队任务板；task 必须自包含）、\
+                     models（子 agent 继承哪个模型、默认轮次预算）、\
+                     ralph（围绕一个不可变目标反复起全新上下文的子 agent，直到收敛）。\n\
+                     队友就是后台任务：最终文本 + 轮次边界消息，只有这两条通道。",
+            "ja" => "このセッションが派遣したサブエージェントと協働する。action：list（状態と job_id 一覧）、\
+                     wait（完了まで待って最終テキストを取得）、interrupt（協調的停止。次のラウンド境界で収手）、\
+                     message（名前または job_id に補足指示をキューイング）、spawn（役割付きの名前付きチームメイトを派遣）、\
+                     models（サブエージェントのモデル経路と既定ラウンド予算）、\
+                     ralph（不変の目標を中心に新しいコンテキストで反復）。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "队友在干什么\n派个队友去做\n等它跑完\n让那个子任务停下\n给队友递个话\n反复打磨到通过",
+            "en" => "what are my subagents doing\nspawn a teammate\nwait for it\nstop that subagent\ntell the teammate\niterate until it passes",
+            "ja" => "サブエージェントの状況\nチームメイトを派遣\n完了まで待つ\nサブタスクを止めて\n仲間に伝える\n通るまで反復",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        team_action_schema()
+    }
+
+    fn parameters_schema_in(&self, _lang: &str) -> Value {
+        team_action_schema()
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_team_action(input);
+        if !TEAM_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                &format!(
+                    "不支持的 action: {action}（可选：{}）",
+                    TEAM_ACTIONS.join(" / ")
+                ),
+                2,
+            );
+        }
+        if ctx.subagent_depth > 0 && !subagent_allows_team_action(&action) {
+            return ValidationResult::failure(
+                "子 agent 只能使用 team 的 list / message：派活、叫停、迭代归主 agent 所有。",
+                2,
+            );
+        }
+        match action.as_str() {
+            "list" => ListAgentsTool.validate_input(input, ctx).await,
+            "wait" => WaitAgentTool.validate_input(input, ctx).await,
+            "interrupt" => InterruptAgentTool.validate_input(input, ctx).await,
+            "message" => SendMessageTool.validate_input(input, ctx).await,
+            "spawn" => SpawnTeammateTool.validate_input(input, ctx).await,
+            "ralph" => RalphTool.validate_input(input, ctx).await,
+            _ => ValidationResult::success(Some(input.clone())),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_team_action(input).as_str() {
+            "spawn" => SpawnTeammateTool.check_permissions(input, ctx).await,
+            "ralph" => RalphTool.check_permissions(input, ctx).await,
+            _ => PermissionResult::allow(),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_team_action(&args);
+        match action.as_str() {
+            "list" => ListAgentsTool.call(args, ctx).await,
+            "wait" => WaitAgentTool.call(args, ctx).await,
+            "interrupt" => InterruptAgentTool.call(args, ctx).await,
+            "message" => SendMessageTool.call(args, ctx).await,
+            "spawn" => SpawnTeammateTool.call(args, ctx).await,
+            "models" => ListSubagentModelsTool.call(args, ctx).await,
+            "ralph" => RalphTool.call(args, ctx).await,
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"),
+                Some("InvalidAction"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::System
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::Safe
+    }
+
+    fn search_hint(&self) -> &str {
+        "team subagent teammate 队友 子任务 并行 分工 等待 叫停 传话 迭代"
+    }
+}
+
+// ============================================================================
+// team_task —— 任务板的统一入口
+// ============================================================================
+
+/// 任务板动作解析：`task_id` 带更新字段 → update；只有 `task_id` → get；
+/// `title` → create；空参数 → list。
+pub(crate) fn effective_team_task_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("task_id").is_some() {
+        let has_update = ["status", "owner", "detail"]
+            .iter()
+            .any(|k| args.get(*k).is_some());
+        if has_update {
+            "update".to_string()
+        } else {
+            "get".to_string()
+        }
+    } else if args.get("title").is_some() {
+        "create".to_string()
+    } else {
+        "list".to_string()
+    }
+}
+
+const TEAM_TASK_ACTIONS: &[&str] = &["create", "list", "get", "update"];
+
+fn team_task_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": TEAM_TASK_ACTIONS,
+                "description": "create: add a plan entry (no execution); list: show the board; get: read one entry with its job status; update: change status / owner / detail."
+            },
+            "task_id": { "type": "string", "description": "Board id such as t1 (for get / update)." },
+            "title": { "type": "string", "description": "For action=create: one-line task title." },
+            "detail": { "type": "string", "description": "Acceptance notes or constraints." },
+            "owner": { "type": "string", "description": "Teammate responsible for this entry." },
+            "status": {
+                "type": "string",
+                "enum": ["pending", "running", "done", "blocked"],
+                "description": "For action=update: honest state — blocked means blocked."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+pub struct TeamTaskTool;
+
+impl TeamTaskTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for TeamTaskTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for TeamTaskTool {
+    fn name(&self) -> &str {
+        "team_task"
+    }
+
+    fn description(&self) -> &str {
+        "Maintain the session's team task board: create an entry to state the split before dispatching \
+         (no execution happens — spawning is team action=spawn), list the board, read one entry with its \
+         linked job status and output preview, or update status / owner / detail. \
+         Status values: pending / running / done / blocked."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "维护本会话的团队任务板：create 在派活前先写清分工（**不执行**，真正派活是 team 的 spawn），\
+                     list 查看整块看板，get 读取某条并附带关联任务状态与输出预览，update 改状态/负责人/说明。\
+                     状态取值：pending / running / done / blocked。",
+            "ja" => "セッションのチーム掲示板を維持する。create は派遣前の分担表明（実行はしない。派遣は team の spawn）、\
+                     list は一覧、get は 1 件と関連ジョブ状態、update は状態・担当・説明の更新。\
+                     状態：pending / running / done / blocked。",
+            _ => self.description(),
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        team_task_schema()
+    }
+
+    fn parameters_schema_in(&self, _lang: &str) -> Value {
+        team_task_schema()
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_team_task_action(input);
+        if !TEAM_TASK_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                &format!(
+                    "不支持的 action: {action}（可选：{}）",
+                    TEAM_TASK_ACTIONS.join(" / ")
+                ),
+                2,
+            );
+        }
+        match action.as_str() {
+            "create" => TeamTaskCreateTool.validate_input(input, ctx).await,
+            "get" => TeamTaskGetTool.validate_input(input, ctx).await,
+            "update" => TeamTaskUpdateTool.validate_input(input, ctx).await,
+            _ => ValidationResult::success(Some(input.clone())),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        // 任务板只是会话内计划，不触达外部状态。
+        TeamTaskCreateTool.check_permissions(input, ctx).await
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_team_task_action(&args);
+        match action.as_str() {
+            "create" => TeamTaskCreateTool.call(args, ctx).await,
+            "list" => TeamTaskListTool.call(args, ctx).await,
+            "get" => TeamTaskGetTool.call(args, ctx).await,
+            "update" => TeamTaskUpdateTool.call(args, ctx).await,
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"),
+                Some("InvalidAction"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::System
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::Safe
+    }
+
+    fn search_hint(&self) -> &str {
+        "team task board 看板 分工 进度 负责人"
+    }
+}
+
 /// 供前端/测试读取状态用（未结束时为空）。
 pub fn running_agents(session_id: &str) -> Vec<String> {
     global_work_job_registry()
@@ -1463,4 +1847,79 @@ pub fn running_agents(session_id: &str) -> Vec<String> {
         .filter(|j| j.status == WorkJobStatus::Running)
         .map(|j| j.job_id)
         .collect()
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_team_arguments_infer_actions() {
+        assert_eq!(effective_team_action(&json!({})), "list");
+        assert_eq!(effective_team_action(&json!({"include_finished": false})), "list");
+        assert_eq!(effective_team_action(&json!({"job_id": "j1"})), "wait");
+        assert_eq!(
+            effective_team_action(&json!({"job_id": "j1", "timeout_secs": 30})),
+            "wait"
+        );
+        assert_eq!(
+            effective_team_action(&json!({"to": "tester", "message": "收一下边界"})),
+            "message"
+        );
+        assert_eq!(
+            effective_team_action(&json!({"name": "tester", "task": "跑测试"})),
+            "spawn"
+        );
+        assert_eq!(effective_team_action(&json!({"goal": "改到通过"})), "ralph");
+        assert_eq!(effective_team_action(&json!({"action": "INTERRUPT"})), "interrupt");
+    }
+
+    #[test]
+    fn legacy_team_task_arguments_infer_actions() {
+        assert_eq!(effective_team_task_action(&json!({})), "list");
+        assert_eq!(effective_team_task_action(&json!({"title": "改鉴权"})), "create");
+        assert_eq!(effective_team_task_action(&json!({"task_id": "t1"})), "get");
+        assert_eq!(
+            effective_team_task_action(&json!({"task_id": "t1", "status": "done"})),
+            "update"
+        );
+        assert_eq!(
+            effective_team_task_action(&json!({"task_id": "t1", "owner": "tester"})),
+            "update"
+        );
+    }
+
+    #[test]
+    fn unsupported_actions_are_rejected() {
+        let ctx = ToolUseContext::default();
+        let verdict = futures::executor::block_on(
+            TeamTool.validate_input(&json!({"action": "nope"}), &ctx),
+        );
+        assert!(!verdict.result, "未知 action 必须拒绝");
+        let verdict = futures::executor::block_on(
+            TeamTaskTool.validate_input(&json!({"action": "remove"}), &ctx),
+        );
+        assert!(!verdict.result, "任务板没有删除动作");
+    }
+
+    #[test]
+    fn subagents_can_only_list_and_message() {
+        let mut ctx = ToolUseContext::default();
+        ctx.subagent_depth = 1;
+        for action in ["spawn", "ralph", "interrupt", "wait"] {
+            let verdict = futures::executor::block_on(
+                TeamTool.validate_input(&json!({"action": action, "task_id": "t1", "goal": "x",
+                    "job_id": "j1", "name": "n", "task": "t"}), &ctx),
+            );
+            assert!(!verdict.result, "子 agent 不该获得 team action={action}");
+        }
+        let allowed = futures::executor::block_on(TeamTool.validate_input(&json!({
+            "action": "list"
+        }), &ctx));
+        assert!(allowed.result, "子 agent 应能看同伴");
+        let allowed = futures::executor::block_on(TeamTool.validate_input(&json!({
+            "action": "message", "to": "peer", "message": "前提变了"
+        }), &ctx));
+        assert!(allowed.result, "子 agent 应能给同伴递话");
+    }
 }

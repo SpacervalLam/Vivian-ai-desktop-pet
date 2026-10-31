@@ -4,6 +4,96 @@ use serde_json::{json, Value};
 use super::{base::Runnable, state::PipelineState, steps::{prompt::PromptBuildingStep, generation::AIResponseGenerationRunnable}};
 use crate::{persona::{PersonaEngine, ToneInjector}, types::response::ChatMessage};
 
+/// Opt-in wire example: production prompt, router, provider serialization and real read receipt.
+/// The receiving server is local and scripted; no credentials or personal stores are used.
+#[tokio::test]
+async fn export_complete_api_request_example() {
+    let Some(output) = std::env::var_os("VIVIAN_API_EXAMPLE_DIR") else { return; };
+    assert!(std::env::var_os("VIVIAN_TEST_DATA_DIR").is_some(), "example requires isolated stores");
+    use axum::{routing::post, Json, Router};
+    use crate::tools::{ToolSystem, tool_call_manager::{ToolCallManager, ToolSearchTool}, types::ToolUseContext};
+    let output = std::path::PathBuf::from(output);
+    std::fs::create_dir_all(&output).unwrap();
+    let workspace = output.join("fixture-workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let file = workspace.join("note.txt");
+    std::fs::write(&file, "今天完成了陪伴侧持续执行优化。\n明天验证真实模型的表现。\n").unwrap();
+    let user_input = format!("读取 {}，原样告诉我正文，不要修改文件。", file.display());
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::<Value>::new()));
+    let captures = requests.clone();
+    let target = file.to_string_lossy().to_string();
+    let task_input = user_input.clone();
+    let app = Router::new().route("/v1/chat/completions", post(move |Json(body): Json<Value>| {
+        let index = { let mut rows = captures.lock(); let index = rows.len(); rows.push(body); index };
+        let message = match index {
+            0 => json!({"role":"assistant","content":json!({"action":true,"continues_task":false,
+                "needs_clarification":false,"task":task_input,"execution_actor":"vivian"}).to_string()}),
+            1 => json!({"role":"assistant","content":null,"tool_calls":[{"id":"read-note-1","type":"function",
+                "function":{"name":"read_file","arguments":json!({"path":target,"max_chars":2000}).to_string()}}]}),
+            2 => json!({"role":"assistant","content":null,"tool_calls":[{"id":"finish-note-1","type":"function",
+                "function":{"name":"finish_companion_task","arguments":json!({"status":"completed","remaining_work":[],"evidence_ids":["read-note-1"]}).to_string()}}]}),
+            3 => json!({"role":"assistant","content":"便签里写的是：\n今天完成了陪伴侧持续执行优化。\n明天验证真实模型的表现。"}),
+            _ => panic!("unexpected extra request in API example"),
+        };
+        async move { Json(json!({"id":format!("example-{index}"),"choices":[{"index":0,"message":message,
+            "finish_reason":if matches!(index,1|2) {"tool_calls"} else {"stop"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}})) }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let mut config = crate::config::AppConfig::default();
+    config.enable_routing_matrix = true; config.ai.provider = "chat_completions".into();
+    config.ai.endpoint = Some(endpoint.clone()); config.ai.api_key = Some("local-example-key".into());
+    config.ai.model = "example-main".into(); config.network.proxy_mode = "direct".into();
+    for (task, model) in [("simple_judge", "example-judge"), ("reasoning", "example-reasoning"), ("companion", "example-companion")] {
+        config.routing_matrix.insert(task.into(), crate::config::manager::TaskRouteConfig {
+            provider_type:"chat_completions".into(),model:model.into(),endpoint:endpoint.clone(),
+            api_key:"local-example-key".into(),..Default::default()
+        });
+    }
+    let router = Arc::new(crate::providers::ModelRouter::new(&config).unwrap());
+    let tools = Arc::new(ToolSystem::new());
+    tools.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool));
+    tools.register_tool(Arc::new(ToolSearchTool::new(Arc::new(vec![]), Arc::downgrade(&tools))));
+    let persona = Arc::new(PersonaEngine::new("vivian").unwrap());
+    let language = std::env::var("VIVIAN_API_EXAMPLE_LANG").unwrap_or_else(|_|"zh".into());
+    persona.set_language(&language);
+    let mut prompt = PromptBuildingStep::new().with_char_id("vivian").with_language(&language).with_native_fc(true);
+    prompt.persona = Some(persona); prompt.tool_system = Some(tools.clone());
+    prompt.tone_injector = Some(Arc::new(ToneInjector::new("vivian")));
+    let mut state = PipelineState { should_respond:true,user_input:user_input.clone(),current_channel:"direct".into(),
+        messages:vec![ChatMessage::user("等下帮我看看我写的便签。"),ChatMessage::assistant("好，把文件位置告诉我就行。")],
+        ..Default::default() };
+    state.metadata["communication_context"] = json!({"current_character":"vivian","speaker":"user","listener":"vivian","knowledge_source":"direct"});
+    let intent = AIResponseGenerationRunnable::resolve_contextual_intent(&router,&state,"vivian",None).await.unwrap();
+    state.metadata["contextual_intent"] = json!(intent);
+    let mut run_config = super::base::RunnableConfig::default();
+    run_config.metadata["task_type"] = json!("companion");
+    let state = prompt.ainvoke(state.to_json(), Some(run_config.clone())).await.unwrap();
+    let manager = Arc::new(ToolCallManager::new(tools, ToolUseContext {
+        char_id:"vivian".into(),working_directory:workspace.to_string_lossy().to_string(),..Default::default()
+    }));
+    // This headless fixture models a user who already approved this read capability.
+    crate::tools::executor::session_allow_tool("read_file","vivian");
+    let generation = AIResponseGenerationRunnable::with_tool_call_manager(router,manager.clone(),
+        super::steps::generation::new_shared_stream_emitter(),true,4,100_000,20);
+    let result = manager.execution_control.lease().scope(generation.ainvoke(state,Some(run_config))).await.unwrap();
+    server.abort();
+    let result = PipelineState::from_json(result);
+    let requests = requests.lock();
+    for (index, name) in ["01-contextual-intent.json","02-first-request.json","03-executor-settlement.json","04-character-reply.json"].iter().enumerate() {
+        if let Some(request) = requests.get(index) { std::fs::write(output.join(name),serde_json::to_vec_pretty(request).unwrap()).unwrap(); }
+    }
+    std::fs::write(output.join("requests.json"),serde_json::to_vec_pretty(&*requests).unwrap()).unwrap();
+    std::fs::write(output.join("example-result.json"),serde_json::to_vec_pretty(&json!({
+        "scenario":user_input,"reply":result.response_text,"execution_outcome":result.metadata["execution_outcome"],
+        "source":"Actual HTTP bodies received by a local scripted server after production intent/prompt/router/provider assembly. Model choices are scripted; the read_file receipt is real and its capability is pre-approved only in this headless fixture process. Optional perception, memory retrieval, query rewriting and reflection services are not enabled in this isolated example."
+    })).unwrap()).unwrap();
+    assert_eq!(requests.len(),4);
+    assert_eq!(result.metadata["execution_outcome"]["task"]["settlement"]["status"],"completed","{}",result.metadata["execution_outcome"]);
+    assert_eq!(result.metadata["verified_tool_receipts"][0]["success"],true);
+}
+
 #[tokio::test]
 async fn export_companion_evaluation_requests() {
     let Some(output) = std::env::var_os("VIVIAN_PROMPT_EVAL_EXPORT_DIR") else { return; };

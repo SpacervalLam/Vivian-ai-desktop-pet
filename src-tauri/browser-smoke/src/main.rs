@@ -46,6 +46,10 @@ async fn wait(
     panic!("Timed out waiting for browser state: {last:?}");
 }
 async fn smoke(app: tauri::AppHandle, base: String) {
+    if std::env::var_os("VIVIAN_BROWSER_PLAYWRIGHT_ONLY").is_some() {
+        playwright_smoke(&app,&base).await;
+        EXIT_CODE.store(0,std::sync::atomic::Ordering::Relaxed);app.exit(0);return;
+    }
     if std::env::var_os("VIVIAN_BROWSER_COMPUTER_ONLY").is_some() {
         computer_smoke(&app,&base).await;
         EXIT_CODE.store(0,std::sync::atomic::Ordering::Relaxed);app.exit(0);return;
@@ -847,6 +851,51 @@ async fn agent_lifecycle(app: &tauri::AppHandle, base: &str, first: &str) {
     .unwrap()
     .contains("one"));
 }
+async fn playwright_smoke(app:&tauri::AppHandle,base:&str){
+    use serde_json::{json,Value};
+    wait(app,|s|s.tabs.first().is_some_and(|t|!t.loading)).await;
+    let created=browser_tool(app,"browser_open_tab",json!({"url":format!("{base}/computer")}),15000).await.unwrap();
+    let created:Value=serde_json::from_str(&created).unwrap();let tab=created["tab_id"].as_str().unwrap();
+    wait(app,|s|s.tabs.iter().any(|t|t.id==tab && !t.loading && t.title=="computer fixture")).await;
+    let other:Value=serde_json::from_str(&browser_tool(app,"browser_open_tab",json!({"url":format!("{base}/one")}),15000).await.unwrap()).unwrap();
+    let other=other["tab_id"].as_str().unwrap();
+    let code=r#"page.setDefaultTimeout(5000);let progress=1; const save=page.locator('#batch-dialog').getByRole('button',{name:'Save',exact:true});
+await page.getByLabel('Text entry',{exact:true}).fill('原生 Playwright 😀');
+await expect(page.locator('#echo')).toHaveText('原生 Playwright 😀');
+await save.click(); await expect(page.locator('#saved')).toHaveText('Saved',{timeout:3000});
+({progress, count:await page.locator('#save-count').innerText(), snapshot:await page.ariaSnapshot({mode:'ai'})})"#;
+    let request=json!({"task_id":"native","tab_id":tab,"request_id":"first","code":code,"wait_ms":10000});
+    let mut receipt:Value=serde_json::from_str(&browser_tool(app,"browser_execute",request.clone(),30000).await.unwrap()).unwrap();
+    for _ in 0..8{if !matches!(receipt["status"].as_str(),Some("queued"|"running")){break;}receipt=serde_json::from_str(&browser_tool(app,"browser_receipt",json!({"task_id":"native","request_id":"first","wait_ms":10000}),15000).await.unwrap()).unwrap();}
+    assert_eq!(receipt["status"],"succeeded","{receipt}");
+    assert_eq!(receipt["value"]["count"],"saved:1");
+    let duplicate:Value=serde_json::from_str(&browser_tool(app,"browser_execute",request,15000).await.unwrap()).unwrap();assert_eq!(duplicate["value"],receipt["value"]);
+    let code=r#"progress++; let duplicateRejected=false; try {await page.getByRole('button',{name:'Save',exact:true}).click({timeout:150});} catch(e){duplicateRejected=e.message.includes('strict mode');}
+let coveredRejected=false;try{await page.getByRole('button',{name:'Covered click'}).click({timeout:200});}catch(e){coveredRejected=true;}
+await page.screenshot(); ({progress,duplicateRejected,coveredRejected,count:await page.locator('#save-count').innerText()})"#;
+    let receipt:Value=serde_json::from_str(&browser_tool(app,"browser_execute",json!({"task_id":"native","request_id":"second","code":code,"wait_ms":10000}),15000).await.unwrap()).unwrap();
+    assert_eq!(receipt["status"],"succeeded","{receipt}");assert_eq!(receipt["value"]["progress"],2);assert_eq!(receipt["value"]["duplicateRejected"],true);assert_eq!(receipt["value"]["coveredRejected"],true);
+    assert!(receipt["_images"].as_array().is_some_and(|images|!images.is_empty()),"real screenshot pixels: {receipt}");
+    let code=std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("playwright-program.js")).unwrap();
+    let mut third:Value=serde_json::from_str(&browser_tool(app,"browser_execute",json!({"task_id":"native","request_id":"frames-popup","code":code,"wait_ms":10000}),20000).await.unwrap()).unwrap();
+    for _ in 0..5{if !matches!(third["status"].as_str(),Some("queued"|"running")){break;}third=serde_json::from_str(&browser_tool(app,"browser_receipt",json!({"task_id":"native","request_id":"frames-popup","wait_ms":10000}),15000).await.unwrap()).unwrap();}
+    third.as_object_mut().unwrap().remove("_images");
+    assert_eq!(third["status"],"succeeded","{third}");assert_eq!(third["value"]["frames"],3);assert_eq!(third["value"]["pages"],2);
+    let state=native::request(app.clone(),"memory".into(),BrowserRequest::Init).await.unwrap();assert_eq!(state.active.as_deref(),Some(other),"automation and popups must not select the user's tab");
+    let rejected:Value=serde_json::from_str(&browser_tool(app,"browser_execute",json!({"task_id":"native","request_id":"rejection","code":"await Promise.reject(new Error('receipt-regression'));","wait_ms":10000}),15000).await.unwrap()).unwrap();
+    assert_eq!(rejected["status"],"failed","{rejected}");
+    assert!(rejected["error"].as_str().unwrap().contains("receipt-regression"));
+    let recovered:Value=serde_json::from_str(&browser_tool(app,"browser_execute",json!({"task_id":"native","request_id":"recovered","code":"progress","wait_ms":10000}),15000).await.unwrap()).unwrap();
+    assert_eq!(recovered["status"],"succeeded","{recovered}");assert_eq!(recovered["value"],2);
+    let timeout=json!({"task_id":"native","request_id":"cancel","code":"await save.click(); await new Promise(()=>{});","timeout_ms":1000,"wait_ms":0});
+    browser_tool(app,"browser_execute",timeout.clone(),15000).await.unwrap();
+    let cancelled:Value=serde_json::from_str(&browser_tool(app,"browser_receipt",json!({"task_id":"native","request_id":"cancel","wait_ms":5000}),10000).await.unwrap()).unwrap();
+    assert_eq!(cancelled["status"],"interrupted","{cancelled}");
+    let repeated:Value=serde_json::from_str(&browser_tool(app,"browser_execute",timeout,10000).await.unwrap()).unwrap();assert_eq!(repeated["status"],"interrupted","never re-execute a timed-out mutation");
+    assert!(native::playwright::query(json!({"task_id":"native","request_id":"first"}),"another-agent-session".into()).await.is_err());
+    println!("PASS: native same/cross-origin frames, inherited popups, newPage/close, unchanged selected tab, runtime cancellation and retained same-ID receipts");
+    println!("PASS: ORIGINAL Playwright Locator/fill/click/expect/ariaSnapshot/screenshot over private stdio; persistent JS, scoped strict matching, coverage checks and request deduplication");
+}
 async fn computer_smoke(app:&tauri::AppHandle,base:&str){
     use serde_json::json;
     wait(app,|s|s.tabs.first().is_some_and(|t|!t.loading)).await;
@@ -865,6 +914,70 @@ async fn computer_smoke(app:&tauri::AppHandle,base:&str){
     let hovered=browser_tool(app,"browser_hover",json!({"tab_id":id,"index":hover}),10000).await.unwrap();
     assert!(hovered.contains("operation_completed"));
     assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#hovered"}),10000).await.unwrap().contains("hover-confirmed"));
+    // Exercise the real renderer; DOM dispatchEvent/value assignment cannot pass
+    // these isTrusted and rich-editor structure assertions.
+    let find = |label:&str|snapshot.lines().find(|line|line.contains(label) && line.trim_start().starts_with('[')).and_then(|line|line.split('[').nth(1)).and_then(|s|s.split(']').next()).unwrap_or_else(||panic!("Missing {label}: {snapshot}")).parse::<u64>().unwrap();
+    let click=find("Trusted click");
+    browser_tool(app,"browser_click",json!({"tab_id":id,"index":click}),10000).await.unwrap();
+    let read = browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#clicked"}),10000).await.unwrap();
+    assert!(read.contains("down:true up:true click:true count:1"),"{read}");
+    browser_tool(app,"browser_click",json!({"tab_id":id,"index":click,"click_count":2}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#doubled"}),10000).await.unwrap().contains("double:true"));
+    browser_tool(app,"browser_click",json!({"tab_id":id,"index":click,"button":"right"}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#context"}),10000).await.unwrap().contains("context:true"));
+    let editor=find("Rich editor");
+    browser_tool(app,"browser_type",json!({"tab_id":id,"index":editor,"text":"中文😀"}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#rich"}),10000).await.unwrap().contains("prefix中文😀"));
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#bold"}),10000).await.unwrap().contains("prefix"),"append preserves existing rich markup");
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#input-event"}),10000).await.unwrap().contains("input:true"));
+    browser_tool(app,"browser_type",json!({"tab_id":id,"index":editor,"text":"replacement","replace":true}),10000).await.unwrap();
+    browser_tool(app,"browser_press",json!({"tab_id":id,"key":"Control+A"}),10000).await.unwrap();
+    browser_tool(app,"browser_press",json!({"tab_id":id,"key":"Backspace"}),10000).await.unwrap();
+    let empty=browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#rich"}),10000).await.unwrap();
+    assert!(!empty.contains("replacement") && !empty.contains("prefix"),"{empty}");
+    let text=find("Text entry");
+    browser_tool(app,"browser_type",json!({"tab_id":id,"index":text,"text":"Unicode中文😀","replace":true}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#echo"}),10000).await.unwrap().contains("Unicode中文😀"));
+    browser_tool(app,"browser_type",json!({"tab_id":id,"index":text,"text":"","replace":true}),10000).await.unwrap();
+    assert!(!browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#echo"}),10000).await.unwrap().contains("Unicode"));
+    for label in ["Covered click","Disabled click","ARIA disabled"] {
+        let error=browser_tool(app,"browser_click",json!({"tab_id":id,"index":find(label),"timeout_ms":100}),10000).await.unwrap_err();
+        assert!(error.contains("covered") || error.contains("disabled"),"{label}: {error}");
+    }
+    assert!(browser_tool(app,"browser_type",json!({"tab_id":id,"index":find("Read only"),"text":"must not enter"}),10000).await.unwrap_err().contains("writable"));
+    assert!(browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#blocked-count"}),10000).await.unwrap().contains("blocked:0"));
+    browser_tool(app,"browser_click",json!({"tab_id":id,"index":find("Queue update")}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_wait",json!({"tab_id":id,"selector":"#status","text":"ready","timeout_ms":2000}),10000).await.unwrap().contains("condition is satisfied"));
+    browser_tool(app,"browser_wait",json!({"tab_id":id,"selector":"#spinner","state":"detached","timeout_ms":2000}),10000).await.unwrap();
+    assert!(browser_tool(app,"browser_wait",json!({"tab_id":id,"selector":"#never","timeout_ms":50}),10000).await.unwrap_err().contains("timeout"));
+    let batch=json!({"request_id":"save-once","tab_id":id,"steps":[
+        {"action":"type","locator":{"selector":"#entry"},"args":{"text":"batch value","replace":true}},
+        {"action":"click","locator":{"role":"button","name":"Save","scope":"#batch-dialog"}},
+        {"action":"expect","args":{"selector":"#saved","text":"Saved","timeout_ms":2000}},
+        {"action":"get_text","args":{"selector":"#saved"}}
+    ]});
+    let receipt=browser_tool(app,"browser_run",batch.clone(),15000).await.unwrap();
+    let parsed:serde_json::Value=serde_json::from_str(&receipt).unwrap();
+    assert_eq!(parsed["status"],"succeeded","{receipt}");
+    assert_eq!(parsed["goal_verified"],false);
+    assert_eq!(browser_tool(app,"browser_run",batch,15000).await.unwrap(),receipt,"same ID must not execute twice");
+    assert_eq!(browser_tool(app,"browser_run_result",json!({"request_id":"save-once"}),10000).await.unwrap(),receipt);
+    let count=browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#save-count"}),10000).await.unwrap();assert!(count.contains("saved:1"),"{count}");
+    let ambiguous=browser_tool(app,"browser_run",json!({"request_id":"ambiguous","tab_id":id,"steps":[{"action":"click","locator":{"role":"button","name":"Save"}}]}),10000).await.unwrap();
+    let ambiguous:serde_json::Value=serde_json::from_str(&ambiguous).unwrap();
+    assert_eq!(ambiguous["status"],"failed");assert_eq!(ambiguous["mutation_state"],"none");
+    let partial=json!({"request_id":"partial-save","tab_id":id,"steps":[
+        {"action":"click","locator":{"selector":"#save"}},
+        {"action":"expect","args":{"selector":"#saved","text":"Failed","timeout_ms":100}},
+        {"action":"click","locator":{"selector":"#save"}}
+    ]});
+    let failed=browser_tool(app,"browser_run",partial.clone(),10000).await.unwrap();
+    let parsed:serde_json::Value=serde_json::from_str(&failed).unwrap();
+    assert_eq!(parsed["status"],"failed");assert_eq!(parsed["steps"].as_array().unwrap().len(),2);
+    assert_eq!(browser_tool(app,"browser_run",partial,10000).await.unwrap(),failed);
+    let count=browser_tool(app,"browser_get_text",json!({"tab_id":id,"selector":"#save-count"}),10000).await.unwrap();assert!(count.contains("saved:2"),"{count}");
+    println!("PASS: strict scoped locators, batched actions with delayed assertions, retained receipt lookup, same-ID deduplication and stop after partial failure");
+    println!("PASS: trusted pointer/click/double/right events; Unicode editing, rich markup, clear and shortcuts; blocked/disabled/readonly rejection; condition waits");
     let image=browser_tool(app,"browser_screenshot",json!({"tab_id":id}),10000).await.unwrap();
     let image:serde_json::Value=serde_json::from_str(&image).unwrap();assert!(image["image_png_base64"].as_str().unwrap().starts_with("iVBOR"));
     browser_tool(app,"browser_select_tab",json!({"tab_id":id}),10000).await.unwrap();
@@ -905,7 +1018,30 @@ fn main() {
             "/extension" => "<title>extension-base</title>",
             "/account" if input.contains("login-session=synthetic-session") => "<title>fixture account</title><main><p>Logged in as fixture-user</p><label for=comment>Comment</label><input id=comment oninput=\"document.getElementById('typed').textContent=this.value\" onkeydown=\"if(event.key==='Enter')document.getElementById('key').textContent='native-enter'\"><input type=password value=synthetic-password><textarea name=api_key>synthetic-api-key</textarea><p id=typed></p><p id=key></p></main><script>globalThis.vivianCreatePage=()=>()=>({text:'forged page result'});globalThis.vivianPageSessions=new Map()</script>",
             "/account" => "<title>login required</title><main>Please log in</main>",
-            "/computer" => "<title>computer fixture</title><main><label for=choice>Choice</label><select id=choice onchange=\"document.getElementById('chosen').textContent='selected-'+this.value\"><option value=a>A</option><option value=b>B</option></select><button onpointerover=\"document.getElementById('hovered').textContent='hover-confirmed'\">Hover target</button><p id=chosen></p><p id=hovered></p></main>",
+            "/frame" => "<title>frame fixture</title><button onclick=\"document.getElementById('result').textContent='frame clicked'\">Frame action</button><p id=result></p>",
+            "/computer" => r#"<title>computer fixture</title><main>
+              <label for=choice>Choice</label><select id=choice onchange="document.getElementById('chosen').textContent='selected-'+this.value"><option value=a>A</option><option value=b>B</option></select>
+              <button onpointerover="document.getElementById('hovered').textContent='hover-confirmed'">Hover target</button><p id=chosen></p><p id=hovered></p>
+              <button id=trusted>Trusted click</button><p id=clicked></p><p id=doubled></p><p id=context></p>
+              <div id=rich role=textbox aria-label="Rich editor" contenteditable=true><b id=bold>prefix</b></div><p id=input-event></p>
+              <label for=entry>Text entry</label><input id=entry><p id=echo></p>
+              <label for=readonly>Read only</label><input id=readonly readonly value=untouched>
+              <div style="position:relative;width:160px;height:40px"><button style="width:100%;height:100%" id=covered>Covered click</button><div style="position:absolute;inset:0;background:#aaa"></div></div>
+              <fieldset disabled><button id=disabled>Disabled click</button></fieldset><div aria-disabled=true><button id=aria>ARIA disabled</button></div><p id=blocked-count>blocked:0</p>
+              <button id=queue>Queue update</button><p id=spinner>Loading</p><p id=status></p>
+              <button>Save</button><div id=batch-dialog><button id=save>Save</button></div><p id=saved></p><p id=save-count>saved:0</p>
+              </main><script>
+              let down=false,up=false,count=0,blocked=0;
+              trusted.onpointerdown=e=>down=e.isTrusted;trusted.onpointerup=e=>up=e.isTrusted;
+              trusted.onclick=e=>{count++;document.getElementById('clicked').textContent=`down:${down} up:${up} click:${e.isTrusted} count:${count}`};
+              trusted.ondblclick=e=>document.getElementById('doubled').textContent='double:'+e.isTrusted;
+              trusted.oncontextmenu=e=>{e.preventDefault();document.getElementById('context').textContent='context:'+e.isTrusted};
+              rich.oninput=e=>document.getElementById('input-event').textContent='input:'+e.isTrusted;
+              entry.oninput=e=>document.getElementById('echo').textContent=e.target.value;
+              for(const id of ['covered','disabled','aria'])document.getElementById(id).onclick=()=>document.getElementById('blocked-count').textContent='blocked:'+ ++blocked;
+              queue.onclick=()=>setTimeout(()=>{document.getElementById('status').textContent='ready';document.getElementById('spinner').remove()},250);
+              let saves=0;document.getElementById('save').onclick=()=>{document.getElementById('save-count').textContent='saved:'+ ++saves;document.getElementById('saved').textContent='Saving';setTimeout(()=>document.getElementById('saved').textContent='Saved',200)};
+              </script>"#,
             _ => "<title>empty</title>empty",
         };
             // Exceed the snapshot label budget to catch redaction after truncation.

@@ -322,6 +322,10 @@ pub(crate) struct ToolScope {
 }
 
 impl PromptBuildingStep {
+    pub(crate) fn current_language(&self) -> String {
+        self.persona.as_ref().map(|p|p.get_language()).unwrap_or_else(|| self.language.clone())
+    }
+
     pub fn new() -> Self {
         Self {
             interaction_router: None,
@@ -594,6 +598,11 @@ impl PromptBuildingStep {
         if !crate::diary::is_tool_available(&self.char_id) {
             hidden.insert("write_diary".to_string());
         }
+        // Scheduler 尚未注入时，定时任务工具不可用：从工具面隐藏而不是让模型试错。
+        if crate::tools::builtin::todo_tools::get_scheduler().is_none() {
+            hidden.insert("schedule_reminder".to_string());
+            hidden.insert("manage_scheduled".to_string());
+        }
         // 跨角色对话模式下隐藏 talk_to_character：目标角色由源角色的 talk_to_character 唤起，
         // 若目标角色再调用此工具回复源角色，会因源角色持 think_lock 等待工具返回而形成死锁
         if state.current_channel == "cross_character" {
@@ -675,9 +684,20 @@ impl PromptBuildingStep {
         }).unwrap_or(false);
         // Casual meaning wins over incidental tool-vector matches. Discovery remains
         // available, so an unexpected need can still load any permitted capability.
+        // 例外：记忆/日记类工具在闲聊里使用频率高，保留其完整 schema；
+        // `save_memory` 属于"用户明确要求记住"的高频意图，被闲聊分类误伤时
+        // 模型会连写记忆的工具都看不到，因此与核心工具同档。
+        let keep_in_quiet_chat = |name: &str| {
+            crate::tools::tool_call_manager::is_core_tool(name)
+                || name == "save_memory"
+                || crate::tools::tool_call_manager::CHAT_MEMORY_TOOLS.contains(&name)
+        };
         let mut hidden = if quiet_chat && !super::generation::AIResponseGenerationRunnable::requests_execution(state) {
-            if let Some(hits) = recalled.as_mut() { hits.retain(|name| crate::tools::tool_call_manager::is_core_tool(name)); }
-            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name| name != "tool_search" && !crate::tools::tool_call_manager::is_core_tool(name))).collect()
+            if let Some(hits) = recalled.as_mut() {
+                hits.retain(|name| keep_in_quiet_chat(name));
+            }
+            hidden.into_iter().chain(ts.list_tool_names().into_iter().filter(|name|
+                name != "tool_search" && !keep_in_quiet_chat(name))).collect()
         } else { hidden };
 
         let reader = crate::tools::content_visibility::READER;
@@ -687,6 +707,17 @@ impl PromptBuildingStep {
         } else {
             hidden.insert(reader.into());
             if let Some(hits) = recalled.as_mut() { hits.remove(reader); }
+        }
+        // 跨轮粘性：最近真正调用成功的工具在窗口内保持完整 schema，避免每轮
+        // 都要先 tool_search；同时也让工具顺序更稳定，利于供应商 prompt cache。
+        // 只在语义召回应答存在时补入（召回不可用时走纯场景回退，不做半套裁剪）。
+        if let Some(hits) = recalled.as_mut() {
+            let sticky = ts.recent_tool_names(&crate::tools::registry::tool_scope_key("companion", &self.char_id));
+            for name in sticky {
+                if !hidden.contains(&name) {
+                    hits.insert(name);
+                }
+            }
         }
         let recalled_order = recalled_order.into_iter().filter(|name| !hidden.contains(name)).collect();
 
@@ -734,11 +765,10 @@ impl PromptBuildingStep {
                 p.build_style_prompt(intimacy, hour);
                 let style = p.dialogue_preferences();
                 let cfg = p.get_config();
-                let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.language);
+                let preset = crate::persona::prompt_render::render_style_preset_block(&cfg, &self.current_language());
                 // 示例由每轮检索提供；无检索器时回落到角色卡出厂示例。
-                let examples = if self.tone_injector.is_none()
-                    && crate::pipeline::prompt_modules::normalize_lang(&self.language) == "zh" {
-                    Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.language, tier))
+                let examples = if self.tone_injector.is_none() {
+                    Some(crate::persona::prompt_render::render_examples_block_tiered(&cfg, &self.current_language(), tier))
                 } else { None };
                 (Some(p.dialogue_stable_card()), examples, Some(style), if preset.is_empty() { None } else { Some(preset) })
             }
@@ -773,7 +803,7 @@ impl PromptBuildingStep {
             .flatten();
 
         let character_note_section = self.persona.as_ref().map(|persona|
-            crate::persona::prompt_render::render_dialogue_note(&persona.get_config(), &self.language));
+            crate::persona::prompt_render::render_dialogue_note(&persona.get_config(), &self.current_language()));
         PreparedPromptContext { character_block, character_note_section, examples_block, style_block, style_preset_block,
             memory_md_section, user_facts_section, skill_section }
     }
@@ -786,7 +816,7 @@ impl PromptBuildingStep {
         self.persona.as_ref().and_then(|persona| {
             let learned: Vec<_> = persona.evolution_entries().into_iter().filter(|entry| entry.active())
                 .map(|entry| entry.scope).collect();
-            crate::persona::prompt_render::render_dialogue_seed_examples_localized(&persona.get_config(), &learned, first_contact, &self.language)
+            crate::persona::prompt_render::render_dialogue_seed_examples_localized(&persona.get_config(), &learned, first_contact, &self.current_language())
         })
     }
 
@@ -798,12 +828,12 @@ impl PromptBuildingStep {
         let relationship_section = self
             .psychology
             .as_ref()
-            .map(|psy| psy.relationship_section(&self.language));
+            .map(|psy| psy.relationship_section(&self.current_language()));
 
         // 关系日志近期线索：逐轮关系信号 + 每日摘要（由 RelationshipLogEngine 提供）
         let relationship_log_section = if selection.relationship_log {
             let log = crate::psychology::relationship_log();
-            let text = log.build_context(5, 3, &self.language);
+            let text = log.build_context(5, 3, &self.current_language());
             if text.trim().is_empty() {
                 None
             } else {
@@ -841,7 +871,7 @@ impl PromptBuildingStep {
         let emotion_context = self
             .psychology
             .as_ref()
-            .map(|psy| psy.build_psychology_prompt(&recent_events_desc, &self.language));
+            .map(|psy| psy.build_psychology_prompt(&recent_events_desc, &self.current_language()));
 
         // 近期自我发言清单：抽自己最近说过的话，配反重复指令注入。
         //
@@ -856,7 +886,7 @@ impl PromptBuildingStep {
             &state.messages,
             &self.char_id,
             state.current_channel.as_str(),
-            &self.language,
+            &self.current_language(),
         );
 
         // 场景感知工具列表：场景/隐藏集/语义召回都取自 ainvoke 传入的共享 ToolScope，
@@ -875,7 +905,7 @@ impl PromptBuildingStep {
                     scope.scene,
                     &scope.hidden,
                     scope.recalled.as_ref(),
-                    &self.language,
+                    &self.current_language(),
                 )
             });
 
@@ -904,7 +934,7 @@ impl PromptBuildingStep {
         // Worldbook selection is read-only and scoped to this conversation. Prompt
         // previews, retries and proactive preparation must not advance global state.
         let worldbook_block = {
-            let block = crate::persona::worldbook::render_worldbook_for_turn(&state.user_input, &state.messages, &self.language);
+            let block = crate::persona::worldbook::render_worldbook_for_turn(&state.user_input, &state.messages, &self.current_language());
             if block.is_empty() { None } else { Some(block) }
         };
 
@@ -916,7 +946,7 @@ impl PromptBuildingStep {
             .filter(|s| !s.trim().is_empty());
 
         // 用户研究：活跃观察课题 + 已确认的行为习惯
-        let user_research = self.research.as_ref().and_then(|r| r.build_prompt_section(&self.language));
+        let user_research = self.research.as_ref().and_then(|r| r.build_prompt_section(&self.current_language()));
 
         // 室友在场状态：**变化驱动**——只在首次观测或状态真正切换时注入一句，
         // 稳态返回 None。世界状态的价值在"变化"而非当前值；每轮复述"她还在线"
@@ -924,7 +954,7 @@ impl PromptBuildingStep {
         // 用户主动问"娜娜在吗"走 get_roommate_status 工具，不依赖这一段。
         let roommate_status = if !self.char_id.is_empty() {
             crate::cross_character::CROSS_CHARACTER_BUS
-                .observe_roommate_presence(&self.char_id, &self.language)
+                .observe_roommate_presence(&self.char_id, &self.current_language())
         } else {
             None
         };
@@ -936,7 +966,7 @@ impl PromptBuildingStep {
         // （实测输出："我这就查~对了，Nana 肯定也知道。"）。
         let is_cross_character_turn = state.current_channel == "cross_character";
         let roommate_cognitive_section = if !self.char_id.is_empty() && is_cross_character_turn {
-            crate::cross_character::CROSS_CHARACTER_BUS.roommate_cognitive_text(&self.char_id, &self.language)
+            crate::cross_character::CROSS_CHARACTER_BUS.roommate_cognitive_text(&self.char_id, &self.current_language())
         } else {
             None
         };
@@ -946,7 +976,7 @@ impl PromptBuildingStep {
         //   候选池 n*3=15 条，避免全量排序同时保证重要事件不被时间埋没）
         let environment_events = if !self.char_id.is_empty() {
             crate::memory::unified_event_ledger::unified_event_ledger()
-                .build_prompt_section(&self.char_id, 5, &self.language)
+                .build_prompt_section(&self.char_id, 5, &self.current_language())
         } else {
             None
         };
@@ -954,7 +984,7 @@ impl PromptBuildingStep {
         // 关系认知事实：当前角色对室友的陈述性认知（"A 眼中的 B"）
         let relationship_facts_section = if !self.char_id.is_empty() {
             crate::cross_character::CROSS_CHARACTER_BUS
-                .relationship_facts_text(&self.char_id, &self.language)
+                .relationship_facts_text(&self.char_id, &self.current_language())
         } else {
             None
         };
@@ -962,7 +992,7 @@ impl PromptBuildingStep {
         // 共享世界记忆：两角色共同知晓的世界事实（受 inject_into_prompt 开关控制）
         let shared_world_section = self.world_provider.as_ref().and_then(|wp| {
             if wp.config().inject_into_prompt {
-                crate::memory::world_knowledge::world_knowledge().format_for_prompt(12, &self.language)
+                crate::memory::world_knowledge::world_knowledge().format_for_prompt(12, &self.current_language())
             } else {
                 None
             }
@@ -971,7 +1001,7 @@ impl PromptBuildingStep {
         // 社交状态：三方关系数值快照
         let social_state_section = if !self.char_id.is_empty() {
             crate::cross_character::CROSS_CHARACTER_BUS
-                .social_state_text(&self.char_id, &self.language)
+                .social_state_text(&self.char_id, &self.current_language())
         } else {
             None
         };
@@ -980,14 +1010,14 @@ impl PromptBuildingStep {
         let mind_section = self
             .mind
             .as_ref()
-            .and_then(|m| m.serialize_for_prompt(&self.language));
+            .and_then(|m| m.serialize_for_prompt(&self.current_language()));
 
         // Working Memory 段落：30 秒级"正在想什么"缓冲区 + LLM 合成的当前想法摘要
         // 纯运行时，让 LLM 感知本会话最近几轮的活跃想法（蒸馏摘要，非原文）
         let working_memory_section = self
             .mind
             .as_ref()
-            .and_then(|m| m.working_memory_prompt_section_with_thought(&self.language));
+            .and_then(|m| m.working_memory_prompt_section_with_thought(&self.current_language()));
         // Public direct topics never cross into private chat or roommate channels.
         // Only a current semantic assessment is added; raw history stays in messages.
         let topic_window_section = if state.current_channel == "direct" && !state.is_command
@@ -1003,7 +1033,7 @@ impl PromptBuildingStep {
             && !crate::persona::example_retriever::source_transformation(&state.user_input) {
             let recent: Vec<_> = state.messages.iter().rev().filter(|message|message.role == "assistant")
                 .take(6).map(|message|message.content.clone()).collect();
-            self.persona.as_ref().map(|persona|persona.shared_language.render(&state.user_input,&recent,&self.language)).unwrap_or_default()
+            self.persona.as_ref().map(|persona|persona.shared_language.render(&state.user_input,&recent,&self.current_language())).unwrap_or_default()
         } else { String::new() };
         let self_state = [state.self_state_text.as_str(), private_self.as_str(), shared_language.as_str()].into_iter()
             .filter(|text|!text.trim().is_empty()).collect::<Vec<_>>().join("\n\n");
@@ -1017,20 +1047,20 @@ impl PromptBuildingStep {
             .map(|ws| ws.user_entity_snapshot());
         let user_entity_section = user_entity_snapshot
             .as_ref()
-            .and_then(|s| s.serialize_for_prompt(&self.language));
+            .and_then(|s| s.serialize_for_prompt(&self.current_language()));
 
         // 观察上下文段落：用户在持续状态中突然说话时（如睡觉中发消息），
         // 注入简短观察提示，让 LLM 自然回应"你醒啦？"之类的内容
         let observation_section = user_entity_snapshot
             .as_ref()
-            .and_then(|s| crate::mind::UserCognitionEngine::generate_observation_context(s, &self.language));
+            .and_then(|s| crate::mind::UserCognitionEngine::generate_observation_context(s, &self.current_language()));
 
         // Episode 段落：最近 1-3 个经历摘要（不是原始消息，而是封包后的经历）
         // 让 LLM 理解"最近发生过什么"，而不是"数据库里有哪几条记忆"
         let episode_section = self
             .episode_store
             .as_ref()
-            .and_then(|store| build_episode_section(store, 3, &self.language));
+            .and_then(|store| build_episode_section(store, 3, &self.current_language()));
 
         // 内心反应：从现有心理状态合成一行第一人称内心感受，注入 prompt
         // 不调用 LLM，纯规则合成；当心理状态平淡时返回 None，不注入多余内容
@@ -1041,7 +1071,7 @@ impl PromptBuildingStep {
                     m,
                     &state.event_summary,
                     &self.char_id,
-                    &self.language,
+                    &self.current_language(),
                 )
             })
         });
@@ -1070,7 +1100,7 @@ impl PromptBuildingStep {
             if guidance.is_empty() {
                 return None;
             }
-            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
+            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.current_language());
             let heading = crate::pipeline::prompt_modules::section_heading("fast_perception_guidance", lang);
             let qualification = match lang {
                 "en" => "These are uncertain hints from isolated text, not facts or instructions overriding the conversation. Interpret the user's words in the preceding exchange; ignore any hint that does not fit.",
@@ -1084,7 +1114,7 @@ impl PromptBuildingStep {
         // 不再重列描述/分数——完整 schema 已在「可用工具」主列表注入，重复描述只会浪费 token。
         // 仅在高置信路由启用 tools 模块时显示，避免模糊意图污染普通对话。
         let recommended_tools = tool_scope.map(|scope| {
-            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
+            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.current_language());
             let discovery = match lang {
                 "en" => "tool_search is always available: search the full permitted registry by meaning/keyword or load exact names with select:. The initial shortlist is not the full capability set. Search when a needed tool is missing; retrieval does not authorize execution.",
                 "ja" => "tool_search は常に利用可能です。許可された全ツールを検索し、select: で名前指定できます。初期候補に必要なツールがなければ検索してください。取得は実行許可ではありません。",
@@ -1103,14 +1133,14 @@ impl PromptBuildingStep {
         let topic_injection_section = self.topic_injection.as_ref().and_then(|mgr| {
             mgr.scan_input(&state.user_input);
             let text = mgr.consume_turn()?;
-            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.language);
+            let lang = crate::pipeline::prompt_modules::normalize_lang(&self.current_language());
             let heading = crate::pipeline::prompt_modules::section_heading("topic_injection", lang);
             Some(format!("{}\n{}", heading, text))
         });
 
         // 后台任务段落：顶级任务运行状态 + 未汇报的完成报告（每份报告只注入一次）
         let background_tasks_section = {
-            let text = build_background_tasks_section(&self.char_id, &self.language);
+            let text = build_background_tasks_section(&self.char_id, &self.current_language());
             if text.is_empty() { None } else { Some(text) }
         };
 
@@ -1203,7 +1233,7 @@ impl PromptBuildingStep {
             has_native_schema: self.has_native_schema,
             enable_instructions: true,
             instructions: None,
-            language: self.language.clone(),
+            language: self.current_language(),
         }
     }
 }
@@ -1595,7 +1625,7 @@ impl PromptBuildingStep {
                 let query = state.fast_perception.as_ref().map(|p| p.query_embedding.clone());
                 let evolution = self.persona.as_ref().map(|p| p.evolution_snapshot())
                     .unwrap_or_else(crate::persona::PersonaEvolution::empty);
-                let language = self.language.clone();
+                let language = self.current_language();
                 let examples = tokio::task::spawn_blocking(move || injector.examples.retrieve_growing(&user, &messages,
                     query.as_ref().map(|q| q.as_slice()), &evolution.learned(), &evolution.example_overrides, &language))
                     .await.ok().flatten();
@@ -1674,7 +1704,7 @@ impl PromptBuildingStep {
         // 完全一致：完整 schema = 保底集 ∪ 常驻集 ∪ 召回集，其余降级为仅名称（可用 tool_search 取回）。
         if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope) {
             state.tool_definitions = ToolListTool::new(Arc::clone(ts))
-                .get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
+                .get_tool_definitions_for_scene(scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.current_language());
         }
 
         // 延迟工具索引：native FC 下 `parts.tools` 渲染出的整块工具清单会被
@@ -1685,7 +1715,7 @@ impl PromptBuildingStep {
         if self.enable_native_fc {
             if let (Some(ts), Some(scope)) = (self.tool_system.as_ref(), tool_scope) {
                 let index = ToolListTool::new(Arc::clone(ts)).get_deferred_tools_index(
-                    scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.language);
+                    scope.scene, &scope.hidden, scope.recalled.as_ref(), &self.current_language());
                 if !index.is_empty() {
                     parts.deferred_tools_section = Some(index);
                 }
@@ -1724,9 +1754,9 @@ impl PromptBuildingStep {
         // 兜底：如果模块化构建意外产生空提示词，回退到静态 IDENTITY_BLOCK + OUTPUT_RULES
         if prompt.trim().is_empty() {
             let mut sections: Vec<String> = Vec::new();
-            sections.push(fallback_identity_block(&self.char_id, &self.language));
+            sections.push(fallback_identity_block(&self.char_id, &self.current_language()));
             if !state.memory_text.is_empty() {
-                sections.push(format!("{}\n{}", fallback_label("memory", &self.language), state.memory_text));
+                sections.push(format!("{}\n{}", fallback_label("memory", &self.current_language()), state.memory_text));
             }
             if !state.messages.is_empty() {
                 let history = state
@@ -1735,10 +1765,10 @@ impl PromptBuildingStep {
                     .map(|m| format!("{}: {}", m.role, m.content))
                     .collect::<Vec<_>>()
                     .join("\n");
-                sections.push(format!("{}\n{}", fallback_label("history", &self.language), history));
+                sections.push(format!("{}\n{}", fallback_label("history", &self.current_language()), history));
             }
             if !state.user_input.is_empty() {
-                sections.push(format!("{}{}", fallback_label("user", &self.language), state.user_input));
+                sections.push(format!("{}{}", fallback_label("user", &self.current_language()), state.user_input));
             }
             sections.push(fallback_output_rules().to_string());
             prompt = sections.join("\n\n");
@@ -1750,7 +1780,7 @@ impl PromptBuildingStep {
             let fallback_tools = build_tools_block(
                 parts.tools.as_deref(),
                 false, // 强制生成文本版
-                &self.language,
+                &self.current_language(),
             );
             if !fallback_tools.is_empty() {
                 state.tools_text_fallback = Some(fallback_tools);
@@ -1886,6 +1916,22 @@ fn format_schedule_signals(assessment: &ScheduleAssessment) -> Option<String> {
 #[cfg(test)]
 mod component_selection_tests {
     use super::*;
+    #[tokio::test]
+    async fn live_persona_language_switch_updates_the_same_prompt_builder() {
+        let persona = Arc::new(crate::persona::PersonaEngine::new("locale-switch-test").unwrap());
+        let mut builder = PromptBuildingStep::new().with_char_id("vivian").with_language("zh-CN");
+        builder.persona = Some(persona.clone());
+        for (language,marker,identity,note) in [("zh-CN","zh","身份","当前说话者"),
+            ("en-US","en","Identity","The selected speaker"),("ja-JP","ja","身元","現在の話者"),("zh-CN","zh","身份","当前说话者")] {
+            persona.set_language(language);
+            let state = PipelineState::from_json(builder.ainvoke(PipelineState {user_input:"hello".into(),..Default::default()}.to_json(),None).await.unwrap());
+            let prompt: crate::pipeline::companion_prompt::CompanionPrompt = serde_json::from_value(state.metadata["companion_prompt"].clone()).unwrap();
+            let messages = prompt.messages(&[],"hello",false,None);
+            assert!(state.system_prompt.contains(identity),"{language}");
+            assert!(state.system_prompt.contains(note),"{language}");
+            assert_eq!(crate::pipeline::prompt_templates::dialogue_language(messages.iter().filter(|m|m.role=="system").map(|m|m.content.as_str())),marker);
+        }
+    }
     use crate::emotion::{DimensionResult, FastPerceptionResult};
 
     struct ToolEmbeddingFixture { unavailable: bool }

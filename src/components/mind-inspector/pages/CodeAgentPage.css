@@ -4018,7 +4018,7 @@
   color: var(--codex-ink-soft); font: inherit; font-size: 12px; line-height: 20px;
   text-align: left; cursor: pointer;
 }
-.codex-tool-activity-header { flex-wrap: wrap; }
+.codex-tool-activity-header { flex-wrap: wrap; row-gap: 2px; }
 .codex-tool-header:hover, .codex-tool-activity-header:hover { background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
 .codex-tool-header:focus-visible, .codex-tool-activity-header:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: -2px; }
 .codex-tool-label { flex: 0 0 auto; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
@@ -4026,10 +4026,54 @@
 .codex-tool-duration { flex-shrink: 0; font: 10px var(--codex-mono); color: var(--codex-ink-faint); }
 .codex-tool-status, .codex-tool-activity-status { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; white-space: nowrap; }
 .codex-tool-status-run, .codex-tool-activity-status-run { color: var(--codex-accent); }
-.codex-tool-status-ok, .codex-tool-activity-status-ok { color: var(--codex-success); }
+/* 完成态保持中性：整屏绿色会让失败/运行中失去重点。 */
+.codex-tool-status-ok, .codex-tool-activity-status-ok { color: var(--codex-ink-faint); }
 .codex-tool-status-err, .codex-tool-row.failed .codex-tool-label { color: var(--codex-danger); }
 .codex-tool-activity-label { min-width: 0; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
-.codex-tool-activity-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-faint); }
+/* 摘要行按“类别 + 数量”排列，窄窗口允许换行；不再截断成一句泛化描述。 */
+.codex-activity-summary { flex: 1 1 240px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; max-width: none; overflow: visible; white-space: normal; color: var(--codex-ink-soft); }
+.codex-activity-fact { white-space: nowrap; font-size: 12px; line-height: 20px; }
+.codex-activity-sep { color: var(--codex-ink-faint); opacity: .55; }
+.codex-tool-activity-fail { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; line-height: 20px; color: var(--codex-danger); }
+.codex-tool-activity-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-faint); }
+.codex-tool-chevron { display: inline-flex; flex-shrink: 0; color: var(--codex-ink-soft); opacity: .35; transition: opacity .15s ease; }
+.codex-tool-row:hover .codex-tool-chevron,
+.codex-tool-row.expanded .codex-tool-chevron,
+.codex-tool-row:focus-within .codex-tool-chevron { opacity: 1; }
+
+/* 展开后的筛选条与阶段标题：用极轻的控件把长过程切短。 */
+.codex-activity-filters { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 0 6px; }
+.codex-activity-filter {
+  padding: 1px 6px; border: 1px solid var(--codex-line-light); border-radius: 5px;
+  background: transparent; color: var(--codex-ink-faint); font: inherit;
+  font-size: 10.5px; line-height: 16px; cursor: pointer;
+}
+.codex-activity-filter:hover { color: var(--codex-ink-soft); border-color: var(--codex-line); background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-activity-filter.active { color: var(--codex-ink); border-color: var(--codex-line); background: var(--codex-accent-soft); }
+.codex-activity-filter:focus-visible { outline: 1px solid var(--codex-accent); outline-offset: 1px; }
+.codex-activity-filter-empty { padding: 6px 0 8px; color: var(--codex-ink-faint); font-size: 11.5px; }
+
+.codex-activity-phase { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; color: var(--codex-ink-faint); font-size: 11px; line-height: 18px; }
+.codex-activity-phase-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--codex-ink-faint); opacity: .5; }
+.codex-activity-phase[data-phase='edit'] .codex-activity-phase-dot { background: var(--codex-accent); opacity: .8; }
+.codex-activity-phase[data-phase='verify'] .codex-activity-phase-dot { background: var(--codex-success); opacity: .8; }
+.codex-activity-phase-name { flex-shrink: 0; color: var(--codex-ink-soft); font-weight: 600; letter-spacing: .02em; }
+.codex-activity-phase-meta { flex-shrink: 0; font-family: var(--codex-mono); font-size: 10.5px; }
+.codex-activity-phase-fail { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; color: var(--codex-danger); font-size: 10.5px; }
+.codex-activity-phase-rule { flex: 1; height: 1px; margin-left: 2px; background: var(--codex-line-light); }
+.codex-no-result-row { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 4px; color: var(--codex-ink-faint); font-size: 11.5px; line-height: 20px; }
+.codex-no-result-row > svg { flex-shrink: 0; }
+
+/* 超长过程虚拟化：展开组内独立滚动，不再把整页对话撑长。 */
+.codex-activity-list { min-width: 0; }
+.codex-activity-list.virtual {
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+.codex-activity-vrow { min-width: 0; }
 .codex-tool-activity-chevron { transform: rotate(-90deg); transition: transform .2s ease; }
 .codex-tool-activity.expanded .codex-tool-activity-chevron { transform: rotate(0); }
 .codex-tool-activity-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .2s ease, opacity .2s ease; }
@@ -4037,6 +4081,36 @@
 .codex-tool-activity-body { min-height: 0; overflow: hidden; border-left: 1px solid var(--codex-line-light); margin: 3px 0 5px 10px; padding-left: 12px; }
 .codex-tool-activity-body .codex-tool-row { margin: 1px 0; }
 .codex-tool-activity-current { padding: 0 10px 8px 30px; font-size: 11px; color: var(--codex-ink-soft); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* 思考块：折叠态只留一行预览；展开后内容自适应、超过 240px 内部滚动。 */
+.codex-thought {
+  min-width: 0;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--codex-paper-card) 78%, transparent);
+}
+.codex-thought-head { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--codex-ink-faint); font-size: 11px; line-height: 18px; }
+.codex-thought-head > svg { flex-shrink: 0; }
+.codex-thought-label { flex-shrink: 0; color: var(--codex-ink-soft); }
+.codex-thought-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-thought-toggle {
+  flex-shrink: 0; padding: 0 2px; border: 0; border-radius: 3px; background: transparent;
+  color: var(--codex-ink-faint); font: inherit; font-size: 11px; line-height: 18px; cursor: pointer;
+}
+.codex-thought-toggle:hover { color: var(--codex-ink); background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-thought-toggle:focus-visible { outline: 1px solid var(--codex-accent); outline-offset: 1px; }
+.codex-thought-body {
+  min-width: 0;
+  margin-top: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--codex-ink-soft);
+}
+.codex-thought-body .codex-md { font-size: 12.5px; line-height: 1.65; color: var(--codex-ink-soft); }
+
 .codex-tool-detail, .codex-tool-body { padding: 5px 4px 10px 25px; }
 .codex-tool-summary { padding: 0 4px 6px 25px; font-size: 12px; }
 .codex-tool-io { min-width: 0; overflow: hidden; }
@@ -4044,7 +4118,7 @@
 .codex-inout-badge { justify-self: end; font-size: 10px; color: var(--codex-ink-faint); margin-top: 2px; user-select: none; }
 .codex-inout-cell { min-width: 0; }
 .codex-inout-divider { height: 6px; }
-.codex-inout-pre { margin: 0; padding: 2px 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--codex-mono); }
+.codex-inout-pre { margin: 0; padding: 2px 0; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.65 var(--codex-mono); }
 .codex-inout-pre-err { color: var(--codex-danger); }
 
 /* JSON 语法高亮配色（暖纸色系内取值） */
@@ -5433,13 +5507,19 @@
   border-radius: 6px;
   background: transparent;
   cursor: pointer;
-  font-size: 11.5px;
+  /* 与工作过程工具行共用同一档字号 / 行高，右侧台账不再像另一套系统。 */
+  font-size: 12px;
   line-height: 1.5;
   min-width: 0;
 }
 
 .codex-trajectory-row:hover {
   background: color-mix(in srgb, var(--codex-accent) 8%, transparent);
+}
+
+.codex-trajectory-row:focus-visible {
+  outline: 2px solid var(--codex-accent);
+  outline-offset: -2px;
 }
 
 .codex-trajectory-row.selected {
@@ -5497,7 +5577,7 @@
 
 .codex-trajectory-tool-name {
   flex-shrink: 0;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--codex-ink);
 }
 

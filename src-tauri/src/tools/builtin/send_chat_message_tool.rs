@@ -11,6 +11,9 @@ use crate::tools::types::{Tool, ToolCategory, ToolResult, ToolUseContext, Valida
 static APP_HANDLE: Lazy<RwLock<Option<AppHandle>>> = Lazy::new(|| RwLock::new(None));
 pub fn set_app_handle(handle: AppHandle) { *APP_HANDLE.write() = Some(handle); }
 
+/// 供后台服务（如补充回复）投递消息时复用应用句柄。
+pub fn current_app_handle() -> Option<AppHandle> { APP_HANDLE.read().clone() }
+
 /// Both proactive paths and explicit tool sends use the same history/event/banner contract.
 pub fn deliver_chat_message(app: &AppHandle, char_id: &str, content: &str) -> Result<(), String> {
     let content = content.trim();

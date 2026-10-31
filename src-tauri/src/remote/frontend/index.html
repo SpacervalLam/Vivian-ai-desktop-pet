@@ -477,6 +477,7 @@
 </style>
 <link rel="stylesheet" href="/navigation.css">
 <link rel="stylesheet" href="/companion-ui.css">
+<link rel="stylesheet" href="/work-process.css">
 </head>
 <body>
 <div class="app" id="app">
@@ -649,7 +650,7 @@
   <section class="page" id="pageWork" aria-label="工作台">
     <div class="page-header"><button class="back-btn" onclick="MobileUI.workBack()" aria-label="返回会话列表或主页">‹</button><div class="page-title" id="workPageTitle">工作台</div></div>
     <div class="page-body mobile-content" id="workIndex"><div class="mobile-toolbar"><button class="btn" data-mobile-action="new-work">新建工作会话</button><button class="mobile-icon-button" data-mobile-action="refresh-work" aria-label="刷新工作会话">↻</button></div><label class="mobile-search"><span aria-hidden="true">⌕</span><input id="workSearch" type="search" aria-label="搜索工作会话" placeholder="搜索会话或工作目录"></label><div id="workList" class="mobile-stack"></div></div>
-    <div id="workDetail" class="mobile-work-detail" hidden><div id="workMeta" class="mobile-work-meta"></div><div id="workMessages" class="mobile-work-messages" tabindex="0" aria-label="工作会话消息"></div><div id="workQuestion" class="mobile-work-question" hidden></div><div id="workError" class="mobile-inline-error" role="status"></div><form id="workComposer" class="mobile-work-composer"><label class="sr-only" for="workInput">工作消息</label><textarea id="workInput" rows="2" placeholder="继续描述任务，或补充你的想法…"></textarea><div><span class="mobile-caption" id="workSendHint">消息发送给当前工作会话</span><button type="button" class="btn outline" id="workStop" data-mobile-action="stop-work" hidden>停止</button><button type="submit" class="btn" id="workSend">发送</button></div></form></div>
+    <div id="workDetail" class="mobile-work-detail" hidden><div id="workMeta" class="mobile-work-meta"></div><button type="button" class="mobile-process-entry" id="workProcessEntry" data-mobile-action="open-process" hidden><span class="mobile-process-entry-icon" aria-hidden="true"></span><span class="mobile-process-entry-text"><strong>过程</strong><span id="workProcessSummaryText"></span></span><span class="mobile-process-entry-status" id="workProcessStatus"></span><span class="mobile-process-entry-chevron" aria-hidden="true">›</span></button><div id="workMessages" class="mobile-work-messages" tabindex="0" aria-label="工作会话消息"></div><div id="workQuestion" class="mobile-work-question" hidden></div><div id="workError" class="mobile-inline-error" role="status"></div><form id="workComposer" class="mobile-work-composer"><label class="sr-only" for="workInput">工作消息</label><textarea id="workInput" rows="2" placeholder="继续描述任务，或补充你的想法…"></textarea><div><span class="mobile-caption" id="workSendHint">消息发送给当前工作会话</span><button type="button" class="btn outline" id="workStop" data-mobile-action="stop-work" hidden>停止</button><button type="submit" class="btn" id="workSend">发送</button></div></form></div>
   </section>
 
 </div>
@@ -671,6 +672,20 @@
 <div class="toast-container" id="toastContainer"></div>
 
 <div class="modal-overlay hidden" id="workNewModal"><form class="modal" id="workNewForm"><h3 id="workNewTitle">新建工作会话</h3><div class="field"><label for="workCharacter">角色</label><select id="workCharacter"></select></div><div class="field"><label for="workDirectory">电脑上的工作目录（可选）</label><input id="workDirectory" placeholder="留空使用电脑端默认目录" autocomplete="off"></div><p class="mobile-caption">新会话使用标准模式和默认工作权限。</p><div id="workNewError" class="mobile-inline-error" role="status"></div><div class="modal-actions"><button type="button" class="btn outline" onclick="hideModal('workNewModal')">取消</button><button type="submit" class="btn" id="workCreate">创建会话</button></div></form></div>
+
+<div class="process-sheet-overlay" id="workProcessSheet" role="dialog" aria-modal="true" aria-label="过程" hidden>
+  <button type="button" class="process-sheet-backdrop" data-mobile-action="close-process" aria-label="关闭过程"></button>
+  <section class="process-sheet">
+    <header class="process-sheet-head">
+      <span class="process-sheet-grip" aria-hidden="true"></span>
+      <h2>过程</h2>
+      <button type="button" class="process-sheet-close" id="workProcessClose" data-mobile-action="close-process" aria-label="关闭过程">✕</button>
+    </header>
+    <div class="process-sheet-summary" id="workProcessSummaryTextSheet"></div>
+    <div class="process-sheet-filters" id="workProcessFilters" role="group" aria-label="筛选过程"></div>
+    <div class="process-sheet-body" id="workProcessList"></div>
+  </section>
+</div>
 
 <!-- 确认弹窗 -->
 <div class="modal-overlay confirm-modal hidden" id="confirmModal">
@@ -745,6 +760,7 @@
 <script src="/memory-presentation.js"></script>
 <script src="/memory-ui.js"></script>
 <script src="/navigation.js"></script>
+<script src="/work-process.js"></script>
 <script>
 let currentCharId = '';
 let wxActiveChar = '';

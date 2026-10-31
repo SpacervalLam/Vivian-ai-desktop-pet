@@ -408,6 +408,9 @@ pub async fn execute_tool_use(
     can_use_tool: Option<CanUseTool>,
 ) -> ToolResult {
     use futures::FutureExt;
+    if crate::pipeline::execution_control::interrupted() {
+        return ToolResult::standard_error("A newer user input or stop request invalidated this decision", Some("ExecutionInterrupted"), None);
+    }
     let resolved = tool_system.find_tool_versioned(tool_name);
     let name = resolved.as_ref()
         .map(|(tool, _)| tool.name().to_string()).unwrap_or_else(|| tool_name.to_string());
@@ -417,7 +420,7 @@ pub async fn execute_tool_use(
             Err(error) => return ToolResult::standard_error(&error, Some("PermissionContextChanged"), None),
         };
         if let Some((read_memory, write_memory)) = policy {
-            let reading = name.starts_with("session_") || matches!(name.as_str(), "search_memories" | "search_memory" | "read_memory" | "get_recent_interactions" | "summarize_today_context");
+            let reading = name.starts_with("session_") || matches!(name.as_str(), "search_memories" | "search_memory" | "read_memory");
             let writing = matches!(name.as_str(), "save_memory" | "write_memory");
             if (reading && !read_memory) || (writing && !write_memory) {
                 return ToolResult::standard_error("本会话已关闭相应的记忆读取或生成。", Some("MemoryDisabled"), None);
@@ -436,6 +439,14 @@ pub async fn execute_tool_use(
     let result = outcome.unwrap_or_else(|_| ToolResult::standard_error(
         "Tool pipeline panicked", Some("ToolExecutionPanic"), None));
     observed.finish(&result);
+    if result.success {
+        // 跨轮粘性：下一轮把这次真正用过的工具保持为完整 schema，
+        // 避免模型每轮重新 tool_search；按侧别+角色隔离，不跨角色串味。
+        tool_system.record_tool_use(
+            &crate::tools::registry::tool_scope_key(&context.agent_kind, &context.char_id),
+            &name,
+        );
+    }
     if result.error.as_deref() == Some("UserDenied") {
         if let Some(id) = recommendation { let _ = crate::plugin_advisor::dismiss(&context.char_id,&id); }
     }
@@ -523,19 +534,18 @@ async fn execute_tool_use_inner(
     let agent_side = AgentSide::from_agent_kind(&context.agent_kind);
     let mut dependencies = Vec::new();
     if tool_name == "computer_action" {
-        match arguments.get("action").and_then(Value::as_str) {
-            Some("click") => dependencies.push("click_mouse"),
-            Some("key") => dependencies.push("hotkey"),
-            Some("type") => dependencies.push("type_text"),
-            _ => {},
-        }
         dependencies.push("computer_state");
         if arguments.get("observe_after").and_then(Value::as_bool).unwrap_or(true)
             && arguments.get("include_screenshot").and_then(Value::as_bool).unwrap_or(true) { dependencies.push("take_screenshot"); }
     } else if tool_name == "computer_state" && arguments.get("action").and_then(Value::as_str)==Some("observe")
         && arguments.get("include_screenshot").and_then(Value::as_bool).unwrap_or(true) {
         dependencies.push("take_screenshot");
-    } else if matches!(tool_name, "spawn_teammate" | "ralph") {
+    } else if tool_name == "team"
+        && matches!(
+            crate::tools::builtin::agent_control_tools::effective_team_action(&arguments).as_str(),
+            "spawn" | "ralph"
+        )
+    {
         dependencies.push("work_delegate");
     }
     if let Some(dependency) = dependencies.into_iter().find(|name| tool_system.is_tool_disabled(name, agent_side)) {
@@ -587,8 +597,11 @@ async fn execute_tool_use_inner(
 
     // A work session's read-only setting is a hard capability boundary, including
     // shell, custom scripts and dispatchers whose parameters are opaque to path checks.
+    // `edit_file` 的 view 动作只读，是这条边界里唯一的例外。
+    let read_only_view = tool_name == "edit_file"
+        && validated_args.get("action").and_then(Value::as_str) == Some("view");
     if context.is_work_agent() && context.access_level == Some(AgentAccessLevel::ReadOnly)
-        && !tool.is_read_only() && tool_name != "save_memory" {
+        && !tool.is_read_only() && tool_name != "save_memory" && !read_only_view {
         return ToolResult::standard_error("只读工作会话不能执行有副作用的工具。", Some("PermissionDenied"), None);
     }
     // This Low-IL backend cannot express an inner read-only mount in an opaque
@@ -865,6 +878,11 @@ async fn execute_tool_use_inner(
         }
     }
 
+    // Permission dialogs may outlive the user instruction that opened them.
+    // Do not drop an in-flight effect; invalidate only calls that have not started.
+    if crate::pipeline::execution_control::interrupted() {
+        return ToolResult::standard_error("A newer user input or stop request invalidated this decision", Some("ExecutionInterrupted"), None);
+    }
     // Caches never bypass the current permission, hook or policy gates.
     trace.phase = "cache";
     let cacheable = tool.is_read_only() && tool.is_cacheable();

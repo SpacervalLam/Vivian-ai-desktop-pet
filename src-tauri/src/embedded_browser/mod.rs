@@ -1,5 +1,7 @@
 //! Native browser surfaces have their own WebView2 environment and no Tauri IPC bridge.
 pub mod model;
+pub(crate) mod input;
+pub(crate) mod plan;
 #[cfg(windows)]
 pub(crate) mod native;
 use model::{BrowserBounds, BrowserRequest, BrowserSnapshot};

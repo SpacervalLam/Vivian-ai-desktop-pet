@@ -162,6 +162,7 @@ pub async fn send_message(
     cancel_close(&char_id);
 
     state.session_coordinator.signal_user_input(&char_id);
+    state.interrupt_companion_execution(&char_id);
 
     // 串行化 brain.think，与流式路径共用 brain_lock。
     // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让本请求永久挂起。
@@ -652,6 +653,7 @@ async fn send_message_stream_impl(
     let queued_at = chrono::Local::now();
     crate::voice_diagnostics::mark_chat("queue_entered");
     state.session_coordinator.signal_user_input(&char_id);
+    state.interrupt_companion_execution(&char_id);
     let _brain_lock = instance.think_lock.clone();
     // 等待必须有上限：持锁方一旦卡死（例如在持有 Mind / 记忆锁时死锁），
     // 无超时的 lock().await 会让本请求永久挂起，既不回包也不报错，

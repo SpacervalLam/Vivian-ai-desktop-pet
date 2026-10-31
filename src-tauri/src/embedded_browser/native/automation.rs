@@ -38,9 +38,9 @@ static TOOL_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
     once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
 
 #[derive(Clone)]
-struct Operation {
-    cancelled: Arc<AtomicBool>,
-    deadline: Instant,
+pub(super) struct Operation {
+    pub(super) cancelled: Arc<AtomicBool>,
+    pub(super) deadline: Instant,
 }
 impl Operation {
     fn check(&self) -> Result<(), String> {
@@ -58,7 +58,7 @@ impl Drop for CancelOnDrop {
     }
 }
 
-async fn main<T: Send + 'static>(
+pub(super) async fn main<T: Send + 'static>(
     app: &tauri::AppHandle,
     op: &Operation,
     action: impl FnOnce(HostRef) -> Result<T, String> + Send + 'static,
@@ -372,7 +372,41 @@ struct FocusEmulation {
     id: String,
     active: bool,
 }
-fn restore_input_surface(h: &HostRef, id: &str) -> Result<(), String> {
+// Release browser input even if the tool future is cancelled between down/up.
+struct InputRelease {
+    app: tauri::AppHandle,
+    id: String,
+    method: &'static str,
+    event: Option<Value>,
+}
+impl Drop for InputRelease {
+    fn drop(&mut self) {
+        let Some(event) = self.event.take() else { return; };
+        let id = self.id.clone(); let method = self.method;
+        let _ = self.app.run_on_main_thread(move || {
+            if let Some(h) = HOSTS.with(|hosts| hosts.borrow().get(OWNER).cloned()) {
+                if let Ok(core) = get_core(&h, &id) {
+                    unsafe { let _ = core.CallDevToolsProtocolMethod(
+                        PCWSTR(wide(method).as_ptr()), PCWSTR(wide(&event.to_string()).as_ptr()),
+                        &CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(()))),
+                    ); }
+                }
+            }
+        });
+    }
+}
+async fn input_pair(app: &tauri::AppHandle, op: &Operation, id: &str, method: &'static str, down: Value, up: Value) -> Result<(), String> {
+    let mut release = InputRelease { app: app.clone(), id: id.into(), method, event: Some(up.clone()) };
+    cdp(app, op, id, method, down).await?;
+    cdp(app, op, id, method, up).await?;
+    release.event = None;
+    Ok(())
+}
+async fn press_key(app: &tauri::AppHandle, op: &Operation, id: &str, key: &str) -> Result<(), String> {
+    let (down, up) = crate::embedded_browser::input::key_events(key)?;
+    input_pair(app, op, id, "Input.dispatchKeyEvent", down, up).await
+}
+pub(super) fn restore_input_surface(h: &HostRef, id: &str) -> Result<(), String> {
     let target = {
         let mut host = h.borrow_mut();
         let hwnd = host.surface_hwnd;
@@ -394,7 +428,7 @@ fn restore_input_surface(h: &HostRef, id: &str) -> Result<(), String> {
     }
     apply_bounds(h).map_err(|e| e.to_string())
 }
-fn park_render_surface(h:&HostRef,id:&str)->Result<(),String>{
+pub(super) fn park_render_surface(h:&HostRef,id:&str)->Result<(),String>{
     let (controller,parent)={
         let mut host=h.borrow_mut();let parent=host.parked_hwnd;
         let tab=host.tabs.get_mut(id).ok_or("Tab closed")?;
@@ -521,6 +555,56 @@ async fn task(
     Ok(page_text(result))
 }
 
+async fn run_plan(app: &tauri::AppHandle, op: &Operation, args: &Value, session: &str) -> Result<String, String> {
+    let plan = crate::embedded_browser::plan::parse(args)?;
+    if let Some(receipt) = crate::embedded_browser::plan::STORE.lock().begin(session, &plan, args)? { return Ok(receipt.to_string()); }
+    let mut lease = crate::embedded_browser::plan::Lease {
+        session:session.into(), request:plan.request_id.clone(), steps:Vec::new(), mutation:false, finished:false,
+    };
+    for (index, step) in plan.steps.iter().enumerate() {
+        let attempt = async {
+            op.check()?;
+            let mut input = step.args.clone(); input["tab_id"] = json!(plan.tab_id);
+            if index == 0 || step.locator.is_some() {
+                // Bind the current document, then resolve the query at execution
+                // time. A replaced/moved control never reuses earlier coordinates.
+                Box::pin(run(app,op,"browser_snapshot",&json!({"tab_id":plan.tab_id}),session)).await?;
+            }
+            if let Some(locator) = &step.locator {
+                let target = page(app,op,&plan.tab_id,session,"browser_resolve_target",&json!({"locator":locator})).await?;
+                input["index"] = target["index"].clone();
+            }
+            let mutating = matches!(step.action.as_str(), "click" | "type" | "press" | "hover" | "select_option" | "scroll");
+            if mutating { lease.mutation=true; lease.update("running",None); }
+            let action = format!("browser_{}", if step.action == "expect" { "wait" } else { &step.action });
+            let output = Box::pin(run(app,op,&action,&input,session)).await?;
+            if let Ok(receipt) = serde_json::from_str::<Value>(&output) {
+                if receipt["operation_completed"] == false || receipt.pointer("/observation/success") == Some(&Value::Bool(false)) {
+                    return Err(format!("Step result requires inspection: {}", output.chars().take(1500).collect::<String>()));
+                }
+            }
+            let mut result=json!({"step":index,"action":step.action,"status":"succeeded"});
+            if !mutating { result["result"]=json!(output.chars().take(4000).collect::<String>()); result["truncated"]=json!(output.chars().count()>4000); result["untrusted"]=json!(true); }
+            Ok::<Value,String>(result)
+        }.await;
+        match attempt {
+            Ok(result) => {lease.steps.push(result);lease.update("running",None);}
+            Err(error) => {
+                lease.steps.push(json!({"step":index,"action":step.action,"status":"failed"}));
+                let receipt=lease.update("failed",Some(&error));lease.finished=true;return Ok(receipt.to_string());
+            }
+        }
+    }
+    // Only explicit reads and a final observation cross back to the model; the
+    // intermediate per-action snapshots stay inside this bounded execution.
+    let observation=Box::pin(run(app,op,"browser_snapshot",&json!({"tab_id":plan.tab_id}),session)).await;
+    lease.steps.push(match observation {
+        Ok(text)=>json!({"action":"final_observation","status":"succeeded","text":text.chars().take(8000).collect::<String>(),"truncated":text.chars().count()>8000,"untrusted":true}),
+        Err(error)=>json!({"action":"final_observation","status":"failed","error":error}),
+    });
+    let receipt=lease.update("succeeded",None);lease.finished=true;Ok(receipt.to_string())
+}
+
 async fn run(
     app: &tauri::AppHandle,
     op: &Operation,
@@ -528,6 +612,7 @@ async fn run(
     args: &Value,
     session: &str,
 ) -> Result<String, String> {
+    if name == "browser_run" { return run_plan(app,op,args,session).await; }
     ready(app, op).await?;
     if name == "browser_tabs" {
         return main(app,op,|h| {
@@ -661,8 +746,14 @@ async fn run(
     }
     settled(app, op, &id, 0).await?;
     let key = id.clone();
+    let session_key = session.to_owned();
     let read_generation = main(app, op, move |h| {
-        Ok(h.borrow().tabs.get(&key).ok_or("标签页已关闭")?.generation)
+        let h = h.borrow();
+        let generation = h.tabs.get(&key).ok_or("标签页已关闭")?.generation;
+        if needs_snapshot && !h.selections.get(&session_key).is_some_and(|(tab, old)| tab == &key && *old == generation) {
+            return Err("Page navigated while waiting; read browser_snapshot before input".into());
+        }
+        Ok(generation)
     })
     .await?;
     // Focus emulation must cover the preceding DOM focus as well as key dispatch.
@@ -673,45 +764,8 @@ async fn run(
             id: id.clone(),
             active: true,
         };
-        if name == "browser_press" {
-            let target = id.clone();
-            main(app, op, move |h| {
-                let (controller, hwnd) = {
-                    let mut host = h.borrow_mut();
-                    let hwnd = host.parked_hwnd;
-                    let tab = host.tabs.get_mut(&target).ok_or("标签页已关闭")?;
-                    let mut visible = BOOL::default();
-                    unsafe {
-                        tab.controller
-                            .IsVisible(&mut visible)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    if visible.as_bool() {
-                        return Ok(());
-                    }
-                    tab.input_parked = true;
-                    (tab.controller.clone(), hwnd)
-                };
-                // Keep the native input surface alive under an invisible parent. The
-                // user's selected tab and OS foreground window remain unchanged.
-                unsafe {
-                    controller
-                        .SetParentWindow(hwnd)
-                        .map_err(|e| e.to_string())?;
-                    controller
-                        .SetBounds(RECT {
-                            left: 0,
-                            top: 0,
-                            right: 1280,
-                            bottom: 900,
-                        })
-                        .map_err(|e| e.to_string())?;
-                    controller.SetIsVisible(true).map_err(|e| e.to_string())?;
-                }
-                Ok(())
-            })
-            .await?;
-        }
+        let target = id.clone();
+        main(app, op, move |h| park_render_surface(&h, &target)).await?;
         cdp(
             app,
             op,
@@ -724,57 +778,59 @@ async fn run(
     } else {
         None
     };
-    let result = if name == "browser_hover" {
-        let target=page(app,op,&id,session,"browser_hover_target",args).await?;
-        cdp(app,op,&id,"Input.dispatchMouseEvent",json!({"type":"mouseMoved","x":target["x"],"y":target["y"]})).await?;
-        json!({"text":"Pointer moved to the observed element"})
-    } else if name == "browser_press" {
-        let key = args.get("key").and_then(Value::as_str).ok_or("缺少 key")?;
-        let (code, vk) = match key {
-            "Enter" => ("Enter", 13),
-            "Tab" => ("Tab", 9),
-            "Escape" | "Esc" => ("Escape", 27),
-            "ArrowLeft" => ("ArrowLeft", 37),
-            "ArrowUp" => ("ArrowUp", 38),
-            "ArrowRight" => ("ArrowRight", 39),
-            "ArrowDown" => ("ArrowDown", 40),
-            "Backspace" => ("Backspace", 8),
-            "Delete" => ("Delete", 46),
-            " " | "Space" => ("Space", 32),
-            _ => return Err("不支持的按键，请用 browser_type 输入文字".into()),
-        };
-        let key = if code == "Space" {
-            " "
-        } else if code == "Escape" {
-            "Escape"
-        } else {
-            key
-        };
-        let mut down = json!({"type":"keyDown","key":key,"code":code,"windowsVirtualKeyCode":vk,"nativeVirtualKeyCode":vk,"modifiers":0});
-        if vk == 13 {
-            down["text"] = json!("\r");
-            down["unmodifiedText"] = json!("\r");
-        } else if vk == 32 {
-            down["text"] = json!(" ");
-            down["unmodifiedText"] = json!(" ");
+    // Validate and prepare before the first input. A failed dispatch may still
+    // have reached the renderer: preserve that uncertainty, never suggest replay.
+    let result = if name == "browser_hover" || name == "browser_click" {
+        let button = args["button"].as_str().unwrap_or("left");
+        let count = args["click_count"].as_u64().unwrap_or(1);
+        if !matches!(button, "left" | "right" | "middle") || !(1..=2).contains(&count) {
+            return Err("button must be left/right/middle; click_count must be 1 or 2".into());
         }
-        cdp(app, op, &id, "Input.dispatchKeyEvent", down).await?;
-        cdp(
-            app,
-            op,
-            &id,
-            "Input.dispatchKeyEvent",
-            json!({"type":"keyUp","key":key,"code":code,"windowsVirtualKeyCode":vk,"nativeVirtualKeyCode":vk,"modifiers":0}),
-        )
-        .await?;
-        json!({"text":"已发送原生网页按键，请重新读取页面确认结果。"})
+        let target=page(app,op,&id,session,if name == "browser_hover" {"browser_hover_target"} else {"browser_click_target"},args).await?;
+        let sent = async {
+            cdp(app,op,&id,"Input.dispatchMouseEvent",json!({"type":"mouseMoved","x":target["x"],"y":target["y"]})).await?;
+            if name == "browser_click" {
+                // Hover handlers can move or cover the target. Recheck before down.
+                let target = page(app,op,&id,session,"browser_click_target",args).await?;
+                for click in 1..=count {
+                    let down=json!({"type":"mousePressed","x":target["x"],"y":target["y"],"button":button,"clickCount":click});
+                    let mut up=down.clone(); up["type"]=json!("mouseReleased");
+                    input_pair(app,op,&id,"Input.dispatchMouseEvent",down,up).await?;
+                }
+            }
+            Ok::<(),String>(())
+        }.await;
+        match sent {
+            Ok(()) => json!({"text":"Browser-native pointer input sent; inspect the resulting state."}),
+            Err(error) => return Ok(json!({"tab_id":id,"operation_completed":false,"input_may_have_occurred":true,"goal_verified":false,"error":error,"next_step":"Observe again; do not replay input"}).to_string()),
+        }
+    } else if name == "browser_type" {
+        let text=args["text"].as_str().ok_or("text is required")?;
+        let replace=args["replace"].as_bool().unwrap_or(false);
+        if text.chars().count()>4000 || (text.is_empty() && !replace) { return Err("Text must be at most 4000 characters; empty text requires replace=true".into()); }
+        page(app,op,&id,session,"browser_type_target",args).await?;
+        let sent=async {
+            press_key(app,op,&id,if replace {"Control+A"} else {"Control+End"}).await?;
+            if text.is_empty() { press_key(app,op,&id,"Backspace").await?; }
+            else { cdp(app,op,&id,"Input.insertText",json!({"text":text})).await?; }
+            Ok::<(),String>(())
+        }.await;
+        match sent {
+            Ok(())=>json!({"text":"Browser-native text input sent; inspect the resulting state."}),
+            Err(error)=>return Ok(json!({"tab_id":id,"operation_completed":false,"input_may_have_occurred":true,"goal_verified":false,"error":error,"next_step":"Observe again; do not replay input"}).to_string()),
+        }
+    } else if name == "browser_press" {
+        let key=args["key"].as_str().ok_or("key is required")?;
+        crate::embedded_browser::input::key_events(key)?;
+        match press_key(app,op,&id,key).await {
+            Ok(())=>json!({"text":"Browser-native key press sent; inspect the resulting state."}),
+            Err(error)=>return Ok(json!({"tab_id":id,"operation_completed":false,"input_may_have_occurred":true,"goal_verified":false,"error":error,"next_step":"Observe again; do not replay input"}).to_string()),
+        }
     } else {
         if !matches!(
             name,
             "browser_snapshot"
                 | "browser_get_text"
-                | "browser_click"
-                | "browser_type"
                 | "browser_scroll"
                 | "browser_wait"
                 | "browser_extract"
@@ -843,6 +899,12 @@ pub(crate) async fn tool(
     timeout: Duration,
     session: String,
 ) -> Result<String, String> {
+    if name == "browser_execute" { return super::playwright::execute(app,args,session).await; }
+    if name == "browser_receipt" { return super::playwright::query(args,session).await; }
+    if name == "browser_run_result" {
+        let request=args["request_id"].as_str().ok_or("request_id is required")?;
+        return crate::embedded_browser::plan::STORE.lock().lookup(&session,request).map(|receipt|receipt.to_string());
+    }
     let op = Operation {
         cancelled: Arc::new(AtomicBool::new(false)),
         deadline: Instant::now() + timeout,
@@ -854,7 +916,9 @@ pub(crate) async fn tool(
         run(&app, &op, &name, &args, &session).await
     })
     .await
-    .map_err(|_| "浏览器操作超时，后台页面已回收；请检查页面或手动完成验证".to_string())?
+    .map_err(|_| if name == "browser_run" {
+        "批量执行等待超时。用同一 request_id 查询 browser_run_result，并核对页面；不要重放修改".to_string()
+    } else { "浏览器操作超时；请重新观察页面，已发送的输入可能生效，不要自动重放".to_string() })?
 }
 
 // Credential values never implement Serialize and never enter a browser tool response.

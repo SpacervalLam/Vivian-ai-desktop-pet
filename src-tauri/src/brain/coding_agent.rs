@@ -84,8 +84,7 @@ pub const CODING_TOOLS: &[&str] = &[
     // 会话目标（一句话终态，跨轮持久）与交付声明（登记已存在的产物）
     "goal",
     "present",
-    // 可撤销编辑器 / 看图 / 生图
-    "str_replace_editor",
+    // 看图 / 生图（编辑动作已并入 edit_file：str_replace 默认，另有 view/create/insert/undo）
     "read_image",
     "generate_image",
     // 运行时环境
@@ -107,18 +106,9 @@ pub const CODING_TOOLS: &[&str] = &[
     "terminal_list",
     "terminal_close",
     "pwsh_persistent",
-    // 多智能体协作
-    "list_agents",
-    "interrupt_agent",
-    "send_message",
-    "wait_agent",
-    "list_subagent_models",
-    "spawn_teammate",
-    "team_task_create",
-    "team_task_list",
-    "team_task_get",
-    "team_task_update",
-    "ralph",
+    // 多智能体协作（team：看见/等待/叫停/传话/派队友/模型/迭代；team_task：任务板）
+    "team",
+    "team_task",
     // 定时提醒（工作侧也开放：长任务常要给自己排后续动作）
     "schedule_reminder",
     "manage_scheduled",
@@ -138,10 +128,11 @@ pub const CODING_TOOLS: &[&str] = &[
     "work_job",
     // 工作树隔离（列出/新建/移除）：改大改前先开隔离工作树，失败可整体丢弃
     "work_isolate",
-    // 能力进化工具
+    // 代码审查输入（只读解析审查目标：未提交/基准分支/提交，附变更文件与规约文件）
+    "review_diff",
+    // 能力进化工具（use_skill：激活正文 / 自然语言召回 / 形态校验三合一）
     "create_skill",
     "use_skill",
-    "search_skill",
     "create_tool",
     "create_plugin",
     "plugin_advisor",
@@ -150,8 +141,16 @@ pub const CODING_TOOLS: &[&str] = &[
     "list_provider_presets",
     "manage_provider_preset",
 ];
-/// Connected browsing tools exposed for evidence retrieval, with normal permissions.
-pub const WORK_WEB_BROWSER_TOOLS: &[&str] = &["mcp__browser__task_tab","mcp__browser__extract","mcp__browser__navigate","mcp__browser__snapshot","mcp__browser__get_text","mcp__browser__scroll","mcp__browser__wait","mcp__browser__back"];
+/// Connected browser observation and input, subject to normal permissions.
+pub const WORK_WEB_BROWSER_TOOLS: &[&str] = &[
+    "mcp__browser__execute", "mcp__browser__receipt",
+    "mcp__browser__task_tab", "mcp__browser__extract", "mcp__browser__navigate",
+    "mcp__browser__snapshot", "mcp__browser__get_text", "mcp__browser__scroll",
+    "mcp__browser__wait", "mcp__browser__back", "mcp__browser__forward", "mcp__browser__reload",
+    "mcp__browser__tabs", "mcp__browser__open_tab", "mcp__browser__select_tab", "mcp__browser__close_tab",
+    "mcp__browser__screenshot", "mcp__browser__click", "mcp__browser__type", "mcp__browser__press",
+    "mcp__browser__hover", "mcp__browser__select_option", "mcp__browser__run", "mcp__browser__run_result",
+];
 
 /// Code 模式单次程序的最大步骤数。
 pub const CODE_MODE_MAX_STEPS: usize = 16;
@@ -2015,6 +2014,12 @@ impl CodingAgentService {
         if !matches!(tool, "write_file" | "edit_file") {
             return;
         }
+        // edit_file 的 view 只是读文件：不能登记成产物，也不能进「变更」清单。
+        if tool == "edit_file"
+            && crate::tools::builtin::coding_tools::effective_edit_action(arguments) == "view"
+        {
+            return;
+        }
         let Some(path) = arguments
             .get("path")
             .and_then(|v| v.as_str())
@@ -3704,7 +3709,10 @@ impl CodingAgentService {
                     consecutive_failures = 0;
                     failure_notes.clear();
                     stall_hinted = false;
-                    if is_substantive_progress(&call.name, tool_execution_succeeded(&result), &result) {
+                    // edit_file 的 view 只是读文件（没有落盘）：按 read_file 同口径判定，
+                    // 避免「反复查看」被算成交付进展而掩盖空转。
+                    let progress_tool = progress_tool_name(&call.name, &call.arguments);
+                    if is_substantive_progress(progress_tool, tool_execution_succeeded(&result), &result) {
                         made_progress = true;
                     }
                     // 写/改文件成功 → 登记会话产物、文件变更与本轮改动标记。
@@ -4894,7 +4902,7 @@ impl CodingAgentService {
                 max = CODE_MODE_MAX_STEPS,
             ),
             _ => format!(
-                "{persona}\n\n你是工作智能体，负责调查、代码修改、命令和文件产物。根据实际工具结果选择下一步。\n{env}\n\n# 执行方式\n- 先阅读相关内容再修改；搜索优先 grep_search/glob，局部修改用 edit_file，新文件用 write_file，按任务运行验证。\n- 独立读取可以同批发起；依赖前一步输出的操作等结果返回后再决定。\n- 工具定义之外的能力先用 tool_search 发现，加载后再调用。延迟目录只列名称，不代表额外授权。\n- 简单任务直接完成；复杂任务才用 work_todo_write，更新真实进度，不为维护清单反复调用工具。\n- 仅在用户拥有的决策或缺失条件阻塞执行时用 work_ask_user；不要询问自己查得到的事实或是否继续。\n- 需要整块独立工作时才发现 work_delegate，写清目标、背景和验收；子任务不继承你的完整历史。后台结算是结果数据，未收集任务不能当成完成。\n- 图片、浏览器、持久终端、技能与插件能力按需发现；不要为普通任务主动创建工具或启动团队。\n- 电脑操作：先 computer_state 列出窗口并观察目标，使用返回的 window 和 screenshot_id；优先控件编号，坐标为窗口内物理像素。图片会直接提供，不要只依赖描述。每次操作后根据新图和控件状态决策；观察失败不得重放输入，先重新观察。verify 仅验证指定后置条件，不代表整体目标完成。浏览器优先 mcp__browser__ 工具；先列标签页或快照，按 tab_id 绑定，可使用截图、悬停和下拉选择。\n- 完成执行任务时单独调用 return_task_result，summary 即最终答复；普通解释也支持自然语言结束。依据实际回执说明验证、限制和未完成部分。\n{scope}{rules}"
+                "{persona}\n\n你是工作智能体，负责调查、代码修改、命令和文件产物。根据实际工具结果选择下一步。\n{env}\n\n# 执行方式\n- 先阅读相关内容再修改；搜索优先 grep_search/glob，局部修改用 edit_file，新文件用 write_file，按任务运行验证。\n- 独立读取可以同批发起；依赖前一步输出的操作等结果返回后再决定。\n- 工具定义之外的能力先用 tool_search 发现，加载后再调用。延迟目录只列名称，不代表额外授权。\n- 简单任务直接完成；复杂任务才用 work_todo_write，更新真实进度，不为维护清单反复调用工具。\n- 仅在用户拥有的决策或缺失条件阻塞执行时用 work_ask_user；不要询问自己查得到的事实或是否继续。\n- 需要整块独立工作时才发现 work_delegate，写清目标、背景和验收；子任务不继承你的完整历史。后台结算是结果数据，未收集任务不能当成完成。\n- 图片、浏览器、持久终端、技能与插件能力按需发现；不要为普通任务主动创建工具或启动团队。\n- 电脑操作：先 computer_state 列出窗口并观察目标，使用返回的 window 和 screenshot_id；优先控件编号，坐标为窗口内物理像素。图片会直接提供，不要只依赖描述。每次操作后根据新图和控件状态决策；观察失败不得重放输入，先重新观察。verify 仅验证指定后置条件，不代表整体目标完成。浏览器交互优先原生 Playwright：先 mcp__browser__tabs 选择 tab_id，再用 mcp__browser__execute 提交标准 JavaScript（已有 page/context/browser/expect/tabbit 绑定，支持顶层 await 和跨调用变量）。把规则明确的步骤、数据筛选和 expect 核对放在同一程序中；遇到新的业务判断再返回模型。观察用原生 ariaSnapshot/screenshot/evaluate 或显式 tabbit.observe，不强制每步快照。用 task_id/request_id 保留状态，queued/running/中断后查 mcp__browser__receipt，禁止盲目重放修改；程序成功不等于业务成功。仅采集资料可用 mcp__browser__task_tab。旧点击/快照工具仅按需发现以兼容旧任务。\n- 完成执行任务时单独调用 return_task_result，summary 即最终答复；普通解释也支持自然语言结束。依据实际回执说明验证、限制和未完成部分。\n{scope}{rules}"
             ),
         }
     }
@@ -5460,6 +5468,20 @@ fn update_project_memory(
     })
 }
 
+/// 判定进展时把 edit_file 的 view 动作折算成 read_file。
+///
+/// view 只是读文件、没有落盘，若按写入一律算进展，「反复查看」就会掩盖真实空转；
+/// 折算成 read_file 后沿用「取到内容才算」的口径。旧参数形状（无 action）默认 str_replace，仍算写入。
+fn progress_tool_name<'a>(call_name: &'a str, arguments: &serde_json::Value) -> &'a str {
+    if call_name == "edit_file"
+        && crate::tools::builtin::coding_tools::effective_edit_action(arguments) == "view"
+    {
+        "read_file"
+    } else {
+        call_name
+    }
+}
+
 /// 判断一次成功调用是否构成「实质进展」。
 ///
 /// 供两处消费：轮级收益递减检测（`OutputBudgetTracker`）与预算耗尽时的自动续轮判定。
@@ -5682,7 +5704,18 @@ fn research_delivery_hint(messages: &[CodingMessage]) -> Option<String> {
         .iter().any(|word| goal.contains(word));
     if !artifact || !creation { return None; }
     let results: Vec<_> = messages[start..].iter().filter(|m| m.role == CodingRole::ToolResult).collect();
-    if results.iter().any(|m| m.tool_success == Some(true) && matches!(m.tool_name.as_deref(), Some("write_file" | "edit_file"))) {
+    // edit_file 的 view 只是查看，不算交付落盘；旧会话缺参数时按写入处理（此前 edit_file 只有写入语义）。
+    let wrote_delivery = results.iter().any(|m| {
+        m.tool_success == Some(true)
+            && match m.tool_name.as_deref() {
+                Some("write_file") => true,
+                Some("edit_file") => m.tool_arguments.as_ref()
+                    .map(|args| crate::tools::builtin::coding_tools::effective_edit_action(args) != "view")
+                    .unwrap_or(true),
+                _ => false,
+            }
+    });
+    if wrote_delivery {
         return None;
     }
     let research = results.iter().filter(|m| m.tool_success == Some(true) && matches!(m.tool_name.as_deref(), Some("web_search" | "read_content" | "web_fetch"))).count();
@@ -5861,6 +5894,27 @@ mod progress_signal_tests {
         assert!(is_substantive_progress("web_search", true, &nested));
     }
 
+    /// view 是只读动作：折算为 read_file（取到内容才算进展）；写入动作保持写入口径。
+    #[test]
+    fn edit_file_view_is_judged_like_read_file() {
+        assert_eq!(
+            progress_tool_name("edit_file", &serde_json::json!({"action": "view"})),
+            "read_file"
+        );
+        // 旧参数形状：old_string/new_string 是写入；无 action 默认 str_replace
+        assert_eq!(progress_tool_name("edit_file", &serde_json::json!({})), "edit_file");
+        assert_eq!(
+            progress_tool_name("edit_file", &serde_json::json!({"old_string": "a", "new_string": "b"})),
+            "edit_file"
+        );
+        assert_eq!(
+            progress_tool_name("edit_file", &serde_json::json!({"file_text": "x"})),
+            "edit_file"
+        );
+        // 其它工具原样透传
+        assert_eq!(progress_tool_name("write_file", &serde_json::json!({})), "write_file");
+    }
+
     /// 只读工具不放宽：反复读小文件正是收益递减要抓的形态。
     #[test]
     fn local_evidence_counts_without_requiring_verbose_model_output() {
@@ -5921,6 +5975,35 @@ mod compaction_boundary_tests {
         assert!(should_retry_work_stream("error decoding response body", 3, 4));
         assert!(!should_retry_work_stream("invalid_api_key", 3, 4));
     }
+
+    /// edit_file 的 view 只是查看源文件，不能当作「已经写出交付物」。
+    #[test]
+    fn work_task_delivery_hint_ignores_edit_file_view() {
+        let mut history = vec![message(CodingRole::User, "制作 PPT")];
+        for _ in 0..6 {
+            let mut fetch = message(CodingRole::ToolResult, "已取得来源");
+            fetch.tool_name = Some("read_content".into());
+            fetch.tool_success = Some(true);
+            history.push(fetch);
+        }
+        assert!(research_delivery_hint(&history).is_some());
+
+        let mut view = message(CodingRole::ToolResult, "1\tcode");
+        view.tool_name = Some("edit_file".into());
+        view.tool_arguments = Some(serde_json::json!({"action": "view"}));
+        view.tool_success = Some(true);
+        history.push(view);
+        assert!(research_delivery_hint(&history).is_some());
+
+        // 旧参数形状（无 action）默认 str_replace，仍按写入处理
+        let mut write = message(CodingRole::ToolResult, "已写入初版");
+        write.tool_name = Some("edit_file".into());
+        write.tool_arguments = Some(serde_json::json!({"old_string": "a", "new_string": "b"}));
+        write.tool_success = Some(true);
+        history.push(write);
+        assert!(research_delivery_hint(&history).is_none());
+    }
+
     #[test]
     fn command_exit_failure_retains_diagnostics() {
         let failed = crate::tools::types::ToolResult::standard_success("命令退出码 1", Some(serde_json::json!({"exit_code": 1, "success": false, "stderr": "missing module"})));

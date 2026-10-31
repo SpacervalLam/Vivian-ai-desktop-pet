@@ -173,9 +173,14 @@ impl ToolSemanticFilter {
         let cache = self.embeddings.lock();
         let mut scored = Vec::new();
         for tool in tool_system.list_tools() {
-            // 常驻工具（含 tool_search）本来就以完整 schema 注入，不该再占用召回槽位：
+            // 保底常驻工具本来就以完整 schema 注入，不该再占用召回槽位：
             // 槽位数固定，被已经到手的工具吃掉一个，就少一个**未注入**工具被带进上下文。
-            if tool.always_load() || crate::tools::registry::is_work_agent_only(tool.name()) { continue; }
+            // 其余 always_load 工具仍可参与召回——闲聊场景的 schema 预算会把它们裁剪成
+            // Lazy，需要靠召回才拿得回完整定义。
+            if crate::tools::registry::is_schema_floor_tool(tool.name())
+                || crate::tools::registry::is_work_agent_only(tool.name()) {
+                continue;
+            }
             let Some((_, vector)) = cache.get(&(tool.name().to_string(), self.language.clone())) else { continue; };
             if vector.len() != current.len() || !valid_query(vector) { continue; }
             let mut current_sim = cosine_similarity(current, vector).max(0.0);
@@ -192,14 +197,46 @@ impl ToolSemanticFilter {
                 similarity: sim as f64, current_similarity: current_sim as f64, context_similarity: context_sim as f64 });
         }
         scored.sort_by(|a,b| b.similarity.total_cmp(&a.similarity).then_with(|| a.name.cmp(&b.name)));
-        scored.truncate(top_n);
-        scored
+        // 同族工具（浏览器导航、终端、团队协作等）描述高度雷同，容易一次吃掉
+        // 多个召回槽位；每个家族最多保留 2 个，剩下的名额让给真正需要的其它能力。
+        let mut selected = Vec::new();
+        let mut family_counts: HashMap<String, usize> = HashMap::new();
+        for recommendation in scored {
+            if selected.len() >= top_n { break; }
+            let family = tool_family(&recommendation.name).to_string();
+            let count = family_counts.entry(family).or_default();
+            if *count >= 2 { continue; }
+            *count += 1;
+            selected.push(recommendation);
+        }
+        selected
     }
 
     /// 清除嵌入缓存（工具列表大变更时调用，如 MCP 重连）
     pub fn clear_cache(&self) {
         self.embeddings.lock().clear();
     }
+}
+
+/// 工具家族：同一家族的描述高度重叠，召回时限制占位数量。
+///
+/// 没有归入已知家族的工具以自身名字为家族，等价于不限制。
+pub(crate) fn tool_family(name: &str) -> &str {
+    if name.starts_with("mcp__browser__") { "browser" }
+    else if name.starts_with("wallpaper_") { "wallpaper" }
+    else if name.starts_with("terminal_") || name == "pwsh_persistent" { "terminal" }
+    else if name.starts_with("music_") || name == "media_control" { "media" }
+    else if name.starts_with("session_") { "session" }
+    else if name.starts_with("notebook_") || matches!(name, "notebook" | "create_html_note") { "notebook" }
+    else if matches!(name, "use_skill" | "create_skill" | "search_skill" | "validate_skill") { "skill" }
+    else if name.starts_with("plugin") || name == "install_plugin" { "plugin" }
+    else if name.starts_with("provider_")
+        || matches!(name, "list_provider_presets" | "manage_provider_preset" | "update_provider_preset") { "provider" }
+    else if name.starts_with("team_")
+        || matches!(name, "team" | "team_task" | "list_agents" | "interrupt_agent" | "send_message" | "wait_agent"
+            | "spawn_teammate" | "ralph" | "list_subagent_models") { "team" }
+    else if matches!(name, "add_todo" | "list_todo" | "complete_todo" | "manage_todo" | "update_todo") { "todo" }
+    else { name }
 }
 
 /// 判断是否应该触发工具语义筛选
@@ -292,6 +329,23 @@ pub(crate) mod tests {
         assert_eq!(filter.filter(&system, &[0.0,0.0,1.0], 1, 0.22)[0].name, "photo_tool");
         assert_eq!(system.find_tool("photo_tool").unwrap().description(), "photo");
         filter.corpus.finish_evolution(&batch);
+    }
+
+    #[test]
+    fn recall_caps_same_family_siblings() {
+        let filter = ToolSemanticFilter::new(Arc::new(FixtureEmbedding { model: "family" }), "en".into());
+        let system = ToolSystem::new();
+        for name in [
+            "mcp__browser__back", "mcp__browser__forward",
+            "mcp__browser__reload", "mcp__browser__snapshot",
+        ] {
+            system.register_tool(Arc::new(FixtureTool { name, description: "photo" }));
+        }
+        system.register_tool(Arc::new(FixtureTool { name: "read_content", description: "photo" }));
+        let ranked = filter.filter_weighted(&system, &[1.0, 0.0, 0.0], None, 3, 0.22, false);
+        assert_eq!(ranked.len(), 3);
+        assert!(ranked.iter().filter(|r| r.name.starts_with("mcp__browser__")).count() <= 2);
+        assert!(ranked.iter().any(|r| r.name == "read_content"));
     }
 
     #[test]

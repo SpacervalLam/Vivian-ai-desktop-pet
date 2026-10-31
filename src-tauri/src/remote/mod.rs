@@ -784,6 +784,7 @@ async fn chat_handler(
     // ── 串行化 brain.think ──
     // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让 HTTP 请求永久挂起。
     state.app_state.session_coordinator.signal_user_input(&char_id);
+    state.app_state.interrupt_companion_execution(&char_id);
     let _brain_lock = instance.think_lock.clone();
     let _brain_guard = match tokio::time::timeout(
         std::time::Duration::from_secs(REMOTE_THINK_LOCK_WAIT_SECS),
@@ -1885,6 +1886,54 @@ async fn list_work_sessions(
     Ok(Json(serde_json::json!({ "sessions": arr })))
 }
 
+/// 手机端只展示工具意图，不把文件正文、完整结果等大字段同步过去。
+///
+/// 保留定位与筛选所需的白名单键，字符串截断到 160 字符；`arguments` 可能是
+/// 单个对象（tool_result），也可能是整批调用数组（tool_use），两种形状都兼容。
+fn compact_argument_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    const LIGHT_KEYS: &[&str] = &[
+        "path", "file_path", "file", "target", "directory", "dir", "pattern", "query",
+        "glob", "keyword", "q", "command", "script", "cmd", "url", "start_line", "end_line",
+        "offset", "limit", "title",
+    ];
+    let object = value.as_object()?;
+    let mut compacted = serde_json::Map::new();
+    for (key, item) in object {
+        if !LIGHT_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        match item {
+            serde_json::Value::String(text) => {
+                let shortened: String = text.chars().take(160).collect();
+                compacted.insert(key.clone(), serde_json::Value::String(shortened));
+            }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => {
+                compacted.insert(key.clone(), item.clone());
+            }
+            _ => {}
+        }
+    }
+    (!compacted.is_empty()).then_some(serde_json::Value::Object(compacted))
+}
+
+fn compact_tool_arguments(value: &Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let value = value.as_ref()?;
+    if let Some(batch) = value.as_array() {
+        let compacted: Vec<serde_json::Value> = batch
+            .iter()
+            .filter_map(|call| {
+                let object = call.as_object()?;
+                let id = object.get("id")?.clone();
+                let name = object.get("name")?.clone();
+                let arguments = object.get("arguments").and_then(compact_argument_value);
+                Some(serde_json::json!({ "id": id, "name": name, "arguments": arguments }))
+            })
+            .collect();
+        return (!compacted.is_empty()).then_some(serde_json::Value::Array(compacted));
+    }
+    compact_argument_value(value)
+}
+
 /// 查询单个工作会话（含最近消息）。
 async fn get_work_session(
     State(_state): State<RemoteAppState>,
@@ -1902,6 +1951,8 @@ async fn get_work_session(
                         "role": m.role,
                         "content": m.content,
                         "tool_name": m.tool_name,
+                        "tool_arguments": compact_tool_arguments(&m.tool_arguments),
+                        "tool_call_id": m.tool_call_id,
                         "tool_success": m.tool_success,
                         "timestamp": m.timestamp,
                     })

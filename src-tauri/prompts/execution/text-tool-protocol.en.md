@@ -1,0 +1,1 @@
+Use JSON tool_calls with tool and arguments fields for necessary operations; otherwise tool_calls=[]. Available tool schemas: {}

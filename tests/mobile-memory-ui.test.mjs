@@ -43,7 +43,7 @@ const server = createServer((req, res) => {
       else if(path.endsWith('/stop')){workStatus='canceled';data={canceled:true};}
       else if(path.endsWith('/answer')){questionPending=false;data={answered:true};}
       else if(path.endsWith('/send')){workStatus='running';data={sent:true};}
-      else data={session_id:path.split('/').at(-1),char_id:'vivian',title:'完善手机端体验',working_directory:'G:\\vivian-rs',status:workStatus,pending_question:questionPending?workQuestion:null,messages:[{role:'user',content:'让手机端更完整一些。',timestamp:1792026000000},{role:'tool',tool_name:'read_file',content:'<script>window.unsafeWork=true</script>',tool_success:true,timestamp:1792026001000},{role:'assistant',content:'**界面已经准备好。**\n\n接下来检查小屏幕和键盘遮挡。\n\n```js\nconst message = "你好";\n```',timestamp:1792026002000}],deliverables:['G:\\vivian-rs\\mobile.html'],work_todos:[{content:'完成手机布局',status:'completed'}]};
+      else data={session_id:path.split('/').at(-1),char_id:'vivian',title:'完善手机端体验',working_directory:'G:\\vivian-rs',status:workStatus,pending_question:questionPending?workQuestion:null,messages:[{role:'user',content:'让手机端更完整一些。',timestamp:1792026000000},{role:'thinking',content:'先看看工作区里的文件，再决定改哪一处。<script>window.unsafeWork=true</script>',timestamp:1792026000050},{role:'tool_use',tool_name:null,tool_call_id:null,tool_arguments:[{id:'call-read',name:'read_file',arguments:{path:'G:\\vivian-rs\\src-tauri\\src\\remote\\frontend\\index.html'}},{id:'call-search',name:'grep_search',arguments:{pattern:'unsafeWork'}}],timestamp:1792026000100},{role:'tool_result',tool_call_id:'call-read',tool_name:'read_file',tool_arguments:{path:'G:\\vivian-rs\\src-tauri\\src\\remote\\frontend\\index.html'},content:'{"total_lines":1200}\n<script>window.unsafeWork=true</script>',tool_success:true,timestamp:1792026000100},{role:'tool_result',tool_call_id:'call-search',tool_name:'grep_search',tool_arguments:{pattern:'unsafeWork'},content:'{"matches":[{"file":"src-tauri/src/remote/frontend/companion-ui.js"}],"total":1}',tool_success:true,timestamp:1792026000150},{role:'assistant',content:'**界面已经准备好。**\n\n接下来检查小屏幕和键盘遮挡。\n\n```js\nconst message = "你好";\n```',timestamp:1792026002000}],deliverables:['G:\\vivian-rs\\mobile.html'],work_todos:[{content:'完成手机布局',status:'completed'}]};
     }
     else if (companionFixtures && path.endsWith('/mind'))data={current_thought:owner==='nana'?'想把今天的小事写下来。':'窗边的阳光很好，想再陪你坐一会儿。',inner_monologue_enabled:true,attention_top:[{entity:'一起散步',weight:.8}],goals:[{description:'把今天的约定完成'}]};
     else if (companionFixtures && path.endsWith('/mood'))data={primary_emotion:'curiosity',arousal:.4,fatigue:0,stress:.12};
@@ -203,7 +203,8 @@ try {
     assert.equal(await evaluate(`document.querySelector('.mobile-nav [aria-current="page"]').dataset.page`),'wechat');
     await evaluate(`openWxChat('vivian')`);await delay(200);
     await evaluate(`document.getElementById('wxInput').value='一条新消息';onWxInput()`);
-    const chat=await evaluate(`(() => {const bar=document.querySelector('.wx-input-bar').getBoundingClientRect(),input=document.getElementById('wxInput').getBoundingClientRect();return {right:bar.right,width:input.width,bottom:bar.bottom,navTop:document.querySelector('.mobile-nav').getBoundingClientRect().top,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
+    await evaluate(`Promise.all(Array.from(document.getElementById('pageWechat').getAnimations()).map(animation=>animation.finished.catch(()=>{}))).then(()=>true)`);
+    const chat=await evaluate(`(() => {const bar=document.querySelector('.wx-input-bar').getBoundingClientRect(),input=document.getElementById('wxInput').getBoundingClientRect();return {width:input.width,bottom:bar.bottom,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
     assert(!chat.overflow&&chat.width>=60&&chat.bottom<=h+1,JSON.stringify(chat));
     await evaluate(`toggleWxDrawer('emoji')`);
     assert(await evaluate(`document.getElementById('wxEmojiDrawer').clientHeight>0`));
@@ -280,6 +281,20 @@ try {
   await evaluate(`document.querySelector('[data-work-id]').click()`);await delay(250);
   assert(await evaluate(`document.getElementById('workQuestion').textContent.includes('下一步')`));
   assert.equal(await evaluate(`window.unsafeWork`),undefined);
+  assert.equal(await evaluate(`document.getElementById('workProcessEntry').hidden`),false);
+  assert(await evaluate(`document.getElementById('workProcessSummaryText').textContent.includes('读取 1 个文件')`));
+  assert(await evaluate(`document.getElementById('workProcessSummaryText').textContent.includes('搜索 1 次')`));
+  await evaluate(`document.getElementById('workProcessEntry').click()`);await delay(250);
+  assert.equal(await evaluate(`document.getElementById('workProcessSheet').hidden`),false);
+  assert(await evaluate(`document.querySelector('#workProcessList').textContent.includes('读取文件')`));
+  assert(await evaluate(`document.querySelector('#workProcessList details[data-key]')!==null`));
+  assert.equal(await evaluate(`window.unsafeWork`),undefined);
+  await evaluate(`document.querySelector('[data-process-filter="failed"]').click()`);await delay(100);
+  assert(await evaluate(`document.getElementById('workProcessList').textContent.includes('这个筛选下没有内容')`));
+  await evaluate(`document.querySelector('[data-process-filter="all"]').click()`);await delay(100);
+  await evaluate(`document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);await delay(100);
+  assert.equal(await evaluate(`document.getElementById('workProcessSheet').hidden`),true);
+  assert.equal(await evaluate(`document.getElementById('workDetail').hidden`),false);
   await shot('work-question');
   await evaluate(`document.querySelector('#workAnswerForm input').checked=true;document.getElementById('workAnswerForm').requestSubmit()`);await delay(250);
   const answer=requests.findLast(r=>r.path==='/api/work/sessions/work-fixture/answer');assert.equal(JSON.parse(answer.body).question_id,42);assert.deepEqual(JSON.parse(answer.body).answer.selected,['完善手机界面']);

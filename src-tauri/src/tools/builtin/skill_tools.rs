@@ -4,7 +4,12 @@
 //! LLM 判断某项技能适用时调用 use_skill 获取技能正文，按其指引行动。
 //! 这样技能正文不常驻上下文，按需激活，控制 token 开销。
 //!
-//! create_skill 是自进化闭环的写入侧：智能体把复用做法沉淀为技能文件，
+//! 读侧合并为 `use_skill` 一个入口，三种动作：
+//! - `use`：按名称激活技能正文（默认；旧 use_skill 形状）
+//! - `search`：按自然语言召回候选（旧 search_skill 形状：有 query）
+//! - `validate`：交付前校验形态，只读（旧 validate_skill 形状：有 content）
+//!
+//! `create_skill` 是自进化闭环的写入侧：智能体把复用做法沉淀为技能文件，
 //! 写入即注册（不等热重载），之后会话可通过 use_skill 激活。
 
 use async_trait::async_trait;
@@ -15,7 +20,121 @@ use crate::tools::types::{
     ValidationResult,
 };
 
-/// use_skill 工具 - 按名称激活技能，返回技能正文供 LLM 遵循。
+/// 读侧技能动作解析（旧工具没有 action 参数）。
+///
+/// 旧参数形状：`content` → validate；`query` → search；其余 → use。
+/// `name` 单给时默认 use——旧 `validate_skill(name)` 与 `use_skill(name)` 形状
+/// 完全相同，只能选更常用的激活；按名校验需显式 `action:"validate"`。
+pub(crate) fn effective_skill_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("content").is_some() {
+        "validate".to_string()
+    } else if args.get("query").is_some() {
+        "search".to_string()
+    } else {
+        "use".to_string()
+    }
+}
+
+const SKILL_ACTIONS: &[&str] = &["use", "search", "validate"];
+
+fn skill_schema(lang: &str) -> Value {
+    match lang {
+        "zh" => json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": SKILL_ACTIONS,
+                    "description": "use：按名称激活技能正文（默认）；search：按自然语言召回候选（只回名称+描述+关键词）；validate：交付前校验技能形态（只读）"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "要激活（use）或校验（validate）的技能名称（来自「可用技能」段落）"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "search 用：用自然语言描述你的需求；按技能名称/描述/关键词匹配（中英文自动分词）"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "search 返回的最大技能数，默认 5",
+                    "minimum": 1
+                },
+                "content": {
+                    "type": "string",
+                    "description": "validate 用：要校验的 SKILL.md 草稿文本；同时给出 name 时以 content 为准，name 作兜底技能名"
+                }
+            },
+            "required": []
+        }),
+        "ja" => json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": SKILL_ACTIONS,
+                    "description": "use：名前で本文を有効化（既定）；search：自然言語で候補を召回（名前+説明+キーワードのみ）；validate：納品前の形式検証（読み取り専用）"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "有効化（use）または検証（validate）するスキル名（「可用技能」セクションから）"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "search 用：ニーズを自然言語で記述；スキル名/説明/キーワードにマッチ"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "search が返すスキルの最大数、デフォルト 5",
+                    "minimum": 1
+                },
+                "content": {
+                    "type": "string",
+                    "description": "validate 用：検証する SKILL.md 草稿。両方指定時は content 優先、name はフォールバック名"
+                }
+            },
+            "required": []
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": SKILL_ACTIONS,
+                    "description": "use: activate a skill by name (default); search: recall candidates from a natural-language need (name+description+keywords only); validate: shape-check a skill (read-only)"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Skill name to activate (use) or validate (from the 可用技能 section)"
+                },
+                "query": {
+                    "type": "string",
+                    "description": "For search: natural-language description of what you need; matched against skill name/description/keywords"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "For search: maximum number of skills to return, default 5",
+                    "minimum": 1
+                },
+                "content": {
+                    "type": "string",
+                    "description": "For validate: draft SKILL.md text to validate; when name is also given, content wins and name is the fallback skill name"
+                }
+            },
+            "required": []
+        }),
+    }
+}
+
+/// use_skill 工具 - 技能读侧统一入口：激活正文 / 自然语言召回 / 形态校验。
 pub struct UseSkillTool;
 
 impl UseSkillTool {
@@ -37,137 +156,107 @@ impl Tool for UseSkillTool {
     }
 
     fn description(&self) -> &str {
-        "Activate a skill by name to get its full instructions, then follow them. \
-         Available skills are listed in the '## 可用技能' prompt section. \
-         Call this when a skill matches the current task, then act according to the returned content."
+        "One entry for the read side of the skill library. Actions: \
+         use (default; activate a skill by exact name and return its full instructions — the skill list is in the \
+         '## 可用技能' prompt section), \
+         search (recall candidates from a natural-language need; returns name + description + keywords only, ranked by relevance), \
+         validate (shape-check before shipping: front-matter, naming, unfinished placeholders, stray auxiliary docs; read-only). \
+         When you know the exact name, activate directly; search only when you are unsure which skill fits. \
+         After a search, activate the chosen one by name. Skills grant no permissions and execute nothing: \
+         follow their guidance only with tools that are registered and approved."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "按名称激活一项技能，获取其完整指引后照做。可用技能列在 prompt 的「## 可用技能」段落中。\
-            当某项技能与当前任务匹配时调用本工具，然后按返回的技能正文行动。",
-            "ja" => "スキル名を指定して有効化し、完全な指示を取得して従う。利用可能なスキルは prompt の「## 可用技能」\
-            セクションに一覧表示される。現在のタスクに合うスキルがある場合にこのツールを呼び出し、\
-            返された内容に沿って行動する。",
+            "zh" => "技能库读侧的统一入口。action 取值：\
+            use（默认，按精确名称激活技能并返回完整指引——可用技能列在 prompt 的「## 可用技能」段落）、\
+            search（按自然语言召回候选，只返回名称+描述+关键词，按相关性排序）、\
+            validate（交付前校验形态：front-matter、命名、未完成占位符与多余附属文档，只读）。\
+            已知精确名称就直接激活；只有不确定该用哪项时才 search，选定后再按名称激活。\
+            技能不授予权限、不执行操作：只按它的指引使用已注册且获准的工具。",
+            "ja" => "スキルライブラリ読み取り側の統一入口。action：\
+            use（既定。正確な名前で有効化し完全な指示を返す——「## 可用技能」セクションに一覧）、\
+            search（自然言語で候補を召回。名前+説明+キーワードのみを関連度順に返す）、\
+            validate（納品前の形式検証：front-matter・命名・未完成プレースホルダ・余計な付属文書。読み取り専用）。\
+            正確な名前が分かっていれば直接有効化；どれを使うか不明な時だけ search し、選定後に名前で有効化。\
+            スキルは権限を付与せず、何も実行しない：登録済みで許可されたツールだけを使う。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "用一下那个技能\n调用技能\n跑一下这个技能",
-            "en" => "use that skill\nrun this skill\napply the skill",
-            "ja" => "そのスキルを使って\nスキルを実行して\n技能を適用して",
+            "zh" => "用一下那个技能\n调用技能\n跑一下这个技能\n有没有相关的技能\n搜一下技能\n校验技能\n检查技能格式",
+            "en" => "use that skill\nrun this skill\napply the skill\nis there a skill for this\nsearch skills\nvalidate this skill",
+            "ja" => "そのスキルを使って\nスキルを実行して\n関連するスキルはある？\nスキルを検索して\nスキルを検証して",
             _ => "",
         }
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name to activate (from the 可用技能 section)"
-                }
-            },
-            "required": ["name"]
-        })
+        skill_schema("en")
     }
 
     fn parameters_schema_in(&self, lang: &str) -> Value {
-        match lang {
-            "zh" => json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "要激活的技能名称（来自「可用技能」段落）"
-                    }
-                },
-                "required": ["name"]
-            }),
-            "ja" => json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "有効化するスキル名（「可用技能」セクションから）"
-                    }
-                },
-                "required": ["name"]
-            }),
-            _ => self.parameters_schema(),
-        }
+        skill_schema(lang)
     }
 
     async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
-        match input.get("name").and_then(|v| v.as_str()) {
-            Some(s) if !s.trim().is_empty() => ValidationResult::success(Some(json!({ "name": s.trim() }))),
-            _ => ValidationResult::failure("name 是必填项", 2),
+        let action = effective_skill_action(input);
+        if !SKILL_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                &format!(
+                    "不支持的 action: {action}（可选：{}）",
+                    SKILL_ACTIONS.join(" / ")
+                ),
+                2,
+            );
+        }
+        match action.as_str() {
+            "use" => match input.get("name").and_then(Value::as_str) {
+                Some(name) if !name.trim().is_empty() => {
+                    ValidationResult::success(Some(json!({ "name": name.trim() })))
+                }
+                _ => ValidationResult::failure("name 是必填项（要激活的技能名）", 2),
+            },
+            "search" => match input.get("query").and_then(Value::as_str) {
+                Some(query) if !query.trim().is_empty() => {
+                    ValidationResult::success(Some(json!({ "query": query.trim() })))
+                }
+                _ => ValidationResult::failure("query 不能为空（用自然语言描述需求）", 2),
+            },
+            _ => {
+                let has_name = input
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
+                let has_content = input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !has_name && !has_content {
+                    return ValidationResult::failure("validate 需要 name 或 content", 2);
+                }
+                ValidationResult::success(None)
+            }
         }
     }
 
     async fn check_permissions(&self, _input: &Value, _context: &ToolUseContext) -> PermissionResult {
-        // 只读检索技能正文，无副作用，无需确认
+        // 三种动作都只读，无副作用，无需确认
         PermissionResult::allow()
     }
 
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let char_id = context.char_id.clone();
-
-        let Some(svc) = crate::cordis::global_ctx()
-            .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
-        else {
-            return ToolResult::standard_error("技能服务不可用", None, None);
-        };
-
-        // 限定当前角色可见的技能（全局 + 该角色 scoped）
-        let skill = svc.list_for(&char_id).into_iter().find(|s| s.name == name);
-        match skill {
-            Some(s) => {
-                let resources_hint = if s.resources.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\n\n该技能目录内还带有以下支撑资源（当前任务确实需要时再用 read_file 读取，不必全部预读）：\n{}",
-                        s.resources
-                            .iter()
-                            .map(|relative| format!("- {relative}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )
-                };
-                ToolResult::standard_success(
-                    &format!(
-                        "技能「{}」使用指导已加载；它不执行操作、不授予权限，也不安装工具。只使用已注册且获准的能力，缺少能力时说明限制：\n\n{}{}",
-                        s.name, s.body, resources_hint
-                    ),
-                    Some(json!({
-                        "name": s.name,
-                        "activated": true,
-                        "kind": "usage_guidance",
-                        "executes": false,
-                        "resources": s.resources,
-                    })),
-                )
-            }
-            None => {
-                // 附带可见技能列表，方便 LLM 纠正名称后重试
-                let available: Vec<String> =
-                    svc.list_for(&char_id).iter().map(|s| s.name.clone()).collect();
-                ToolResult::standard_error(
-                    &format!("未找到技能「{}」。当前可用技能：{}", name, available.join("、")),
-                    None,
-                    None,
-                )
-            }
+        match effective_skill_action(&args).as_str() {
+            "use" => activate_skill(args, context).await,
+            "search" => search_skill_candidates(args, context).await,
+            "validate" => validate_skill_shape(args).await,
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"),
+                Some("InvalidAction"),
+                None,
+            ),
         }
     }
 
@@ -183,6 +272,205 @@ impl Tool for UseSkillTool {
     fn risk(&self) -> ToolRiskTier {
         ToolRiskTier::FsRead
     }
+
+    fn search_hint(&self) -> &str {
+        "skill 技能 激活 搜索技能 召回技能 校验技能 use discover validate"
+    }
+
+    fn anti_use_cases(&self) -> &[&str] {
+        &[
+            "创建或更新技能（改用 create_skill）",
+            "搜索工具而非技能（改用 tool_search）",
+            "搜索记忆事实（改用 search_memory）",
+        ]
+    }
+}
+
+/// action=use：按名称激活，返回技能正文与资源清单。
+async fn activate_skill(args: Value, context: &ToolUseContext) -> ToolResult {
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let char_id = context.char_id.clone();
+
+    let Some(svc) = crate::cordis::global_ctx()
+        .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
+    else {
+        return ToolResult::standard_error("技能服务不可用", None, None);
+    };
+
+    // 限定当前角色可见的技能（全局 + 该角色 scoped）
+    let skill = svc.list_for(&char_id).into_iter().find(|s| s.name == name);
+    match skill {
+        Some(s) => {
+            let resources_hint = if s.resources.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n该技能目录内还带有以下支撑资源（当前任务确实需要时再用 read_file 读取，不必全部预读）：\n{}",
+                    s.resources
+                        .iter()
+                        .map(|relative| format!("- {relative}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            ToolResult::standard_success(
+                &format!(
+                    "技能「{}」使用指导已加载；它不执行操作、不授予权限，也不安装工具。只使用已注册且获准的能力，缺少能力时说明限制：\n\n{}{}",
+                    s.name, s.body, resources_hint
+                ),
+                Some(json!({
+                    "name": s.name,
+                    "activated": true,
+                    "kind": "usage_guidance",
+                    "executes": false,
+                    "resources": s.resources,
+                })),
+            )
+        }
+        None => {
+            // 附带可见技能列表，方便 LLM 纠正名称后重试
+            let available: Vec<String> =
+                svc.list_for(&char_id).iter().map(|s| s.name.clone()).collect();
+            ToolResult::standard_error(
+                &format!("未找到技能「{}」。当前可用技能：{}", name, available.join("、")),
+                None,
+                None,
+            )
+        }
+    }
+}
+
+/// action=search：BM25 召回候选（不含正文），选定后再按名称激活。
+async fn search_skill_candidates(args: Value, ctx: &ToolUseContext) -> ToolResult {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let max_results = args
+        .get("max_results")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5)
+        .max(1) as usize;
+
+    let Some(svc) = crate::cordis::global_ctx()
+        .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
+    else {
+        return ToolResult::standard_error("技能服务不可用", None, None);
+    };
+
+    let char_id = ctx.char_id.clone();
+    let hits = svc.search_skills(&char_id, query, max_results);
+    if hits.is_empty() {
+        return ToolResult::standard_success(
+            "没有匹配的技能。可换一组关键词重试，或用 create_skill 沉淀一项新技能。",
+            Some(json!({ "matches": [], "query": query })),
+        );
+    }
+
+    let matches: Vec<Value> = hits
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "keywords": s.keywords,
+            })
+        })
+        .collect();
+    let lines: Vec<String> = hits
+        .iter()
+        .map(|s| format!("- {}：{}", s.name, s.description))
+        .collect();
+
+    ToolResult::standard_success(
+        &format!(
+            "按需求召回 {} 项技能：\n{}\n选定后调用 use_skill(name) 加载其完整指引。",
+            hits.len(),
+            lines.join("\n")
+        ),
+        Some(json!({
+            "matches": matches,
+            "query": query,
+            "max_results": max_results,
+        })),
+    )
+}
+
+/// 解析已注册技能用于校验：内置技能与单文件技能返回正文，目录化技能返回其目录。
+fn resolve_skill_for_validation(name: &str) -> Option<Result<std::path::PathBuf, String>> {
+    let svc = crate::cordis::global_ctx()
+        .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())?;
+    let skill = svc.find(name)?;
+    let Some(path) = skill.path.clone() else {
+        return Some(Err(skill.body));
+    };
+    let candidate = std::path::PathBuf::from(&path);
+    if candidate.is_dir() {
+        Some(Ok(candidate))
+    } else {
+        Some(Err(skill.body))
+    }
+}
+
+/// action=validate：校验草稿文本或已注册技能，只读。
+async fn validate_skill_shape(args: Value) -> ToolResult {
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .filter(|c| !c.trim().is_empty());
+    let draft = content.map(|c| c.to_string());
+
+    let (validation, target) = if let Some(draft) = draft {
+        let fallback = if name.is_empty() { "skill".to_string() } else { name.clone() };
+        (
+            crate::skills::validate::validate_skill_text(&fallback, &draft),
+            format!("草稿文本（兜底名 {fallback}）"),
+        )
+    } else if !name.is_empty() {
+        match resolve_skill_for_validation(&name) {
+            Some(Ok(dir)) => (
+                crate::skills::validate::validate_skill_dir(&dir),
+                dir.display().to_string(),
+            ),
+            Some(Err(body)) => (
+                crate::skills::validate::validate_skill_text(&name, &body),
+                format!("技能「{name}」"),
+            ),
+            None => {
+                return ToolResult::standard_error(&format!("未找到技能「{name}」"), None, None)
+            }
+        }
+    } else {
+        return ToolResult::standard_error("name 与 content 至少给一项", None, None);
+    };
+
+    let ok = validation.ok;
+    let lines: Vec<String> = validation
+        .issues
+        .iter()
+        .map(|issue| format!("[{}] {}：{}", issue.level, issue.code, issue.message))
+        .collect();
+    let summary = if lines.is_empty() {
+        format!("技能校验通过（{target}），未发现问题。")
+    } else {
+        format!(
+            "技能校验{}（{target}）：\n{}",
+            if ok { "通过（含提示）" } else { "未通过" },
+            lines.join("\n")
+        )
+    };
+    ToolResult::standard_success(
+        &summary,
+        Some(json!({ "ok": ok, "issues": validation.issues, "target": target })),
+    )
 }
 
 /// create_skill 工具 - 智能体自主封装可复用技能（能力自进化闭环）。
@@ -266,7 +554,7 @@ impl Tool for CreateSkillTool {
          as a folder `<name>/SKILL.md`; optional text resources go under `references/` or \
          `scripts/`. Use this to distill a reusable procedure into a named skill, so it appears \
          in the '## 可用技能' list and can be activated later via use_skill. Provide keywords \
-         (synonyms, trigger phrases, related terms) so search_skill can recall it later. \
+         (synonyms, trigger phrases, related terms) so use_skill can recall it later by description. \
          Same-name skills are overwritten."
     }
 
@@ -275,12 +563,12 @@ impl Tool for CreateSkillTool {
             "zh" => "创建或更新一项可复用技能，并立即注册。新技能以目录形态写入 `<name>/SKILL.md`，\
             可选文本资源放在 `references/` 或 `scripts/` 下。当你总结出一套值得复用的做法时，\
             把它沉淀为命名技能，技能会出现在「## 可用技能」列表中，之后通过 use_skill 激活。\
-            请提供 keywords（同义词、触发短语、相关词），以便之后 search_skill 能用自然语言召回它。\
+            请提供 keywords（同义词、触发短语、相关词），以便之后 use_skill 能用自然语言召回它。\
             同名技能会被覆盖更新。",
             "ja" => "再利用可能なスキルを作成・更新する：Markdown 形式の指示ファイルとしてスキルディレクトリに保存し、即座に登録する。\
             繰り返し使える手順（例：複数ステップのタスクの処理方法）を名前付きスキルとしてまとめると、\
             「## 可用技能」リストに表示され、後から use_skill で有効化できる。\
-            keywords（同義語・トリガー句・関連語）を指定すると、後で search_skill が自然言語で呼び出せる。\
+            keywords（同義語・トリガー句・関連語）を指定すると、後で use_skill が自然言語で呼び出せる。\
             同名スキルは上書きされる。",
             _ => self.description(),
         }
@@ -314,7 +602,7 @@ impl Tool for CreateSkillTool {
                 "keywords": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional retrieval terms (synonyms, trigger phrases, related words) used by search_skill to recall this skill; not shown in the 可用技能 list"
+                    "description": "Optional retrieval terms (synonyms, trigger phrases, related words) used by use_skill to recall this skill; not shown in the 可用技能 list"
                 },
                 "layout": {
                     "type": "string",
@@ -358,7 +646,7 @@ impl Tool for CreateSkillTool {
                     "keywords": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "可选检索词（同义词、触发短语、相关词），供 search_skill 召回此技能；不显示在「可用技能」列表中"
+                        "description": "可选检索词（同义词、触发短语、相关词），供 use_skill 召回此技能；不显示在「可用技能」列表中"
                     },
                     "layout": {
                         "type": "string",
@@ -398,7 +686,7 @@ impl Tool for CreateSkillTool {
                     "keywords": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "任意の検索語（同義語・トリガー句・関連語）。search_skill がこのスキルを召回するのに使用、「可用技能」リストには表示されない"
+                        "description": "任意の検索語（同義語・トリガー句・関連語）。use_skill がこのスキルを召回するのに使用、「可用技能」リストには表示されない"
                     },
                     "layout": {
                         "type": "string",
@@ -630,7 +918,7 @@ impl Tool for CreateSkillTool {
         };
         ToolResult::standard_success(
             &format!(
-                "技能「{name}」已{}，立即生效（含 {} 个检索关键词{}）。之后可随时调用 use_skill(\"{name}\") 按其指引行动，或用 search_skill 按关键词召回。",
+                "技能「{name}」已{}，立即生效（含 {} 个检索关键词{}）。之后可随时调用 use_skill(\"{name}\") 按其指引行动，或用 use_skill(query=\"…\") 按需求召回。",
                 if is_update { "更新" } else { "创建" },
                 keywords.len(),
                 warnings_hint
@@ -677,411 +965,6 @@ impl Tool for CreateSkillTool {
     }
 }
 
-/// search_skill 工具 - 按自然语言召回当前角色可见的技能（名称/描述/关键词），
-/// 返回候选技能的名称+描述（不含正文），由 LLM 选定后再用 use_skill 加载正文。
-/// 与 tool_search 对延迟工具的两段式加载同构：先召回定位，再按需取全文。
-pub struct SearchSkillTool;
-
-impl SearchSkillTool {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for SearchSkillTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Tool for SearchSkillTool {
-    fn name(&self) -> &str {
-        "search_skill"
-    }
-
-    fn description(&self) -> &str {
-        "Recall reusable skills that match a natural-language need. \
-         Use this when: (1) you are unsure which skill fits the current task; \
-         (2) the '## 可用技能' list does not obviously contain a match; \
-         (3) you want to discover skills by what they do rather than by exact name. \
-         Returns each match's name + description (+ keywords), ranked by relevance — NOT the full body. \
-         After picking one, call use_skill(name) to load its full instructions. \
-         Do NOT use this to load a skill you already know the exact name of (call use_skill directly)."
-    }
-
-    fn description_in(&self, lang: &str) -> &str {
-        match lang {
-            "zh" => "按自然语言召回与当前需求匹配的可复用技能。适用场景：(1) 不确定该用哪项技能；\
-            (2)「## 可用技能」列表里没有明显匹配项；(3) 想按“能做什么”而非精确名称来找技能。\
-            返回每个匹配项的名称+描述(+关键词)，按相关性排序——不含正文。\
-            选定后再调用 use_skill(name) 加载完整指引。\
-            已知技能精确名称时不要用本工具（直接 use_skill）。",
-            "ja" => "自然言語で現在のニーズに合う再利用可能スキルを召回する。使用場面：(1) どのスキルを使うか不明；\
-            (2)「## 可用技能」リストに明白な一致がない；(3) 正確な名前ではなく機能でスキルを探したい。\
-            各一致の名称+説明(+キーワード)を関連度順に返す——本文は含まない。\
-            選定後に use_skill(name) で完全な指示を読み込む。\
-            正確なスキル名が既知の場合は本ツールを使わない（直接 use_skill）。",
-            _ => self.description(),
-        }
-    }
-
-    fn usage_corpus(&self, lang: &str) -> &'static str {
-        match lang {
-            "zh" => "有没有相关的技能\n找个能用在这个情况的技能\n搜一下技能",
-            "en" => "is there a skill for this\nfind a relevant skill\nsearch skills",
-            "ja" => "関連するスキルはある？\nこの状況に合うスキルを探して\nスキルを検索して",
-            _ => "",
-        }
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural-language description of what you need; matched against skill name/description/keywords (auto-tokenized for Chinese and English)"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of skills to return, default 5",
-                    "minimum": 1
-                }
-            },
-            "required": ["query"]
-        })
-    }
-
-    fn parameters_schema_in(&self, lang: &str) -> Value {
-        match lang {
-            "zh" => json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "用自然语言描述你的需求；按技能名称/描述/关键词匹配（中英文自动分词）"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "返回的最大技能数，默认 5",
-                        "minimum": 1
-                    }
-                },
-                "required": ["query"]
-            }),
-            "ja" => json!({
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "ニーズを自然言語で記述；スキル名/説明/キーワードにマッチ（中英自動分かち書き）"
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": "返すスキルの最大数、デフォルト 5",
-                        "minimum": 1
-                    }
-                },
-                "required": ["query"]
-            }),
-            _ => self.parameters_schema(),
-        }
-    }
-
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        if query.trim().is_empty() {
-            return ValidationResult::failure("query 不能为空", 2);
-        }
-        ValidationResult::success(Some(input.clone()))
-    }
-
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::allow()
-    }
-
-    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5)
-            .max(1) as usize;
-
-        let Some(svc) = crate::cordis::global_ctx()
-            .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())
-        else {
-            return ToolResult::standard_error("技能服务不可用", None, None);
-        };
-
-        let char_id = ctx.char_id.clone();
-        let hits = svc.search_skills(&char_id, query, max_results);
-        if hits.is_empty() {
-            return ToolResult::standard_success(
-                "没有匹配的技能。可换一组关键词重试，或用 create_skill 沉淀一项新技能。",
-                Some(json!({ "matches": [], "query": query })),
-            );
-        }
-
-        let matches: Vec<Value> = hits
-            .iter()
-            .map(|s| {
-                json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "keywords": s.keywords,
-                })
-            })
-            .collect();
-        let lines: Vec<String> = hits
-            .iter()
-            .map(|s| format!("- {}：{}", s.name, s.description))
-            .collect();
-
-        ToolResult::standard_success(
-            &format!(
-                "search_skill 召回 {} 项技能：\n{}\n选定后调用 use_skill(name) 加载其完整指引。",
-                hits.len(),
-                lines.join("\n")
-            ),
-            Some(json!({
-                "matches": matches,
-                "query": query,
-                "max_results": max_results,
-            })),
-        )
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::System
-    }
-
-    /// 权限风险等级：读取本地文件 / 持久化数据，无写入
-    fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::FsRead
-    }
-
-    fn search_hint(&self) -> &str {
-        "search skill 搜索技能 召回技能 找技能 匹配技能 discover skill"
-    }
-
-    fn anti_use_cases(&self) -> &[&str] {
-        &[
-            "已知技能精确名称、只想加载正文（直接 use_skill）",
-            "搜索工具而非技能（改用 tool_search）",
-            "搜索记忆事实（改用 memory_search）",
-        ]
-    }
-}
-
-/// 解析已注册技能用于校验：内置技能与单文件技能返回正文，目录化技能返回其目录。
-fn resolve_skill_for_validation(name: &str) -> Option<Result<std::path::PathBuf, String>> {
-    let svc = crate::cordis::global_ctx()
-        .and_then(|ctx| ctx.get_service::<crate::skills::SkillService>())?;
-    let skill = svc.find(name)?;
-    let Some(path) = skill.path.clone() else {
-        return Some(Err(skill.body));
-    };
-    let candidate = std::path::PathBuf::from(&path);
-    if candidate.is_dir() {
-        Some(Ok(candidate))
-    } else {
-        Some(Err(skill.body))
-    }
-}
-
-/// validate_skill 工具 - 交付前校验技能形态：front-matter、命名、占位符与目录卫生。
-///
-/// 传 `name` 校验已注册技能（含内置技能与插件技能）；传 `content` 校验草稿文本。
-/// 两者都给出时以 `content` 为准，`name` 作兜底技能名。只读，无副作用。
-pub struct ValidateSkillTool;
-
-impl ValidateSkillTool {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for ValidateSkillTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Tool for ValidateSkillTool {
-    fn name(&self) -> &str {
-        "validate_skill"
-    }
-
-    fn description(&self) -> &str {
-        "Validate a skill's shape before shipping it: front-matter, naming, unfinished placeholders \
-         and stray auxiliary docs. Pass `name` to check an existing skill, or `content` to check \
-         draft text (with `name` as the fallback skill name). Read-only."
-    }
-
-    fn description_in(&self, lang: &str) -> &str {
-        match lang {
-            "zh" => "交付前校验技能形态：front-matter 是否完整、命名是否合规、有没有未完成的占位符与多余附属文档。\
-            传 `name` 校验已注册技能（含内置与插件技能）；传 `content` 校验草稿文本（`name` 作兜底技能名）。\
-            只读，无副作用。",
-            "ja" => "納品前にスキルの形を検証する：front-matter・命名・未完成プレースホルダ・余計な付属文書。\
-            `name` で登録済みスキル、`content` で草稿テキスト（`name` をフォールバック名に）。読み取り専用。",
-            _ => self.description(),
-        }
-    }
-
-    fn usage_corpus(&self, lang: &str) -> &'static str {
-        match lang {
-            "zh" => "校验技能\n检查技能格式\n技能写对了吗",
-            "en" => "validate this skill\ncheck the skill format",
-            "ja" => "スキルを検証して\nスキルの形式を確認して",
-            _ => "",
-        }
-    }
-
-    fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Existing skill name to validate (builtin and plugin skills included)"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Draft SKILL.md text to validate; when both are given, content wins and name is the fallback skill name"
-                }
-            }
-        })
-    }
-
-    fn parameters_schema_in(&self, lang: &str) -> Value {
-        match lang {
-            "zh" => json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "要校验的已注册技能名（含内置与插件技能）" },
-                    "content": { "type": "string", "description": "要校验的 SKILL.md 草稿文本；同时给出时以 content 为准，name 作兜底技能名" }
-                }
-            }),
-            "ja" => json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "検証する登録済みスキル名（組み込み・プラグイン含む）" },
-                    "content": { "type": "string", "description": "検証する SKILL.md 草稿。両方指定時は content 優先、name はフォールバック名" }
-                }
-            }),
-            _ => self.parameters_schema(),
-        }
-    }
-
-    async fn validate_input(&self, input: &Value, _context: &ToolUseContext) -> ValidationResult {
-        let has_name = input
-            .get("name")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.trim().is_empty());
-        let has_content = input
-            .get("content")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.trim().is_empty());
-        if !has_name && !has_content {
-            return ValidationResult::failure("name 与 content 至少给一项", 2);
-        }
-        ValidationResult::success(None)
-    }
-
-    async fn check_permissions(&self, _input: &Value, _context: &ToolUseContext) -> PermissionResult {
-        PermissionResult::allow()
-    }
-
-    async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
-        let name = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .filter(|c| !c.trim().is_empty());
-        let draft = content.map(|c| c.to_string());
-
-        let (validation, target) = if let Some(draft) = draft {
-            let fallback = if name.is_empty() { "skill".to_string() } else { name.clone() };
-            (
-                crate::skills::validate::validate_skill_text(&fallback, &draft),
-                format!("草稿文本（兜底名 {fallback}）"),
-            )
-        } else if !name.is_empty() {
-            match resolve_skill_for_validation(&name) {
-                Some(Ok(dir)) => (
-                    crate::skills::validate::validate_skill_dir(&dir),
-                    dir.display().to_string(),
-                ),
-                Some(Err(body)) => (
-                    crate::skills::validate::validate_skill_text(&name, &body),
-                    format!("技能「{name}」"),
-                ),
-                None => {
-                    return ToolResult::standard_error(&format!("未找到技能「{name}」"), None, None)
-                }
-            }
-        } else {
-            return ToolResult::standard_error("name 与 content 至少给一项", None, None);
-        };
-
-        let ok = validation.ok;
-        let lines: Vec<String> = validation
-            .issues
-            .iter()
-            .map(|issue| format!("[{}] {}：{}", issue.level, issue.code, issue.message))
-            .collect();
-        let summary = if lines.is_empty() {
-            format!("技能校验通过（{target}），未发现问题。")
-        } else {
-            format!(
-                "技能校验{}（{target}）：\n{}",
-                if ok { "通过（含提示）" } else { "未通过" },
-                lines.join("\n")
-            )
-        };
-        ToolResult::standard_success(
-            &summary,
-            Some(json!({ "ok": ok, "issues": validation.issues, "target": target })),
-        )
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::System
-    }
-
-    fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::FsRead
-    }
-
-    fn search_hint(&self) -> &str {
-        "validate skill 校验技能 检查技能格式 skill check lint 形态"
-    }
-
-    fn anti_use_cases(&self) -> &[&str] {
-        &[
-            "创建或更新技能（改用 create_skill）",
-            "加载技能正文（改用 use_skill）",
-        ]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,5 +992,38 @@ mod tests {
     fn builtin_guard_blocks_guide_skills() {
         assert!(crate::skills::BUILTIN_SKILL_NAMES.contains(&"review-agent"));
         assert!(crate::skills::BUILTIN_SKILL_NAMES.contains(&"skill-creator"));
+    }
+
+    #[test]
+    fn legacy_skill_arguments_infer_actions() {
+        // 旧 use_skill：只有 name（旧 validate_skill(name) 形状相同，只能默认激活）
+        assert_eq!(effective_skill_action(&json!({ "name": "demo" })), "use");
+        // 旧 search_skill：query + max_results
+        assert_eq!(
+            effective_skill_action(&json!({ "query": "更新供应商预设", "max_results": 5 })),
+            "search"
+        );
+        // 旧 validate_skill：content 优先（同时带 name 也走校验）
+        assert_eq!(
+            effective_skill_action(&json!({ "name": "demo", "content": "---\nname: demo\n---" })),
+            "validate"
+        );
+        // 显式 action 永远优先
+        assert_eq!(
+            effective_skill_action(&json!({ "action": " VALIDATE ", "name": "demo" })),
+            "validate"
+        );
+        // 空参数默认 use，交给 validate_input 报缺 name
+        assert_eq!(effective_skill_action(&json!({})), "use");
+    }
+
+    #[test]
+    fn unknown_skill_actions_are_rejected() {
+        for action in ["", "activate", "create", "delete"] {
+            let args = json!({ "action": action, "name": "demo" });
+            let expected = if action.is_empty() { "use" } else { action };
+            assert_eq!(effective_skill_action(&args), expected);
+        }
+        assert!(!SKILL_ACTIONS.contains(&"activate"));
     }
 }

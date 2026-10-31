@@ -1,7 +1,8 @@
-//! 编辑与看图工具：`str_replace_editor`、`read_image`。
+//! 编辑与看图工具：`edit_file` 的内部编辑器实现、`read_image`。
 //!
-//! `str_replace_editor` 是 Claude Code 风格的多动作编辑器（view / create / str_replace / insert / undo）：
-//! 与 `edit_file` 的区别是**能撤销**——改错了不用靠记忆反推原文。
+//! `StrReplaceEditorTool` 是 Claude Code 风格的多动作编辑器（view / create / str_replace / insert / undo），
+//! 现在不再单独注册：`edit_file` 的 `view` / `create` / `insert` / `undo` 动作直接委托给它，
+//! `str_replace` 则在 `edit_file` 内完成并复用这里的撤销栈（改错了不用靠记忆反推原文）。
 //!
 //! `read_image` 让模型真的"看见"图：图片不走 JSON 文本（base64 塞进 data 会吃满上下文），
 //! 而是放进 `ToolResult::images`，由调用方映射成 provider 的 image part。
@@ -22,7 +23,7 @@ use crate::tools::types::{
 /// 单张图片上限（超过就拒绝：base64 之后还会膨胀 1/3，塞进上下文不划算）
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
-fn resolve_path(raw: &str, ctx: &ToolUseContext) -> String {
+pub(crate) fn resolve_path(raw: &str, ctx: &ToolUseContext) -> String {
     let p = std::path::Path::new(raw);
     if p.is_absolute() || ctx.working_directory.trim().is_empty() {
         raw.to_string()
@@ -225,7 +226,7 @@ fn undo_key(session_id: &str, path: &str) -> UndoKey {
     format!("{session_id}|{path}")
 }
 
-fn push_undo(session_id: &str, path: &str, previous: String) {
+pub(crate) fn push_undo(session_id: &str, path: &str, previous: String) {
     let mut stack = undo_stack().lock().unwrap_or_else(|e| e.into_inner());
     let entry = stack.entry(undo_key(session_id, path)).or_default();
     entry.push(previous);

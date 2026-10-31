@@ -195,15 +195,16 @@ impl ToolScene {
                  优先低打扰的回应方式。用户明确请求时不受此限制。"
             }
             ToolScene::Chat => {
-                "当前是陪伴对话场景，工作能力已直接注入：查资料（web_search / read_content）、\
-                 后台任务（run_job / manage_job）、待办（update_todo / add_todo）、\
-                 计划（plan_task）、多步编排（run_workflow）、向用户提问（ask_user）、\
-                 把大型工程任务以用户身份写成完整提示词交给共享的工作智能体执行，并读取其总结（delegate_to_work_agent + get_work_status）。\
-                 优先直接使用这些能力完成用户请求；未列出的工具先调用 tool_search 加载。"
+                "当前是陪伴对话场景。工具分两种面向：认知类（记忆检索/写入、日记、笔记、按时段回忆）\
+                 是你的大脑，先用来回忆和判断；执行类（桌面操作、媒体、终端、文件写入）是你的手脚，\
+                 只在用户确实要求操作或需要现场观察时使用。完整 schema 常驻核心工具；其余能力按需出现：\
+                 需要时先调用 tool_search 取回 schema，或直接按语义召回结果调用。\
+                 能用已有记忆或语言完成的事优先直接回复，不要为了展示能力而调工具。"
             }
             ToolScene::Task => {
                 "当前是任务场景，已注入任务相关工具的完整 schema。\
-                 若需要的工具未在列表中，先调用 tool_search 加载。"
+                 认知类工具（记忆/笔记/检索）用来查背景与已确认事实；执行类工具（桌面/终端/浏览器/文件）用来落地动作。\
+                 不要用回忆代替实际执行，也不要重复检索已经拿到的事实。若需要的工具未在列表中，先调用 tool_search 加载。"
             }
             ToolScene::Idle => {
                 "当前是后台场景（无用户输入），仅注入核心工具。\
@@ -1172,6 +1173,33 @@ pub enum ToolSemantics {
     Action,
 }
 
+/// 工具的能力面向：认知（大脑）与执行（手脚）。
+///
+/// 这是**决策语义**，不是权限等级：两类工具都可以读写，区别在于结果用来"想"还是"做"。
+/// - [`ToolFacet::Brain`]：记忆、日记、笔记、跨会话检索、联网取证。产出的是"我知道什么"，
+///   用来回忆、判断、回答；写记忆/写日记也属于这里——它改变的是内部认知，不是外部世界。
+/// - [`ToolFacet::Limb`]：桌面操作、终端/命令、文件写入、浏览器自动化、媒体/壁纸、角色动作。
+///   内部是"我对世界做了什么"；这类调用有外部副作用，通常伴随沙箱与确认。
+///
+/// 用途：闲聊场景给认知面更多完整 schema 预算（先想再答），执行面默认延迟到真正需要动手时；
+/// 延迟工具索引按面向分组，让模型先判断"这事要回忆还是要操作"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolFacet {
+    /// 认知面：记忆 / 日记 / 笔记 / 知识检索
+    Brain,
+    /// 执行面：操作电脑 / 改变外部状态
+    Limb,
+}
+
+impl ToolFacet {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolFacet::Brain => "brain",
+            ToolFacet::Limb => "limb",
+        }
+    }
+}
+
 /// 工具 trait - 所有工具必须实现的核心接口
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -1254,6 +1282,19 @@ pub trait Tool: Send + Sync {
         }
     }
 
+    /// 工具面向：认知（大脑）还是执行（手脚）。
+    ///
+    /// 默认按 [`Tool::category`] 推导：`Memory` / `Web` 是认知面（记忆、笔记、检索到的知识），
+    /// 其余（System / File / Media / Pet / Mcp）是执行面（操作机器或改变外部状态）。
+    /// 注意它与 [`Tool::semantics`] 是两条轴：`save_memory` 是 Action（写入）但属于 Brain；
+    /// `computer_state` 是 Retrieval（只读）但属于 Limb。
+    fn facet(&self) -> ToolFacet {
+        match self.category() {
+            ToolCategory::Memory | ToolCategory::Web => ToolFacet::Brain,
+            _ => ToolFacet::Limb,
+        }
+    }
+
     /// 工具类别
     fn category(&self) -> ToolCategory;
 
@@ -1303,11 +1344,15 @@ pub trait Tool: Send + Sync {
     /// 是否延迟加载（默认 false）
     ///
     /// true：初始 prompt 只注入工具名（在 `<available-deferred-tools>` 块中），
-    ///       LLM 需先调用 `tool_search` 拿到完整 schema 才能调用本工具。
+    ///       完整 schema 需要 `tool_search` 取回。
     /// false：与 `always_load` 配合决定注入方式：
     ///       - always_load=true → 全量注入
     ///       - always_load=false && should_defer=false → 全量注入（常用工具）
     ///       - always_load=false && should_defer=true → 仅注入名字（长尾工具）
+    ///
+    /// 注意：`always_load()` 声明的是"这个工具不能被语义召回挤掉"，不等于
+    /// "每个场景都占一个完整 schema 槽位"。闲聊/后台/低信任场景仍受每场景
+    /// schema 预算约束，超预算时低优先级工具会降级为 Lazy。
     fn should_defer(&self) -> bool {
         false
     }
@@ -1400,5 +1445,44 @@ pub trait Tool: Send + Sync {
                 "parameters": self.parameters_schema(),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+
+    struct FacetProbe(ToolCategory, bool);
+    #[async_trait]
+    impl Tool for FacetProbe {
+        fn name(&self) -> &str { "facet_probe" }
+        fn description(&self) -> &str { "facet probe" }
+        fn parameters_schema(&self) -> Value { serde_json::json!({"type":"object","properties":{}}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> ValidationResult { ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult { PermissionResult::allow() }
+        async fn call(&self, _: Value, _: &ToolUseContext) -> ToolResult { ToolResult::success(serde_json::json!(null)) }
+        fn is_read_only(&self) -> bool { self.1 }
+        fn category(&self) -> ToolCategory { self.0 }
+    }
+
+    #[test]
+    fn facet_is_cognition_for_memory_and_web_but_limb_for_operations() {
+        for category in [ToolCategory::Memory, ToolCategory::Web] {
+            assert_eq!(FacetProbe(category, true).facet(), ToolFacet::Brain);
+            assert_eq!(FacetProbe(category, false).facet(), ToolFacet::Brain, "写记忆仍是认知面");
+        }
+        for category in [ToolCategory::System, ToolCategory::File, ToolCategory::Media, ToolCategory::Pet, ToolCategory::Mcp] {
+            assert_eq!(FacetProbe(category, true).facet(), ToolFacet::Limb, "只读的桌面观察仍是执行面");
+        }
+    }
+
+    #[test]
+    fn facet_and_semantics_are_independent_axes() {
+        let write_memory = FacetProbe(ToolCategory::Memory, false);
+        assert_eq!(write_memory.facet(), ToolFacet::Brain);
+        assert_eq!(write_memory.semantics(), ToolSemantics::Action);
+        let read_desktop = FacetProbe(ToolCategory::System, true);
+        assert_eq!(read_desktop.facet(), ToolFacet::Limb);
+        assert_eq!(read_desktop.semantics(), ToolSemantics::Retrieval);
     }
 }

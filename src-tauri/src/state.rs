@@ -302,6 +302,16 @@ impl AppState {
     /// 设置指定角色的生成取消标志
     pub fn set_generation_cancel(&self, char_id: &str, value: bool) {
         self.generation_cancel.write().insert(char_id.to_string(), value);
+        if value { self.interrupt_companion_execution(char_id); }
+    }
+
+    /// Called before waiting for think_lock, so queued corrections stop old tool decisions.
+    pub fn interrupt_companion_execution(&self, char_id: &str) {
+        if let Ok(instance) = self.get_character(Some(char_id)) {
+            if let Some(manager) = instance.brain.chat_chain.as_ref().and_then(|chain| chain.tool_call_manager.as_ref()) {
+                manager.execution_control.interrupt();
+            }
+        }
     }
 
     /// 查询指定角色的生成取消标志

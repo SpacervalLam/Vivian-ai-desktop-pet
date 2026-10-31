@@ -352,6 +352,15 @@ impl ToolSandbox {
         }
 
         // 3. 风险评估
+        // edit_file 的 view 是只读动作：不触发写盘确认，也不把「首次编辑」警告打在查看上。
+        if tool_name == "edit_file"
+            && args.get("action").and_then(Value::as_str) == Some("view")
+        {
+            return SafetyResult::allowed(
+                ToolRiskLevel::Safe,
+                "只读查看文件".to_string(),
+            );
+        }
         let profile = match self.get_safety_profile(tool_name) {
             Some(p) => p,
             None => {

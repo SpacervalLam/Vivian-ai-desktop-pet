@@ -129,6 +129,7 @@ pub struct MultiStepResult {
 
 /// 工具调用管理器 - 解析 AI 响应并循环执行工具调用
 pub struct ToolCallManager {
+    pub(crate) execution_control: crate::pipeline::execution_control::ExecutionControl,
     /// 工具系统
     tool_system: Arc<ToolSystem>,
     /// 最大迭代次数
@@ -147,6 +148,7 @@ impl ToolCallManager {
     /// 创建新的工具调用管理器，默认最大迭代次数 10，反馈截断 2000 字符
     pub fn new(tool_system: Arc<ToolSystem>, context: ToolUseContext) -> Self {
         Self {
+            execution_control: Default::default(),
             tool_system,
             max_iterations: 10,
             feedback_history_chars: 2000,
@@ -1191,10 +1193,12 @@ impl ToolListTool {
         }
 
         // 末尾追加延迟/精简工具索引（仅工具名，供 tool_search 搜索）
-        let index = Self::render_deferred_index(
-            &deferred.iter().map(|t| t.name()).chain(lazy.iter().map(|t| t.name())).collect::<Vec<_>>(),
-            lang_norm,
-        );
+        let index_entries: Vec<(&str, crate::tools::types::ToolFacet)> = deferred
+            .iter()
+            .chain(lazy.iter())
+            .map(|t| (t.name(), t.facet()))
+            .collect();
+        let index = Self::render_deferred_index(&index_entries, lang_norm);
         if !index.is_empty() {
             lines.push(String::new());
             lines.push(index);
@@ -1207,6 +1211,11 @@ impl ToolListTool {
     ///
     /// 两条注入通道（API `tools` 字段 / prompt 工具清单）与延迟工具索引共用此函数，
     /// 保证三处对"谁能拿完整 schema"的判断永不发散。
+    ///
+    /// 除了场景与召回，这一层还做两件事：
+    /// - 过滤当前不可用的工具（如浏览器桥未连接时的 `mcp__browser__*`）；
+    /// - 用每场景的 schema 预算裁剪 Always：保底/召回优先，其余降级为 Lazy，
+    ///   避免 30+ 个 `always_load` 工具在闲聊里占满上下文。
     fn bucket_tools_for_scene(
         &self,
         scene: ToolScene,
@@ -1218,6 +1227,9 @@ impl ToolListTool {
         let mut deferred: Vec<Arc<dyn Tool>> = Vec::new();
         for tool in self.tool_system.list_tools_for_scene(scene) {
             if tool.name() != "tool_search" && hidden.contains(tool.name()) {
+                continue;
+            }
+            if !tool_available_now(tool.name()) {
                 continue;
             }
             match resolve_visibility_with_recall(&tool, scene, recalled) {
@@ -1233,6 +1245,14 @@ impl ToolListTool {
             lazy.retain(|t| t.name() != "share_link");
             deferred.retain(|t| t.name() != "share_link");
         }
+        apply_schema_budget(scene, recalled, &mut always, &mut lazy);
+        tracing::debug!(
+            scene = ?scene,
+            always = always.len(),
+            lazy = lazy.len(),
+            deferred = deferred.len(),
+            "工具注入分档"
+        );
         (always, lazy, deferred)
     }
 
@@ -1250,27 +1270,77 @@ impl ToolListTool {
         lang: &str,
     ) -> String {
         let (_, lazy, deferred) = self.bucket_tools_for_scene(scene, hidden, recalled);
-        let names: Vec<&str> = deferred
+        let entries: Vec<(&str, crate::tools::types::ToolFacet)> = deferred
             .iter()
             .chain(lazy.iter())
-            .map(|t| t.name())
+            .map(|t| (t.name(), t.facet()))
             .collect();
-        Self::render_deferred_index(&names, crate::pipeline::prompt_modules::normalize_lang(lang))
+        Self::render_deferred_index(&entries, crate::pipeline::prompt_modules::normalize_lang(lang))
     }
 
-    /// 渲染 `<available-deferred-tools>` 块。`names` 为空时返回空串。
-    fn render_deferred_index(names: &[&str], lang: &str) -> String {
-        if names.is_empty() {
+    /// 渲染 `<available-deferred-tools>` 块。`entries` 为空时返回空串。
+    ///
+    /// 名称去重并限制在 [`MAX_DEFERRED_NAMES`] 条以内：注册表已过百条，
+    /// 全量列出既占 token 又会让模型误以为必须逐个尝试；超出部分交给
+    /// `tool_list`（能力目录）继续发现。
+    ///
+    /// 分组顺序是「面向 → 家族」：先分成认知（大脑：记忆/笔记/检索）与执行
+    /// （手脚：操作电脑），再在每个面向内按家族并列。模型据此先判断
+    /// "这件事要回忆还是要动手"，再到对应组里挑工具，避免在百来个名字里平扫。
+    fn render_deferred_index(entries: &[(&str, crate::tools::types::ToolFacet)], lang: &str) -> String {
+        if entries.is_empty() {
             return String::new();
         }
-        let hint = match crate::pipeline::prompt_modules::normalize_lang(lang) {
-            "en" => "These tools are registered and permitted, but only their names are listed above. To call one, first use tool_search to load its schema (`select:name` loads by exact name).",
-            "ja" => "これらのツールは登録・許可済みだが、上には名前のみが並んでいる。呼び出す前に tool_search で schema を取得すること（`select:名前` で名前指定ロード可）。",
-            _ => "这些工具已注册且被允许，但此处只列名称。需要调用时先用 tool_search 取回 schema（可用 `select:工具名` 按名称精确加载）。",
+        let mut seen = std::collections::HashSet::new();
+        let mut unique: Vec<(&str, crate::tools::types::ToolFacet)> = entries
+            .iter()
+            .copied()
+            .filter(|(name, _)| seen.insert(*name))
+            .collect();
+        let total = unique.len();
+        unique.truncate(MAX_DEFERRED_NAMES);
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let hint = match lang {
+            "en" => "Grouped by facet: brain tools recall/interpret knowledge, limb tools act on the computer. To call one, first use tool_search to load its schema (`select:name` loads by exact name).",
+            "ja" => "面ごとに分類：認知（記憶・知識）は思い出す・判断するため、実行（PC操作）は実際に動かすため。呼び出す前に tool_search で schema を取得すること（`select:名前` で名前指定ロード可）。",
+            _ => "按面向分组：认知类用来回忆与判断，执行类用来操作电脑。需要调用时先用 tool_search 取回 schema（可用 `select:工具名` 按名称精确加载）。",
         };
-        let mut lines = Vec::with_capacity(names.len() + 5);
+        let facet_label = |facet: crate::tools::types::ToolFacet| match (lang, facet) {
+            ("en", crate::tools::types::ToolFacet::Brain) => "brain (memory / knowledge)",
+            ("en", crate::tools::types::ToolFacet::Limb) => "limbs (computer operations)",
+            ("ja", crate::tools::types::ToolFacet::Brain) => "認知（記憶・知識）",
+            ("ja", crate::tools::types::ToolFacet::Limb) => "実行（PC操作）",
+            (_, crate::tools::types::ToolFacet::Brain) => "认知（回忆与知识）",
+            (_, crate::tools::types::ToolFacet::Limb) => "执行（操作电脑）",
+        };
+        let mut lines = Vec::with_capacity(unique.len() + 12);
         lines.push("<available-deferred-tools>".to_string());
-        lines.extend(names.iter().map(|name| name.to_string()));
+        for facet in [crate::tools::types::ToolFacet::Brain, crate::tools::types::ToolFacet::Limb] {
+            let mut grouped: std::collections::BTreeMap<&str, Vec<&str>> = std::collections::BTreeMap::new();
+            for (name, entry_facet) in &unique {
+                if *entry_facet != facet {
+                    continue;
+                }
+                let family = super::semantic_filter::tool_family(name);
+                let key = if family == *name { "other" } else { family };
+                grouped.entry(key).or_default().push(name);
+            }
+            if grouped.is_empty() {
+                continue;
+            }
+            lines.push(format!("[{}]", facet_label(facet)));
+            for (family, names) in grouped {
+                lines.push(format!("  {}: {}", family, names.join(", ")));
+            }
+        }
+        if total > unique.len() {
+            let more = match lang {
+                "en" => format!("… and {} more, use tool_list to browse the catalog.", total - unique.len()),
+                "ja" => format!("… ほか {} 件。tool_list で一覧を確認できる。", total - unique.len()),
+                _ => format!("… 另有 {} 个，可用 tool_list 查看完整目录。", total - unique.len()),
+            };
+            lines.push(more);
+        }
         lines.push("</available-deferred-tools>".to_string());
         lines.push(String::new());
         lines.push(hint.to_string());
@@ -1350,6 +1420,120 @@ impl ToolListTool {
             })
             .collect()
     }
+}
+
+/// 延迟工具索引最多列出的名字数量。
+const MAX_DEFERRED_NAMES: usize = 64;
+
+/// 闲聊场景优先保留的“记忆/日记”能力。
+///
+/// 陪伴对话里“你还记得吗 / 上次那个 / 昨天写下的”出现频率很高，这些工具
+/// 常驻完整 schema 比省几行 token更重要；它们仍然只在 Chat/Idle 优先，
+/// 其它场景靠召回与 tool_search。
+pub const CHAT_MEMORY_TOOLS: &[&str] = &[
+    "deep_recall",
+    "recall_time",
+    "read_user_quick_notes",
+    "memory_md",
+    "write_diary",
+];
+
+/// 闲聊场景即使超出 schema 预算也优先保留的常用能力。
+///
+/// 这些是陪伴对话里最可能被立刻用到、又不属于“每轮必备”的工具：
+/// 查资料、打开网页、截图、制定计划、委派工作、后台任务、加待办。
+const CHAT_DEFAULT_TOOLS: &[&str] = &[
+    "web_search",
+    "read_content",
+    "open_url",
+    "take_screenshot",
+    "plan_task",
+    "delegate_to_work_agent",
+    "run_job",
+    "add_todo",
+];
+
+/// 每场景允许的完整 schema 软上限。
+///
+/// 保底集（`is_schema_floor_tool`）与语义召回优先保留；超出预算的 `always_load`
+/// 工具降级为 Lazy（名称+描述仍可见，完整 schema 通过 `tool_search` 取回）。
+/// 闲聊/后台压得最紧，任务场景给足，避免执行途中被迫先去 discovery。
+fn always_schema_cap(scene: ToolScene) -> usize {
+    match scene {
+        ToolScene::Chat | ToolScene::Idle => 28,
+        ToolScene::LowTrust => 16,
+        ToolScene::Focus => 30,
+        ToolScene::Default => 38,
+        ToolScene::Task => 44,
+    }
+}
+
+/// 完整 schema 的保留优先级：0 保底 > 1 语义召回 > 2 闲聊记忆/日记
+/// > 3 闲聊认知面（记忆/笔记/检索） > 4 闲聊常用 > 5 声明的 always_load > 6 其他。
+///
+/// 闲聊/后台场景里"大脑"（认知面）排在"手脚"（执行面）前面：用户随口问一句
+/// "你还记得吗"时，记忆工具必须能直接答；而开机/终端/桌面操作只有真要动手才需要，
+/// 超预算时先降级它们。任务场景不受这条影响（要执行时手脚优先，由 always_load 与召回决定）。
+fn schema_priority(tool: &Arc<dyn Tool>, recalled: Option<&HashSet<String>>, scene: ToolScene) -> u8 {
+    let name = tool.name();
+    if crate::tools::registry::is_schema_floor_tool(name) {
+        0
+    } else if recalled.is_some_and(|hits| hits.contains(name)) {
+        1
+    } else if CHAT_MEMORY_TOOLS.contains(&name) {
+        2
+    } else if matches!(scene, ToolScene::Chat | ToolScene::Idle)
+        && tool.facet() == crate::tools::types::ToolFacet::Brain
+    {
+        3
+    } else if CHAT_DEFAULT_TOOLS.contains(&name) {
+        4
+    } else if tool.always_load() {
+        5
+    } else {
+        6
+    }
+}
+
+/// 按预算裁剪 Always 桶：稳定排序后把低优先级工具降级到 Lazy。
+fn apply_schema_budget(
+    scene: ToolScene,
+    recalled: Option<&HashSet<String>>,
+    always: &mut Vec<Arc<dyn Tool>>,
+    lazy: &mut Vec<Arc<dyn Tool>>,
+) {
+    let cap = always_schema_cap(scene);
+    if always.len() <= cap {
+        return;
+    }
+    let mut ranked: Vec<(u8, String, Arc<dyn Tool>)> = std::mem::take(always)
+        .into_iter()
+        .map(|tool| (schema_priority(&tool, recalled, scene), tool.name().to_string(), tool))
+        .collect();
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let overflow = ranked.split_off(cap);
+    *always = ranked.into_iter().map(|(_, _, tool)| tool).collect();
+    lazy.extend(overflow.into_iter().map(|(_, _, tool)| tool));
+    lazy.sort_by(|a, b| a.name().cmp(b.name()));
+}
+
+/// 当前进程里该工具是否真的可用。
+///
+/// 浏览器族工具由进程内 WebView2 桥提供：桥未连接时列出它们只会诱导模型调用
+/// 一个必然失败的入口，因此直接从工具面剔除（连接后下一轮自动出现）。
+/// 定时任务同理：Scheduler 尚未注入时先隐藏，避免模型反复试错。
+/// 插件工具以「注册即初始化」为门：插件未安装 / 被禁用时 `unregister_tool_if_owner`
+/// 已把工具从注册表移除，它们根本不会进入工具面，这里无需再判定。
+/// 角色相关的可用性（日记前置条件）在 PromptBuildingStep 的 `hidden` 里按 char_id 判定。
+fn tool_available_now(name: &str) -> bool {
+    if name.starts_with("mcp__browser__") {
+        return crate::browser_bridge::tools::global_bridge()
+            .is_some_and(|bridge| bridge.is_connected());
+    }
+    if matches!(name, "schedule_reminder" | "manage_scheduled") {
+        return crate::tools::builtin::todo_tools::get_scheduler().is_some();
+    }
+    true
 }
 
 /// Discovery is the only fixed schema during semantic selection. Other tools must be recalled.
@@ -1442,7 +1626,7 @@ pub(super) fn resolve_visibility(
             }
         },
         ToolScene::Chat => {
-            if is_core {
+            if is_core || CHAT_MEMORY_TOOLS.contains(&tool.name()) {
                 ToolVisibility::Always
             } else {
                 ToolVisibility::Lazy
@@ -1458,7 +1642,7 @@ pub(super) fn resolve_visibility(
             }
         }
         ToolScene::Idle => {
-            if is_core {
+            if is_core || CHAT_MEMORY_TOOLS.contains(&tool.name()) {
                 ToolVisibility::Always
             } else {
                 ToolVisibility::Lazy
@@ -1487,7 +1671,9 @@ fn resolve_visibility_with_recall(
             // 语义召回只应决定**其余工具**的档位，不能推翻它：否则一次没召回到，
             // 声明了 always_load 的工具就彻底拿不到 schema，而调用方（以及工具自己的
             // 触发逻辑）仍然按「它一定在」写，形成静默失效。
-            if is_floor_tool(tool) || is_core_tool(tool.name()) || tool.always_load() || hits.contains(tool.name()) {
+            let chat_memory = matches!(scene, ToolScene::Chat | ToolScene::Idle)
+                && CHAT_MEMORY_TOOLS.contains(&tool.name());
+            if is_floor_tool(tool) || crate::tools::registry::SCHEMA_FLOOR_TOOLS.contains(&tool.name()) || chat_memory || tool.always_load() || hits.contains(tool.name()) {
                 ToolVisibility::Always
             } else if tool.should_defer() {
                 ToolVisibility::Deferred
@@ -1540,6 +1726,51 @@ mod tests {
         fn is_read_only(&self) -> bool { self.read_only }
         fn category(&self) -> ToolCategory { ToolCategory::Memory }
         fn risk(&self) -> crate::tools::types::ToolRiskTier { crate::tools::types::ToolRiskTier::FsRead }
+    }
+
+    struct AlwaysProbe(&'static str);
+    #[async_trait]
+    impl Tool for AlwaysProbe {
+        fn name(&self) -> &str { self.0 }
+        fn description(&self) -> &str { "always probe" }
+        fn parameters_schema(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> ValidationResult { ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult { PermissionResult::allow() }
+        async fn call(&self, _: Value, _: &ToolUseContext) -> ToolResult { ToolResult::success(json!(null)) }
+        fn is_read_only(&self) -> bool { true }
+        fn always_load(&self) -> bool { true }
+        fn category(&self) -> ToolCategory { ToolCategory::System }
+    }
+
+    #[test]
+    fn chat_schema_budget_keeps_floor_and_demotes_overflow() {
+        let system = Arc::new(ToolSystem::new());
+        for name in [
+            "tool_search", "search_memory", "save_memory", "talk_to_character",
+            "get_roommate_status", "ask_user", "continue_thinking", "send_chat_message",
+            "wallpaper_list",
+        ] {
+            system.register_tool(Arc::new(AlwaysProbe(name)));
+        }
+        for index in 0..40 {
+            system.register_tool(Arc::new(AlwaysProbe(Box::leak(
+                format!("leaky_{index:02}").into_boxed_str(),
+            ))));
+        }
+        let list = ToolListTool::new(system.clone());
+        let recalled = HashSet::new();
+        let defs = list.get_tool_definitions_for_scene(
+            ToolScene::Chat, &HashSet::new(), Some(&recalled), "en");
+        assert!(defs.len() <= always_schema_cap(ToolScene::Chat));
+        for floor in ["tool_search", "search_memory", "save_memory", "ask_user", "continue_thinking"] {
+            assert!(defs.iter().any(|definition| definition.name == floor), "{floor} 必须保留");
+        }
+        // 超预算的普通常驻工具降级为 Lazy：完整 schema 不再注入，但名字仍可被发现。
+        assert!(!defs.iter().any(|definition| definition.name == "leaky_39"));
+        let text = list.get_tools_for_ai_with_scene(
+            ToolScene::Chat, &HashSet::new(), Some(&recalled), "en");
+        assert!(text.contains("leaky_39"));
+        assert_eq!(defs.len(), always_schema_cap(ToolScene::Chat));
     }
 
     fn probe_manager() -> (ToolCallManager, Arc<std::sync::atomic::AtomicUsize>, Arc<std::sync::atomic::AtomicUsize>) {
@@ -2002,5 +2233,61 @@ mod tests {
             let got = resolve_visibility_with_recall(&normal, scene, None);
             assert_eq!(expected, got, "scene {:?} mismatch", scene);
         }
+    }
+
+    /// 延迟索引先按面向（大脑/手脚）分段，再按家族列名：
+    /// 记忆类进认知段，桌面/浏览器/终端类进执行段。
+    #[test]
+    fn deferred_index_separates_brain_from_limbs() {
+        use crate::tools::types::ToolFacet;
+        let entries = [
+            ("session_search", ToolFacet::Brain),
+            ("notebook", ToolFacet::Brain),
+            ("mcp__browser__navigate", ToolFacet::Limb),
+            ("terminal_open", ToolFacet::Limb),
+            ("open_application", ToolFacet::Limb),
+        ];
+        let text = ToolListTool::render_deferred_index(&entries, "zh");
+        let brain = text.find("认知（回忆与知识）").expect("应输出认知段");
+        let limb = text.find("执行（操作电脑）").expect("应输出执行段");
+        assert!(brain < limb, "认知段应排在执行段之前:\n{text}");
+        let brain_block = &text[brain..limb];
+        let limb_block = &text[limb..];
+        assert!(brain_block.contains("session: session_search"), "{text}");
+        // 单工具的家族名与工具名相同，按既有规则归入 other（仍在认知段内）。
+        assert!(brain_block.contains("other: notebook"), "{text}");
+        assert!(limb_block.contains("browser: mcp__browser__navigate"), "{text}");
+        assert!(limb_block.contains("terminal: terminal_open"), "{text}");
+        assert!(limb_block.contains("other: open_application"), "{text}");
+        assert!(!brain_block.contains("terminal_open"), "{text}");
+        assert!(!limb_block.contains("session_search"), "{text}");
+    }
+
+    /// 闲聊/后台超预算时先降级执行面（手脚），保留认知面（大脑）。
+    #[test]
+    fn chat_schema_budget_demotes_limbs_before_brain() {
+        let system = Arc::new(ToolSystem::new());
+        system.register_tool(mock("tool_search", ToolCategory::System, true, false));
+        for name in ["memory_probe_a", "memory_probe_b"] {
+            system.register_tool(mock(name, ToolCategory::Memory, true, false));
+        }
+        for index in 0..30 {
+            system.register_tool(mock(Box::leak(
+                format!("limb_probe_{index:02}").into_boxed_str(),
+            ), ToolCategory::System, true, false));
+        }
+        let list = ToolListTool::new(system.clone());
+        let recalled = HashSet::new();
+        let defs = list.get_tool_definitions_for_scene(
+            ToolScene::Chat, &HashSet::new(), Some(&recalled), "en");
+        assert!(defs.len() <= always_schema_cap(ToolScene::Chat));
+        for name in ["memory_probe_a", "memory_probe_b"] {
+            assert!(defs.iter().any(|d| d.name == name), "{name} 是认知面，应优先保留");
+        }
+        // 超预算的执行面被降级（仍可在延迟索引里被发现）。
+        assert!(!defs.iter().any(|d| d.name == "limb_probe_29"));
+        let text = list.get_tools_for_ai_with_scene(
+            ToolScene::Chat, &HashSet::new(), Some(&recalled), "en");
+        assert!(text.contains("limb_probe_29"));
     }
 }

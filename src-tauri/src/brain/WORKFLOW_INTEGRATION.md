@@ -1,14 +1,10 @@
 # Vivian 工作流集成
 
-## 源码依据与实现选择
+## 实现选择
 
-- [dsh-plugin-agent-workflow](https://github.com/xuanyuanzhifeng/dsh-plugin-agent-workflow)，本地审阅提交 `41b0cd52c43cd667bfcea33460e6a5f401184057`，版本 0.3.0，适配 DSH 0.2.0-rc.2。
-- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，本地审阅提交 `571902028a75c64c1d767f4ae5fd099485f0ddf0`，版本 0.2.1-alpha.3。
-- 参考插件的 `src/client/workflow-model.ts`、`WorkflowView.tsx`、`request-messages.ts` 与 DSH 的 `packages/core/session/src/surface.ts`、`packages/client/ui-trajectory/src/client/trajectory-event-projection.ts`。
+会话执行记录的只读视图通常依赖宿主的插槽与事件投影机制。Vivian 的执行器为 Rust、界面为 React/Tauri，因此在这里原生实现相同的轮次→请求→响应→工具交互，复用现有工作智能体、消息和模型路由，不额外安装另一套会话运行时。发布包无需访问外部源码目录，也没有新增 npm/Cargo 依赖。
 
-该插件提供会话执行记录的只读视图。它的宿主入口 `apply()` 为空；浏览器入口需要 Cordis slots、sessions、locale 及 DSH 的事件投影。Vivian 的执行器为 Rust、界面为 React/Tauri，且本地 DSH 版本高于插件适配版本。因此在 Vivian 中原生实现相同的轮次→请求→响应→工具交互，复用现有工作智能体、消息和模型路由，不安装另一套 DSH 会话运行时。发布包无需访问两个本地源码目录，也没有新增 npm/Cargo 依赖。
-
-这是一份针对 Vivian 数据结构的独立适配；两个上游项目均使用 MIT 许可，本次未复制其实现文件。后续如直接引入上游源码，需随分发保留对应版权及完整 MIT 许可。
+这是一份针对 Vivian 数据结构的独立适配，未复制第三方实现文件。后续如直接引入外部源码，需随分发保留对应版权及完整许可。
 
 ## 数据流
 

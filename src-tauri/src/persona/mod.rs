@@ -475,7 +475,7 @@ impl PersonaEngine {
             crate::pipeline::prompt_modules::companion_dialogue_rules(&lang).to_string(),
             crate::pipeline::prompt_modules::dialogue_tone_rules(&lang),
             crate::pipeline::prompt_modules::companion_reply_language(&lang),
-            include_str!("../../prompts/framework/companion_contract.en.md").to_string(),
+            crate::pipeline::prompt_modules::companion_contract(&lang).to_string(),
             crate::pipeline::prompt_modules::creator_identity_rules().to_string(),
             self.dialogue_card(),
             prompt_render::render_style_preset_block(&config, &lang),
@@ -828,7 +828,7 @@ mod speaking_voice_tests {
             assert!(voice.contains(&engine.get_name()));
             assert!(voice.contains("[COMPANION DIALOGUE]"));
             assert!(voice.contains("[HUMAN_FEEL_RULES]"));
-            assert!(voice.contains("Speech Style"));
+            assert!(voice.contains("说话方式"));
             assert!(!voice.contains("[PERSONA_PROTOCOL]"));
         }
     }

@@ -284,9 +284,10 @@ impl SkillService {
             .map(|s| format!("- {}：{}", s.name, s.description))
             .collect();
         Some(format!(
-            "## 可用技能\n{}\n（如需使用某项技能，调用 use_skill 工具获取其完整指引后照做。\
-             若不确定该用哪项技能、或当前列表里没看到合适的，调用 search_skill 用自然语言描述需求，\
-             它会按名称/描述/关键词召回最匹配的技能，再用 use_skill 加载选中的那一项。\
+            "## 可用技能\n{}\n（如需使用某项技能，调用 use_skill 工具（给 name）获取其完整指引后照做。\
+             若不确定该用哪项技能、或当前列表里没看到合适的，调用 use_skill 给 query 用自然语言描述需求，\
+             它会按名称/描述/关键词召回最匹配的技能，再用 use_skill(name) 加载选中的那一项。\
+             交付技能草稿前可用 use_skill 的 validate 动作自检形态。\
              当你总结出一套值得复用的做法时，可调用 create_skill 把它沉淀为新技能。）",
             lines.join("\n")
         ))

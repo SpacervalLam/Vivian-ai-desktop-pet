@@ -87,6 +87,22 @@ fn index_failure_rolls_back_canonical_write_and_metadata_does_not_retokenize() {
 }
 
 #[test]
+fn diary_scope_filter_finds_diary_entries() {
+    let dir=tempfile::tempdir().unwrap();
+    let store=MemoryEntryStore::open(dir.path().join("entries.db")).unwrap();
+    let mut diary=MemoryItem::new("今天和用户去了海边，风很大但很开心".into(),Granularity::Summary,0.8);
+    diary.id="diary-1".into();
+    diary.tags=vec!["diary".into(),"2026-10-29".into(),"开心".into()];
+    diary.metadata=json!({"kind":"diary","record_kind":"diary","diary_id":"d1","date":"2026-10-29","mood_tag":"开心"});
+    kinds::initialize_record(&mut diary);
+    save(&store,&[diary.clone()]);
+    let filter=MemoryRetrievalFilter{tags_any:Some(vec!["diary".into()]),..Default::default()};
+    let hits=store.search_candidates("海边 风", "vivian", &filter, 5).unwrap();
+    assert_eq!(hits.iter().map(|(id,_)|id.as_str()).collect::<Vec<_>>(),vec!["diary-1"]);
+    assert!(kinds::recallable(&diary));
+}
+
+#[test]
 fn filters_and_context_loading_keep_order_and_session_boundaries() {
     let dir=tempfile::tempdir().unwrap();let store=MemoryEntryStore::open(dir.path().join("entries.db")).unwrap();
     let mut items=Vec::new();

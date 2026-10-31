@@ -1,0 +1,1 @@
+The unpublished draft has these specific problems: {}. Rewrite the result as the same character with the full persona above. This is not a new task. Do not execute tools or repeat the operation.

@@ -64,7 +64,7 @@ pub mod workflow_tools;
 pub mod agent_meta_tools;
 /// 多智能体协作：队友管理、团队任务板、消息投递、目标迭代。
 pub mod agent_control_tools;
-/// 编辑与看图：str_replace_editor（可撤销）、read_image（真正看见图）。
+/// 编辑与看图：edit_file（多动作编辑器，可撤销）、read_image（真正看见图）。
 pub mod editor_tools;
 /// 运行时环境：工作目录切换、依赖探测、运行时自省。
 pub mod runtime_env_tools;
@@ -85,36 +85,29 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(system_ops::TakeScreenshotTool::new()),
         Arc::new(computer_action::ComputerActionTool),
         Arc::new(computer_action::ComputerStateTool),
-        // 扩展系统工具
+        // 扩展系统工具（前台窗口/内存占用已并入 computer_state 的 action）
         Arc::new(extended_system_ops::OpenUrlTool::new()),
-        Arc::new(extended_system_ops::GetActiveWindowTool::new()),
-        // 系统内存查询（内存占用概况 + Top 进程明细，只读按需采集）
-        Arc::new(extended_system_ops::GetMemoryUsageTool::new()),
-        // 供应商预设更新（联网核对官方 API 文档后的结构化落点：整行 upsert +
-        // 系统时钟写核对日期 + 自动递增插件版本防播种覆盖）
-        Arc::new(provider_preset_tools::UpdateProviderPresetTool::new()),
+        // 供应商预设（盘点 + 统一变更入口：LLM/嵌入 upsert、按 id 删除；
+        // 旧 update_provider_preset 的整行 upsert 语义并入 manage_provider_preset）
         Arc::new(provider_preset_tools::ListProviderPresetsTool::new()),
         Arc::new(provider_preset_tools::ManageProviderPresetTool::new()),
         // 记忆工具
         Arc::new(memory_tools::SaveMemoryTool::new()),
         Arc::new(memory_tools::SearchMemoryTool::new()),
+        // 深查：模型一次给多组关键词/渠道，内部并行跨日记/笔记/摘要/事实/原文检索。
+        Arc::new(memory_tools::DeepRecallTool::new()),
         Arc::new(user_quick_notes::ReadUserQuickNotes),
         Arc::new(memory_tools::MemoryMdTool::new()),
-        Arc::new(memory_tools::GetRecentInteractionsTool::new()),
         Arc::new(pet_interaction_tools::GetPetInteractionsTool),
-        Arc::new(memory_tools::SummarizeTodayContextTool::new()),
-        Arc::new(memory_tools::ReadDiaryByDateTool::new()),
-        Arc::new(memory_tools::RecallByDateTimeTool::new()),
+        // 时间回忆（最近互动/按日期/今日总结合并为一个 canonical 工具）
+        Arc::new(memory_tools::RecallTimeTool::new()),
         // 智能日记工具（LLM 自主写日记，条件满足时可见）
         Arc::new(diary_tools::WriteDiaryTool::new()),
         // 宠物注视模式切换
         Arc::new(pet_tools::ToggleWatchModeTool::new()),
-        // 待办工具
-        Arc::new(todo_tools::AddTodoTool::new()),
+        // 待办工具（读用 list_todo，写统一走 manage_todo 的 action 分发）
         Arc::new(todo_tools::ListTodoTool::new()),
-        Arc::new(todo_tools::CompleteTodoTool::new()),
         Arc::new(todo_tools::ManageTodoTool::new()),
-        Arc::new(todo_tools::UpdateTodoTool::new()),
         // 工作智能体独立待办工具（与陪伴待办分离，仅工作侧使用；整表替换语义）
         Arc::new(work_todo_tools::WorkTodoWriteTool::new()),
         // 工作智能体询问工具（选择题，挂起 loop 等用户抉择；与陪伴侧自由文本 ask_user 分离）
@@ -159,26 +152,14 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(cross_character_tools::TalkToCharacterTool::new()),
         // 室友在场查询（只读；补上 prompt 侧"变化驱动注入"留下的按需缺口）
         Arc::new(cross_character_tools::GetRoommateStatusTool::new()),
-        // 媒体控制工具（合并播放/暂停/上下首/音量/静音为单工具）
+        // 媒体控制（播放/暂停、音量/静音 + 读取当前播放 + 按名点歌，统一 action 分发）
         Arc::new(media_tools::MediaControlTool::new()),
-        // 音乐（读当前播放 / 按名字找歌并播放；不单独暴露「搜索」工具，
-        // 检索内嵌在 music_play 里，避免同一件事拆成两个工具）
-        Arc::new(music_tools::MusicNowPlayingTool),
-        Arc::new(music_tools::MusicPlayTool),
-        // 桌面感知工具
-        Arc::new(perception_tools::GetForegroundAppContextTool::new()),
-        // 输入控制工具
-        Arc::new(input_control_tools::ClickMouseTool::new()),
-        Arc::new(input_control_tools::HotkeyTool::new()),
-        Arc::new(input_control_tools::TypeTextTool::new()),
         // 后台任务工具（run_job / manage_job：后台命令执行与轮询）
         Arc::new(jobs_tools::RunJobTool::new()),
         Arc::new(jobs_tools::ManageJobTool::new()),
         // LSP 语义查询工具（定义/引用/实现/hover）
         Arc::new(lsp_tools::LspQueryTool::new()),
-        // Wallpaper Engine 工具（list/set 保留，控制类合并为 wallpaper_control）
-        Arc::new(wallpaper_tools::WallpaperListTool::new()),
-        Arc::new(wallpaper_tools::WallpaperSetTool::new()),
+        // Wallpaper Engine 工具（列出/设置/控制合并到 wallpaper_control）
         Arc::new(wallpaper_tools::WallpaperControlTool::new()),
         // 网络搜索（LLM 原生搜索的补充，支持 DuckDuckGo/SearXNG/Tavily）
         Arc::new(web_search_tool::WebSearchTool::new()),
@@ -191,25 +172,16 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(send_chat_message_tool::SendChatMessageTool),
         // 可视化组件（智能体把 SVG 流程图/图表渲染成编程页卡片）
         Arc::new(show_widget_tool::ShowWidgetTool::new()),
-        // 技能激活（按名称获取目录化技能正文，按需加载不常驻上下文）
+        // 技能读侧统一入口（use 激活正文 / search 自然语言召回 / validate 形态校验；后两者旧名保留为别名）
         Arc::new(skill_tools::UseSkillTool::new()),
         Arc::new(plugin_advisor_tools::PluginAdvisorTool),
         // 技能创建（智能体自主沉淀可复用技能，写入即注册，自进化闭环）
         Arc::new(skill_tools::CreateSkillTool::new()),
-        // 技能召回（按自然语言 BM25 检索名称/描述/关键词，返回候选供 use_skill 加载正文）
-        Arc::new(skill_tools::SearchSkillTool::new()),
-        // 技能校验（交付前检查 front-matter / 命名 / 占位符 / 附属文档）
-        Arc::new(skill_tools::ValidateSkillTool::new()),
         // 代码审查输入（只读解析审查目标：未提交/基准分支/提交，附变更文件与规约文件）
         Arc::new(review_tools::ReviewDiffTool::new()),
-        // 笔记本工具（创建/查看/修改/分享卡片风格 HTML 笔记）
+        // 笔记本工具（create_notebook 保留长写作工作流；其余查看/修改/分享/HTML 笔记合并为 notebook）
         Arc::new(notebook_tools::CreateNotebookTool::new()),
-        Arc::new(notebook_tools::ListNotebooksTool::new()),
-        Arc::new(notebook_tools::GetNotebookDetailTool::new()),
-        Arc::new(notebook_tools::UpdateNotebookTool::new()),
-        Arc::new(notebook_tools::ShareNotebookTool::new()),
-        // 完整 HTML 笔记（LLM 直接撰写自包含 HTML；paper 范式由后端注入样式表，前端以 iframe 渲染）
-        Arc::new(notebook_tools::CreateHtmlNoteTool::default()),
+        Arc::new(notebook_tools::NotebookTool::new()),
         // 文件系统读取（按路径读本地文本/代码/HTML，受沙箱路径校验约束）
         Arc::new(file_tools::ReadFileTool::default()),
         Arc::new(file_tools::ReadSpilledResultTool),
@@ -220,8 +192,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(coding_tools::GrepSearchTool::new()),
         Arc::new(coding_tools::ListDirTool::new()),
         Arc::new(coding_tools::GlobTool::new()),
-        // 可撤销编辑器 + 看图（让模型真的看见图，而不是猜文件名）
-        Arc::new(editor_tools::StrReplaceEditorTool::new()),
+        // 看图（让模型真的看见图，而不是猜文件名）；编辑动作已并入 edit_file
         Arc::new(editor_tools::ReadImageTool::new()),
         // 生图（文生图 + 参考图引导；结果落盘并随工具结果回传）
         Arc::new(image_gen_tool::GenerateImageTool::new()),
@@ -244,18 +215,9 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(terminal_tools::TerminalListTool::new()),
         Arc::new(terminal_tools::TerminalCloseTool::new()),
         Arc::new(terminal_tools::PwshPersistentTool::new()),
-        // 多智能体协作
-        Arc::new(agent_control_tools::ListAgentsTool::new()),
-        Arc::new(agent_control_tools::InterruptAgentTool::new()),
-        Arc::new(agent_control_tools::SendMessageTool::new()),
-        Arc::new(agent_control_tools::WaitAgentTool::new()),
-        Arc::new(agent_control_tools::ListSubagentModelsTool::new()),
-        Arc::new(agent_control_tools::SpawnTeammateTool::new()),
-        Arc::new(agent_control_tools::TeamTaskCreateTool::new()),
-        Arc::new(agent_control_tools::TeamTaskListTool::new()),
-        Arc::new(agent_control_tools::TeamTaskGetTool::new()),
-        Arc::new(agent_control_tools::TeamTaskUpdateTool::new()),
-        Arc::new(agent_control_tools::RalphTool::new()),
+        // 多智能体协作（team / team_task 两个统一入口；旧名保留为别名）
+        Arc::new(agent_control_tools::TeamTool::new()),
+        Arc::new(agent_control_tools::TeamTaskTool::new()),
         // 天气预报（Open-Meteo 免费 API，支持 1~16 天预报）
         Arc::new(weather_tools::GetWeatherForecastTool::new()),
         // 内容发现闭环（B 站推荐 / 反馈 / 兴趣探针）
@@ -282,13 +244,51 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
     // 目标未注册的条目被 `register_alias` 忽略并 warn，表内可保留暂未注册的名字而不报错。
     let alias_pairs: &[(&str, &str)] = &[
         ("screenshot_analyze", "take_screenshot"),
-        ("set_wallpaper", "wallpaper_set"),
-        ("set_wallpaper_from_file", "wallpaper_set"),
+        ("set_wallpaper", "wallpaper_control"),
+        ("set_wallpaper_from_file", "wallpaper_control"),
+        ("wallpaper_list", "wallpaper_control"),
+        ("wallpaper_set", "wallpaper_control"),
+        ("music_now_playing", "media_control"),
+        ("music_play", "media_control"),
+        ("add_todo", "manage_todo"),
+        ("complete_todo", "manage_todo"),
+        ("update_todo", "manage_todo"),
+        ("click_mouse", "computer_state"),
+        ("hotkey", "computer_state"),
+        ("type_text", "computer_state"),
+        ("get_active_window", "computer_state"),
+        ("get_foreground_app_context", "computer_state"),
+        ("get_recent_interactions", "recall_time"),
+        ("recall_by_date_time", "recall_time"),
+        ("read_diary_by_date", "recall_time"),
+        ("summarize_today_context", "recall_time"),
+        ("list_agents", "team"),
+        ("interrupt_agent", "team"),
+        ("send_message", "team"),
+        ("wait_agent", "team"),
+        ("list_subagent_models", "team"),
+        ("spawn_teammate", "team"),
+        ("ralph", "team"),
+        ("team_task_create", "team_task"),
+        ("team_task_list", "team_task"),
+        ("team_task_get", "team_task"),
+        ("team_task_update", "team_task"),
+        ("list_notebooks", "notebook"),
+        ("get_notebook_detail", "notebook"),
+        ("update_notebook", "notebook"),
+        ("share_notebook", "notebook"),
+        ("create_html_note", "notebook"),
+        // 技能读侧合并：旧名按参数形状推断 use / search / validate
+        ("search_skill", "use_skill"),
+        ("validate_skill", "use_skill"),
+        // 供应商预设：旧 update_provider_preset 的整行 upsert 已并入 manage_provider_preset
+        ("update_provider_preset", "manage_provider_preset"),
+        // 编辑器合并：str_replace_editor 的 view/create/insert/undo 已并入 edit_file
+        ("str_replace_editor", "edit_file"),
         ("list_directory", "list_dir"),
         ("search_files", "grep_search"),
         ("grep", "grep_search"),
         ("cancel_scheduled", "manage_scheduled"),
-        ("delete_todo", "manage_todo"),
     ];
     let alias_count = tool_system.register_aliases(alias_pairs);
     tracing::info!(
@@ -332,4 +332,77 @@ pub fn validate_confirmation_tools(tool_system: &crate::tools::ToolSystem) {
         );
     }
 
+}
+
+#[cfg(test)]
+mod merged_family_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_family_names_resolve_to_the_merged_tool() {
+        let system = Arc::new(crate::tools::ToolSystem::new());
+        register_builtin_tools(&system);
+        let cases = [
+            ("music_play", "media_control"),
+            ("music_now_playing", "media_control"),
+            ("wallpaper_list", "wallpaper_control"),
+            ("wallpaper_set", "wallpaper_control"),
+            ("set_wallpaper", "wallpaper_control"),
+            ("add_todo", "manage_todo"),
+            ("complete_todo", "manage_todo"),
+            ("update_todo", "manage_todo"),
+            ("click_mouse", "computer_state"),
+            ("hotkey", "computer_state"),
+            ("type_text", "computer_state"),
+            ("get_active_window", "computer_state"),
+            ("get_foreground_app_context", "computer_state"),
+            ("get_recent_interactions", "recall_time"),
+            ("recall_by_date_time", "recall_time"),
+            ("read_diary_by_date", "recall_time"),
+            ("summarize_today_context", "recall_time"),
+            ("list_agents", "team"),
+            ("interrupt_agent", "team"),
+            ("send_message", "team"),
+            ("wait_agent", "team"),
+            ("list_subagent_models", "team"),
+            ("spawn_teammate", "team"),
+            ("ralph", "team"),
+            ("team_task_create", "team_task"),
+            ("team_task_list", "team_task"),
+            ("team_task_get", "team_task"),
+            ("team_task_update", "team_task"),
+            ("list_notebooks", "notebook"),
+            ("get_notebook_detail", "notebook"),
+            ("update_notebook", "notebook"),
+            ("share_notebook", "notebook"),
+            ("create_html_note", "notebook"),
+            ("search_skill", "use_skill"),
+            ("validate_skill", "use_skill"),
+            ("update_provider_preset", "manage_provider_preset"),
+            ("str_replace_editor", "edit_file"),
+        ];
+        for (legacy, canonical) in cases {
+            assert_eq!(
+                system.find_tool(legacy).expect("旧名应能解析").name(),
+                canonical,
+                "alias {legacy}"
+            );
+        }
+        // 合并后的家族只保留 canonical 一个模型可见工具。
+        for canonical in [
+            "media_control",
+            "wallpaper_control",
+            "manage_todo",
+            "computer_state",
+            "recall_time",
+            "team",
+            "team_task",
+            "notebook",
+            "use_skill",
+            "manage_provider_preset",
+            "edit_file",
+        ] {
+            assert!(system.find_tool(canonical).is_some(), "{canonical} 应已注册");
+        }
+    }
 }

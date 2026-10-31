@@ -270,7 +270,11 @@ pub fn confirmation_info(tool_name: &str, args: &serde_json::Value) -> (Confirma
         }
         "edit_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            (ConfirmationRisk::High, format!("将编辑文件：{}", path))
+            if args.get("action").and_then(|v| v.as_str()) == Some("view") {
+                (ConfirmationRisk::Low, format!("将查看文件：{}", path))
+            } else {
+                (ConfirmationRisk::High, format!("将编辑文件：{}", path))
+            }
         }
         "read_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("?");

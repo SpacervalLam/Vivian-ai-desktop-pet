@@ -133,22 +133,24 @@ async fn non_user_messages_skip_embedding_and_parallel_merge_preserves_existing_
 struct BlockingSemantic(Arc<FastSemanticAnalyzer>);
 
 #[tokio::test]
-async fn retrieved_examples_are_dynamic_and_absent_without_relevant_scene() {
-    let injector = Arc::new(crate::persona::ToneInjector::new("nana"));
+async fn retrieved_voice_fragments_are_dynamic_and_absent_for_source_transformation() {
+    let (provider, _) = controlled_provider(true);
+    let injector = Arc::new(crate::persona::ToneInjector::with_embedding("nana", provider));
+    injector.preload_scene_vectors_for_test();
     let prompt = PromptBuildingStep::new().with_tone_injector(injector);
     let messages = vec![serde_json::from_value(serde_json::json!({
         "role": "assistant", "content": "英语演讲准备讲多久？"
     })).unwrap()];
     let state = PipelineState { user_input: "8分钟左右".into(), messages, ..Default::default() };
     let result = PipelineState::from_json(prompt.ainvoke(state.to_json(), None).await.unwrap());
-    let position = result.system_prompt.find("[FICTIONAL DIALOGUE").unwrap();
+    let position = result.system_prompt.find("[RETRIEVED EXAMPLES").unwrap();
     let boundary = result.system_prompt.find("[NEXT TURN]").unwrap();
     assert!(position < boundary);
-    assert!(result.system_prompt.contains("presentation-duration"));
+    assert!(result.system_prompt.contains("Expression fragment "));
     assert!(result.metadata["retrieved_example_chars"].as_u64().unwrap() <= 1800);
-    let state = PipelineState { user_input: "怎么安装软件".into(), ..Default::default() };
+    let state = PipelineState { user_input: "请把这句话翻译成英文".into(), ..Default::default() };
     let result = PipelineState::from_json(prompt.ainvoke(state.to_json(), None).await.unwrap());
-    assert!(!result.system_prompt.contains("presentation-duration"));
+    assert!(!result.system_prompt.contains("[RETRIEVED EXAMPLES"));
 }
 
 #[test]

@@ -3,6 +3,12 @@ import i18n from 'i18next';
 const strings = {
   'zh-CN': {
     activity_search: '搜索资料', activity_browse: '读取网页', activity_read: '检查项目文件', activity_edit: '修改文件', activity_run: '执行命令', activity_plan: '更新计划', activity_image: '处理图片', activity_other: '执行工具操作', activity_join: '、',
+    activity_edit_files: '编辑 {{n}} 个文件', activity_read_files: '读取 {{n}} 个文件', activity_edit_ops: '编辑 {{n}} 次', activity_read_ops: '读取 {{n}} 次',
+    activity_search_ops: '搜索 {{n}} 次', activity_run_ops: '执行 {{n}} 条命令', activity_browse_ops: '读取 {{n}} 个网页', activity_plan_ops: '更新计划 {{n}} 次', activity_image_ops: '处理 {{n}} 张图片', activity_other_ops: '执行工具 {{n}} 次', activity_failed: '{{n}} 步失败',
+    thinking: '思考', thinkingShowAll: '展开思考', thinkingShowLess: '收起思考', workProcess: '工作过程',
+    phase_explore: '探索', phase_edit: '编辑', phase_verify: '验证', phase_other: '其他', phase_steps: '{{n}} 步', phase_files: '{{n}} 个文件',
+    filterAll: '全部', filterFailed: '失败 {{n}}', filterFiles: '文件 {{n}}', filterThinking: '思考 {{n}}', filterEmpty: '当前筛选下没有记录',
+    noResultGroup: '未找到匹配 · {{n}} 次',
     pages: '页面', newPage: '新建页面',
     toolsUnreturned: '{{n}} 步未返回', toolsReturned: '工具已返回', workThinking: '工作思考',
     summarizing: '正在整理最终报告…',
@@ -19,6 +25,12 @@ const strings = {
   },
   en: {
     activity_search: 'Search sources', activity_browse: 'Read web pages', activity_read: 'Inspect project files', activity_edit: 'Edit files', activity_run: 'Run commands', activity_plan: 'Update plan', activity_image: 'Process images', activity_other: 'Run tools', activity_join: ' · ',
+    activity_edit_files: 'Edit {{n}} files', activity_read_files: 'Read {{n}} files', activity_edit_ops: 'Edit {{n}}×', activity_read_ops: 'Read {{n}}×',
+    activity_search_ops: 'Search {{n}}×', activity_run_ops: 'Run {{n}} commands', activity_browse_ops: 'Read {{n}} pages', activity_plan_ops: 'Update plan {{n}}×', activity_image_ops: 'Process {{n}} images', activity_other_ops: 'Run tools {{n}}×', activity_failed: '{{n}} failed',
+    thinking: 'Thinking', thinkingShowAll: 'Show all', thinkingShowLess: 'Show less', workProcess: 'Work log',
+    phase_explore: 'Explore', phase_edit: 'Edit', phase_verify: 'Verify', phase_other: 'Other', phase_steps: '{{n}} steps', phase_files: '{{n}} files',
+    filterAll: 'All', filterFailed: '{{n}} failed', filterFiles: '{{n}} files', filterThinking: '{{n}} thinking', filterEmpty: 'Nothing matches this filter',
+    noResultGroup: 'No matches · {{n}}×',
     pages: 'Pages', newPage: 'New page',
     toolsUnreturned: '{{n}} without results', toolsReturned: 'Tools returned', workThinking: 'Work reasoning',
     summarizing: 'Preparing the final report…',
@@ -35,6 +47,12 @@ const strings = {
   },
   ja: {
     activity_search: '資料を検索', activity_browse: 'ページを確認', activity_read: 'ファイルを確認', activity_edit: 'ファイルを編集', activity_run: 'コマンドを実行', activity_plan: '計画を更新', activity_image: '画像を処理', activity_other: 'ツールを実行', activity_join: '・',
+    activity_edit_files: '{{n}} ファイルを編集', activity_read_files: '{{n}} ファイルを読み取り', activity_edit_ops: '{{n}} 回編集', activity_read_ops: '{{n}} 回読み取り',
+    activity_search_ops: '{{n}} 回検索', activity_run_ops: '{{n}} コマンドを実行', activity_browse_ops: '{{n}} ページを閲覧', activity_plan_ops: '計画を {{n}} 回更新', activity_image_ops: '{{n}} 枚の画像を処理', activity_other_ops: 'ツールを {{n}} 回実行', activity_failed: '{{n}} ステップ失敗',
+    thinking: '思考', thinkingShowAll: '思考を展開', thinkingShowLess: '思考を折りたたむ', workProcess: '作業ログ',
+    phase_explore: '探索', phase_edit: '編集', phase_verify: '検証', phase_other: 'その他', phase_steps: '{{n}} ステップ', phase_files: '{{n}} ファイル',
+    filterAll: 'すべて', filterFailed: '失敗 {{n}}', filterFiles: 'ファイル {{n}}', filterThinking: '思考 {{n}}', filterEmpty: 'この条件に一致する記録はありません',
+    noResultGroup: '一致なし・{{n}} 回',
     pages: 'ページ', newPage: '新しいページ',
     toolsUnreturned: '{{n}} 件未応答', toolsReturned: 'ツール応答済み', workThinking: '作業中の思考',
     summarizing: '最終レポートをまとめています…',

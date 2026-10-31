@@ -12,6 +12,12 @@ pub mod desktop_state;
 pub mod topic_window;
 #[path = "../src/pipeline/presentation_grounding.rs"]
 pub mod presentation_grounding;
+#[path = "../src/pipeline/execution_control.rs"]
+pub mod execution_control;
+#[path = "../src/pipeline/execution_task.rs"]
+pub mod execution_task;
+#[path = "../src/pipeline/prompt_templates.rs"]
+pub mod prompt_templates;
 #[path = "../src/brain/work_contract.rs"]
 pub mod work_contract;
 #[path = "../src/brain/work_context.rs"]

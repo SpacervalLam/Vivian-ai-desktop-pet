@@ -1,0 +1,1 @@
+Return exactly one valid JSON object with a text field. No text or Markdown fences outside JSON. Use the active spoken language inside text. Example structure: {"text":"spoken reply"}.

@@ -53,7 +53,6 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
     // 文件读写（coding 工具集）
     "read_file",
     "write_file",
-    "edit_file",
     "list_dir",
     "grep_search",
     "glob",
@@ -81,8 +80,8 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
 
 /// 分发器工具：只有**非破坏性** action 才免确认。
 ///
-/// `manage_todo` / `manage_scheduled` 是"一个工具干几件事"的分发器，
-/// 把整个工具塞进确认名单会让 `list` 这类只读调用也弹窗。
+/// `manage_todo` / `manage_scheduled` / `edit_file` 是"一个工具干几件事"的分发器，
+/// 把整个工具塞进确认名单会让 `list`、`view` 这类只读调用也弹窗。
 ///
 /// 刻意用**白名单**（列出安全的 action）而不是黑名单（列出破坏性的）：
 /// 模型给出未知 action、拼写错误或干脆不给 action 时，白名单会落到
@@ -92,6 +91,8 @@ const CONFIRM_AT_ACTION_TOOLS: &[&str] = &[
 const DISPATCHER_SAFE_ACTIONS: &[(&str, &[&str])] = &[
     ("manage_todo", &["list", "get", "update"]),
     ("manage_scheduled", &["list", "get", "pause", "resume"]),
+    // edit_file 只有 view 是只读动作；缺 action 的旧调用默认 str_replace，仍要确认。
+    ("edit_file", &["view"]),
 ];
 
 /// 免确认工具（**真实注册名**）：直接放行，不进入权限流程。
@@ -301,6 +302,24 @@ fn file_operation_for(tool_name: &str) -> Option<&'static str> {
     }
 }
 
+/// 该调用是否只是 `edit_file` 的只读 view 动作。
+///
+/// `validate_input` 会把推断出的 action 写回参数，所以执行期看到的 action 已经归一；
+/// 权限层只认显式 `view`，缺 action 的旧调用按写盘处理（宁可多问一次）。
+fn is_read_only_view_call(tool_name: &str, args: &Value) -> bool {
+    canonical_tool_name(tool_name) == "edit_file"
+        && args.get("action").and_then(Value::as_str) == Some("view")
+}
+
+/// 按调用参数细化文件操作类型：`edit_file` 的 view 是读，其余写盘工具仍是写。
+fn file_operation_for_call(tool_name: &str, args: &Value) -> Option<&'static str> {
+    if is_read_only_view_call(tool_name, args) {
+        Some("read")
+    } else {
+        file_operation_for(tool_name)
+    }
+}
+
 /// 从工具参数中提取文件路径
 fn extract_file_paths(tool_name: &str, args: &Value) -> Vec<String> {
     let mut paths = Vec::new();
@@ -359,7 +378,7 @@ pub async fn check_tool_permission(
     }
 
     // An explicit read-only mount remains read-only even in Bypass/always_allow.
-    if let Some(operation) = file_operation_for(tool_name) {
+    if let Some(operation) = file_operation_for_call(tool_name, args) {
         for path in extract_file_paths(tool_name, args) {
             let result = check_file_permission(&path, operation, permission_context);
             if result.is_denied() { return result; }
@@ -408,7 +427,7 @@ pub async fn check_tool_permission(
     );
 
     // 2. 文件路径权限检查
-    if let Some(operation) = file_operation_for(tool_name) {
+    if let Some(operation) = file_operation_for_call(tool_name, args) {
         for fp in extract_file_paths(tool_name, args) {
             let result = check_file_permission(&fp, operation, permission_context);
             if result.is_denied() {
@@ -454,7 +473,7 @@ pub async fn check_tool_permission(
 
     // Selected workspaces are already authorized. Keep explicit Ask/Deny and read-only
     // checks above, but do not ask again for every bounded file operation.
-    if let Some(operation) = file_operation_for(tool_name) {
+    if let Some(operation) = file_operation_for_call(tool_name, args) {
         let mut paths = extract_file_paths(tool_name, args);
         if paths.is_empty() && matches!(tool_name, "list_dir" | "grep_search" | "glob") {
             paths.push(context.working_directory.clone());
@@ -725,7 +744,7 @@ pub fn requires_permission(
     if confirmation_tier(tool.name(), args) == ToolConfirmationTier::HandOff {
         return true;
     }
-    if let Some(operation) = file_operation_for(tool.name()) {
+    if let Some(operation) = file_operation_for_call(tool.name(), args) {
         if extract_file_paths(tool.name(), args).iter().any(|path|
             check_file_permission(path, operation, context).is_denied()) {
             return true;
@@ -777,7 +796,7 @@ pub fn requires_permission(
     }
 
     // 文件写入路径不在工作目录内时也需要确认
-    if let Some(op) = file_operation_for(tool.name()) {
+    if let Some(op) = file_operation_for_call(tool.name(), args) {
         if op == "write" {
             for fp in extract_file_paths(tool.name(), args) {
                 if !context.is_path_in_working_directory(&fp) {
@@ -786,7 +805,7 @@ pub fn requires_permission(
             }
         }
     }
-    !tool.is_read_only()
+    !tool.is_read_only() && !is_read_only_view_call(tool.name(), args)
 }
 
 #[cfg(test)]
@@ -1181,6 +1200,44 @@ mod tests {
         assert_eq!(
             confirmation_tier("manage_todo", &json!({"action": "DELETE"})),
             ToolConfirmationTier::ConfirmAtAction
+        );
+    }
+
+    #[test]
+    fn edit_file_view_is_read_only_but_writes_confirm() {
+        // 合并 str_replace_editor 后，edit_file 是多动作分发器：
+        // view 免确认且按读盘判定，其余动作（含缺省 str_replace）仍要确认。
+        assert!(is_confirmation_required_tool("edit_file"));
+        assert_eq!(
+            confirmation_tier("edit_file", &json!({"action": "view"})),
+            ToolConfirmationTier::NotRequired
+        );
+        for args in [
+            json!({}),
+            json!({"action": "str_replace"}),
+            json!({"action": "create"}),
+            json!({"action": "insert"}),
+            json!({"action": "undo"}),
+            json!({"action": "wipe"}),
+        ] {
+            assert_eq!(
+                confirmation_tier("edit_file", &args),
+                ToolConfirmationTier::ConfirmAtAction,
+                "args={args}"
+            );
+        }
+
+        assert_eq!(
+            file_operation_for_call("edit_file", &json!({"action": "view"})),
+            Some("read")
+        );
+        assert_eq!(
+            file_operation_for_call("edit_file", &json!({})),
+            Some("write")
+        );
+        assert_eq!(
+            file_operation_for_call("edit_file", &json!({"action": "str_replace"})),
+            Some("write")
         );
     }
 

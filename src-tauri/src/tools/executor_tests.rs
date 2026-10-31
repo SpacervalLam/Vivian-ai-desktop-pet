@@ -15,6 +15,39 @@ struct Probe {
 }
 
 #[tokio::test]
+async fn user_correction_during_permission_check_invalidates_the_approved_call() {
+    struct PermissionProbe {
+        control: crate::pipeline::execution_control::ExecutionControl,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl Tool for PermissionProbe {
+        fn name(&self) -> &str { "permission_lease_probe" }
+        fn description(&self) -> &str { "test observation" }
+        fn parameters_schema(&self) -> Value { json!({"type":"object","properties":{}}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> ValidationResult { ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+            tokio::task::yield_now().await;
+            self.control.interrupt();
+            PermissionResult::allow()
+        }
+        async fn call(&self, _: Value, _: &ToolUseContext) -> ToolResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success(json!({"observed":true}))
+        }
+        fn is_read_only(&self) -> bool { true }
+        fn category(&self) -> ToolCategory { ToolCategory::Memory }
+    }
+    let control = crate::pipeline::execution_control::ExecutionControl::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(PermissionProbe { control:control.clone(), calls:calls.clone() }));
+    let result = control.lease().scope(execute_tool_use("permission_lease_probe", json!({}), &system, &ToolUseContext::default(), None)).await;
+    assert_eq!(result.error.as_deref(), Some("ExecutionInterrupted"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn work_file_edits_use_selected_workspace_without_a_blanket_approval_callback() {
     let system = ToolSystem::new();
     system.register_tool(Arc::new(

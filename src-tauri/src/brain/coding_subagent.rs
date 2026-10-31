@@ -45,8 +45,8 @@ pub const SUBAGENT_DEFAULT_TOOLS: &[&str] = &[
     // 队友之间互相传话：只给「看同伴」和「递一句话」两条。
     // 委派 / 提问 / 结算仍归主 agent 所有——子 agent 面前没有人类应答者，
     // 但同伴是有的，所以这两条不违背上面那条边界。
-    "list_agents",
-    "send_message",
+    // `team` 在 subagent_depth > 0 时只放行 list / message（见 TeamTool::validate_input）。
+    "team",
 ];
 
 /// 子 agent 的终止原因。

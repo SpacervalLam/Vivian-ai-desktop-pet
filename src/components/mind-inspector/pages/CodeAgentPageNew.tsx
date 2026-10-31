@@ -9,6 +9,7 @@ import { useNavigation } from '../NavigationContext';
 
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, useContext, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
@@ -31,7 +32,7 @@ import {
 } from 'lucide-react';
 import './CodeAgentPage.css';
 import './workbenchStrings';
-import { workActivitySummary } from './workActivitySummary';
+import { collectWorkActivity, formatWorkActivity, workPhaseOf, type WorkPhase } from './workActivitySummary';
 import './workflowStrings';
 import './browserStrings';
 import SessionSearch from './SessionSearch';
@@ -71,6 +72,21 @@ function resolveWorkspacePath(path: string, cwd?: string): string {
   if (!cwd) return p;
   const base = cwd.replace(/[\\/]+$/, '');
   return `${base}/${p.replace(/^\.\//, '')}`;
+}
+
+/**
+ * 工作区内的绝对路径折成相对路径后展示。
+ * 工具行目标若是根目录起点的绝对路径，会把文件名挤到省略号后面；
+ * 折成相对路径后先看到文件名，完整路径仍保留在 title / 详情里。
+ */
+function relativizeWorkspacePath(path: string, cwd?: string): string {
+  if (!cwd) return path;
+  const normalizedPath = path.replace(/\\/g, '/');
+  const normalizedCwd = cwd.replace(/\\/g, '/').replace(/\/$/, '');
+  if (!normalizedCwd) return path;
+  return normalizedPath.toLowerCase().startsWith(`${normalizedCwd.toLowerCase()}/`)
+    ? normalizedPath.slice(normalizedCwd.length + 1)
+    : path;
 }
 
 // ============ 类型 ============
@@ -416,6 +432,7 @@ const TOOL_META: Record<string, { icon: React.ReactNode }> = {
   edit_file: { icon: <FileEdit size={14} /> },
   run_command: { icon: <TerminalIcon size={14} /> },
   grep_search: { icon: <Search size={14} /> },
+  glob: { icon: <Search size={14} /> },
   list_dir: { icon: <FolderTree size={14} /> },
   compose_program: { icon: <Braces size={14} /> },
 };
@@ -928,14 +945,18 @@ function compactValue(v: unknown, max = 60): string {
 }
 
 const TOOL_ARG_KEY_ORDER = ['description', 'url', 'command', 'pattern', 'query', 'path', 'file_path', 'file', 'target', 'directory'];
+const TOOL_ARG_PATH_KEYS = new Set(['path', 'file_path', 'file', 'target', 'directory', 'dir']);
 
 /** 参数摘要：优先取关键字段（命令/模式/路径等）；空参数返回 ''（区别于"有参数但为空"） */
-function toolArgSummary(argsJson: string, tr?: (key: string, opts?: Record<string, unknown>) => string): string {
+function toolArgSummary(argsJson: string, tr?: (key: string, opts?: Record<string, unknown>) => string, cwd?: string): string {
   const o = tryParseJsonObject(argsJson);
   if (o) {
     for (const k of TOOL_ARG_KEY_ORDER) {
       const v = o[k];
-      if (typeof v === 'string' && (v as string).trim()) return `${k}: ${compactValue(v as string, 80)}`;
+      if (typeof v === 'string' && (v as string).trim()) {
+        const value = (v as string).trim();
+        return `${k}: ${compactValue(TOOL_ARG_PATH_KEYS.has(k) ? relativizeWorkspacePath(value, cwd) : value, 80)}`;
+      }
       if (typeof v === 'number') return `${k}: ${v}`;
     }
     const entries = Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== '');
@@ -965,6 +986,14 @@ function toolResultSummary(name: string, result: string | undefined, success: bo
           ? (tr ? tr('mind_inspector.code_grep_found', { n: m }) : `找到 ${m} 处匹配`)
           : (tr ? tr('mind_inspector.code_grep_not_found') : '未找到匹配');
         return `${hit}${fs !== null ? ` · ${tr ? tr('mind_inspector.code_scan_files', { n: fs }) : `扫描 ${fs} 个文件`}` : ''}`;
+      }
+    }
+    if (name === 'glob' || name === 'find') {
+      const n = typeof d.count === 'number' ? d.count : Array.isArray(d.files) ? d.files.length : null;
+      if (n !== null) {
+        return n > 0
+          ? (tr ? tr('mind_inspector.code_glob_found', { n }) : `找到 ${n} 个文件`)
+          : (tr ? tr('mind_inspector.code_glob_not_found') : '未找到文件');
       }
     }
     if (name === 'list_dir') {
@@ -1107,7 +1136,7 @@ const InOutRow: React.FC<{ label: string; text: string; failed?: boolean }> = ({
   </div>
 );
 
-const ToolCallRow: React.FC<{
+interface ToolCallRowProps {
   name: string;
   argumentsJson: string;
   result?: string;
@@ -1115,21 +1144,23 @@ const ToolCallRow: React.FC<{
   running?: boolean;
   stopped?: boolean;
   durationMs?: number | null;
-}> = ({ name, argumentsJson, result, success, running, stopped, durationMs }) => {
+  cwd?: string;
+}
+
+const ToolCallRow = React.memo(function ToolCallRow({ name, argumentsJson, result, success, running, stopped, durationMs, cwd }: ToolCallRowProps) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const meta = toolMeta(name);
   const label = toolLabel(name, t);
   const tr = (key: string, opts?: Record<string, unknown>) => t(key, { ...opts, defaultValue: '' });
+  // 完成态保持中性，只有运行中/失败才着色——否则整组工具行会被绿色淹没。
   const statusColor = running
     ? 'var(--codex-accent)'
-    : success === true
-      ? 'var(--codex-success)'
-      : success === false
-        ? 'var(--codex-danger)'
-        : 'var(--codex-ink-faint)';
+    : success === false
+      ? 'var(--codex-danger)'
+      : 'var(--codex-ink-soft)';
 
-  const argSum = toolArgSummary(argumentsJson, tr);
+  const argSum = toolArgSummary(argumentsJson, tr, cwd);
   const resSum = toolResultSummary(name, result, success, tr);
 
   return (
@@ -1151,7 +1182,7 @@ const ToolCallRow: React.FC<{
         ) : success === false ? (
           <span className="codex-tool-status codex-tool-status-err">{t('mind_inspector.code_tool_failed')}</span>
         ) : result === undefined ? <span className="codex-tool-status">{t(stopped ? 'workbench.stopped' : 'workbench.pending')}</span> : null}
-        <span style={{ color: 'var(--codex-ink-soft)', display: 'inline-flex', flexShrink: 0 }}>
+        <span className="codex-tool-chevron">
           {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
       </button>
@@ -1191,7 +1222,153 @@ const ToolCallRow: React.FC<{
       )}
     </div>
   );
+});
+
+// ============ 思考（默认只给预览，展开后阅读全文） ============
+
+const THOUGHT_PREVIEW_CHARS = 96;
+const THOUGHT_LONG_LINES = 3;
+
+/** 工作思考块：折叠态保留首行预览，避免整段推理把操作流冲散。 */
+const ThinkingNote = React.memo(function ThinkingNote({ content }: { content: string }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const text = content.trim();
+  if (!text) return null;
+  const plain = text.replace(/\s+/g, ' ');
+  const long = text.length > 280 || text.split('\n').length > THOUGHT_LONG_LINES;
+  return (
+    <div className={`codex-thought${long && !open ? ' compact' : ''}`}>
+      <div className="codex-thought-head">
+        <Brain size={12} aria-hidden />
+        <span className="codex-thought-label">{t('workbench.thinking')}</span>
+        {long && !open && (
+          <span className="codex-thought-preview" title={plain}>
+            {plain.slice(0, THOUGHT_PREVIEW_CHARS)}
+          </span>
+        )}
+        {long && (
+          <button
+            type="button"
+            className="codex-thought-toggle"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {t(open ? 'workbench.thinkingShowLess' : 'workbench.thinkingShowAll')}
+          </button>
+        )}
+      </div>
+      {(!long || open) && (
+        <div className="codex-thought-body">
+          <MarkdownText text={text} keyPrefix="thought" />
+        </div>
+      )}
+    </div>
+  );
+});
+
+// ============ 工作过程阶段（探索 / 编辑 / 验证） ============
+
+interface ActivityPhaseInfo {
+  phase: WorkPhase;
+  /** 该连续阶段内的工具调用数 */
+  count: number;
+  /** 编辑/读取涉及的不重复文件数 */
+  files: number;
+  failed: number;
+}
+
+/** 按“连续同类工具”切阶段：思考/旁白不打断阶段，只在阶段首条工具行前插入标题。 */
+function buildActivityPhases(msgs: CodingMessage[], weights?: readonly number[]): Map<number, ActivityPhaseInfo> {
+  const headers = new Map<number, ActivityPhaseInfo>();
+  let current: { start: number; info: ActivityPhaseInfo; files: Set<string> } | null = null;
+  const flush = () => {
+    if (current === null) return;
+    current.info.files = current.files.size;
+    headers.set(current.start, current.info);
+  };
+  msgs.forEach((msg, index) => {
+    const name = msg.tool_name;
+    if (!name) return;
+    const phase = workPhaseOf(name);
+    if (current !== null && current.info.phase === phase) {
+      current.info.count += weights?.[index] ?? 1;
+      if (isFileTool(name)) {
+        const path = filePathFromArgs(typeof msg.tool_arguments === 'string' ? msg.tool_arguments : JSON.stringify(msg.tool_arguments ?? ''));
+        if (path) current.files.add(path);
+      }
+      if (msg.tool_success === false) current.info.failed += 1;
+      return;
+    }
+    flush();
+    const files = new Set<string>();
+    if (isFileTool(name)) {
+      const path = filePathFromArgs(typeof msg.tool_arguments === 'string' ? msg.tool_arguments : JSON.stringify(msg.tool_arguments ?? ''));
+      if (path) files.add(path);
+    }
+    current = {
+      start: index,
+      info: { phase, count: weights?.[index] ?? 1, files: 0, failed: msg.tool_success === false ? 1 : 0 },
+      files,
+    };
+  });
+  flush();
+  return headers;
+}
+
+/** 连续的空搜索结果合并成一行，避免“未找到匹配”刷屏。 */
+function isEmptySearchResult(msg: CodingMessage): boolean {
+  const name = msg.tool_name ?? '';
+  if (msg.role !== 'tool_result' || msg.tool_success === false) return false;
+  if (!/search|grep|glob|find/.test(name)) return false;
+  const parsed = tryParseJsonObject(msg.content || '');
+  if (!parsed) return false;
+  const data = unwrapToolData(parsed);
+  if (Array.isArray(data.matches)) return data.matches.length === 0;
+  if (Array.isArray(data.results)) return data.results.length === 0;
+  if (Array.isArray(data.files)) return data.files.length === 0;
+  if (typeof data.matches === 'number') return data.matches === 0;
+  if (typeof data.count === 'number') return data.count === 0;
+  return false;
+}
+
+const NoResultRow: React.FC<{ count: number }> = ({ count }) => {
+  const { t } = useTranslation();
+  return (
+    <div className="codex-no-result-row">
+      <Search size={13} aria-hidden />
+      <span>{t('workbench.noResultGroup', { n: count })}</span>
+    </div>
+  );
 };
+
+const ActivityPhaseRow: React.FC<{ info: ActivityPhaseInfo }> = ({ info }) => {
+  const { t } = useTranslation();
+  const name = t(`workbench.phase_${info.phase}`);
+  const meta = info.phase === 'edit' && info.files > 0
+    ? t('workbench.phase_files', { n: info.files })
+    : t('workbench.phase_steps', { n: info.count });
+  return (
+    <div className="codex-activity-phase" data-phase={info.phase}>
+      <span className="codex-activity-phase-dot" aria-hidden />
+      <span className="codex-activity-phase-name">{name}</span>
+      <span className="codex-activity-phase-meta">{meta}</span>
+      {info.failed > 0 && (
+        <span className="codex-activity-phase-fail">
+          <XCircle size={10} aria-hidden />
+          {t('workbench.activity_failed', { n: info.failed })}
+        </span>
+      )}
+      <span className="codex-activity-phase-rule" aria-hidden />
+    </div>
+  );
+};
+
+type ActivityFilter = 'all' | 'failed' | 'files' | 'thinking';
+
+type ActivityProcessItem =
+  | { kind: 'phase'; key: string; info: ActivityPhaseInfo }
+  | { kind: 'msg'; key: string; msg: CodingMessage; index: number; noResultCount?: number };
 
 // ============ 工作过程（连续工具调用行） ============
 
@@ -1206,53 +1383,202 @@ const ToolActivity: React.FC<{
   // 展开状态只由用户操作决定，失败和结束都不改变它。
   const [expanded, setExpanded] = useState(false);
 
-  // 组统计：步数 / 失败数 / 涉及文件数 / 总耗时 / 未完成步骤
+  // 组统计：总耗时 / 未返回步骤；类别计数交给 workActivitySummary，避免重复计算。
   const stats = useMemo(() => {
-    let steps = 0;
-    let failed = 0;
     let ms = 0;
     let started = 0;
-    const files = new Set<string>();
     for (const m of msgs) {
-      if (m.role === 'tool_result') {
-        steps += 1;
-        if (m.tool_success === false) failed += 1;
-        ms += m.tool_duration_ms ?? 0;
-        if (
-          (m.tool_name === 'write_file' || m.tool_name === 'edit_file') &&
-          m.tool_success !== false
-        ) {
-          const argsJson =
-            typeof m.tool_arguments === 'string'
-              ? m.tool_arguments
-              : JSON.stringify(m.tool_arguments ?? '');
-          const p = filePathFromArgs(argsJson);
-          if (p) files.add(p);
-        }
-      } else if (m.role === 'tool_use' && m.tool_name) {
-        started += 1;
-      }
+      if (m.role === 'tool_result') ms += m.tool_duration_ms ?? 0;
+      else if (m.role === 'tool_use' && m.tool_name) started += 1;
     }
-    return { steps, failed, ms, files: files.size, pending: started };
+    return { ms, pending: started };
   }, [msgs]);
 
+  const summary = useMemo(() => collectWorkActivity(msgs), [msgs]);
+  const facts = useMemo(() => formatWorkActivity(summary, t), [summary, t]);
+  const [filter, setFilter] = useState<ActivityFilter>('all');
+  const headerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  const filterCounts = useMemo(() => {
+    let failed = 0;
+    let files = 0;
+    let thinking = 0;
+    for (const m of msgs) {
+      if (m.role === 'thinking') thinking += 1;
+      if (m.role === 'tool_result' && m.tool_success === false) failed += 1;
+      if (isFileTool(m.tool_name ?? '')) files += 1;
+    }
+    return { failed, files, thinking };
+  }, [msgs]);
+
+  // 数据变化后若当前筛选已无内容，自动回到“全部”，避免停在空白列表。
+  useEffect(() => {
+    setFilter((current) => {
+      if (current === 'failed' && filterCounts.failed === 0) return 'all';
+      if (current === 'files' && filterCounts.files === 0) return 'all';
+      if (current === 'thinking' && filterCounts.thinking === 0) return 'all';
+      return current;
+    });
+  }, [filterCounts]);
+
+  const visibleMsgs = useMemo(() => {
+    if (filter === 'thinking') return msgs.filter((m) => m.role === 'thinking');
+    if (filter === 'failed') return msgs.filter((m) => m.role === 'tool_result' && m.tool_success === false);
+    if (filter === 'files') return msgs.filter((m) => isFileTool(m.tool_name ?? ''));
+    return msgs;
+  }, [msgs, filter]);
+
+  const processItems = useMemo<ActivityProcessItem[]>(() => {
+    // 连续空结果先合并，避免一长串「未找到匹配」占满阅读区。
+    const merged: { msg: CodingMessage; noResultCount?: number }[] = [];
+    for (const msg of visibleMsgs) {
+      if (isEmptySearchResult(msg)) {
+        const last = merged[merged.length - 1];
+        if (last && last.noResultCount !== undefined) {
+          last.noResultCount += 1;
+          continue;
+        }
+        merged.push({ msg, noResultCount: 1 });
+        continue;
+      }
+      merged.push({ msg });
+    }
+    const displayMsgs = merged.map((entry) => entry.msg);
+    const toolRows = displayMsgs.filter((m) => m.tool_name).length;
+    // 少量工具行不插入阶段标题，避免标题比内容还多。
+    const headers = toolRows >= 4
+      ? buildActivityPhases(displayMsgs, merged.map((entry) => entry.noResultCount ?? 1))
+      : new Map<number, ActivityPhaseInfo>();
+    const items: ActivityProcessItem[] = [];
+    merged.forEach((entry, index) => {
+      const info = headers.get(index);
+      if (info) items.push({ kind: 'phase', key: `phase-${index}-${info.phase}`, info });
+      items.push({ kind: 'msg', key: `msg-${index}`, msg: entry.msg, index, noResultCount: entry.noResultCount });
+    });
+    return items;
+  }, [visibleMsgs]);
+
+  const renderProcessMessage = (msg: CodingMessage, i: number): React.ReactNode => {
+    if (msg.role === 'thinking') return <ThinkingNote content={msg.content} />;
+    if (msg.role === 'commentary') {
+      return <div className="codex-msg-assistant">
+        <MarkdownText text={msg.content} keyPrefix={`process-${i}`} />
+      </div>;
+    }
+    // 聚合落库的"工具调用意图"桩消息：参数与结果已由 tool_result 承载，跳过
+    if (msg.role === 'tool_use' && !msg.tool_name) return null;
+    const wfRun =
+      msg.role === 'tool_result' &&
+      msg.tool_name === 'run_workflow' &&
+      tryParseWorkflowRun(msg.content);
+    if (wfRun) return <WorkflowVizCard run={wfRun} />;
+    const lsp =
+      msg.role === 'tool_result' && msg.tool_name === 'lsp_query'
+        ? parseLspResult(msg.content)
+        : null;
+    if (lsp) return <LspVizCard parsed={lsp} cwd={cwd} />;
+    return (
+      <ToolCallRow
+        name={msg.tool_name ?? ''}
+        argumentsJson={
+          msg.tool_arguments
+            ? typeof msg.tool_arguments === 'string'
+              ? msg.tool_arguments
+              : JSON.stringify(msg.tool_arguments)
+            : ''
+        }
+        result={msg.role === 'tool_result' ? msg.content : undefined}
+        success={msg.tool_success ?? null}
+        running={msg.role === 'tool_use' && sessionRunning && !settled}
+        stopped={msg.role === 'tool_use' && settled}
+        durationMs={msg.tool_duration_ms ?? null}
+        cwd={cwd}
+      />
+    );
+  };
+
+  // 长过程虚拟化：只在展开且条目超过阈值时启用，短组保持普通文档流。
+  const virtualEnabled = expanded && processItems.length > 50;
+  const virtualizer = useVirtualizer({
+    count: virtualEnabled ? processItems.length : 0,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => 34,
+    overscan: 8,
+    getItemKey: (index) => processItems[index]?.key ?? index,
+  });
+
+  const renderItem = (item: ActivityProcessItem): React.ReactNode => {
+    if (item.kind === 'phase') return <ActivityPhaseRow info={item.info} />;
+    if (item.noResultCount !== undefined && item.noResultCount > 1) {
+      return <NoResultRow count={item.noResultCount} />;
+    }
+    return renderProcessMessage(item.msg, item.index);
+  };
+
+  // 方向键在工具行之间移动，Esc 收起整组并把焦点还给摘要行。
+  const onListKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setExpanded(false);
+      headerRef.current?.focus();
+      return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
+    const rows = [...event.currentTarget.querySelectorAll<HTMLElement>('.codex-tool-header')];
+    if (rows.length === 0) return;
+    const current = event.target instanceof HTMLElement
+      ? event.target.closest<HTMLElement>('.codex-tool-header')
+      : null;
+    if (current === null) return;
+    const index = rows.indexOf(current);
+    if (index < 0) return;
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? rows.length - 1
+        : event.key === 'ArrowDown'
+          ? Math.min(rows.length - 1, index + 1)
+          : Math.max(0, index - 1);
+    if (next !== index) {
+      event.preventDefault();
+      rows[next]?.focus();
+    }
+  }, []);
+
+  // 切换筛选后回到列表顶部，避免停在上一组结果的中段。
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [filter]);
+
   const metaParts: string[] = [];
-  if (stats.steps > 0) metaParts.push(t('mind_inspector.code_tool_group_steps', { n: stats.steps }));
   if (stats.pending > 0) metaParts.push(t(settled ? 'workbench.toolsUnreturned' : 'mind_inspector.code_tool_group_pending', { n: stats.pending }));
-  if (stats.files > 0) metaParts.push(t('mind_inspector.code_tool_group_files', { n: stats.files }));
   if (stats.ms > 0) metaParts.push(formatDuration(stats.ms));
 
   return (
     <div className={`codex-tool-activity${expanded ? ' expanded' : ''}`}>
-      <button type="button" className="codex-tool-activity-header" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); }}>
+      <button ref={headerRef} type="button" className="codex-tool-activity-header" aria-expanded={expanded} onClick={() => { setExpanded((v) => !v); }}>
         <List size={13} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
-        <span className="codex-tool-activity-label">
-          {workActivitySummary(msgs, t)}
+        <span className="codex-tool-activity-label codex-activity-summary">
+          {facts.length === 0 ? (
+            <span className="codex-activity-fact">{t('workbench.workProcess')}</span>
+          ) : facts.map((label, index) => (
+            <React.Fragment key={`${index}-${label}`}>
+              {index > 0 && <span className="codex-activity-sep" aria-hidden>·</span>}
+              <span className="codex-activity-fact">{label}</span>
+            </React.Fragment>
+          ))}
         </span>
+        {summary.failed > 0 && (
+          <span className="codex-tool-activity-fail">
+            <XCircle size={11} aria-hidden />
+            {t('workbench.activity_failed', { n: summary.failed })}
+          </span>
+        )}
         {metaParts.length > 0 && (
           <span className="codex-tool-activity-meta">{metaParts.join(' · ')}</span>
         )}
-        {stats.failed > 0 || stats.steps + stats.pending === 0 ? null : settled ? (
+        {summary.total === 0 ? null : settled ? (
           <span className="codex-tool-activity-status codex-tool-activity-status-ok">
             {stats.pending > 0 ? t('workbench.stopped') : t('workbench.toolsReturned')}
           </span>
@@ -1276,54 +1602,87 @@ const ToolActivity: React.FC<{
       )}
       <div className={`codex-tool-activity-reveal${expanded ? ' open' : ''}`} {...(!expanded ? { inert: '' } : {})}>
         <div className="codex-tool-activity-body">
-          {msgs.map((msg, i) => {
-            if (msg.role === 'commentary' || msg.role === 'thinking') {
-              return <div className="codex-msg-assistant" key={`text-${i}`}>
-                {msg.role === 'thinking' && <div className="codex-tool-activity-meta">{t('workbench.workThinking')}</div>}
-                <MarkdownText text={msg.content} keyPrefix={`process-${i}`} />
-              </div>;
-            }
-            // 聚合落库的"工具调用意图"桩消息：参数与结果已由 tool_result 承载，跳过
-            if (msg.role === 'tool_use' && !msg.tool_name) return null;
-            const wfRun =
-              msg.role === 'tool_result' &&
-              msg.tool_name === 'run_workflow' &&
-              tryParseWorkflowRun(msg.content);
-            if (wfRun) {
-              return <WorkflowVizCard key={`${msg.tool_call_id ?? i}-${i}`} run={wfRun} />;
-            }
-            const lsp =
-              msg.role === 'tool_result' && msg.tool_name === 'lsp_query'
-                ? parseLspResult(msg.content)
-                : null;
-            if (lsp) {
-              return (
-                <LspVizCard
-                  key={`${msg.tool_call_id ?? i}-${i}`}
-                  parsed={lsp}
-                  cwd={cwd}
-                />
-              );
-            }
-            return (
-              <ToolCallRow
-                key={`${msg.tool_call_id ?? i}-${i}`}
-                name={msg.tool_name ?? ''}
-                argumentsJson={
-                  msg.tool_arguments
-                    ? typeof msg.tool_arguments === 'string'
-                      ? msg.tool_arguments
-                      : JSON.stringify(msg.tool_arguments)
-                    : ''
-                }
-                result={msg.role === 'tool_result' ? msg.content : undefined}
-                success={msg.tool_success ?? null}
-                running={msg.role === 'tool_use' && sessionRunning && !settled}
-                stopped={msg.role === 'tool_use' && settled}
-                durationMs={msg.tool_duration_ms ?? null}
-              />
-            );
-          })}
+          {msgs.length >= 4 && (filterCounts.failed > 0 || filterCounts.files > 0 || filterCounts.thinking > 0) && (
+            <div className="codex-activity-filters" role="group" aria-label={t('workbench.filterAll')}>
+              <button
+                type="button"
+                className={`codex-activity-filter${filter === 'all' ? ' active' : ''}`}
+                aria-pressed={filter === 'all'}
+                onClick={() => setFilter('all')}
+              >
+                {t('workbench.filterAll')}
+              </button>
+              {filterCounts.failed > 0 && (
+                <button
+                  type="button"
+                  className={`codex-activity-filter${filter === 'failed' ? ' active' : ''}`}
+                  aria-pressed={filter === 'failed'}
+                  onClick={() => setFilter(filter === 'failed' ? 'all' : 'failed')}
+                >
+                  {t('workbench.filterFailed', { n: filterCounts.failed })}
+                </button>
+              )}
+              {filterCounts.files > 0 && (
+                <button
+                  type="button"
+                  className={`codex-activity-filter${filter === 'files' ? ' active' : ''}`}
+                  aria-pressed={filter === 'files'}
+                  onClick={() => setFilter(filter === 'files' ? 'all' : 'files')}
+                >
+                  {t('workbench.filterFiles', { n: filterCounts.files })}
+                </button>
+              )}
+              {filterCounts.thinking > 0 && (
+                <button
+                  type="button"
+                  className={`codex-activity-filter${filter === 'thinking' ? ' active' : ''}`}
+                  aria-pressed={filter === 'thinking'}
+                  onClick={() => setFilter(filter === 'thinking' ? 'all' : 'thinking')}
+                >
+                  {t('workbench.filterThinking', { n: filterCounts.thinking })}
+                </button>
+              )}
+            </div>
+          )}
+          {visibleMsgs.length === 0 ? (
+            <div className="codex-activity-filter-empty">{t('workbench.filterEmpty')}</div>
+          ) : (
+            <div
+              ref={listRef}
+              className={`codex-activity-list${virtualEnabled ? ' virtual' : ''}`}
+              role="group"
+              aria-label={t('workbench.workProcess')}
+              onKeyDown={onListKeyDown}
+            >
+              {virtualEnabled ? (
+                <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+                  {virtualizer.getVirtualItems().map((virtualRow) => {
+                    const item = processItems[virtualRow.index];
+                    if (item === undefined) return null;
+                    return (
+                      <div
+                        key={item.key}
+                        data-index={virtualRow.index}
+                        ref={virtualizer.measureElement}
+                        className="codex-activity-vrow"
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          transform: `translateY(${virtualRow.start}px)`,
+                        }}
+                      >
+                        {renderItem(item)}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : processItems.map((item) => (
+                <React.Fragment key={item.key}>{renderItem(item)}</React.Fragment>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1741,10 +2100,12 @@ const MessageBubble: React.FC<{
   const { t } = useTranslation();
   const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
   const errorDetailsId = React.useId();
-  if (msg.role === 'commentary' || msg.role === 'thinking') {
+  if (msg.role === 'thinking') {
+    return <ThinkingNote content={msg.content} />;
+  }
+  if (msg.role === 'commentary') {
     return (
       <div className="codex-msg-assistant codex-msg-process">
-        {msg.role === 'thinking' && <div className="codex-tool-activity-meta">{t('workbench.workThinking')}</div>}
         <MarkdownText text={msg.content} />
       </div>
     );
@@ -5824,6 +6185,7 @@ const CodeAgentPage: React.FC = () => {
                               running={msg.role === 'tool_use' && running}
                               stopped={msg.role === 'tool_use' && !running}
                               durationMs={msg.tool_duration_ms ?? null}
+                              cwd={activeSession?.working_directory ?? ''}
                             />
                           );
                         }
@@ -5869,7 +6231,7 @@ const CodeAgentPage: React.FC = () => {
                             <span className="codex-dots"><i /><i /><i /></span>
                           </div>}
                           {thinkingText && !compacting && (
-                            <details className="codex-thinking-chain"><summary>{t('workbench.workThinking')}</summary>
+                            <details className="codex-thinking-chain"><summary>{t('workbench.thinking')}</summary>
                               <StreamFadeContext.Provider value={thinking}>
                                 <StreamFadeText text={thinkingText} />
                               </StreamFadeContext.Provider>

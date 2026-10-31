@@ -19,6 +19,12 @@ pub enum RecordKind {
     /// 进入检索供对话引用，但不是关于用户的事实——不参与事实合并，也不路由到
     /// 共享世界层。生命周期由 24h 保留规则控制。
     SelfState,
+    /// 她按天写下的日记（当天发生了什么、自己的感受）。
+    ///
+    /// 与 Fact 不同：日记是作者视角的叙述，不是用户口述/被抽取的事实，
+    /// 因此不参与冲突仲裁、事实合并与共享世界路由；但它必须可被检索召回，
+    /// 否则"她还记得上周那件事"就无从谈起。
+    Diary,
     Internal,
 }
 
@@ -79,13 +85,17 @@ pub fn initialize_record(item: &mut MemoryItem) {
             // 自述状态是临时的"此刻"，过期由 daily_presence 的 24h 规则接管
             RecordKind::SelfState => "ephemeral",
             // 采集资料按自身 TTL/expires_at 过期，不因类别被提前淘汰。
-            RecordKind::Reference | RecordKind::Fact | RecordKind::SessionSummary => "durable",
+            RecordKind::Reference | RecordKind::Fact | RecordKind::SessionSummary
+            | RecordKind::Diary => "durable",
         })
     });
     let evidence = if record_kind == RecordKind::Subjective {
         "inferred"
-    } else if matches!(record_kind, RecordKind::SessionSummary | RecordKind::Reference) {
-        // 采集资料由搜索结果总结而来，不是谁的原话。
+    } else if matches!(
+        record_kind,
+        RecordKind::SessionSummary | RecordKind::Reference | RecordKind::Diary
+    ) {
+        // 采集资料与日记都是整理后的成文内容，不是谁的原话。
         "derived"
     } else if meta
         .get("source_quote")
@@ -137,6 +147,8 @@ pub fn recallable(item: &MemoryItem) -> bool {
                 // 自述状态可被召回：她"今天也有自己的事"要能说出口。
                 // 但它不是关于用户的事实，见 SelfState 的注释。
                 | RecordKind::SelfState
+                // 日记同样可召回：她要能想起自己写过的那一天。
+                | RecordKind::Diary
         )
 }
 
@@ -267,6 +279,23 @@ mod tests {
         assert!(!entries[1].consolidated);
         assert!(entries[1].metadata.get("summarized").is_none());
         assert_eq!(entries[1].content, "原文");
+    }
+
+    #[test]
+    fn diary_is_recallable_without_becoming_a_user_fact() {
+        let mut diary = MemoryItem::new("今天去了海边".into(), Granularity::Summary, 0.8);
+        diary.tags = vec!["diary".into(), "2026-10-29".into(), "开心".into()];
+        diary.metadata = serde_json::json!({
+            "kind": "diary", "record_kind": "diary", "diary_id": "d1",
+            "date": "2026-10-29", "mood_tag": "开心",
+        });
+        initialize_record(&mut diary);
+        assert_eq!(kind(&diary), RecordKind::Diary);
+        // 日记是作者视角的叙述，不能当成用户事实参与合并。
+        assert_ne!(kind(&diary), RecordKind::Fact);
+        assert!(recallable(&diary));
+        assert_eq!(diary.metadata["retention"], serde_json::json!("durable"));
+        assert_eq!(diary.metadata["evidence_kind"], serde_json::json!("derived"));
     }
 
     #[test]

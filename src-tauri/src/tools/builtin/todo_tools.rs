@@ -997,6 +997,30 @@ impl Default for ManageTodoTool {
     }
 }
 
+/// manage_todo 的 action 解析。
+///
+/// 新调用走 `action`；旧名别名（`add_todo` / `complete_todo` / `update_todo`）
+/// 只有旧参数形状：items → 整表替换，id → 完成，title → 新增。
+fn effective_todo_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_string();
+    }
+    if args.get("items").is_some() {
+        "replace".to_string()
+    } else if args.get("id").is_some() {
+        "complete".to_string()
+    } else if args.get("title").is_some() {
+        "add".to_string()
+    } else {
+        String::new()
+    }
+}
+
 #[async_trait]
 impl Tool for ManageTodoTool {
     fn name(&self) -> &str {
@@ -1004,13 +1028,19 @@ impl Tool for ManageTodoTool {
     }
 
     fn description(&self) -> &str {
-        "Update or delete a todo item. action: update/delete. For update, pass title/description/priority/due_date to modify (modifying due_date synchronously updates the scheduled reminder). For delete, only id is needed; automatically cancels the associated scheduled reminder."
+        "Create, complete, update, delete, or replace todo items.\
+         Actions: add (title required), complete (id), update (id + fields), delete (id), \
+         replace (items). Use list_todo to read the current list."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "更新或删除待办事项。action：update/delete。update 时传入 title/description/priority/due_date 进行修改（修改 due_date 会同步更新定时提醒）；delete 时只需 id，自动取消关联的定时提醒。",
-            "ja" => "ToDoアイテムを更新または削除する。action：update/delete。update 時は title/description/priority/due_date を渡して変更（due_date の変更はスケジュールされたリマインダーを同期的に更新）。delete 時は id のみ必要、関連付けられたスケジュール済みリマインダーを自動的にキャンセル。",
+            "zh" => "创建、完成、修改、删除或整表替换待办。\
+             action：add（需要 title）、complete（id）、update（id + 字段）、delete（id）、\
+             replace（items）。要读取当前清单请用 list_todo。",
+            "ja" => "ToDo の作成・完了・更新・削除・一括置換を行う。\
+             action：add（title 必須）、complete（id）、update（id + 各フィールド）、\
+             delete（id）、replace（items）。現在の一覧は list_todo で読む。",
             _ => self.description(),
         }
     }
@@ -1028,14 +1058,31 @@ impl Tool for ManageTodoTool {
         json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["update", "delete"], "description": "Action: update or delete"},
-                "id": {"type": "string"},
-                "title": {"type": "string", "description": "New title (update only)"},
-                "description": {"type": "string", "description": "New description (update only)"},
-                "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "New priority (update only)"},
-                "due_date": {"type": "string", "description": "New due time (update only). Supports: specific datetime (2024-01-15T10:30:00), date only (2024-01-15, defaults to 09:00), or duration (PT2M=2min, PT2H=2hr). Pass empty string to clear."}
+                "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "Action to perform"},
+                "id": {"type": "string", "description": "Todo id (complete / update / delete)"},
+                "title": {"type": "string", "description": "Title (add required; update optional)"},
+                "description": {"type": "string", "description": "Description (add / update)"},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Priority 1-3 (add / update)"},
+                "due_date": {"type": "string", "description": "Due time (add / update). Supports datetime, date, or duration; empty string clears on update."},
+                "event_time": {"type": "string", "description": "Event start time (add / update)"},
+                "items": {
+                    "type": "array",
+                    "description": "Full replacement list (action=replace)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                            "completed": {"type": "boolean"},
+                            "event_time": {"type": "string"},
+                            "due_date": {"type": "string"}
+                        },
+                        "required": ["title"]
+                    }
+                }
             },
-            "required": ["action", "id"]
+            "required": ["action"]
         })
     }
 
@@ -1044,59 +1091,107 @@ impl Tool for ManageTodoTool {
             "zh" => json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["update", "delete"], "description": "操作：update 或 delete"},
-                    "id": {"type": "string"},
-                    "title": {"type": "string", "description": "新标题（仅 update）"},
-                    "description": {"type": "string", "description": "新描述（仅 update）"},
-                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "新优先级（仅 update）"},
-                    "due_date": {"type": "string", "description": "新截止时间（仅 update）。支持：具体时间（2024-01-15T10:30:00）、纯日期（2024-01-15，默认 09:00）、持续时间（PT2M=2分钟后）。传空字符串清除。"}
+                    "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "要执行的操作"},
+                    "id": {"type": "string", "description": "待办 ID（complete / update / delete）"},
+                    "title": {"type": "string", "description": "标题（add 必填；update 可选）"},
+                    "description": {"type": "string", "description": "描述（add / update）"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "优先级 1-3（add / update）"},
+                    "due_date": {"type": "string", "description": "提醒时间（add / update）。支持具体时间、纯日期或持续时间；update 传空字符串清除。"},
+                    "event_time": {"type": "string", "description": "事件开始时间（add / update）"},
+                    "items": {
+                        "type": "array",
+                        "description": "整表替换清单（action=replace）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                                "completed": {"type": "boolean"},
+                                "event_time": {"type": "string"},
+                                "due_date": {"type": "string"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
                 },
-                "required": ["action", "id"]
+                "required": ["action"]
             }),
             "ja" => json!({
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["update", "delete"], "description": "アクション：update または delete"},
-                    "id": {"type": "string"},
-                    "title": {"type": "string", "description": "新しいタイトル（update のみ）"},
-                    "description": {"type": "string", "description": "新しい説明（update のみ）"},
-                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "新しい優先度（update のみ）"},
-                    "due_date": {"type": "string", "description": "新しい期限時間（update のみ）。対応形式：特定時刻（2024-01-15T10:30:00）、日付のみ（2024-01-15、09:00）、継続時間（PT2M=2分後）。空文字列でクリア。"}
+                    "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "実行するアクション"},
+                    "id": {"type": "string", "description": "ToDo ID（complete / update / delete）"},
+                    "title": {"type": "string", "description": "タイトル（add では必須、update では任意）"},
+                    "description": {"type": "string", "description": "説明（add / update）"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "優先度 1-3（add / update）"},
+                    "due_date": {"type": "string", "description": "期限時間（add / update）。特定時刻・日付・継続時間に対応。update で空文字列はクリア。"},
+                    "event_time": {"type": "string", "description": "イベント開始時刻（add / update）"},
+                    "items": {
+                        "type": "array",
+                        "description": "一括置換リスト（action=replace）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                                "completed": {"type": "boolean"},
+                                "event_time": {"type": "string"},
+                                "due_date": {"type": "string"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
                 },
-                "required": ["action", "id"]
+                "required": ["action"]
             }),
             _ => self.parameters_schema(),
         }
     }
 
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        let action = match input.get("action").and_then(|v| v.as_str()) {
-            Some(a) if !a.is_empty() => a.to_string(),
-            _ => return ValidationResult::failure("action 是必填项", 2),
-        };
-        if !matches!(action.as_str(), "update" | "delete") {
-            return ValidationResult::failure("action 必须是 update 或 delete", 2);
-        }
-        match input.get("id").and_then(|v| v.as_str()) {
-            Some(t) if !t.is_empty() => ValidationResult::success(Some(input.clone())),
-            _ => ValidationResult::failure("id 是必填项", 2),
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_todo_action(input);
+        match action.as_str() {
+            "add" => AddTodoTool.validate_input(input, ctx).await,
+            "complete" => CompleteTodoTool.validate_input(input, ctx).await,
+            "replace" => UpdateTodoTool.validate_input(input, ctx).await,
+            "update" | "delete" => match input.get("id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => ValidationResult::success(Some(input.clone())),
+                _ => ValidationResult::failure("id 是必填项", 2),
+            },
+            "" => ValidationResult::failure("action 是必填项", 2),
+            other => ValidationResult::failure(
+                &format!(
+                    "action 必须是 add / complete / update / delete / replace（收到 {}）",
+                    other
+                ),
+                2,
+            ),
         }
     }
 
-    async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if action == "delete" {
-            PermissionResult::ask("删除待办事项不可逆，需要用户确认")
-        } else {
-            PermissionResult::allow()
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_todo_action(input).as_str() {
+            "add" => AddTodoTool.check_permissions(input, ctx).await,
+            "complete" => CompleteTodoTool.check_permissions(input, ctx).await,
+            "replace" => UpdateTodoTool.check_permissions(input, ctx).await,
+            "delete" => PermissionResult::ask("删除待办事项不可逆，需要用户确认"),
+            _ => PermissionResult::allow(),
         }
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let action = effective_todo_action(&args);
+        match action.as_str() {
+            "add" => return AddTodoTool.call(args, ctx).await,
+            "complete" => return CompleteTodoTool.call(args, ctx).await,
+            "replace" => return UpdateTodoTool.call(args, ctx).await,
+            _ => {}
+        }
         let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-        match action {
+        match action.as_str() {
             "update" => {
                 let title = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let description = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -1133,7 +1228,7 @@ impl Tool for ManageTodoTool {
             }
             _ => ToolResult::standard_error(
                 "不支持的 action",
-                Some("action 必须是 update 或 delete"),
+                Some("action 必须是 add / complete / update / delete / replace"),
                 None,
             ),
         }
@@ -1373,4 +1468,18 @@ impl Tool for UpdateTodoTool {
 
 pub(crate) fn publish_scheduler_changed(character_id: &str) {
     emit_event("scheduler:changed", &json!({"action":"execution_settled", "character_id":character_id}));
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_todo_arguments_infer_actions() {
+        assert_eq!(effective_todo_action(&json!({"title": "买菜"})), "add");
+        assert_eq!(effective_todo_action(&json!({"id": "t1"})), "complete");
+        assert_eq!(effective_todo_action(&json!({"items": []})), "replace");
+        assert_eq!(effective_todo_action(&json!({"action": "delete", "id": "t1"})), "delete");
+        assert_eq!(effective_todo_action(&json!({})), "");
+    }
 }

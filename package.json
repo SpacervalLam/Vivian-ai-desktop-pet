@@ -26,7 +26,7 @@
     "predev": "npm run build:mobile",
     "dev": "vite",
     "build:mobile": "esbuild src/mobileMemory.ts --bundle --format=iife --global-name=MemoryPresentation --target=es2020 --outfile=src-tauri/src/remote/frontend/memory-presentation.js",
-    "build": "npm run build:mobile && tsc && vite build && npm run compress:chibi && npm run package:resources && node scripts/check-apartment-plugin.mjs --core",
+    "build": "npm run build:mobile && tsc && vite build && npm run compress:chibi && npm run package:resources && npm run package:browser-runtime && node scripts/check-apartment-plugin.mjs --core",
     "package:resources": "node scripts/package-resources.mjs",
     "audit:rust-size": "node scripts/audit-rust-size.mjs",
     "audit:comic-assets": "node scripts/audit-mind-comic-assets.mjs",
@@ -41,9 +41,11 @@
     "check:agent-track": "esbuild plugins/3d-apartment/tools/room/check-agent-track.ts --bundle --platform=node --format=esm --outfile=tmp/check-agent-track.mjs --log-level=warning && node tmp/check-agent-track.mjs",
     "check:world-route": "node plugins/3d-apartment/tools/room/check-world-route.mjs",
     "build:apartment": "npm run build --workspace @vivian/3d-apartment",
-    "package:small": "node scripts/package-small.mjs"
+    "package:small": "node scripts/package-small.mjs",
+    "package:browser-runtime": "node scripts/package-browser-runtime.mjs"
   },
   "dependencies": {
+    "@playwright/test": "1.64.1",
     "@tanstack/react-virtual": "^3.14.6",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
@@ -57,6 +59,7 @@
     "i18next": "^23.16.0",
     "lucide-react": "^1.24.0",
     "mammoth": "^1.12.3",
+    "playwright-core": "1.64.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-i18next": "^15.1.0",

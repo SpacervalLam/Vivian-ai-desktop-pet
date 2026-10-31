@@ -22,6 +22,8 @@ use crate::pipeline::state::PipelineState;
 
 /// 记忆重要度引导阈值：importance 不低于该值的关键记忆在注入时打上 [重点] 标记。
 const IMPORTANCE_EMPHASIS_THRESHOLD: f64 = 0.7;
+/// 基础召回保留条数；关联扩展会在此基础上追加，最终仍受 `MEMORY_CONTEXT_MAX_TOKENS` 约束。
+const RECALL_TOP_K: usize = 6;
 
 fn is_authored_context(memory: &crate::memory::MemoryItem) -> bool {
     memory.id.starts_with("seed_") || matches!(
@@ -264,7 +266,7 @@ impl MemoryRetrievalStep {
         // 应用实体相关性过滤（修复 M6）：
         // 过滤掉"其他角色之间"的记忆，避免 LLM 把室友间对话误记为用户对话。
         // 保留：无 metadata 的普通记忆、用户直接对话、自己参与的跨角色对话、自己旁观的记忆。
-        // 过滤发生在 MemoryFilter 之前，避免无关记忆挤占 5 条配额。
+        // 过滤发生在 MemoryFilter 之前，避免无关记忆挤占基础召回配额。
         let char_id = self.memory.char_id().to_string();
         let items: Vec<_> = items
             .into_iter()
@@ -280,7 +282,7 @@ impl MemoryRetrievalStep {
             let scored = filter.get_filtered_memories(
                 &state.user_input,
                 items,
-                5,
+                RECALL_TOP_K,
                 &char_id,
             );
             let session_id = filter.last_session_id.clone();
@@ -290,8 +292,8 @@ impl MemoryRetrievalStep {
                 new_session,
             )
         } else {
-            // 未注入过滤器：截断到 5 条（保持原行为）
-            (items.into_iter().take(5).collect(), None, false)
+            // 未注入过滤器：保留基础召回条数
+            (items.into_iter().take(RECALL_TOP_K).collect(), None, false)
         };
 
         // ── 多跳关联检索 ──
@@ -507,8 +509,9 @@ impl MemoryRetrievalStep {
         let mut memory_parts: Vec<String> = Vec::new();
         let mut memory_details: Vec<serde_json::Value> = Vec::new();
         for (index, mem) in filtered_items.iter().enumerate() {
-            // Give the strongest two episodes room for context, while retaining the total budget.
-            let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 800 } else { 180 });
+            // Give the strongest two episodes more room for context; the remaining entries stay
+            // compact so the expanded total still fits the memory budget.
+            let content = crate::utils::truncate_chars(&mem.content, if index < 2 { 1200 } else { 240 });
             let authored_context = is_authored_context(mem);
             let type_label = if mem.metadata["fictional_backstory"] == true {
                 format!("{}；仅在用户问及或当前话题确有需要时回应，不主动以此开启或延续话题，也不当作与当前用户的共同经历",

@@ -562,9 +562,13 @@ class ChatControllerClass {
 
   /** 处理 augment 回复（增量记忆补充） */
   handleAugmentReply(text: string): void {
-    if (!text) return;
-    BubbleController.appendToBubble(text);
-    this.handlers.onAugmentReply?.(text);
+    const trimmed = text?.trim();
+    if (!trimmed) return;
+    // 首条气泡还在时接着往下说；已经关闭时作为一条新的补充气泡出现。
+    if (!BubbleController.appendToBubble(trimmed)) {
+      BubbleController.showBubble(trimmed);
+    }
+    this.handlers.onAugmentReply?.(trimmed);
   }
 
   /**

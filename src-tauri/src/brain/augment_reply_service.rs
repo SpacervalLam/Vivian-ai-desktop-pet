@@ -22,6 +22,7 @@ use crate::providers::base::LLMRequest;
 use crate::providers::ModelRouter;
 use crate::types::response::ChatMessage;
 use crate::utils::truncate_chars;
+use tauri::{Emitter, Manager};
 
 // ── 用户上下文判定阈值（600 秒）──
 const USER_FACING_CONTEXT_SECONDS: u64 = 600;
@@ -255,6 +256,8 @@ impl AugmentReplyService {
             max_pending: 2,
             max_augment_len: 200,
             similarity_reject: 0.55,
+            // slow 检索（embedding）+ 精排两次往返的后台预算；
+            // 该任务不占用户首字延迟，但也不该无限等待。
             slow_timeout_seconds: 4.0,
             // Hybrid = keyword + recency 加权，比关键路径的 Auto 更彻底
             slow_strategy: RetrievalStrategy::Hybrid,
@@ -532,10 +535,14 @@ impl AugmentReplyService {
             map.get(&req.char_id).cloned()
         }
         .ok_or_else(|| format!("no_memory_for_char_{}", req.char_id))?;
+
+        // slow 检索只做一次后台 embedding 召回；模型主导的「关键词深入回忆」是
+        // `search_memory` 工具的职责，由模型判断证据不足时自己调用，不是每轮固定流程。
         let items = memory
             .search_memories(&req.user_input, self.slow_strategy, self.slow_limit)
             .await
             .map_err(|e| e.to_string())?;
+
         // 过滤掉与当前用户输入相同的记忆（UserMemorySaving 刚写入的当前轮 ShortTerm），
         // 否则 diff_slow_vs_fast 会把它当作"新记忆"触发无意义的补充回复。
         let user_trimmed = req.user_input.trim();
@@ -788,7 +795,11 @@ impl AugmentReplyService {
             }));
         }
 
-        // 2) 记忆系统：作为 assistant 补充回复沉淀（importance 0.25）
+        // 2) 投递到桌宠气泡 / 应用内聊天窗口，形成"继续回复"。
+        //    写入对话管理器后，下一轮提示词也能看到这句补充。
+        self.deliver_to_user(req, augment_text);
+
+        // 3) 记忆系统：作为 assistant 补充回复沉淀（importance 0.25）
         //    严格按 req.char_id 路由到对应角色的 MemoryManager，角色记忆库完全隔离
         let memory_opt = {
             let map = self.memories.read();
@@ -827,6 +838,63 @@ impl AugmentReplyService {
             req.first_response_text,
             augment_text
         );
+    }
+
+    /// 把补充回复投递为一次新的助手消息。
+    ///
+    /// - 写入当前角色的 DialogueManager（下一轮上下文能看到这句补充）；
+    /// - emit `chat:augment_reply`，主窗口据此在桌宠气泡里继续显示；
+    /// - 微信渠道额外 emit `chat:assistant_message`，让 ChatWindow 也追加一条。
+    fn deliver_to_user(&self, req: &AugmentRequest, augment_text: &str) {
+        let Some(app) = crate::tools::builtin::send_chat_message_tool::current_app_handle() else {
+            tracing::debug!("[AugmentReply] AppHandle 不可用，补充回复仅写入记忆");
+            return;
+        };
+        let Some(state) = app.try_state::<Arc<crate::state::AppState>>() else {
+            return;
+        };
+        let character = match state.get_character(Some(&req.char_id)) {
+            Ok(character) => character,
+            Err(error) => {
+                tracing::warn!("[AugmentReply] 投递补充回复时找不到角色 {}: {}", req.char_id, error);
+                return;
+            }
+        };
+        let dialogue = &character.brain.dialogue;
+        let channel = dialogue.get_channel();
+        let is_wechat = channel.starts_with("wechat");
+        let mut message = ChatMessage::assistant(augment_text);
+        message.meta = Some(
+            crate::messages::MessageMeta::assistant().with_channel(&channel),
+        );
+        let session_id = dialogue.get_session_id();
+        dialogue.add_message_with_metadata(
+            message,
+            serde_json::json!({
+                "session_id": session_id,
+                "speaker": req.char_id.clone(),
+                "listener": "user",
+                "channel": channel.clone(),
+                "knowledge_source": "direct",
+                "augment": true,
+            }),
+        );
+
+        let payload = serde_json::json!({
+            "character_id": req.char_id.clone(),
+            "content": augment_text,
+            "channel": channel.clone(),
+            "timestamp": chrono::Local::now().to_rfc3339(),
+            "augment": true,
+        });
+        if let Err(error) = app.emit("chat:augment_reply", payload.clone()) {
+            tracing::warn!("[AugmentReply] 桌宠气泡事件发送失败: {}", error);
+        }
+        if is_wechat {
+            if let Err(error) = app.emit("chat:assistant_message", payload) {
+                tracing::warn!("[AugmentReply] 聊天窗口事件发送失败: {}", error);
+            }
+        }
     }
 
     /// 标记请求完成：更新状态、维护冷却时间戳、从 pending 移除、广播事件。

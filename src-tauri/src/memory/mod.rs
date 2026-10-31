@@ -4,6 +4,7 @@
 //! 嵌入服务、向量检索、写入时 LLM 增强、混合检索、陈旧度提示、分词器。
 
 pub mod age;
+pub mod agentic_recall;
 pub mod auto_extractor;
 pub mod extraction_queue;
 pub mod retrieval_budget;

@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
+use super::music_tools::{MusicNowPlayingTool, MusicPlayTool};
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
     ValidationResult,
@@ -49,6 +50,26 @@ const VK_VOLUME_UP: u8 = 0xAF;
 const VK_VOLUME_DOWN: u8 = 0xAE;
 const VK_VOLUME_MUTE: u8 = 0xAD;
 
+/// 合并音乐工具后的动作解析。
+///
+/// 新调用走 `action`；旧名别名（`music_play` / `music_now_playing`）只有旧参数形状：
+/// 带 query/track_id 视为播放，其余视为读取当前播放。
+fn effective_media_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_string();
+    }
+    if args.get("query").is_some() || args.get("track_id").is_some() {
+        "play".to_string()
+    } else {
+        "now_playing".to_string()
+    }
+}
+
 /// 将 action 字符串映射到 (VK 码, 标签)
 fn map_action(action: &str) -> Option<(u8, &'static str)> {
     match action {
@@ -88,11 +109,13 @@ impl Tool for MediaControlTool {
     fn description(&self) -> &str {
         "Control global media playback or system volume.\
          The action parameter specifies what to do:\
-         play_pause, next_track, previous_track, volume_up, volume_down, mute.\n\
+         play_pause, next_track, previous_track, volume_up, volume_down, mute, \
+         now_playing (read the current track), play (find a song by query/track_id and play it).\n\
          Playback actions go through the system media session (so they can target a specific \
          player and report what ended up playing), falling back to media keys if that fails. \
          Volume and mute always use media keys.\n\
-         Typical scenario: call when the user says \"play/pause\", \"next track\", \"volume up\", \"mute\"."
+         Typical scenario: call when the user says \"play/pause\", \"next track\", \"volume up\", \
+         \"mute\", \"what am I listening to\", or \"play <song>\"."
     }
 
     fn description_in(&self, lang: &str) -> &str {
@@ -100,15 +123,18 @@ impl Tool for MediaControlTool {
             "zh" => "控制全局媒体播放或系统音量。\
          action 参数指定动作：\
          play_pause（播放/暂停）、next_track（下一首）、previous_track（上一首）、\
-         volume_up（音量增大）、volume_down（音量减小）、mute（静音切换）。\n\
+         volume_up（音量增大）、volume_down（音量减小）、mute（静音切换）、\
+         now_playing（读取当前播放）、play（按歌名/路径找歌并播放）。\n\
          播放类动作优先走系统媒体会话（可定向到具体播放器、并能回报最终在放什么），\
          失败时降级为模拟媒体键；音量与静音始终用媒体键。\n\
-         典型场景：当用户说\"播放/暂停\"、\"下一首\"、\"音量增大\"、\"静音\"时调用。\n\
-         注意：想按歌名找歌并播放请用 music_play，不要用本工具。",
+         典型场景：当用户说\"播放/暂停\"、\"下一首\"、\"音量增大\"、\"静音\"、\
+         \"我在听什么\"、\"放首某某的歌\"时调用。\n\
+         按歌名找歌与读取当前播放分别是 action=play 与 action=now_playing。",
             "ja" => "グローバルなメディア再生やシステム音量を制御する。\
          action パラメータで動作を指定する：\
          play_pause（再生/一時停止）、next_track（次のトラック）、previous_track（前のトラック）、\
-         volume_up（音量を上げる）、volume_down（音量を下げる）、mute（ミュート切り替え）。\n\
+         volume_up（音量を上げる）、volume_down（音量を下げる）、mute（ミュート切り替え）、\
+         now_playing（現在の再生を読み取る）、play（曲名/パスで探して再生する）。\n\
          再生系の操作はシステムメディアセッションを優先し（特定のプレイヤーを指定でき、\
          最終的に何が再生されているかを返せる）、失敗時はメディアキーにフォールバックする。\n\
          典型的なシナリオ：ユーザーが\"再生/一時停止\"\"次のトラック\"\"音量を上げて\"\"ミュート\"と言った時に呼び出す。",
@@ -127,8 +153,7 @@ impl Tool for MediaControlTool {
 
     fn anti_use_cases(&self) -> &[&str] {
         &[
-            "Find a specific song by name and play it (use music_play instead)",
-            "Just checking what is currently playing (use music_now_playing instead)",
+            "Pause/resume is play_pause; do not call play without a song name",
         ]
     }
 
@@ -138,12 +163,33 @@ impl Tool for MediaControlTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["play_pause", "next_track", "previous_track", "volume_up", "volume_down", "mute"],
-                    "description": "Media key action to send."
+                    "enum": ["play_pause", "next_track", "previous_track", "volume_up", "volume_down", "mute", "now_playing", "play"],
+                    "description": "Media action. now_playing reads the current track; play searches and plays a song named by query/track_id."
                 },
                 "target_app": {
                     "type": "string",
                     "description": "Optional. Restrict the action to a specific player, matched against its app id (e.g. \"cloudmusic\", \"spotify\", \"qqmusic\"). Omit to use the system's current session."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Song title/artist for action=play. Required unless track_id is given."
+                },
+                "track_id": {
+                    "type": "string",
+                    "description": "Exact local file path for action=play; skips searching."
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["auto", "local", "netease", "qqmusic", "spotify"],
+                    "description": "Music source for action=play; defaults to the configured preference."
+                },
+                "directory": {
+                    "type": "string",
+                    "description": "Optional folder to search for action=play."
+                },
+                "index": {
+                    "type": "number",
+                    "description": "Which search result to play (1-based) for action=play."
                 }
             },
             "required": ["action"]
@@ -186,27 +232,36 @@ impl Tool for MediaControlTool {
         }
     }
 
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        let action = input.get("action").and_then(|v| v.as_str());
-        match action {
-            Some(a) if map_action(a).is_some() => ValidationResult::success(None),
-            Some(a) => ValidationResult::failure(
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_media_action(input);
+        match action.as_str() {
+            "now_playing" => ValidationResult::success(Some(input.clone())),
+            "play" => MusicPlayTool.validate_input(input, ctx).await,
+            other if map_action(other).is_some() => ValidationResult::success(None),
+            other => ValidationResult::failure(
                 &format!(
-                    "不支持的 action: {}（可选：play_pause / next_track / previous_track / volume_up / volume_down / mute）",
-                    a
+                    "不支持的 action: {}（可选：play_pause / next_track / previous_track / volume_up / volume_down / mute / now_playing / play）",
+                    other
                 ),
                 2,
             ),
-            None => ValidationResult::failure("必须提供 action 参数", 2),
         }
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        if effective_media_action(input) == "play" {
+            return MusicPlayTool.check_permissions(input, ctx).await;
+        }
         PermissionResult::ask("控制媒体（播放/暂停/音量/静音）需要用户确认")
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_media_action(&args);
+        match action.as_str() {
+            "now_playing" => return MusicNowPlayingTool.call(args, ctx).await,
+            "play" => return MusicPlayTool.call(args, ctx).await,
+            _ => {}
+        }
         let target_app = args
             .get("target_app")
             .and_then(|v| v.as_str())
@@ -214,7 +269,7 @@ impl Tool for MediaControlTool {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        let (vk, label) = match map_action(action) {
+        let (vk, label) = match map_action(&action) {
             Some(v) => v,
             None => {
                 return ToolResult::standard_error(
@@ -227,9 +282,9 @@ impl Tool for MediaControlTool {
 
         // 播放类动作优先走 SMTC：可定向到具体播放器、有成功回执、能读回曲名做校验。
         // 音量/静音没有 SMTC 对应 API，直接发媒体键。
-        let is_playback = matches!(action, "play_pause" | "next_track" | "previous_track");
+        let is_playback = matches!(action.as_str(), "play_pause" | "next_track" | "previous_track");
         if is_playback {
-            if let Some(pa) = PlaybackAction::parse(action) {
+            if let Some(pa) = PlaybackAction::parse(action.as_str()) {
                 match MusicSource::new().control(pa, target_app.clone()).await {
                     Ok(snapshot) => {
                         let now = snapshot
@@ -296,5 +351,18 @@ impl Tool for MediaControlTool {
 
     fn risk(&self) -> ToolRiskTier {
         ToolRiskTier::FsWrite
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_music_arguments_infer_actions() {
+        assert_eq!(effective_media_action(&json!({"query": "晴天"})), "play");
+        assert_eq!(effective_media_action(&json!({"track_id": "D:/a.mp3"})), "play");
+        assert_eq!(effective_media_action(&json!({})), "now_playing");
+        assert_eq!(effective_media_action(&json!({"action": "pause"})), "pause");
     }
 }

@@ -1631,6 +1631,300 @@ impl Tool for CreateHtmlNoteTool {
     }
 }
 
+// ============================================================================
+// notebook —— 查看 / 修改 / 分享 / HTML 笔记的统一入口
+// ============================================================================
+
+/// 合并五个笔记工具后的动作解析（旧工具都没有 action 参数）。
+///
+/// 旧参数形状：`html` → create_html；`note_id` + `follow_up` → share；
+/// `note_id` + 任一可更新字段 → update；只有 `note_id` → get；空参数 → list。
+pub(crate) fn effective_notebook_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("html").is_some() {
+        return "create_html".to_string();
+    }
+    if args.get("note_id").is_some() {
+        if args.get("follow_up").is_some() {
+            return "share".to_string();
+        }
+        let updatable = ["title", "layout", "palette", "tags", "cover", "blocks"]
+            .iter()
+            .any(|key| args.get(*key).is_some());
+        return if updatable {
+            "update".to_string()
+        } else {
+            "get".to_string()
+        };
+    }
+    "list".to_string()
+}
+
+const NOTEBOOK_ACTIONS: &[&str] = &["list", "get", "update", "share", "create_html"];
+
+fn notebook_action_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": NOTEBOOK_ACTIONS,
+                "description": "list: notes with ids/tags/layout; get: full structured content; update: change fields; \
+                                share: link card to the WeChat chat; create_html: author an HTML note page."
+            },
+            "note_id": { "type": "string", "description": "Target note id (get / update / share)." },
+            "keyword": { "type": "string", "description": "For action=list: fuzzy filter over title/tags." },
+            "title": { "type": "string", "description": "New title (update) or page title (create_html)." },
+            "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "New layout for action=update." },
+            "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "New palette for action=update." },
+            "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags (update replaces the list; create_html uses 2-4 topic tags)." },
+            "cover": { "type": "object", "description": "New cover config for action=update." },
+            "blocks": { "type": "array", "description": "Replacement content blocks for action=update. Replaces ALL blocks — read action=get first." },
+            "follow_up": { "type": "string", "description": "For action=share: one or two natural sentences to say when sharing." },
+            "style": {
+                "type": "string",
+                "enum": ["free", "paper"],
+                "description": "For action=create_html: free = you write the complete self-contained HTML document; \
+                                paper = the system injects the document and stylesheet, you write only the fragment inside .wrap."
+            },
+            "html": {
+                "type": "string",
+                "description": "For action=create_html: complete HTML document (style=free) or the .wrap fragment (style=paper). \
+                                Never include <script>, on* attributes, nested <iframe> or javascript: URLs; chart libraries do not run — use tables or inline SVG."
+            },
+            "meta_note": {
+                "type": "string",
+                "description": "For action=create_html: provenance/reliability notes stored beside the note for retrieval but not rendered."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+pub struct NotebookTool;
+
+impl NotebookTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NotebookTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for NotebookTool {
+    fn name(&self) -> &str {
+        "notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Work with existing notebook notes and author HTML note pages. Actions: \
+         list (note ids, titles, tags, layout, last-updated; fuzzy keyword filter), \
+         get (full structured content as JSON — always do this before update so you do not lose blocks), \
+         update (title / layout / palette / tags / cover, or replace ALL blocks; omitted fields keep their value), \
+         share (send an existing note to the WeChat chat as a link card under a short natural follow-up; \
+         find the note_id via list — never create a new note just to share one), \
+         create_html (author a note rendered in the Notebook tab).\n\
+         create_html has two modes via style: free = you write the complete self-contained HTML document \
+         (CSS variables on :root, hierarchy by size/weight/whitespace, contrast ≥ 4.5:1, responsive, \
+         :root/body/html work because the note loads in its own iframe); paper = the system injects the \
+         document and stylesheet and you write only the fragment inside .wrap (facts and judgement stay \
+         physically separate: close reading, quick-reference/comparison sheets, study digests, briefings). \
+         Never use <script>, on* handlers, nested <iframe> or javascript: URLs — they are stripped and chart \
+         libraries do not run; express data with tables and inline SVG (use create_notebook table/chart blocks \
+         when an actually rendered chart is required). Write in first person like your own diary, not as a report; \
+         open straight into the content and do not use emoji anywhere. Reuse an existing tag via action=list when \
+         the meaning matches. Prefer create_notebook for simple card-style notes; use create_html when you need \
+         fine-grained visual control."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "处理已有笔记与撰写 HTML 笔记页。action 取值：\
+                     list（笔记 id、标题、标签、布局、最后修改时间，可按 keyword 模糊过滤）、\
+                     get（完整结构化内容 JSON；修改前务必先看，避免丢内容块）、\
+                     update（改标题/布局/配色/标签/封面，或替换全部 blocks；未提供的字段保持原值）、\
+                     share（把已有笔记以链接卡片分享到微信聊天，附一句自然的跟进；先用 list 找 note_id，不要为分享新建笔记）、\
+                     create_html（撰写在笔记 tab 中渲染的 HTML 笔记）。\n\
+                     create_html 由 style 分两种模式：free＝你写完整自包含 HTML 文档（:root CSS 变量、用字号粗细与留白建立层级、\
+                     对比度 ≥ 4.5:1、响应式；笔记在独立 iframe 中加载，:root/body/html 正常生效）；\
+                     paper＝系统注入整份文档与样式表，你只写 .wrap 内部正文片段（事实与判断在版面上分开：精读、速查/对照表、\
+                     学习材料消化、汇报）。禁止 <script>、on* 事件、嵌套 <iframe> 与 javascript: 协议——脚本会被移除，\
+                     图表库不可用；数据用表格与内联 SVG 表达，确实要渲染柱状/折线/饼图时用 create_notebook 的 table/chart 块。\
+                     像写自己的日记那样用第一人称，开头直接切进内容，不要写成报告；全文不用 emoji。\
+                     标签先 list 看已有标签，能复用就复用。简单卡片笔记用 create_notebook，需要精细视觉控制时用 create_html。",
+            "ja" => "既存ノートの操作とHTMLノートの作成。action：list（id・タイトル・タグ・レイアウト・更新時刻、keyword絞り込み）、\
+                     get（完全な構造化内容。更新前に必ず確認してブロック消失を防ぐ）、update（タイトル/レイアウト/配色/タグ/カバー、\
+                     または全blocksの置換）、share（既存ノートをリンクカードとしてWeChatに共有。共有のためだけに新規作成しない）、\
+                     create_html（ノートタブで描画されるHTMLノート）。\n\
+                     create_html は style で二模式：free＝完全な自己完結HTML文書を自分で書く；paper＝文書とスタイルシートはシステムが注入し、\
+                     .wrap 内部の本文断片だけを書く。`<script>`・on* 属性・ネストiframe・javascript: は禁止（除去され、チャートライブラリも動かない）。\
+                     データは表とインラインSVGで表現する。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我有哪些笔记\n看看那篇笔记\n改一下笔记\n分享笔记\n做个好看的网页笔记\n整理成速查表",
+            "en" => "what notes do I have\nshow me that note\nupdate the note\nshare the notebook\nmake a formatted html note\nquick reference sheet",
+            "ja" => "ノート一覧\nあのノートを見せて\nノートを更新\nノートを共有\nHTMLノートを作って\n速査表にまとめて",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        notebook_action_schema()
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        if lang != "zh" {
+            return self.parameters_schema();
+        }
+        let style_guide = doc_style::guide("zh");
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": NOTEBOOK_ACTIONS,
+                    "description": "list 列笔记；get 读取完整内容；update 修改字段；share 分享到微信；create_html 撰写 HTML 笔记。"
+                },
+                "note_id": { "type": "string", "description": "目标笔记 ID（get / update / share）。" },
+                "keyword": { "type": "string", "description": "action=list 时按标题/标签模糊过滤；留空返回全部。" },
+                "title": { "type": "string", "description": "update 的新标题；create_html 的页面标题（简洁，建议 15 字以内）。" },
+                "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "action=update 的新布局。" },
+                "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "action=update 的新配色。" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "标签。update 会替换原标签；create_html 取 2-4 个主题词。先 list 看已有标签，能复用就复用。" },
+                "cover": { "type": "object", "description": "action=update 的新封面配置。" },
+                "blocks": { "type": "array", "description": "action=update 的新内容块，会替换全部 blocks——先 get 看原内容，再给完整列表。" },
+                "follow_up": { "type": "string", "description": "action=share 时附带的 1-2 句自然跟进评论。" },
+                "style": {
+                    "type": "string",
+                    "enum": ["free", "paper"],
+                    "description": format!("笔记范式。free=你撰写完整自包含 HTML 文档（默认）；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部正文片段。\n\n{}", style_guide),
+                    "default": "free"
+                },
+                "html": { "type": "string", "description": "action=create_html 必填。style=free 给完整自包含 HTML 文档（含 <style>）；style=paper 只给 .wrap 内部正文片段（不要 <!DOCTYPE>/<html>/<head>/<body>/<style>）。禁止 <script>、on* 事件、嵌套 <iframe> 与 javascript: 协议；图表库不可用，数据用表格与内联 SVG。" },
+                "meta_note": { "type": "string", "description": "action=create_html 的来源说明（存进笔记目录供检索、页面不渲染）：整理自哪些来源、可靠性、哪些没收录。" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_notebook_action(input);
+        if !NOTEBOOK_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                &format!(
+                    "不支持的 action: {action}（可选：{}）",
+                    NOTEBOOK_ACTIONS.join(" / ")
+                ),
+                2,
+            );
+        }
+        match action.as_str() {
+            "list" => ListNotebooksTool.validate_input(input, ctx).await,
+            "get" => GetNotebookDetailTool.validate_input(input, ctx).await,
+            "update" => UpdateNotebookTool.validate_input(input, ctx).await,
+            "share" => ShareNotebookTool.validate_input(input, ctx).await,
+            "create_html" => CreateHtmlNoteTool.validate_input(input, ctx).await,
+            _ => ValidationResult::success(Some(input.clone())),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_notebook_action(input).as_str() {
+            "share" => ShareNotebookTool.check_permissions(input, ctx).await,
+            "create_html" => CreateHtmlNoteTool.check_permissions(input, ctx).await,
+            _ => PermissionResult::allow(),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        match effective_notebook_action(&args).as_str() {
+            "list" => ListNotebooksTool.call(args, ctx).await,
+            "get" => GetNotebookDetailTool.call(args, ctx).await,
+            "update" => UpdateNotebookTool.call(args, ctx).await,
+            "share" => ShareNotebookTool.call(args, ctx).await,
+            "create_html" => CreateHtmlNoteTool.call(args, ctx).await,
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"),
+                Some("InvalidAction"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    fn search_hint(&self) -> &str {
+        "notebook note list read update share html page 笔记 列表 查看 修改 分享 网页笔记 速查表"
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_notebook_arguments_infer_actions() {
+        assert_eq!(effective_notebook_action(&json!({})), "list");
+        assert_eq!(effective_notebook_action(&json!({"keyword": "食谱"})), "list");
+        assert_eq!(effective_notebook_action(&json!({"note_id": "n1"})), "get");
+        assert_eq!(
+            effective_notebook_action(&json!({"note_id": "n1", "blocks": []})),
+            "update"
+        );
+        assert_eq!(
+            effective_notebook_action(&json!({"note_id": "n1", "follow_up": "给你写好啦"})),
+            "share"
+        );
+        assert_eq!(
+            effective_notebook_action(&json!({"title": "热梗", "html": "<div>x</div>"})),
+            "create_html"
+        );
+        assert_eq!(effective_notebook_action(&json!({"action": "LIST"})), "list");
+    }
+
+    #[test]
+    fn unknown_notebook_action_is_rejected() {
+        let ctx = ToolUseContext::default();
+        let verdict =
+            futures::executor::block_on(NotebookTool.validate_input(&json!({"action": "delete"}), &ctx));
+        assert!(!verdict.result, "笔记工具没有删除动作");
+    }
+}
+
 /// raw_html 笔记里「不是正文、却会被朴素去标签法当成正文」的块。
 ///
 /// `<style>` 是最大的一头：自由 HTML 笔记常自带整份样式表，paper 范式的更是约 7KB——

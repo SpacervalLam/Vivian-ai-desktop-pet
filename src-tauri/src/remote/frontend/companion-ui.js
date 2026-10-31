@@ -8,7 +8,8 @@
   const defaultOwner = () => currentCharId || characters()[0]?.id || '';
   const state = {
     page: 'home', mind: {owner:'', seq:0}, diary: {owner:'', seq:0, entries:[], selected:null},
-    work: {id:null, seq:0, listSeq:0, sessions:[], detail:null, signature:'', questionId:null}, planFilter:'pending',
+    work: {id:null, seq:0, listSeq:0, sessions:[], detail:null, signature:'', questionId:null,
+      process:null, processSignature:'', processFilter:'all', processOpen:false}, planFilter:'pending',
   };
   const sending = new Set();
   let refreshTimer, connectionBusy = false, restoringHistory = false;
@@ -110,6 +111,162 @@
   }
 
   const statusLabel = session => session.pending_question?'等你回应':({running:'进行中',idle:'可继续',canceled:'已停止'})[session.status]||'可继续';
+  const PROCESS_FILTERS = [
+    {id:'all',label:'全部'},{id:'failed',label:'失败'},{id:'files',label:'文件'},{id:'think',label:'思考'},
+  ];
+  const PROCESS_GLYPH = {edit:'✎',read:'▤',search:'⌕',run:'▸',browse:'◍',plan:'☰',image:'▣',other:'⚙'};
+  const PROCESS_SUMMARY_KEYS = new Set(['path','file_path','file','target','directory','dir','pattern','query','glob','keyword','q','command','script','cmd','url']);
+  const processGlyph = kind => PROCESS_GLYPH[kind] || PROCESS_GLYPH.other;
+
+  /** 对话流只保留真正的对话消息；工具、思考、旁白都进「过程」。 */
+  function conversationOf(data) {
+    return (data.messages||[]).filter(message => ['user','assistant','error','notice'].includes(message.role) && String(message.content||'').trim());
+  }
+  function processSummaryLine(process) {
+    if(!process) return '';
+    const parts=[], summary=window.WorkProcess?.summaryText(process.summary);
+    if(summary) parts.push(summary);
+    if(process.counts.thinking) parts.push('思考 '+process.counts.thinking+' 段');
+    if(process.counts.failed) parts.push(process.counts.failed+' 步失败');
+    return parts.join(' · ');
+  }
+  function uniqueProcessFiles(process) {
+    const files=new Set();
+    for(const call of process?.calls||[]) {
+      if(window.WorkProcess.FILE_TOOLS.has(call.name)&&call.path) files.add(String(call.path).replace(/\\/g,'/').toLowerCase());
+    }
+    return files.size;
+  }
+  function processSignatureOf(process) {
+    if(!process) return '';
+    const rows=process.items.map(item=>{
+      if(item.type==='tool') {
+        const info=item.call.info||{};
+        return ['t',item.call.id,item.weight,item.emptyCount||0,!!item.call.hasResult,!!item.call.success,info.meta||'',info.state||'',(info.files||[]).length,Boolean(item.call.result)];
+      }
+      if(item.type==='think') return ['k',item.index,String(item.content||'').length];
+      if(item.type==='say') return ['s',item.index,String(item.content||'').length];
+      return ['p',item.phase,item.count,item.files,item.failed];
+    });
+    return JSON.stringify([rows,process.steps,process.running,process.counts]);
+  }
+  function renderProcessEntry() {
+    const process=state.work.process, entry=$('workProcessEntry'), line=processSummaryLine(process);
+    const summary=$('workProcessSummaryText'), sheetSummary=$('workProcessSummaryTextSheet');
+    if(summary) summary.textContent=line;
+    if(sheetSummary) sheetSummary.textContent=line;
+    const rows=process?process.items.filter(item=>item.type!=='phase').length:0;
+    const content=rows>0;
+    if(entry) entry.hidden=!content;
+    if(!content||!entry) return;
+    const status=$('workProcessStatus');
+    status.className='mobile-process-entry-status';
+    if(process.running) {status.textContent='进行中';status.classList.add('is-running');}
+    else if(process.counts.failed) {status.textContent=process.counts.failed+' 步失败';status.classList.add('is-failed');}
+    else status.textContent=rows+' 步';
+  }
+  function visibleProcessItems(process) {
+    const filter=state.work.processFilter, items=process.items||[], WP=window.WorkProcess;
+    if(filter==='all') return items;
+    return items.filter(item=>{
+      if(item.type==='phase') return false;
+      if(filter==='think') return item.type==='think';
+      if(item.type!=='tool') return false;
+      const call=item.call, info=call.info||{};
+      if(filter==='failed') return call.success===false||info.state==='failed';
+      return WP.FILE_TOOLS.has(call.name);
+    });
+  }
+  function renderProcessFilters(process) {
+    const filters=$('workProcessFilters'); if(!filters) return;
+    const counts={all:process.items.filter(item=>item.type!=='phase').length, failed:process.counts.failed, files:uniqueProcessFiles(process), think:process.counts.thinking};
+    filters.innerHTML=PROCESS_FILTERS.map(item=>`<button type="button" data-process-filter="${item.id}" aria-pressed="${state.work.processFilter===item.id}">${item.label}${counts[item.id]?`<span class="process-filter-count">${counts[item.id]}</span>`:''}</button>`).join('');
+  }
+  function renderProcessTool(item, openKeys) {
+    const WP=window.WorkProcess, call=item.call, info=call.info||{}, failed=call.success===false||info.state==='failed', pending=info.state==='pending'||info.state==='stopped';
+    const merged=item.emptyCount>1?' · '+item.emptyCount+' 次':'';
+    const key='tool:'+(call.id||item.index);
+    const files=info.files||[];
+    const extra=WP.detailPairs(call).filter(([name])=>!PROCESS_SUMMARY_KEYS.has(name)).slice(0,8);
+    const output=String(call.result||'').trim(), preview=output.length>1200?output.slice(0,1200)+'…':output;
+    const range=(call.args?.start_line!=null&&call.args?.end_line!=null)?String(call.args.start_line)+'-'+String(call.args.end_line):'';
+    const detail=[
+      extra.length?`<div class="process-detail">${extra.map(([name,value])=>`<div class="process-detail-row"><span class="process-detail-key">${escape(name)}</span><span class="process-detail-value">${escape(value)}</span></div>`).join('')}</div>`:'',
+      files.length?`<div class="process-files">${files.slice(0,8).map(file=>`<div class="process-file"><span class="process-file-icon" aria-hidden="true">◫</span><span class="process-file-name" title="${escape(file)}">${escape(WP.displayPath(file,item.call.cwd))}</span>${range?`<span class="process-file-range">${escape(range)}</span>`:''}</div>`).join('')}${files.length>8?`<span class="process-file-more">还有 ${files.length-8} 个文件</span>`:''}</div>`:'',
+      preview?`<pre class="process-output">${escape(preview)}</pre>`:'',
+    ].join('');
+    const hasDetail=!!detail;
+    const head=`<span class="process-tool-label">${escape(WP.toolLabel(call.name))}</span><span class="process-tool-meta${failed?' is-failed':pending?' is-pending':''}">${escape((info.meta||'')+merged)}</span>${hasDetail?'<span class="process-chevron" aria-hidden="true">›</span>':''}${call.argsText?`<span class="process-tool-arg" title="${escape(call.argsText)}">${escape(call.argsText)}</span>`:''}`;
+    const icon=`<span class="process-item-icon" aria-hidden="true">${processGlyph(call.kind)}</span>`;
+    const classes=`process-item process-tool${failed?' is-failed':''}`;
+    return hasDetail
+      ? `<details class="${classes}" data-key="${escape(key)}"${openKeys.has(key)?' open':''}>${icon}<summary>${head}</summary><div class="process-tool-body">${detail}</div></details>`
+      : `<div class="${classes} is-static">${icon}<div class="process-tool-head">${head}</div></div>`;
+  }
+  function renderProcessThink(item, openKeys) {
+    const key='think:'+item.index, one=String(item.content||'').replace(/\s+/g,' ').trim(), preview=one.length>80?one.slice(0,79)+'…':one;
+    const open=state.work.processFilter==='think'||openKeys.has(key);
+    return `<details class="process-item process-think" data-key="${escape(key)}"${open?' open':''}><span class="process-item-icon" aria-hidden="true">◍</span><summary><span class="process-think-label">思考过程</span><span class="process-think-preview">${escape(preview)}</span><span class="process-chevron" aria-hidden="true">›</span></summary><div class="process-think-body">${escape(String(item.content||'').trim())}</div></details>`;
+  }
+  function renderProcessSay(item, openKeys) {
+    const key='say:'+item.index, one=String(item.content||'').replace(/\s+/g,' ').trim(), preview=one.length>80?one.slice(0,79)+'…':one;
+    return `<details class="process-item process-say" data-key="${escape(key)}"${openKeys.has(key)?' open':''}><span class="process-item-icon" aria-hidden="true">✦</span><summary><span class="process-say-label">说明</span><span class="process-say-preview">${escape(preview)}</span><span class="process-chevron" aria-hidden="true">›</span></summary><div class="process-say-body mobile-prose">${prose(item.content)}</div></details>`;
+  }
+  function renderProcessSheet(reset=false) {
+    const list=$('workProcessList'), process=state.work.process;
+    if(!state.work.processOpen||!list) return;
+    if(!process) {list.innerHTML='<div class="process-sheet-empty">还没有工具调用记录。</div>';return;}
+    renderProcessFilters(process);
+    const signature=processSignatureOf(process);
+    if(!reset&&signature===state.work.processSignature) return;
+    const openKeys=new Set([...list.querySelectorAll('details[data-key][open]')].map(element=>element.dataset.key));
+    const scroll=reset?0:list.scrollTop;
+    state.work.processSignature=signature;
+    const items=visibleProcessItems(process);
+    list.innerHTML=items.length?`<div class="process-list">${items.map(item=>{
+      if(item.type==='phase') return `<div class="process-phase"><span>${escape(window.WorkProcess.phaseLabel(item.phase))}</span><span class="process-phase-count">${item.count} 步${item.failed?' · '+item.failed+' 失败':''}</span></div>`;
+      if(item.type==='think') return renderProcessThink(item,openKeys);
+      if(item.type==='say') return renderProcessSay(item,openKeys);
+      return renderProcessTool(item,openKeys);
+    }).join('')}</div>`:`<div class="process-sheet-empty">${state.work.processFilter==='all'?'还没有工具调用记录。':'这个筛选下没有内容。'}</div>`;
+    list.scrollTop=scroll;
+  }
+  function openProcessSheet() {
+    if(!state.work.process||!state.work.process.items.length) return;
+    state.work.processOpen=true;
+    state.work.processSignature='';
+    $('workProcessSheet').hidden=false;
+    renderProcessSheet();
+    $('workProcessClose')?.focus({preventScroll:true});
+  }
+  function closeProcessSheet() {
+    if(!state.work.processOpen) return;
+    state.work.processOpen=false;
+    $('workProcessSheet').hidden=true;
+    const entry=$('workProcessEntry');
+    if(entry&&!entry.hidden) entry.focus({preventScroll:true});
+  }
+  function updateWorkProcess(data) {
+    state.work.process=window.WorkProcess?window.WorkProcess.build(data.messages,data.working_directory,data.status):null;
+    renderProcessEntry();
+    renderProcessSheet();
+  }
+  function renderWorkConversation(data) {
+    const container=$('workMessages');
+    const follow=!state.work.signature||container.scrollHeight-container.scrollTop-container.clientHeight<100;
+    const scroll=container.scrollTop;
+    const messages=conversationOf(data);
+    const hasProcess=!!state.work.process&&state.work.process.items.some(item=>item.type!=='phase');
+    container.innerHTML=(messages.length?messages.map(message=>{
+      const mine=message.role==='user';
+      const label=mine?'你':message.role==='error'?'错误':message.role==='notice'?'提示':charName(data.char_id);
+      return `<article class="mobile-work-message${mine?' from-user':''}${message.role==='error'?' is-error':''}${message.role==='notice'?' is-notice':''}"><header>${escape(label)}<time>${escape(time(message.timestamp))}</time></header><div class="mobile-prose">${prose(message.content)}</div></article>`;
+    }).join(''):`<div class="mobile-work-placeholder">${hasProcess?'工具调用与思考已收进顶部「过程」，完成后会在这里给出回复。':'在下方输入任务，工作智能体会在这里回复。'}</div>`)
+      + (data.work_todos?.length?`<details class="mobile-work-plan"><summary>任务进度 · ${data.work_todos.length} 项</summary><ul>${data.work_todos.map(item=>`<li>${item.status==='completed'?'✓':'○'} ${escape(item.title||item.content||item.description)}</li>`).join('')}</ul></details>`:'')
+      + (data.deliverables?.length?`<details class="mobile-work-plan"><summary>产物文件 · ${data.deliverables.length}</summary><ul>${data.deliverables.map(file=>`<li>${escape(file)}</li>`).join('')}</ul></details>`:'');
+    container.scrollTop=follow?container.scrollHeight:scroll;
+  }
+
   function renderWorkList() {
     const query=$('workSearch').value.trim().toLowerCase();
     const sessions=state.work.sessions.filter(s=>!query||[s.title,s.working_directory,charName(s.char_id)].join(' ').toLowerCase().includes(query));
@@ -123,15 +280,19 @@
   }
   function rememberWorkDraft() { if(state.work.id)storage.set('work:'+state.work.id,$('workInput').value); }
   async function openWork(id) {
-    rememberWorkDraft();state.work.id=id;state.work.signature='';state.work.questionId=null;state.work.detail=null;
+    rememberWorkDraft();closeProcessSheet();
+    state.work.id=id;state.work.signature='';state.work.questionId=null;state.work.detail=null;
+    state.work.process=null;state.work.processSignature='';state.work.processFilter='all';
     $('workIndex').hidden=true;$('workDetail').hidden=false;$('workQuestion').hidden=true;$('workError').textContent='';
     $('workMessages').innerHTML=loading();$('workMeta').replaceChildren();$('workPageTitle').textContent='工作会话';
+    $('workProcessEntry').hidden=true;$('workProcessList').replaceChildren();
     $('workInput').value=storage.get('work:'+id);$('workSend').disabled=true;$('workStop').hidden=true;
     await loadWorkDetail(id);scheduleRefresh();
   }
   function workBack() {
     if(!state.work.id){goHome();return;}
-    rememberWorkDraft();state.work.id=null;state.work.seq++;
+    closeProcessSheet();rememberWorkDraft();state.work.id=null;state.work.seq++;
+    state.work.process=null;state.work.processSignature='';
     $('workIndex').hidden=false;$('workDetail').hidden=true;$('workPageTitle').textContent='工作台';
     loadWorkList();scheduleRefresh();
   }
@@ -143,14 +304,11 @@
       state.work.detail=data;$('workError').textContent='';
       $('workPageTitle').textContent=data.title||'工作会话';
       $('workMeta').innerHTML=`<span>${escape(charName(data.char_id))}</span><span class="mobile-work-status ${data.status==='running'?'is-running':''}">${statusLabel(data)}</span><span class="mobile-work-directory">${escape(data.working_directory||'未绑定工作目录')}</span>`;
-      const signature=JSON.stringify([data.messages,data.deliverables,data.work_todos]);
+      updateWorkProcess(data);
+      const signature=JSON.stringify([conversationOf(data),data.deliverables,data.work_todos,data.status]);
       if(signature!==state.work.signature) {
-        const container=$('workMessages'), follow=!state.work.signature||container.scrollHeight-container.scrollTop-container.clientHeight<100;
-        const scroll=container.scrollTop;state.work.signature=signature;
-        container.innerHTML=(data.messages||[]).map(message=>message.role==='tool'?`<details class="mobile-tool-result"><summary><span>${message.tool_success===false?'执行未成功':'工具记录'} · ${escape(message.tool_name||'操作')}</span></summary><pre>${escape(message.content)}</pre></details>`:`<article class="mobile-work-message ${message.role==='user'?'from-user':''}"><header>${message.role==='user'?'你':escape(charName(data.char_id))}<time>${escape(time(message.timestamp))}</time></header><div class="mobile-prose">${prose(message.content)}</div></article>`).join('')||empty('暂无消息','在下方输入任务。');
-        if(data.work_todos?.length)container.insertAdjacentHTML('beforeend',`<details class="mobile-work-plan"><summary>任务进度 · ${data.work_todos.length} 项</summary><ul>${data.work_todos.map(item=>`<li>${item.status==='completed'?'✓':'○'} ${escape(item.title||item.content||item.description)}</li>`).join('')}</ul></details>`);
-        if(data.deliverables?.length)container.insertAdjacentHTML('beforeend',`<details class="mobile-work-plan"><summary>产物文件 · ${data.deliverables.length}</summary><ul>${data.deliverables.map(file=>`<li>${escape(file)}</li>`).join('')}</ul></details>`);
-        container.scrollTop=follow?container.scrollHeight:scroll;
+        state.work.signature=signature;
+        renderWorkConversation(data);
       }
       renderQuestion(data.pending_question);
       $('workSend').disabled=sending.has(id)||data.status==='running';
@@ -248,6 +406,7 @@
     },state.page==='work'&&state.work.id?3000:15000);
   }
   function onPageChange(page) {
+    if(page!=='work')closeProcessSheet();
     rememberWorkDraft();state.page=page;
     if(page==='mind')loadMind();if(page==='diary')loadDiary();if(page==='work'){if(state.work.id)loadWorkDetail(state.work.id);else loadWorkList();}
     if(!restoringHistory&&location.hash!=='#'+page)history.pushState({mobilePage:page},'','#'+page);
@@ -263,6 +422,7 @@
     const diary=event.target.closest('[data-diary-id]');if(diary){showDiary(diary.dataset.diaryId);return;}
     const session=event.target.closest('[data-work-id]');if(session){openWork(session.dataset.workId);return;}
     const filter=event.target.closest('#planFilters [data-filter]');if(filter){state.planFilter=filter.dataset.filter;$('planFilters').querySelectorAll('button').forEach(button=>button.setAttribute('aria-pressed',button===filter));filterPlans();return;}
+    const processFilter=event.target.closest('[data-process-filter]');if(processFilter){state.work.processFilter=processFilter.dataset.processFilter;renderProcessSheet(true);return;}
     const button=event.target.closest('[data-mobile-action]');if(!button)return;
     switch(button.dataset.mobileAction){
       case 'refresh-mind':loadMind();break;case 'refresh-diary':loadDiary();break;
@@ -271,6 +431,7 @@
       case 'new-work':$('workNewError').textContent='';$('workDirectory').value='';showModal('workNewModal');break;
       case 'stop-work':{const id=state.work.id;button.disabled=true;try{await request('/api/work/sessions/'+segment(id)+'/stop',{method:'POST'});if(id===state.work.id)await loadWorkDetail(id,true);}catch(error){if(id===state.work.id)$('workError').textContent=error.message;}finally{button.disabled=false;}break;}
       case 'skip-question':answerQuestion(true);break;case 'open-memory':window.navigateMobile('memory');break;
+      case 'open-process':openProcessSheet();break;case 'close-process':closeProcessSheet();break;
       case 'reconnect':await checkConnection();if(!characters().length)await loadCharacters();renderOwnerControls();onPageChange(state.page);break;
     }
   });
@@ -289,7 +450,14 @@
   window.addEventListener('online',()=>{checkConnection();scheduleRefresh();});
   window.addEventListener('offline',()=>{$('connectionBanner').hidden=false;$('mobileConnection').textContent='网络已断开';});
   window.addEventListener('popstate',()=>{const page=location.hash.slice(1)||'home';restoringHistory=true;window.navigateMobile(['home','wechat','memory','mind','diary','notes','todo','work'].includes(page)?page:'home');restoringHistory=false;});
-  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!document.querySelector('.modal-overlay:not(.hidden)')&&!$('navigationDrawer').classList.contains('open')){if(state.page==='diary'&&state.diary.selected){event.stopImmediatePropagation();diaryBack();}else if(state.page==='work'&&state.work.id){event.stopImmediatePropagation();workBack();}}},true);
+  document.addEventListener('keydown',event=>{
+    if(event.key!=='Escape')return;
+    if(state.work.processOpen){event.stopImmediatePropagation();closeProcessSheet();return;}
+    if(!document.querySelector('.modal-overlay:not(.hidden)')&&!$('navigationDrawer').classList.contains('open')){
+      if(state.page==='diary'&&state.diary.selected){event.stopImmediatePropagation();diaryBack();}
+      else if(state.page==='work'&&state.work.id){event.stopImmediatePropagation();workBack();}
+    }
+  },true);
   window.MobileUI={diaryBack,workBack,decorateNotes,filterPlans,filterNotes,restoreNoteDraft,clearNoteDraft,inputDateTime};
   renderOwnerControls();checkConnection();scheduleRefresh();
   const initial=location.hash.slice(1);if(['wechat','memory','mind','diary','notes','todo','work'].includes(initial)){restoringHistory=true;window.navigateMobile(initial);restoringHistory=false;}else history.replaceState({mobilePage:'home'},'','#home');

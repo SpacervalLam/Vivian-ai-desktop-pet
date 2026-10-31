@@ -2,7 +2,7 @@
 //!
 //! 覆盖"读代码 → 搜代码 → 改代码 → 跑命令"的最小闭环：
 //! - `write_file`：创建/覆写文本文件（FsWrite，限工作目录内）
-//! - `edit_file`：精确字符串替换编辑（FsWrite，限工作目录内）
+//! - `edit_file`：多动作编辑器（默认精确替换；另含 view / create / insert / undo，FsWrite，限工作目录内）
 //! - `run_command`：在工作目录执行 PowerShell 命令（Shell，超时+输出截断）
 //! - `grep_search`：递归搜索文件内容（FsRead，跳过 .git/node_modules/target）
 //! - `list_dir`：树状列出目录结构（FsRead，深度受限）
@@ -17,6 +17,7 @@ use crate::tools::sandbox::is_path_safe;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
 };
+use super::editor_tools::{resolve_path, push_undo, StrReplaceEditorTool};
 
 /// 搜索/列目录时跳过的目录名
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", "dist", ".venv", "__pycache__", ".next"];
@@ -383,7 +384,40 @@ fn cap_write_diff(mut out: Vec<String>, body_truncated: bool) -> String {
 // EditFileTool
 // ============================================================================
 
-/// 精确字符串替换编辑：old_string 必须在文件中唯一（或显式 replace_all）。
+/// edit_file 的合法动作。
+///
+/// `str_replace` 是唯一的默认动作：旧调用（只给 path/old_string/new_string）
+/// 不必改参数就能继续工作；其余动作要求显式 `action` 或对应的形状参数。
+pub(crate) const EDIT_ACTIONS: &[&str] = &["view", "create", "str_replace", "insert", "undo"];
+
+/// 从参数推断 edit_file 的动作（显式 action 优先，其次按旧工具的参数形状）。
+///
+/// 合并 `str_replace_editor` 后，旧调用不会带 `action`：
+/// - 给 `file_text` → create
+/// - 给 `line` → insert
+/// - 给 `view_start` / `view_end` → view
+/// - 其余（path + old_string/new_string）→ str_replace
+pub(crate) fn effective_edit_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("file_text").is_some() {
+        "create".to_string()
+    } else if args.get("line").is_some() {
+        "insert".to_string()
+    } else if args.get("view_start").is_some() || args.get("view_end").is_some() {
+        "view".to_string()
+    } else {
+        "str_replace".to_string()
+    }
+}
+
+/// 多动作文本编辑器：默认精确字符串替换；view / create / insert / undo 复用编辑器实现。
 pub struct EditFileTool;
 
 impl EditFileTool {
@@ -517,22 +551,22 @@ impl Tool for EditFileTool {
     }
 
     fn description(&self) -> &str {
-        "Edit a text file by exact string replacement. `old_string` must appear exactly once in the file (include surrounding lines to disambiguate), or set `replace_all` to replace every occurrence. Use for surgical code edits instead of rewriting whole files."
+        "Edit a text file. Default action `str_replace` replaces an exact string: `old_string` must appear exactly once (include surrounding lines to disambiguate), or set `replace_all`. Other actions: `view` (show the file with line numbers, optional view_start/view_end), `create` (new file from `file_text`, fails if it exists), `insert` (insert `new_string` after line N), `undo` (revert the most recent edit to this file in this session). Use `view` before a delicate edit and `undo` when you may need to roll back."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "精确字符串替换编辑文件。old_string 必须在文件中恰好出现一次（可带上下文行消歧），或设置 replace_all 替换全部出现。适合精准修改代码片段而非整文件重写。",
-            "ja" => "文字列の完全一致置換でファイルを編集する。old_string はファイル内にちょうど1回だけ出現する必要がある（文脈行を含めて一意にする）。全置換には replace_all を指定。ファイル全体の書き換えではなく部分的なコード修正に使う。",
+            "zh" => "编辑文本文件。默认动作 str_replace：old_string 必须在文件中恰好出现一次（可带上下文行消歧），或设置 replace_all 替换全部出现。其他动作：view（带行号查看，可指定 view_start/view_end）、create（用 file_text 新建文件，已存在则失败）、insert（在第 N 行之后插入 new_string）、undo（撤销本会话对该文件的最近一次修改）。精细修改前先用 view 看清原文，可能改错时用 undo 回退。",
+            "ja" => "テキストファイルを編集する。既定の str_replace は old_string がファイル内にちょうど1回だけ出現する必要がある（文脈行を含めて一意にする。全置換は replace_all）。他の動作：view（行番号付きで表示、view_start/view_end で範囲指定）、create（file_text で新規作成、既存なら失敗）、insert（N 行目の後ろに new_string を挿入）、undo（このセッションで当該ファイルに加えた直近の変更を取り消す）。繊細な修正の前に view で原文を確認し、戻す可能性があるときは undo を使う。",
             _ => self.description(),
         }
     }
 
     fn usage_corpus(&self, lang: &str) -> &'static str {
         match lang {
-            "zh" => "改一下这个文件\n编辑文件\n把这段改改",
-            "en" => "edit this file\nmodify the file\nchange this code",
-            "ja" => "このファイルを編集して\nファイルを修正して\nコードを変更して",
+            "zh" => "改一下这个文件\n编辑文件\n把这段改改\n查看这个文件的行号\n撤销刚才的修改\n新建一个文件",
+            "en" => "edit this file\nmodify the file\nchange this code\nshow me the file with line numbers\nundo my last edit\ncreate a file",
+            "ja" => "このファイルを編集して\nファイルを修正して\nコードを変更して\nこのファイルを行番号付きで見せて\n直前の変更を取り消し\nファイルを作成",
             _ => "",
         }
     }
@@ -541,12 +575,21 @@ impl Tool for EditFileTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "目标文件绝对路径（工作目录内）" },
-                "old_string": { "type": "string", "description": "要被替换的原文（含足够上下文使其唯一）" },
-                "new_string": { "type": "string", "description": "替换后的新文本" },
-                "replace_all": { "type": "boolean", "description": "替换全部出现（默认 false，要求唯一匹配）" }
+                "action": {
+                    "type": "string",
+                    "enum": ["view", "create", "str_replace", "insert", "undo"],
+                    "description": "动作。默认 str_replace（精确替换）；view 带行号查看；create 新建文件；insert 按行插入；undo 撤销本会话对该文件的最近一次修改"
+                },
+                "path": { "type": "string", "description": "目标文件路径（绝对路径，或相对工作目录）" },
+                "old_string": { "type": "string", "description": "str_replace：要被替换的原文（含足够上下文使其唯一）" },
+                "new_string": { "type": "string", "description": "str_replace / insert：替换后的新文本（str_replace 省略则表示删除该片段）/ 要插入的文本" },
+                "replace_all": { "type": "boolean", "description": "str_replace：替换全部出现（默认 false，要求唯一匹配）" },
+                "file_text": { "type": "string", "description": "create：文件的完整内容" },
+                "line": { "type": "integer", "description": "insert：在这一行之后插入（1-based，0 表示文件开头）" },
+                "view_start": { "type": "integer", "description": "view：起始行（1-based，可空）" },
+                "view_end": { "type": "integer", "description": "view：结束行（1-based，可空）" }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["path"]
         })
     }
 
@@ -555,33 +598,56 @@ impl Tool for EditFileTool {
     }
 
     async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_edit_action(input);
+        if !EDIT_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                "action 必须是 view / create / str_replace / insert / undo",
+                2,
+            );
+        }
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
         if path.is_empty() {
             return ValidationResult::failure("path 不能为空", 2);
         }
-        if !is_path_safe(path) {
+        let resolved = resolve_path(path, ctx);
+        if !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(path) {
+        if !ctx.is_path_authorized(&resolved) {
             return ValidationResult::failure(
-                &format!("路径不在任何已授权工作区内，已拒绝编辑: {}", path),
+                &format!("路径不在任何已授权工作区内，已拒绝编辑: {}", resolved),
                 2,
             );
         }
+
+        // 把推断出的动作写回参数：后续权限判断（view 是只读调用）、
+        // 确认文案与执行分支都依赖这个归一结果，避免各处重复推断。
+        let mut normalized = input.clone();
+        normalized["path"] = json!(resolved);
+        normalized["action"] = json!(action);
+
+        if action != "str_replace" {
+            // view / create / insert / undo 的参数规则与可写区校验直接复用编辑器实现。
+            return StrReplaceEditorTool.validate_input(&normalized, ctx).await;
+        }
+
         if input.get("old_string").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
             return ValidationResult::failure("old_string 不能为空", 2);
         }
-        if input.get("new_string").and_then(|v| v.as_str()).is_none() {
-            return ValidationResult::failure("new_string 是必填项", 2);
-        }
-        ValidationResult::success(None)
+        // new_string 允许缺省：沿用编辑器语义，省略即删除 old_string 片段。
+        ValidationResult::success(Some(normalized))
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        // 非 str_replace 动作交给共享编辑器实现（view/create/insert/undo），
+        // 撤销栈也由它维护；这里只负责保留原有的精确替换 + diff 输出。
+        if effective_edit_action(&args) != "str_replace" {
+            return StrReplaceEditorTool.call(args, ctx).await;
+        }
         let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
         let old_string = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let new_string = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -630,6 +696,8 @@ impl Tool for EditFileTool {
         }
         let diff = build_edit_diff(&path, &raw, &replacements);
 
+        // 与编辑器动作共用撤销栈：改错了可以用 action="undo" 回退。
+        push_undo(&ctx.session_id, &path, raw.clone());
         match std::fs::write(&path, updated.as_bytes()) {
             Ok(()) => ToolResult::standard_success(
                 &format!("已编辑「{}」：替换 {count} 处", path, count = if replace_all { count } else { 1 }),
@@ -1608,5 +1676,51 @@ mod console_decode_tests {
             !decoded.contains('\u{FFFD}'),
             "不应产出替换字符，实际: {decoded:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod edit_action_tests {
+    use super::*;
+
+    /// 旧 edit_file 调用（无 action）必须继续走 str_replace，不能因为合并而改变语义。
+    #[test]
+    fn legacy_arguments_infer_actions() {
+        assert_eq!(
+            effective_edit_action(&json!({"path": "a.txt", "old_string": "x", "new_string": "y"})),
+            "str_replace"
+        );
+        assert_eq!(
+            effective_edit_action(&json!({"path": "a.txt", "file_text": "x"})),
+            "create"
+        );
+        assert_eq!(
+            effective_edit_action(&json!({"path": "a.txt", "line": 3, "new_string": "x"})),
+            "insert"
+        );
+        assert_eq!(
+            effective_edit_action(&json!({"path": "a.txt", "view_start": 2})),
+            "view"
+        );
+        assert_eq!(
+            effective_edit_action(&json!({"path": "a.txt"})),
+            "str_replace"
+        );
+        // 显式 action 优先，并做小写归一
+        assert_eq!(
+            effective_edit_action(&json!({"action": "VIEW", "path": "a.txt", "old_string": "x"})),
+            "view"
+        );
+    }
+
+    /// 动作枚举必须与 schema / 委托分支一致。
+    #[test]
+    fn edit_actions_are_closed_set() {
+        assert!(EDIT_ACTIONS.contains(&"view"));
+        assert!(EDIT_ACTIONS.contains(&"create"));
+        assert!(EDIT_ACTIONS.contains(&"str_replace"));
+        assert!(EDIT_ACTIONS.contains(&"insert"));
+        assert!(EDIT_ACTIONS.contains(&"undo"));
+        assert!(!EDIT_ACTIONS.contains(&"activate"));
     }
 }

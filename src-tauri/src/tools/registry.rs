@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -29,11 +29,44 @@ use super::types::{Tool, ToolCategory, ToolDefinition, ToolScene};
 /// 字段与 system prompt 工具清单）以及 `tool_search` 的检索域都不包含它们；
 /// 执行层另有硬门兜底（防幻觉盲调 / 历史重放）。轻量沉淀（create_skill）
 /// 不在名单内，陪伴侧可直接使用。
-pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &["create_tool", "create_plugin", "delete_plugin", "install_plugin"];
+pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &[
+    "create_tool",
+    "create_plugin",
+    "delete_plugin",
+    "install_plugin",
+    // 工作智能体的会话内待办、提问、子任务与工作树隔离都是编码会话语义，
+    // 陪伴侧没有对应 UI 与循环，暴露过去只会让模型误用。
+    "work_todo_write",
+    "work_ask_user",
+    "work_delegate",
+    "work_job",
+    "work_isolate",
+];
 
 /// 判断工具是否为工作智能体专属工具
 pub fn is_work_agent_only(name: &str) -> bool {
     WORK_AGENT_ONLY_TOOLS.contains(&name)
+}
+
+/// 陪伴侧无论如何都要保留完整 schema 的工具：发现入口 + 记忆读写 +
+/// 角色互动 + 循环机制 + 用户提问。
+///
+/// 其它 `always_load()` 工具在闲聊/后台/低信任场景不再无条件占满上下文：
+/// 它们仍可通过语义召回或 `tool_search` 拿回，完整 schema 槽位由场景预算控制。
+pub const SCHEMA_FLOOR_TOOLS: &[&str] = &[
+    "tool_search",
+    "search_memory",
+    "save_memory",
+    "talk_to_character",
+    "get_roommate_status",
+    "continue_thinking",
+    "ask_user",
+    "send_chat_message",
+];
+
+/// 判断工具是否属于「保底完整 schema」集合（含固定常驻的壁纸控制）。
+pub fn is_schema_floor_tool(name: &str) -> bool {
+    SCHEMA_FLOOR_TOOLS.contains(&name) || name.starts_with("wallpaper_")
 }
 
 /// 智能体侧别 —— 两条独立产品线（陪伴 / 工作）的区分维度。
@@ -120,6 +153,41 @@ pub fn is_tool_locked(name: &str, side: AgentSide) -> bool {
     matches!(side, AgentSide::Work) && WORK_LOCKED_TOOLS.contains(&name)
 }
 
+/// 跨轮粘性工具的窗口时长：最后一次使用后超过该时长即不再保持完整 schema。
+const RECENT_TOOL_TTL: Duration = Duration::from_secs(15 * 60);
+/// 每个「侧别:角色」最多记住多少个最近用过的工具。
+const RECENT_TOOL_CAP: usize = 10;
+/// 粘性表最多保留多少个「侧别:角色」键，超出时清理过期项，防止长期运行泄漏。
+const RECENT_TOOL_MAX_KEYS: usize = 64;
+
+/// 一个角色最近调用成功的工具集合（按调用先后排序）。
+#[derive(Default)]
+struct RecentToolSet {
+    names: std::collections::VecDeque<String>,
+    updated: Option<Instant>,
+}
+
+impl RecentToolSet {
+    fn age(&self) -> Duration {
+        self.updated.map(|at| at.elapsed()).unwrap_or(Duration::MAX)
+    }
+
+    fn touch(&mut self, name: &str) {
+        self.names.retain(|existing| existing != name);
+        self.names.push_back(name.to_string());
+        while self.names.len() > RECENT_TOOL_CAP {
+            self.names.pop_front();
+        }
+        self.updated = Some(Instant::now());
+    }
+}
+
+/// 「侧别:角色」键：陪伴与工作的同名工具互不串味，不同角色也不共享。
+pub fn tool_scope_key(agent_kind: &str, char_id: &str) -> String {
+    let side = if agent_kind == "work" { "work" } else { "companion" };
+    format!("{side}:{char_id}")
+}
+
 /// 工具系统 - 整合所有工具组件的统一入口
 pub struct ToolSystem {
     /// Names, aliases, ownership and revision change atomically.
@@ -152,6 +220,12 @@ pub struct ToolSystem {
     /// （陪伴侧 `list_tools_for_scene` / 工作侧 `get_tool_schemas`），执行入口按
     /// `agent_kind` 映射出的侧别直接拒绝。`list_tools`（设置界面用）不受影响。
     disabled_tools: RwLock<HashMap<AgentSide, HashSet<String>>>,
+    /// 最近真正调用成功的工具（按「侧别:角色」隔离），用于跨轮保持完整 schema。
+    ///
+    /// 语义召回只看当前消息，这一层补上"刚刚用过"的上下文：避免模型每轮都要
+    /// 先 `tool_search` 才能再次调用同一个工具；同时保持工具顺序稳定，利于
+    /// 供应商的 prompt cache。按角色隔离，不会把 A 角色的工具习惯带进 B 角色。
+    recent_tools: RwLock<HashMap<String, RecentToolSet>>,
     /// Cordis 运行时上下文引用（策略缝 guard / post-execute 的分发目标）。
     ///
     /// 由 AppState 初始化时注入；用于 `execute_tool_use` 在 pre/post 阶段
@@ -185,6 +259,7 @@ impl ToolSystem {
             confirmation_timeout_secs: RwLock::new(600),
             last_tool_call_at: RwLock::new(None),
             disabled_tools: RwLock::new(HashMap::new()),
+            recent_tools: RwLock::new(HashMap::new()),
             policy_ctx: RwLock::new(None),
         }
     }
@@ -210,6 +285,7 @@ impl ToolSystem {
             confirmation_timeout_secs: RwLock::new(confirmation_timeout_secs.max(10)),
             last_tool_call_at: RwLock::new(None),
             disabled_tools: RwLock::new(HashMap::new()),
+            recent_tools: RwLock::new(HashMap::new()),
             policy_ctx: RwLock::new(None),
         }
     }
@@ -226,6 +302,32 @@ impl ToolSystem {
         );
         map.insert(AgentSide::Work, work.into_iter().collect::<HashSet<_>>());
         *self.disabled_tools.write() = map;
+    }
+
+    /// 记录一次真正执行成功的工具调用，供下一轮保持完整 schema。
+    pub fn record_tool_use(&self, key: &str, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let mut map = self.recent_tools.write();
+        map.entry(key.to_string()).or_default().touch(name);
+        if map.len() > RECENT_TOOL_MAX_KEYS {
+            map.retain(|_, set| set.age() < RECENT_TOOL_TTL);
+        }
+    }
+
+    /// 返回窗口内最近调用成功的工具名（按调用先后排序，旧 → 新）。
+    pub fn recent_tool_names(&self, key: &str) -> Vec<String> {
+        let map = self.recent_tools.read();
+        map.get(key)
+            .filter(|set| set.age() < RECENT_TOOL_TTL)
+            .map(|set| set.names.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// 清空某个「侧别:角色」的粘性工具记录（测试或会话边界使用）。
+    pub fn clear_recent_tools(&self, key: &str) {
+        self.recent_tools.write().remove(key);
     }
 
     /// 查询工具在指定侧是否被用户禁用。
@@ -756,6 +858,28 @@ mod tests {
         assert!(!ts.register_alias("wallpaper_set", ""));
         assert!(!ts.register_alias("wallpaper_set", "wallpaper_set"));
         assert!(!ts.register_alias("  ", "wallpaper_set"));
+    }
+
+    #[test]
+    fn work_session_tools_stay_out_of_the_companion_surface() {
+        for name in ["work_todo_write", "work_ask_user", "work_delegate", "work_job", "work_isolate"] {
+            assert_eq!(tool_scope(name), ToolScope::Work, "{name}");
+        }
+        assert_eq!(tool_scope("review_diff"), ToolScope::Both);
+        assert_eq!(tool_scope("search_memory"), ToolScope::Companion);
+    }
+
+    #[test]
+    fn recent_tools_are_deduped_ordered_and_side_isolated() {
+        let ts = ToolSystem::new();
+        let key = tool_scope_key("", "nana");
+        ts.record_tool_use(&key, "search_memory");
+        ts.record_tool_use(&key, "web_search");
+        ts.record_tool_use(&key, "search_memory");
+        assert_eq!(ts.recent_tool_names(&key), vec!["web_search", "search_memory"]);
+        assert!(ts.recent_tool_names(&tool_scope_key("work", "nana")).is_empty());
+        ts.clear_recent_tools(&key);
+        assert!(ts.recent_tool_names(&key).is_empty());
     }
 
     /// 批量注册只统计成功项：一个目标没注册不该把其余别名一起丢掉。

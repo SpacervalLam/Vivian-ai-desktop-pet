@@ -36,8 +36,18 @@ pub fn set_config(
 ) -> Result<(), String> {
     // The game observer owns this learned table; legacy settings snapshots must not erase it.
     if key == "companion.game_processes" { return Ok(()); }
-    let config = state.config.read();
-    config.set_no_save(&key, value).map_err(err_str)
+    let language = (key == "base.language").then(|| value.as_str().map(str::to_owned)).flatten();
+    {
+        let config = state.config.read();
+        config.set_no_save(&key, value).map_err(err_str)?;
+    }
+    if let Some(language) = language {
+        crate::i18n::set_language(&language);
+        for instance in state.characters.read().values() {
+            instance.brain.persona.set_language(&language);
+        }
+    }
+    Ok(())
 }
 
 /// 前端上报当前生效的界面主题（light/dark；设置"跟随系统"时按系统深浅偏好解析）

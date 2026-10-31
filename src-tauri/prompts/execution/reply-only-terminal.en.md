@@ -1,0 +1,1 @@
+This turn is reply-only. Clarify the unresolved selection or acknowledge the task state. Do not perform operations, promise execution, or output tool calls.

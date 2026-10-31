@@ -1,0 +1,1 @@
+Settle the ENTIRE user request after all operations returned. Call alone. A successful step does not finish a compound request. Reference actual successful call IDs; describe unfinished work explicitly. No user-facing text.

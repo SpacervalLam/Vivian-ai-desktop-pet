@@ -97,7 +97,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--mobile-accent);
 .mobile-work-meta { flex-shrink: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; padding: 6px 18px 12px; font-size: 12px; border-bottom: 1px solid var(--mobile-line); }
 .mobile-work-directory { color: var(--text2); width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10px; }
 #workPageTitle { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.mobile-work-messages { flex: 1; min-height: 60px; overflow-y: auto; overscroll-behavior: contain; padding: 18px 16px; display: flex; flex-direction: column; gap: 16px; }
+.mobile-work-messages { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 18px 16px; display: flex; flex-direction: column; gap: 16px; }
 .mobile-work-message { border: 1px solid var(--mobile-line); border-radius: 4px 19px 19px 19px; padding: 15px 14px; background: var(--card); }
 .mobile-work-message.from-user { align-self: flex-end; max-width: 92%; border-radius: 19px 4px 19px 19px; background: var(--mobile-soft); }
 .mobile-work-message header { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 11px; color: var(--mobile-accent); }

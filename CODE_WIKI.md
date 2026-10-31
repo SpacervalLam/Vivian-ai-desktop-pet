@@ -522,7 +522,7 @@ pub struct MemoryItem {
 - **工具复用主对话链路**：`execute_tool_use` 自动经过沙箱 `is_path_safe` / 守卫 / 审批矩阵
 - **会话级权限接入**：`ToolUseContext` 新增 `access_level: Option<AgentAccessLevel>` 字段（serde default None），`execute_tool_use` 权限检查优先用 `context.access_level.unwrap_or(runtime_cfg.access_level)`——编程 agent 按会话 `permission` 设置覆盖，实现会话粒度的工具放行控制（None 时回退全局 runtime config，不影响其他 agent）
 - **工作区写入免确认**：执行器权限检查构建 `PermissionContext` 时，把 `context.working_directory` 注册为已授权工作目录（`add_working_directory`，read_only 会话注册为只读）——工作目录内的读写操作在 `check_file_permission` 中直接 `allow`，不再落到「路径不在已授权目录需确认」分支；路径范围仍由各工具 `validate_input` 的沙箱校验限制在工作目录内，`read_only` 会话写入仍被矩阵拒绝
-- **沙箱确认回调**：编程会话的工具执行传入 `coding_sandbox_confirm(has_workspace, has_responder)`——`write_file`/`edit_file` 内置档案 `requires_confirmation=true` 且 Cautious 模式前 3 次需要确认，而执行器在无回调时会直接返回 `SandboxConfirmationRequired` 错误（无弹窗），导致工作区写文件被误拦，故有工作区时恒放行（真正边界仍由路径沙箱 + 权限矩阵 + 命令黑名单把守）；无工作区时没有路径边界，改为"有应答者就弹确认、没有应答者就拒绝"，详见「沙箱确认回调（`coding_sandbox_confirm`）」小节
+- **沙箱确认回调**：编程会话的工具执行传入 `coding_sandbox_confirm(has_workspace, has_responder)`——`write_file`/`edit_file` 内置档案 `requires_confirmation=true` 且 Cautious 模式前 3 次需要确认（`edit_file` 的 `view` 只读动作例外），而执行器在无回调时会直接返回 `SandboxConfirmationRequired` 错误（无弹窗），导致工作区写文件被误拦，故有工作区时恒放行（真正边界仍由路径沙箱 + 权限矩阵 + 命令黑名单把守）；无工作区时没有路径边界，改为"有应答者就弹确认、没有应答者就拒绝"，详见「沙箱确认回调（`coding_sandbox_confirm`）」小节
 - **推理等级**：run_loop 从会话读取 `reasoning_level`，`LLMRequest.reasoning = reasoning_level != "low"`（standard/code 两条路径一致）
 - **多轮工具调用**：历史中 assistant 的 `tool_calls` 结构完整回传 LLM（`ChatMessage::assistant_with_tool_calls`），tool 结果经 `ChatMessage::tool_result` 按 `tool_call_id` 关联，满足原生 function calling 的多轮上下文协议
 - **任务执行期间发消息：插话 / 引导标注**：编程页输入框在智能体工作时仍可发送——消息**不打断**当前任务，进入输入区上方「排队中」卡片（可编辑 / 删除），当前任务结束后按序自动补发：
@@ -534,7 +534,7 @@ pub struct MemoryItem {
 - **工作流与 LSP 工具**：`CODING_TOOLS` 白名单含 `run_workflow`（多步编排，连续 parallel 步骤扇出并发）与 `lsp_query`（定义/引用/实现/hover 语义查询），definition 按白名单顺序输出保持 API tools 前缀缓存稳定
 - **图片工具（`send_image`）**：智能体把本地图片发送到聊天界面——编程会话下经 `CodingAgent::push_agent_image` 作为 assistant 消息追加（`images` base64 内联，随会话持久化、恢复会话前端直接重渲染），并 emit `coding:assistant_message`（携带 images）供编程页实时渲染；伴随的 caption 作为可选说明文本。图片副本同时保存到 `<user_data_dir>/images/` 供历史复用
 - **可视化组件工具（`show_widget`）**：工作智能体把 SVG 流程图/架构图/时序图/状态图渲染为编程页内联卡片，落「强约束 / 载荷隔离 / 受控渲染」三原则——约束系统（viewBox 固定 680、颜色显式填、暖纸色板、禁渐变阴影/emoji/script/事件、字体≥11px）内嵌在工具 `description`（随 schema 每轮注入，等效每次调用前读一遍规范）；SVG 经 `CodingWidget{title,kind,code}` 走 `push_agent_widget` 推给前端（`widgets` 字段，不进 LLM 上下文）；前端 `WidgetCard` 经 dompurify sanitize 后内联渲染、失败降级为可展开源码卡片。与 `send_image` 同通道、随会话持久化，历史恢复零成本
-- **能力进化工具**：`CODING_TOOLS` 白名单末位为 `create_skill` / `use_skill` / `search_skill` / `create_tool` / `create_plugin`——工作智能体是能力进化事件的**执行主体**：沉淀方法论（create_skill，写入即注册）与构建新工具（create_tool，stdin/stdout 函数协议）、打包完整插件（create_plugin，四类贡献原子落盘即装载）。system prompt 明确该职责并引导「任务中总结出值得复用的做法时沉淀技能、确认缺少可执行原语时构建工具、一组相关能力要整体装卸时打包插件」。`create_tool` / `create_plugin` 创建经 executor 能力进化门强制弹预览卡片（宿主自动放行回调不绕过），且属于 `WORK_AGENT_ONLY_TOOLS`——陪伴侧工具面/检索域/执行层三层收口（见 custom_tools 小节），`agent_kind="work"` 才可发起
+- **能力进化工具**：`CODING_TOOLS` 白名单末位为 `create_skill` / `use_skill`（use 激活 / search 召回 / validate 自检） / `create_tool` / `create_plugin`——工作智能体是能力进化事件的**执行主体**：沉淀方法论（create_skill，写入即注册）与构建新工具（create_tool，stdin/stdout 函数协议）、打包完整插件（create_plugin，四类贡献原子落盘即装载）。system prompt 明确该职责并引导「任务中总结出值得复用的做法时沉淀技能、确认缺少可执行原语时构建工具、一组相关能力要整体装卸时打包插件」。`create_tool` / `create_plugin` 创建经 executor 能力进化门强制弹预览卡片（宿主自动放行回调不绕过），且属于 `WORK_AGENT_ONLY_TOOLS`——陪伴侧工具面/检索域/执行层三层收口（见 custom_tools 小节），`agent_kind="work"` 才可发起
 - **轮次预算与循环保护**（`run_loop_inner`）：预算来自 `config.tools.max_coding_rounds`（默认 48，设置-工具可调，命令层从 `config` 读取后经 `send_message` → `run_loop` → `run_loop_inner` 传入；`DEFAULT_MAX_TOOL_ROUNDS=48` 兜底）。
   - 软预算提醒：`rounds_used` 达到 `budget*2/3`、`budget*5/6` 时向本轮请求注入 `[系统提示]`（只引导、不落库）。
   - 停滞检测①：`DoomLoopTracker`（复用 `pipeline::doom_loop`）记录工具名、规范化参数和实际结果，连续重复序列达到阈值才介入；结果变化表示出现新观察，不算原地打转。
@@ -852,7 +852,7 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 |------|------|------|
 | `read_file` | FsRead | 读取文件内容（UTF-8/GBK/Shift-JIS 自动检测），沙箱校验工作目录 |
 | `write_file` | FsWrite（破坏性） | UTF-8 写入，自动建父目录，沙箱校验工作目录 |
-| `edit_file` | FsWrite（破坏性） | 精确字符串替换，要求唯一匹配或 `replace_all`，防止误改；成功后结果 JSON 内嵌 unified `diff`（`build_edit_diff`：每处替换一行 hunk 含 3 行上下文、间隙 ≤6 行自动合并、6 hunk/100 行/4000 字符体积受控），供前端 diff 渲染与 LLM 感知改动 |
+| `edit_file` | FsWrite（破坏性） | 多动作编辑器：默认 `str_replace` 要求唯一匹配或 `replace_all`，成功后结果 JSON 内嵌 unified `diff`（`build_edit_diff`：每处替换一行 hunk 含 3 行上下文、间隙 ≤6 行自动合并、6 hunk/100 行/4000 字符体积受控）；`view` 只读带行号查看（免写盘确认）、`create` 新建、`insert` 按行插入、`undo` 撤销本会话最近一次修改（与 view/create/insert 复用 `editor_tools` 的撤销栈） |
 | `run_command` | Shell | PowerShell 非交互执行，120s 超时，输出截断 8000 字符，破坏性命令黑名单，`CREATE_NO_WINDOW` |
 | `grep_search` | FsRead | 递归内容搜索，跳过依赖目录与二进制，最多 50 处匹配 |
 | `list_dir` | FsRead | 树状列目录（深度上限 4），跳过依赖目录 |
@@ -1596,7 +1596,7 @@ if reply.should_continue && reply.response_mode == "speak" && !reply.reply.is_em
 
 ### skills/ —— 技能服务
 
-[`skills/mod.rs`](src-tauri/src/skills/mod.rs) 提供作用域内可注册/可卸载的技能服务，技能是 `(名称, 描述, 关键词, 内容)` 四元组，只承载提示词片段，由 prompt 注入与 `use_skill` / `search_skill` 工具消费。
+[`skills/mod.rs`](src-tauri/src/skills/mod.rs) 提供作用域内可注册/可卸载的技能服务，技能是 `(名称, 描述, 关键词, 内容)` 四元组，只承载提示词片段，由 prompt 注入与 `use_skill`（use / search / validate 三动作）工具消费。
 
 #### 核心结构
 
@@ -1621,7 +1621,7 @@ pub struct Skill {
 | `remove_by_prefix(prefix)` | 按名称前缀整组移除，返回被移除技能名（插件卸载撤销 `<插件名>/` 命名空间贡献） |
 | `list_for(char_id)` | 列出指定角色可见技能（全局 + 该角色 scoped） |
 | `search_skills(char_id, query, n)` | 角色可见域内按 BM25 召回 Top-N（复用 `tools::discovery::ToolSearchIndex`）：把每个技能映射为 `DiscoverableTool`（name→名、description→摘要+描述、keywords→`search_hint` 权重最高、scope→layer），检索后映射回 `Skill`；query 为空或无可见技能返回空。取代了旧的 `search` 子串匹配 |
-| `prompt_section(char_id)` | 生成 `## 可用技能` 注入段落（仅名称+描述，正文按需激活），并引导 use_skill 加载 / search_skill 自然语言召回 / create_skill 沉淀 |
+| `prompt_section(char_id)` | 生成 `## 可用技能` 注入段落（仅名称+描述，正文按需激活），并引导 use_skill 加载 / use_skill(query) 自然语言召回 / use_skill(validate) 自检 / create_skill 沉淀 |
 | `load_default_dir()` | 从 `<用户数据目录>/skills` 装载 `*.md`（目录缺失自动创建），同名原子替换 |
 | `spawn_hot_reload(interval)` | 后台热刷新：每 30 秒对比目录指纹（文件名 + mtime），变更自动重载 |
 
@@ -1641,11 +1641,10 @@ keywords: 同义词, 触发短语 相关词
 #### 集成路径
 
 - **内置技能**：风格预设（`default_style` / `lively_style` / `healing_style` / `focused_style` / `sweet_style`，`BUILTIN_SKILL_NAMES` 公共名单）作为全局种子——该名单同时是 `create_skill` 的防覆盖名单与管理面板的过滤名单（内置风格不显示在设置窗口技能清单）
-- **Prompt 注入**：`pipeline/steps/prompt.rs` 从全局 ctx 取 SkillService，`prompt_section(char_id)` 注入 `## 可用技能` 段落（仅名称+描述），并引导三条动作——用 `use_skill` 加载完整指引、不确定用哪项时 `search_skill` 按自然语言召回、总结出可复用做法时 `create_skill` 沉淀
-- **use_skill 工具**（`tools/builtin/skill_tools.rs`）：按名激活返回正文，限定当前角色可见（全局 + scoped），未命中附可用技能列表
-- **search_skill 工具**（`tools/builtin/skill_tools.rs`，只读）：与 `tool_search` 对延迟工具的两段式加载同构——按自然语言 `query`（可选 `max_results`，默认 5）经 `search_skills` BM25 召回当前角色可见技能，返回候选的名称+描述+关键词（**不含正文**），由 LLM 选定后再 `use_skill(name)` 加载全文。已知精确技能名时不应调用（直接 use_skill）；搜工具用 tool_search、搜记忆用 memory_search（anti_use_cases 明示）
-- **create_skill 工具**（`tools/builtin/skill_tools.rs`，自进化闭环写入侧）：智能体把复用做法沉淀为技能——`(name, description, body, keywords?)`，front-matter Markdown 写入 `<用户数据目录>/skills/<name>.md` 并**立即注册**（不等 30s 热重载）。`keywords` 可选（数组或逗号/空白分隔字符串），写入 front-matter 供后续 `search_skill` 召回；缺省则仅靠名称/描述匹配。防护：技能名白名单（字母/数字/`_`/`-`/中文，≤64 字符，防路径穿越）、内置 `*_style` 不可覆盖、description 单行化保证 front-matter 合法。`risk()=FsWrite` 走审批矩阵，属于能力进化事件（见 executor 进化门）
-- **插件技能**：`plugins.rs` 以 `<插件名>/` 命名空间前缀注册进同一 SkillService，与用户技能隔离不冲突；技能文件的 `keywords` front-matter 同样经 `parse_skill_file` 解析并随技能注册（插件技能也可被 `search_skill` 召回）；卸载插件时 `remove_by_prefix("<插件名>/")` 整组撤销
+- **Prompt 注入**：`pipeline/steps/prompt.rs` 从全局 ctx 取 SkillService，`prompt_section(char_id)` 注入 `## 可用技能` 段落（仅名称+描述），并引导三条动作——用 `use_skill` 加载完整指引、不确定用哪项时 `use_skill(query=…)` 按自然语言召回、总结出可复用做法时 `create_skill` 沉淀
+- **use_skill 工具**（`tools/builtin/skill_tools.rs`，只读三动作）：`use` 按名激活返回正文，限定当前角色可见（全局 + scoped），未命中附可用技能列表；`search` 与 `tool_search` 对延迟工具的两段式加载同构——按自然语言 `query`（可选 `max_results`，默认 5）经 `search_skills` BM25 召回当前角色可见技能，返回候选的名称+描述+关键词（**不含正文**），由 LLM 选定后再 `use_skill(name)` 加载全文；`validate` 校验技能草稿或已注册技能的形态。已知精确技能名时不应 search（直接 use_skill）；搜工具用 tool_search、搜记忆用 memory_search（anti_use_cases 明示）
+- **create_skill 工具**（`tools/builtin/skill_tools.rs`，自进化闭环写入侧）：智能体把复用做法沉淀为技能——`(name, description, body, keywords?)`，front-matter Markdown 写入 `<用户数据目录>/skills/<name>.md` 并**立即注册**（不等 30s 热重载）。`keywords` 可选（数组或逗号/空白分隔字符串），写入 front-matter 供后续 use_skill 的 search 动作召回；缺省则仅靠名称/描述匹配。防护：技能名白名单（字母/数字/`_`/`-`/中文，≤64 字符，防路径穿越）、内置 `*_style` 不可覆盖、description 单行化保证 front-matter 合法。`risk()=FsWrite` 走审批矩阵，属于能力进化事件（见 executor 进化门）
+- **插件技能**：`plugins.rs` 以 `<插件名>/` 命名空间前缀注册进同一 SkillService，与用户技能隔离不冲突；技能文件的 `keywords` front-matter 同样经 `parse_skill_file` 解析并随技能注册（插件技能也可被 use_skill 的 search 动作召回）；卸载插件时 `remove_by_prefix("<插件名>/")` 整组撤销
 - **注册**：`state.rs` 初始化 `SkillService::new()` 加入 cordis 全局 ctx
 
 ### plugins.rs —— 插件贡献点体系
@@ -1654,7 +1653,7 @@ keywords: 同义词, 触发短语 相关词
 
 | 贡献点 | 清单字段 | 装载语义 |
 |--------|---------|---------|
-| skills | `"skills": ["skills/*.md"]` | glob 展开，经同一 `parse_skill_file` 解析（含 `keywords` front-matter），以 `<插件名>/<技能名>` 命名空间注册进 SkillService（同名原子替换，幂等）；插件技能同样可被 `search_skill` 召回 |
+| skills | `"skills": ["skills/*.md"]` | glob 展开，经同一 `parse_skill_file` 解析（含 `keywords` front-matter），以 `<插件名>/<技能名>` 命名空间注册进 SkillService（同名原子替换，幂等）；插件技能同样可被 use_skill 的 search 动作召回 |
 | tools | `"tools": ["tools/*.json"]` | 工具定义文件（格式同自建工具 `CustomToolDef`），经 `DynamicTool` 适配器注册进 ToolSystem——插件贡献**可执行能力**；校验同自建工具（名字合法 / 脚本黑名单 / schema 为 object），与已注册工具重名时跳过（防影子化，后注册不覆盖先注册） |
 | mcp_servers | `"mcp_servers": [McpServerConfig]` | 按归属合并进 servers.json（`source_plugin` 字段标记归属），新增/同插件重载的 server 由 `add_server` 连接；用户手配（无归属字段）或其他插件的同 id 配置优先，插件不覆盖 |
 | providers | `"providers": "providers.json"` | LLM 供应商预设数据（`ProviderPresetData` JSON 数组）；按需读盘不常驻——`list_provider_presets` 命令每次调用重新读取，编辑后重开设置即生效；插件目录字典序遍历，同 id 先到保留（内置预设 id 受保护，任何插件不得覆盖） |
@@ -1674,7 +1673,7 @@ keywords: 同义词, 触发短语 相关词
 
 **`ProviderPresetData`**（camelCase 序列化，对齐前端 `ProviderPreset`）：`id`（稳定标识，前端按此与 ConfigWindow.tsx 内置兜底浅合并覆盖；provider_cache 凭据快照按 id 索引，**不可变更已发布 id**）/ `labelKey`（复用 `config.preset_*` i18n 键）或 `label`（第三方插件直给显示名，优先于 labelKey）/ `providerType` + `endpoint`（默认协议）/ `defaultModel` / `mainModels`（datalist 建议）/ `contextWindow` / `suggestedMaxTokens` / `needsSecret` / `needsAppId` / `consoleUrl` / `protocols`（协议变体，`ProviderProtocolData`：`providerType` + `labelKey|label` + `endpoint`）/ `verifiedAt`（上次逐字段核对官方文档的日期，`YYYY-MM-DD` 字符串——类型宽容，单行格式异常不应导致整文件拒绝反序列化）/ `verifiedSource`（核对依据的官方文档入口 URL）。id 安全校验：非空且仅字母/数字/`-`/`_`。
 
-**运行时 upsert**（`plugins.rs::upsert_provider_preset`，`update_provider_preset` 工具的核心实现）：按 id **整行替换**（新 id 追加），`verified_at` 由 `chrono::Local::now()` 写入（不信任调用方传入的日期——模型对"今天几号"的先验不可靠），同步 `bump_plugin_version` 递增 plugin.json version（patch +1，磁盘版本高于内置 → 播种不覆盖本次修改）；文件缺失时先 `ensure_builtin_plugins` 播种再改。目录参数化实现 `upsert_provider_preset_at` 供单元测试隔离。
+**运行时 upsert**（`plugins.rs::upsert_provider_preset`，`manage_provider_preset` 的 upsert 动作核心实现）：按 id **整行替换**（新 id 追加），`verified_at` 由 `chrono::Local::now()` 写入（不信任调用方传入的日期——模型对"今天几号"的先验不可靠），同步 `bump_plugin_version` 递增 plugin.json version（patch +1，磁盘版本高于内置 → 播种不覆盖本次修改）；文件缺失时先 `ensure_builtin_plugins` 播种再改。目录参数化实现 `upsert_provider_preset_at` 供单元测试隔离。
 
 **内置插件播种**（`seed_builtin_plugin(dir, manifest, files)` 通用实现）：磁盘缺失时写入完整文件集；版本落后时更新清单和技能，保留现有 LLM/嵌入预设；仅为缺少思考资料的同名 LLM 预设补充内置能力（`parse_version` 比较 major.minor.patch；磁盘清单解析失败也重播）。两个内置插件，均编译期 `include_str!` 嵌入：
 
@@ -1706,7 +1705,7 @@ keywords: 同义词, 触发短语 相关词
 | [`sandbox.rs`](src-tauri/src/tools/sandbox.rs) | 路径穿越校验 + 危险命令检测 |
 | [`permission.rs`](src-tauri/src/tools/permission.rs) | 风险矩阵与四档确认策略、真实注册名校验、等价能力簇和显式规则；`always_deny` 与进入权限链后，敏感页面 HandOff 在 Bypass 之前判断 |
 | [`confirmation.rs`](src-tauri/src/tools/confirmation.rs) | 三态确认（拒绝/放行一次/始终允许）+ `confirmation_info()` 按工具生成风险等级与确认文案 |
-| [`types.rs`](src-tauri/src/tools/types.rs) | `Tool` trait + `ToolContext` + `ToolRiskTier`（含定级规则文档）+ `AgentAccessLevel` + `policy_for()` 矩阵 + `ToolVisibility` |
+| [`types.rs`](src-tauri/src/tools/types.rs) | `Tool` trait + `ToolContext` + `ToolRiskTier`（含定级规则文档）+ `AgentAccessLevel` + `policy_for()` 矩阵 + `ToolVisibility` + `ToolFacet`（认知/执行面向，与 `ToolSemantics` 正交） |
 | [`chainer.rs`](src-tauri/src/tools/chainer.rs) | 顺序工具链（`ToolChain` 声明式步骤序列 + 失败策略 Stop/Skip/Continue + `${result}` 参数注入）+ `IntentRecognizer` 正则意图识别；MultiStepExecutor 死代码已删除 |
 | [`mcp.rs`](src-tauri/src/tools/mcp.rs) | MCP 原生集成（手写 JSON-RPC 2.0 over stdio） |
 | [`observability.rs`](src-tauri/src/tools/observability.rs) | 工具调用可观测性 + 指标 |
@@ -1729,6 +1728,8 @@ keywords: 同义词, 触发短语 相关词
 3. 语义召回集：本轮命中 Top-N（`semantic_recall_top_n`：Chat / Idle / LowTrust 6，Focus / Default / Task 7）
 
 其余按 `should_defer` 降级为 `Deferred`（仅名）/ `Lazy`（名+描述）；`recalled=None`（嵌入不可用）时回退纯场景矩阵。
+
+**认知面 / 执行面（`Tool::facet`）**：`Memory` / `Web` 类归认知面（大脑：记忆、日记、笔记、会话与知识检索），其余（System / File / Media / Pet / Mcp）归执行面（手脚：桌面操作、终端、浏览器自动化、媒体/壁纸、文件写入）。它与 `ToolSemantics` 是两条正交轴——`save_memory` 是写入动作（Action）但属于大脑，`computer_state` 是只读查询（Retrieval）但属于手脚。用途：Chat / Idle 的完整 schema 预算里认知面优先保留（`schema_priority` 3，排在闲聊常用与普通 `always_load` 之前），执行面超预算先降级；`<available-deferred-tools>` 先按面向分段、再按家族列名，让模型先判断「要回忆还是要动手」，再到对应组里挑工具。
 
 **共用分桶**：`ToolListTool::bucket_tools_for_scene` 是唯一分桶实现，两条通道与延迟索引用同一份结果，杜绝判定发散。
 
@@ -1905,7 +1906,7 @@ scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
 | --- | --- |
 | `NotRequired` | 不因确认档位额外询问，继续工具自身权限检查。`save_memory` 默认免确认，显式拒绝仍优先。 |
 | `PreApprovalAllowed` | 截图、画面识别、壁纸、媒体与应用开关等可使用本轮已明确指向目标的授权；未获得授权则询问。矩阵 Ask 或显式 Ask 仍会先拦截。 |
-| `ConfirmAtAction` | `read_file`、`write_file`、`edit_file`、`list_dir`、`grep_search`、`run_command`、`delete_plugin` 和普通页面 `browser_eval_js` 等执行前确认。 |
+| `ConfirmAtAction` | `read_file`、`write_file`、`edit_file`（`view` 只读动作例外）、`list_dir`、`grep_search`、`run_command`、`delete_plugin` 和普通页面 `browser_eval_js` 等执行前确认。 |
 | `HandOff` | 进入 `check_tool_permission` 后，支付、银行或凭据等敏感页脚本先于 Bypass 被拒绝并交回用户。 |
 
 `manage_todo` 的安全动作是 list/get/update，`manage_scheduled` 是 list/get/pause/resume；白名单以外或缺失的 action 需确认。不能用不存在的 `delete_todo`、`cancel_scheduled` 等名称描述注册工具。
@@ -1924,14 +1925,14 @@ scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
 | `diary_tools.rs` | 日记（`write_diary`，基于当日对话与情绪状态生成，落盘 `FsWrite`） |
 | `discovery_tools.rs` | 兴趣探针与内容推荐（`get_interest_probes` / `answer_interest_probe` / `recommend_content` / `submit_content_feedback`，均 `Safe`，只动应用内偏好数据） |
 | `extended_system_ops.rs` | 扩展系统操作（`open_url` 仅 http/https，`Network` + 需确认；`get_active_window` / **`get_memory_usage`**——系统内存占用概况 + Top 进程明细：总览走 10s 轮询缓存，进程明细按需枚举并按可执行名聚合，只读 `Safe` 免确认、`should_defer=true` 经 tool_search 唤起） |
-| `provider_preset_tools.rs` | 供应商预设更新（**update_provider_preset**：核对技能的结构化落点——按 id 整行 upsert llm-providers 插件预设行，`verifiedAt` 由系统时钟写入不信任模型日期、`verifiedSource` 传官方文档 URL；自动 bump 插件 version 防播种覆盖；风险 FsWrite 走审批矩阵，`should_defer=true` 经 tool_search 唤起；description 强调整行替换需传完整行、id 不可改名） |
+| `provider_preset_tools.rs` | 供应商预设（**list_provider_presets** 只读盘点 + **manage_provider_preset**：按 id 整行 upsert / 删除 llm 与 embedding 预设——`verifiedAt` 由系统时钟写入不信任模型日期、`verifiedSource` 传官方文档 URL；自动 bump 插件 version 防播种覆盖；风险 FsWrite 走审批矩阵，`should_defer=true` 经 tool_search 唤起；upsert 强调整行替换需传完整行、id 不可改名） |
 | `input_control_tools.rs` | 输入控制（`click_mouse` / `type_text` / `hotkey` 等，均 `InputControl`；默认 `fs-write` 下拒绝，显式启用 `full-control` 后仍需确认） |
 | `media_tools.rs` | 媒体控制（`media_control`：播放/暂停/切歌/音量/静音，`InputControl`）。**播放类动作优先走 SMTC**（`world::MusicSource::control`）——可经 `target_app` 定向到具体播放器、有成功回执、能读回曲名校验；失败降级媒体键，但**指定了 `target_app` 就不降级**（媒体键全局无定向，降级会误控另一个播放器）。音量/静音无 SMTC API，始终用媒体键 |
 | `music_tools.rs` | 音乐（`music_now_playing` 读 SMTC `Safe` / `music_play` 按名字找歌并播放 `Shell` 需确认）。不单独暴露「搜索」工具——检索内嵌在 `music_play` 里，多结果时把候选清单附在返回里。桌宠内置能力，无设置开关，开箱即用 |
 | `memory_tools.rs` | 记忆操作与 `memory_md` 长期笔记；日常 `memory_note` 由独立精简反思协议沉淀，不复用主对话 system prompt，写入与睡眠整理仍由原笔记路径处理 |
 | `notebook_tools.rs` | 笔记（create/list/get_detail/update/share/create_html_note，均 `should_defer=true` 按需加载；落盘类 `FsWrite`、读取类 `FsRead`、`share_notebook` 仅推前端卡片故 `Safe`；`list_notebooks` 枚举已有笔记定位 note_id，分享时防止"为分享重建笔记"；`create_html_note` 的 validate 用 `sanitize_html` 前后对比拒绝含 script/on*/iframe 的输入，并按 `style` 区分两种成文路径——`free` 由模型写整份文档，`paper` 由后端注入样式表、模型只写正文片段，见「纸面范式」一节） |
 | `file_tools.rs` | `read_file` 与 `read_spilled_result`，支持 Unicode 字符 offset、返回长度与 next_offset；尊重小页预算并适配上下文裁剪阈值，受原沙箱与权限限制 |
-| `coding_tools.rs` | 编程智能体工具集（`write_file` / `edit_file` `FsWrite`、`run_command` `Shell`、`grep_search` / `list_dir` `FsRead`，读改跑闭环，供 Coding Agent 使用） |
+| `coding_tools.rs` | 编程智能体工具集（`write_file` / `edit_file` `FsWrite`、`run_command` `Shell`、`grep_search` / `list_dir` `FsRead`，读改跑闭环，供 Coding Agent 使用）。`edit_file` 是多动作编辑器：默认 `str_replace`，另有 `view`（只读）/ `create` / `insert` / `undo` |
 | `perception_tools.rs` | `get_foreground_app_context` 区分 foreground 与 running_apps；包含真实前台（含自身窗口）、最近外部窗口及其观测年龄，超过 300 秒标记陈旧；应用存在不证明正在录屏 |
 | `pet_tools.rs` | 桌宠（表情/动作/状态；`toggle_watch_mode` 注视跟随开关，内存态 `Safe`） |
 | `presence_tools.rs` | 在场状态（`set_presence_state`：online/busy/rest/offline 自主切换，内存态 `Safe`） |
@@ -1960,7 +1961,7 @@ scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
 | `work_todo_tools.rs` | 工作待办清单（`work_todo_write`：整表替换的编程计划清单，注入每轮 system prompt，落盘 `FsWrite`） |
 | `weather_tools.rs` | 多来源天气（`get_weather_forecast`，Open-Meteo + 可选 Apple WeatherKit、逐小时／每日预报、US AQI；只读 `Network`；配置与口径见 [`WEATHER.md`](src-tauri/src/world/WEATHER.md)） |
 | `web_search_tool.rs` | 多查询搜索与时间、域名、语言过滤，fast/research 策略、来源去重与明确的失败/部分结果；自动结果数陪伴 5、工作 10，详见 network/ |
-| `skill_tools.rs` | 技能（`use_skill` 按名激活，返回完整正文指引，正文不常驻上下文；限定当前角色可见范围，未命中附可用列表）+ `search_skill`（按自然语言 BM25 召回可见技能的名称/描述/关键词，不含正文，选定后再 use_skill 加载——与 tool_search 两段式同构）+ `create_skill`（智能体沉淀复用做法，可带 keywords 检索线索，写入即注册） |
+| `skill_tools.rs` | 技能（`use_skill` 三动作：use 按名激活返回完整正文、search 按自然语言 BM25 召回名称/描述/关键词、validate 形态自检；正文不常驻上下文，限定当前角色可见范围）+ `create_skill`（智能体沉淀复用做法，可带 keywords 检索线索，写入即注册） |
 | `tool_tools.rs` | 工具创建元工具（`create_tool`）：智能体把「PowerShell 脚本 + JSON Schema」封装为可执行新工具，创建走预览卡片授权 |
 | `plugin_tools.rs` | 插件创建元工具（`create_plugin`）：把技能 / 可执行工具 / MCP server 声明 / 供应商预设四类贡献打包为完整插件，校验全绿原子落盘后立即 `plugins::load_one` 装载（落盘即生效） |
 
@@ -1980,7 +1981,7 @@ scratch（`%TEMP%\vivian-sandbox-low`），TMP/TEMP 重定向过去。
 
 | 层级 | 载体 | 工具 |
 |------|------|------|
-| 知识沉淀 | 技能（提示词方法论） | `create_skill` / `use_skill` / `search_skill` |
+| 知识沉淀 | 技能（提示词方法论） | `create_skill` / `use_skill`（use / search / validate） |
 | 能力组合 | 既有工具编排 | `run_workflow` |
 | **能力构建** | **自建工具（可执行原语）** | **`create_tool`** |
 | **能力分发** | **插件（四类贡献打包，可整体装卸）** | **`create_plugin`** |
@@ -3270,7 +3271,7 @@ lib.rs::setup
 ├── trusted_apps.json                    # 信任应用列表
 ├── trusted_origins.json                 # 浏览器可信来源白名单（内置 + 用户合并，mtime 热重载）
 ├── skills\                              # 技能目录（*.md，30 秒热加载；create_skill 写入即注册）
-│   └── *.md                             # 技能文件（可选 name/description/keywords front-matter；keywords 供 search_skill 召回）
+│   └── *.md                             # 技能文件（可选 name/description/keywords front-matter；keywords 供 use_skill 的 search 动作召回）
 ├── tools\                               # 自建工具目录（*.json，30 秒热重载；create_tool 写入）
 │   └── *.json                           # 工具定义（name/description/parameters/script/deferred）
 ├── plugins\<name>\                      # 插件目录（create_plugin 落盘即装载；手工编辑后设置→插件页重载）

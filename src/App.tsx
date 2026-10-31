@@ -3641,6 +3641,32 @@ export default function App() {
     };
   }, []);
 
+  // 补充回复监听：首条回复发出后，后端用 LLM 规划关键词并行检索遗漏记忆，
+  // 若确有需要补充的信息，再 emit chat:augment_reply 让桌宠继续说完。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        unlisten = await listen<{ content: string; character_id?: string }>('chat:augment_reply', (event) => {
+          const payload = event.payload;
+          const text = payload?.content?.trim();
+          if (!text) return;
+          if (payload.character_id && payload.character_id !== getCharacterId()) return;
+          // 用户已经开了新一轮：别让迟到的补充句盖掉正在生成的新回复。
+          if (ChatController.isStreaming) return;
+          ChatController.handleAugmentReply(text);
+        });
+        // 迟到 resolve 兜底：cleanup 先于监听器注册完成时，当场解绑防泄漏
+        if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+      } catch {
+        /* listen 不可用时忽略 */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 快捷输入 窗口发送消息：QuickInputWindow 是独立 WebviewWindow，持有自己的
   // ChatController 单例（未 init），无法直接处理流式回复。改为 emit 事件，
   // 由主窗口统一调用 ChatController.sendMessage，走 direct 渠道。

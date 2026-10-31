@@ -80,7 +80,7 @@ path="main.rs"
 #![allow(dead_code)]
 mod error { pub type VivianResult<T> = Result<T, std::io::Error>; }
 mod types {pub mod response {#[derive(serde::Deserialize)] pub struct ChatMessage {pub role:String,pub content:String}}}
-mod pipeline {pub mod message_context {${followup}}
+mod pipeline {#[path=${JSON.stringify(abs('src-tauri/src/pipeline/prompt_templates.rs'))}] pub mod prompt_templates; pub mod message_context {${followup}}
  pub mod prompt_modules {${normalize}}}
 mod utils {
  pub mod path {
@@ -144,11 +144,12 @@ fn main() {}
     assert!(!out.contains("Fictional user:") && out.chars().count()<=1800);
     assert!(out.lines().filter(|line|line.starts_with("Expression fragment ")).count() <= 6);
     assert_eq!(r.retrieve("semantic probe",&[],Some(&q),&[e.scope.clone()],lang).as_deref(),Some(out.as_str()));
-    let marker=format!("Expression fragment {}\\nWording and rhythm only: ",e.id);
+    let label=match lang { "en"=>"Wording and rhythm only: ","ja"=>"語彙とリズムだけを参考にする：",_=>"只参考用词与节奏：" };
+    let marker=format!("Expression fragment {}\\n{}",e.id,label);
     let wording=out.split(&marker).nth(1).unwrap().lines().next().unwrap();
     let wording:serde_json::Value=serde_json::from_str(wording).unwrap();
     assert_eq!(wording.as_str(),e.text_for(lang),"wrong translation for {name}/{} in {lang}",e.id);
-    for line in out.lines().filter_map(|l|l.strip_prefix("Wording and rhythm only: ")) {
+    for line in out.lines().filter_map(|l|l.strip_prefix(label)) {
      assert!(serde_json::from_str::<serde_json::Value>(line).unwrap().is_string(),"never inject the trilingual object");
     }
     }

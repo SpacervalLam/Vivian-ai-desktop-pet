@@ -1051,6 +1051,41 @@ fn pop_wallpaper_history() -> Option<String> {
     history.pop()
 }
 
+/// 合并壁纸工具的 action 解析。
+///
+/// 新调用走 `action`；旧名别名（`wallpaper_list` / `wallpaper_set`）只有旧参数形状：
+/// 带 workshop_id / folder_path / title 视为设置，其余视为列出。
+fn effective_wallpaper_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_string();
+    }
+    if ["workshop_id", "folder_path", "title", "path", "file_path"]
+        .iter()
+        .any(|key| args.get(*key).is_some())
+    {
+        "set".to_string()
+    } else {
+        "list".to_string()
+    }
+}
+
+/// 旧别名参数规范化：`set_wallpaper` 历史参数可能是 path / file_path，
+/// 合并后统一映射成 `folder_path`。
+fn normalize_wallpaper_args(args: &Value) -> Value {
+    let mut mapped = args.clone();
+    if mapped.get("folder_path").is_none() {
+        if let Some(path) = mapped.get("path").or_else(|| mapped.get("file_path")).cloned() {
+            mapped["folder_path"] = path;
+        }
+    }
+    mapped
+}
+
 #[async_trait]
 impl Tool for WallpaperControlTool {
     fn name(&self) -> &str {
@@ -1066,6 +1101,8 @@ impl Tool for WallpaperControlTool {
          - toggle_mute: toggle mute/unmute of all wallpapers (first call mutes, next call unmutes)\n\
          - next: switch to the next wallpaper in the playlist (requires playlist configured)\n\
          - previous: switch back to the previous wallpaper (uses an internal history stack)\n\
+         - list: enumerate available wallpapers (optional filter / limit)\n\
+         - set: apply a wallpaper by workshop_id / folder_path / title\n\
          \n\
          Optional monitor parameter (for close and next): specifies a 0-based monitor index.\
          If omitted, the action applies to all monitors.\n\
@@ -1089,6 +1126,8 @@ impl Tool for WallpaperControlTool {
          - toggle_mute：切换所有壁纸的静音状态（第一次调用静音，下次调用取消静音）\n\
          - next：切换到播放列表中的下一张壁纸（需要配置播放列表）\n\
          - previous：换回上一张壁纸（通过应用层维护的历史栈实现）\n\
+         - list：列出可用壁纸（可选 filter / limit）\n\
+         - set：按 workshop_id / folder_path / title 应用某张壁纸\n\
          \n\
          可选 monitor 参数（仅对 close 和 next 有效）：指定从 0 开始的显示器索引。省略则对所有显示器生效。\n\
          \n\
@@ -1107,6 +1146,8 @@ impl Tool for WallpaperControlTool {
          - toggle_mute：すべての壁紙のミュート状態を切り替える（最初の呼び出しでミュート、次の呼び出しでミュート解除）\n\
          - next：プレイリストの次の壁紙に切り替える（プレイリストの設定が必要）\n\
          - previous：前の壁紙に戻る（アプリケーション層の履歴スタックで実現）\n\
+         - list：利用可能な壁紙を一覧（任意で filter / limit）\n\
+         - set：workshop_id / folder_path / title で壁紙を適用\n\
          \n\
          オプション monitor パラメータ（close と next のみ有効）：0 始まりのモニターインデックスを指定。省略時はすべてのモニターに適用。\n\
          \n\
@@ -1136,12 +1177,32 @@ impl Tool for WallpaperControlTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous"],
-                    "description": "Control action to perform."
+                    "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                    "description": "Control action to perform. list enumerates available wallpapers; set applies a wallpaper (requires workshop_id / folder_path / title)."
                 },
                 "monitor": {
                     "type": "number",
                     "description": "Monitor index (0-based, only for close and next actions). If omitted, applies to all monitors."
+                },
+                "workshop_id": {
+                    "type": "string",
+                    "description": "Wallpaper Workshop ID for action=set. Must come from wallpaper list results; do not fabricate."
+                },
+                "folder_path": {
+                    "type": "string",
+                    "description": "Wallpaper folder path (containing project.json) for action=set."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Fuzzy match by wallpaper title for action=set."
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "Optional title filter for action=list."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of wallpapers to list, default 50."
                 }
             },
             "required": ["action"]
@@ -1155,12 +1216,32 @@ impl Tool for WallpaperControlTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous"],
-                        "description": "要执行的控制动作。"
+                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                        "description": "要执行的控制动作。list 列出可用壁纸；set 应用某张壁纸（需要 workshop_id / folder_path / title）。"
                     },
                     "monitor": {
                         "type": "number",
                         "description": "显示器索引（从 0 开始，仅对 close 和 next 动作有效）。省略则对所有显示器生效。"
+                    },
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "action=set 时的壁纸 Workshop ID，必须来自列表结果，不要编造。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "action=set 时的壁纸文件夹路径（包含 project.json）。"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "action=set 时按标题模糊匹配。"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "action=list 时的可选题名过滤。"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "action=list 时最多列出多少张，默认 50。"
                     }
                 },
                 "required": ["action"]
@@ -1170,12 +1251,32 @@ impl Tool for WallpaperControlTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous"],
-                        "description": "実行する制御アクション。"
+                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                        "description": "実行する制御アクション。list は壁紙一覧、set は指定壁紙の適用（workshop_id / folder_path / title が必要）。"
                     },
                     "monitor": {
                         "type": "number",
                         "description": "モニターインデックス（0 始まり、close と next アクションのみ有効）。省略時はすべてのモニターに適用。"
+                    },
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "action=set の壁紙 Workshop ID。一覧の戻り値から取得し、捏造しないこと。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "action=set の壁紙フォルダパス（project.json を含む）。"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "action=set でタイトルによる曖昧一致。"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "action=list の任意タイトルフィルター。"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "action=list の最大件数、デフォルト 50。"
                     }
                 },
                 "required": ["action"]
@@ -1184,26 +1285,37 @@ impl Tool for WallpaperControlTool {
         }
     }
 
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
-        let action = input.get("action").and_then(|v| v.as_str());
-        match action {
-            Some(a) if matches!(a, "pause" | "stop" | "close" | "toggle_mute" | "next" | "previous") => {
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_wallpaper_action(input);
+        let normalized = normalize_wallpaper_args(input);
+        match action.as_str() {
+            "list" => WallpaperListTool.validate_input(input, ctx).await,
+            "set" => WallpaperSetTool.validate_input(&normalized, ctx).await,
+            other if matches!(other, "pause" | "stop" | "close" | "toggle_mute" | "next" | "previous") => {
                 ValidationResult::success(None)
             }
-            Some(a) => ValidationResult::failure(
-                &format!("不支持的 action: {}（可选：pause / stop / close / toggle_mute / next / previous）", a),
+            other => ValidationResult::failure(
+                &format!("不支持的 action: {}（可选：pause / stop / close / toggle_mute / next / previous / list / set）", other),
                 2,
             ),
-            None => ValidationResult::failure("必须提供 action 参数", 2),
         }
     }
 
-    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::ask("控制壁纸（暂停/停止/静音等）需要用户确认")
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_wallpaper_action(input).as_str() {
+            "list" => PermissionResult::allow(),
+            "set" => WallpaperSetTool.check_permissions(&normalize_wallpaper_args(input), ctx).await,
+            _ => PermissionResult::ask("控制壁纸（暂停/停止/静音等）需要用户确认"),
+        }
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_wallpaper_action(&args);
+        match action.as_str() {
+            "list" => return WallpaperListTool.call(args, ctx).await,
+            "set" => return WallpaperSetTool.call(normalize_wallpaper_args(&args), ctx).await,
+            _ => {}
+        }
         let monitor = args.get("monitor").and_then(|v| v.as_i64());
 
         let exe = match find_wallpaper_engine_exe() {
@@ -1217,7 +1329,7 @@ impl Tool for WallpaperControlTool {
             }
         };
 
-        match action {
+        match action.as_str() {
             // 暂停/继续：切换内部状态，发送 pause 或 play
             "pause" => {
                 let was_playing = WALLPAPER_PLAYING.fetch_xor(true, Ordering::SeqCst);
@@ -1489,6 +1601,23 @@ impl Tool for WallpaperControlTool {
 
     fn signals_goal_completion(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_wallpaper_arguments_infer_actions_and_paths() {
+        assert_eq!(effective_wallpaper_action(&json!({})), "list");
+        assert_eq!(effective_wallpaper_action(&json!({"title": "星空"})), "set");
+        assert_eq!(effective_wallpaper_action(&json!({"path": "D:/wp"})), "set");
+        assert_eq!(effective_wallpaper_action(&json!({"action": "next"})), "next");
+        let normalized = normalize_wallpaper_args(&json!({"path": "D:/wp"}));
+        assert_eq!(normalized["folder_path"], json!("D:/wp"));
+        let kept = normalize_wallpaper_args(&json!({"folder_path": "D:/wp2", "path": "D:/wp"}));
+        assert_eq!(kept["folder_path"], json!("D:/wp2"));
     }
 }
 

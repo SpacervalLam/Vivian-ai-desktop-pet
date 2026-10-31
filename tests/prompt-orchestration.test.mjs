@@ -15,7 +15,7 @@ const assembly=extractedAssembly.replaceAll('super::spoken_reply::PRIVATE_OPERAT
 const privateRule=companion.match(/fn private_operation\([\s\S]*?\n\}/)?.[0];assert.ok(privateRule);
 const spoken=await readFile('src-tauri/src/pipeline/spoken_reply.rs','utf8');
 const privateMarker=spoken.match(/const PRIVATE_OPERATION: &str = ([^\n]+);/)?.[1];assert.ok(privateMarker);
-const boundary=companion.match(/const DATA_BOUNDARY: &str = ([^\n]+);/)?.[1];assert.ok(boundary);
+const boundary=JSON.stringify(await readFile('src-tauri/prompts/execution/companion-data-boundary.en.md','utf8'));
 const dir=await mkdtemp(path.join(tmpdir(),'vivian-communication-'));
 try{
  const input=path.join(dir,'prompt.rs');

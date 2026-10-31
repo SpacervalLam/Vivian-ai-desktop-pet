@@ -67,6 +67,8 @@ __pycache__/
 !/scripts/check-apartment-plugin.mjs
 !/scripts/compress-chibi.mjs
 !/scripts/package-resources.mjs
+!/scripts/package-browser-runtime.mjs
+/src-tauri/browser-runtime/
 !/scripts/audit-rust-size.mjs
 !/scripts/audit-chibi-palette.mjs
 !/scripts/package-small.mjs

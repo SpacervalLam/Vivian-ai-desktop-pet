@@ -5,6 +5,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use tauri::{Emitter, Manager};
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, *};
 pub(crate) mod automation;
+pub(crate) mod playwright;
 mod lifecycle;
 use lifecycle::{engine_error, invalid_state, EngineLifecycle};
 use windows::{
@@ -234,6 +235,7 @@ unsafe fn clip_surface(surface: HWND, rect: RECT, scale: f64, clip: Option<&Brow
 }
 
 fn apply_bounds(host: &HostRef) -> windows::core::Result<()> {
+    playwright::sync_surfaces(host)?;
     unsafe {
         let (rect, scale, surface, clip, controllers) = {
             let h = host.borrow();
@@ -788,7 +790,8 @@ unsafe fn wire(
                 return Ok(());
             };
             let url = text(|p| args.Uri(p));
-            if let Some(task) = h.borrow_mut().tasks.get_mut(&key) {
+            let playwright_owned=playwright::task_for_tab(&key).is_some();
+            if let Some(task) = h.borrow_mut().tasks.get_mut(&key).filter(|_|!playwright_owned) {
                 task.error = Some("后台页面请求弹窗，请在可见浏览器中完成登录或验证".into());
                 args.SetHandled(true)?;
                 return Ok(());
@@ -804,9 +807,10 @@ unsafe fn wire(
             // An about:blank popup may receive document.write or an OAuth form from its opener.
             tab.start = false;
             let deferral = args.GetDeferral()?;
+            let popup_id=tab.id.clone();
             {
                 let mut h = h.borrow_mut();
-                h.state.active = Some(tab.id.clone());
+                if !playwright_owned { h.state.active = Some(tab.id.clone()); }
                 h.state.tabs.push(tab.clone());
             }
             args.SetHandled(true)?;
@@ -814,6 +818,7 @@ unsafe fn wire(
                 let _ = deferral.Complete();
                 fail(&h, engine_error("创建浏览器弹窗", &error));
             }
+            if playwright_owned { playwright::popup(h.borrow().app.clone(),key.clone(),popup_id); }
             publish(&h, true);
             Ok(())
         })),
@@ -1176,6 +1181,7 @@ fn operate(host: &HostRef, request: BrowserRequest) -> Result<(), String> {
                 }
             }
             BrowserRequest::Close { id } => {
+                playwright::closed(&id);
                 let native = host.borrow_mut().tabs.remove(&id);
                 if let Some(tab) = native {
                     tab.controller.Close().map_err(|e| com_failure(host, "操作浏览器", e))?;
