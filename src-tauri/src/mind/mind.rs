@@ -46,6 +46,7 @@ pub struct ThoughtSnapshot {
 
 /// 角色认知聚合句柄
 pub struct Mind {
+    pub personal: Arc<super::personal::Personal>,
     pub char_id: String,
     /// 已有心理架构（不持有所有权，Brain 仍是 owner，Mind 持有 Arc 引用）
     pub psychology: Arc<PsychologyManager>,
@@ -80,6 +81,8 @@ pub struct Mind {
     pub social_urge: Arc<RwLock<f32>>,
     pub thought_generated_at: Arc<RwLock<f64>>,
     pub conversation_opportunities: Arc<RwLock<ConversationOpportunities>>,
+    pub peer_learning: Arc<RwLock<super::peer_learning::PeerLearning>>,
+    pub inbox: Arc<super::inbox::Inbox>,
     pub thought_context_version: std::sync::atomic::AtomicU64,
     pub thought_refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// current_thought 累积缓冲区（内心 OS 提示词注入用）
@@ -90,6 +93,8 @@ pub struct Mind {
     pub accumulated_thoughts: Arc<RwLock<Vec<ThoughtSnapshot>>>,
     /// 是否需要重新合成当前想法（事件驱动触发时设 true，SelfUpdate 阶段检查并消费）
     pub thought_refresh_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Native resident actor wake-up. A notification alone never requests a model call.
+    pub cognition_wake: Arc<tokio::sync::Notify>,
     /// 持久化目录：`<user_data>/characters/<char_id>/mind/`
     persistence_dir: std::path::PathBuf,
 }
@@ -142,8 +147,15 @@ impl Mind {
         let mut conversation_opportunities = ConversationOpportunities::default();
         conversation_opportunities.threads = crate::utils::fs::load_json_or_backup(&mind_dir.join("thought_threads.json")).unwrap_or_default();
         conversation_opportunities.threads.prune(chrono::Utc::now().timestamp());
+        if conversation_opportunities.threads.continuation.retry_interrupted(chrono::Utc::now().timestamp()) {
+            if let Ok(json) = serde_json::to_string(&conversation_opportunities.threads) {
+                let _ = crate::utils::fs::write_atomic(&mind_dir.join("thought_threads.json"), &json);
+            }
+        }
+        let peer_learning = crate::utils::fs::load_json_or_backup(&mind_dir.join("peer_learning.json")).unwrap_or_default();
 
         Self {
+            personal: super::personal::Personal::shared(mind_dir.join("personal.json")),
             char_id: char_id.to_string(),
             psychology,
             beliefs,
@@ -156,10 +168,13 @@ impl Mind {
             social_urge: Arc::new(RwLock::new(0.5)),
             thought_generated_at: Arc::new(RwLock::new(0.0)),
             conversation_opportunities: Arc::new(RwLock::new(conversation_opportunities)),
+            peer_learning: Arc::new(RwLock::new(peer_learning)),
+            inbox: super::inbox::Inbox::shared(mind_dir.join("interaction_inbox.json")),
             thought_context_version: std::sync::atomic::AtomicU64::new(0),
             thought_refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
             thought_refresh_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cognition_wake: Arc::new(tokio::sync::Notify::new()),
             persistence_dir: mind_dir,
         }
     }
@@ -191,6 +206,7 @@ impl Mind {
             crate::utils::fs::write_atomic(&self.persistence_dir.join("working_memory.json"), &json)?;
         }
         self.save_thought_threads(&self.conversation_opportunities.write().threads)?;
+        self.save_peer_learning(&self.peer_learning.read())?;
         Ok(())
     }
 
@@ -198,6 +214,48 @@ impl Mind {
     fn save_thought_threads(&self, threads: &super::thought_threads::ThoughtThreads) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.persistence_dir)?;
         crate::utils::fs::write_atomic(&self.persistence_dir.join("thought_threads.json"), &serde_json::to_string(threads)?)
+    }
+
+    fn save_peer_learning(&self, learning: &super::peer_learning::PeerLearning) -> std::io::Result<()> {
+        crate::utils::fs::write_atomic(&self.persistence_dir.join("peer_learning.json"), &serde_json::to_string(learning)?)
+    }
+
+    pub fn receive_peer_statement(&self, speaker: &str, id: &str, text: &str, concern: Option<String>, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        let mut learning = self.peer_learning.write();
+        let Some(statement) = learning.receive(&self.char_id, speaker, id, text, concern, now) else { return; };
+        if let Err(error) = self.save_peer_learning(&learning) { tracing::warn!("同伴发言来源保存失败: {error}"); }
+        let event = statement.event();
+        // Preserve the host-authored concern reference instead of the generic event ID.
+        opportunities.record_peer_event(event);
+        if opportunities.threads.continuation.cancel() {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考计划取消保存失败: {error}"); }
+        }
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        opportunities.replace(None);
+        self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cognition_wake.notify_one();
+    }
+
+    pub fn activate_peer_fallbacks(&self, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        if opportunities.threads.activate_peer_fallbacks(now) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("同伴回退状态保存失败: {error}"); }
+            self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            opportunities.replace(None);
+            self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.cognition_wake.notify_one();
+        }
+    }
+
+    pub fn prepared_personal_event(&self, text: &str) -> Option<String> {
+        self.conversation_opportunities.read().prepared_personal_event(text)
+    }
+    pub fn peer_draft_is_current(&self, text: &str, now: i64) -> bool {
+        self.conversation_opportunities.read().peer_draft_is_current(text, now)
+    }
+    pub fn prepared_peer_message_id(&self, text: &str) -> Option<String> {
+        self.conversation_opportunities.read().prepared_peer_message_id(&self.char_id, text)
     }
 
     pub fn thought_threads_snapshot(&self, now: i64) -> Vec<super::thought_threads::ThoughtThread> {
@@ -313,6 +371,7 @@ impl Mind {
     /// 心理架构（emotion/needs/relationship）由 PsychologyManager.reset_to_initial 负责。
     /// 调用后会持久化清空后的状态到 mind/ 目录下的各 JSON 文件。
     pub fn reset_all(&self) -> std::io::Result<()> {
+        self.personal.clear().map_err(std::io::Error::other)?;
         {
             let mut store = self.beliefs.write();
             *store = BeliefStore::new();
@@ -334,6 +393,8 @@ impl Mind {
         }
         self.clear_current_thought();
         *self.conversation_opportunities.write() = ConversationOpportunities::default();
+        *self.peer_learning.write() = super::peer_learning::PeerLearning::default();
+        self.inbox.clear().map_err(std::io::Error::other)?;
         {
             let mut acc = self.accumulated_thoughts.write();
             acc.clear();
@@ -363,11 +424,25 @@ impl Mind {
     /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
     /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
     pub fn set_current_thought(&self, output: super::conversation::ThoughtSynthesisOutput,
-        grounding: &super::thought_threads::ThoughtGrounding<'_>, user_present: bool, now: f64, context_version: u64) {
+        grounding: &super::thought_threads::ThoughtGrounding<'_>, user_present: bool, now: f64, context_version: u64) -> Vec<super::peer_learning::LearnedNote> {
         let mut opportunities = self.conversation_opportunities.write();
-        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return; }
+        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return Vec::new(); }
         // Only the exact records offered before this request may authorize a proposal.
         let changed = opportunities.apply_synthesis(&output, grounding, user_present, now);
+        // A slow provider must not turn "in 60 seconds" into an immediate retry.
+        let planned = opportunities.threads.plan_continuation(output.next_thought.as_ref(), chrono::Utc::now().timestamp());
+        let learned = {
+            let mut learning = self.peer_learning.write();
+            let previous = learning.clone();
+            let notes = learning.learn(&output.learning_updates, now as i64);
+            if !notes.is_empty() {
+                if let Err(error) = self.save_peer_learning(&learning) {
+                    *learning = previous;
+                    tracing::warn!("同伴学习记录保存失败: {error}");
+                    Vec::new()
+                } else { notes }
+            } else { notes }
+        };
         {
             let mut cur = self.current_thought.write();
             if let Some(prev) = cur.take() {
@@ -379,11 +454,13 @@ impl Mind {
         }
         *self.social_urge.write() = output.social_urge.clamp(0.0, 1.0);
         *self.thought_generated_at.write() = chrono::Utc::now().timestamp() as f64;
-        if changed {
+        if changed || planned {
             if let Err(error) = self.save_thought_threads(&opportunities.threads) {
                 tracing::warn!(character=%self.char_id,"思绪保存失败: {error}");
             }
         }
+        self.cognition_wake.notify_one();
+        learned
     }
 
     pub fn fresh_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
@@ -391,8 +468,12 @@ impl Mind {
     }
 
     pub fn take_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
+        self.take_conversation_opportunity_for(false, now)
+    }
+
+    pub fn take_conversation_opportunity_for(&self, peer: bool, now: f64) -> Option<ConversationOpportunity> {
         let mut opportunities = self.conversation_opportunities.write();
-        let candidate = opportunities.take(now);
+        let candidate = opportunities.take_for(peer, now);
         if candidate.as_ref().is_some_and(|c| c.source == super::conversation::ConversationSource::ThoughtThread) {
             if let Err(error) = self.save_thought_threads(&opportunities.threads) {
                 tracing::warn!("思绪发言进度保存失败，暂不发言: {error}");
@@ -400,6 +481,29 @@ impl Mind {
             }
         }
         candidate
+    }
+
+    pub fn claim_due_continuation(&self, now: i64) -> bool {
+        let mut opportunities = self.conversation_opportunities.write();
+        let anchors = opportunities.threads.continuation_anchors(now, true);
+        let previous = opportunities.threads.continuation.clone();
+        let claimed = opportunities.threads.continuation.claim(&anchors, now);
+        if opportunities.threads.continuation != previous {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                opportunities.threads.continuation = previous;
+                tracing::warn!("思考计划领取保存失败，暂缓: {error}");
+                return false;
+            }
+        }
+        if claimed { self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed); }
+        claimed
+    }
+
+    pub fn retry_continuation(&self, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        if opportunities.threads.continuation.retry_interrupted(now) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考重试保存失败: {error}"); }
+        }
     }
 
     pub fn restore_conversation_after_failure(&self, candidate: ConversationOpportunity, context_version: u64) {
@@ -480,12 +584,18 @@ impl Mind {
         self.invalidate_conversation_opportunity();
         self.thought_refresh_requested
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cognition_wake.notify_one();
     }
 
     /// New input invalidates an earlier proposal without scheduling an extra request.
     pub fn invalidate_conversation_opportunity(&self) {
         self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.conversation_opportunities.write().replace(None);
+        let mut opportunities = self.conversation_opportunities.write();
+        opportunities.replace(None);
+        opportunities.cancel_peer_drafts();
+        if opportunities.threads.continuation.cancel() {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考计划取消保存失败: {error}"); }
+        }
     }
 
     /// 消费刷新请求标志位（返回是否有待处理的刷新请求）
@@ -632,6 +742,8 @@ impl Mind {
     pub fn serialize_for_prompt(&self, lang: &str) -> Option<String> {
         let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
         let mut sections: Vec<String> = Vec::new();
+        sections.push(include_str!("../../prompts/framework/personal_companion.en.md").into());
+        sections.push(format!("[Personal continuity — attributed data]\n{}",self.personal.context(chrono::Utc::now().timestamp())));
 
         // Belief：取置信度 Top-5，按 subject 分组展示
         {
@@ -721,6 +833,7 @@ impl Mind {
             };
             sections.push(format!("{label}\n{}", serde_json::to_string(&threads).unwrap_or_default()));
         }
+        if let Some(notes) = self.peer_learning.read().prompt_notes() { sections.push(notes); }
 
         if sections.is_empty() {
             None

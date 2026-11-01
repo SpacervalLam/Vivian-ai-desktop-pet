@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Ellipsis, Folder, FolderPlus, HelpCircle, Loader2, Plus, Search } from 'lucide-react';
+import { CircleAlert, ChevronRight, Ellipsis, Folder, FolderPlus, HelpCircle, Loader2, Plus, Search } from 'lucide-react';
 import { readSessionGroups, recentSidebarSessions, removeSessionGroup, SESSION_GROUP_KEY, sidebarProjects, type SidebarSession } from './sessionSidebarModel';
 import './SessionSidebar.css';
 import './sessionSidebarStrings';
@@ -88,7 +88,8 @@ export default function SessionSidebar<T extends SidebarSession>(props: Props<T>
     onDragStart={event => { hideHover(); event.dataTransfer.setData('application/x-vivian-work-session', session.session_id); event.dataTransfer.effectAllowed = 'move'; }}>
     <span className="codex-session-title">{session.title || text('untitled')}</span>
     {session.status === 'running' && <Loader2 size={13} className="codex-spin" aria-label={text('running')} />}
-    {props.waitingId === session.session_id && <HelpCircle size={14} aria-label={t('mind_inspector.code_waiting_confirm')} />}
+    {(session.stage === 'answer' || props.waitingId === session.session_id) && <HelpCircle size={14} aria-label={text('waitingAnswer')} />}
+    {session.stage === 'blocked' && <CircleAlert size={14} className="codex-session-blocked" aria-label={text('waitingBlocked')} />}
     {props.unread.has(session.session_id) && <span className="codex-session-unread-dot" aria-label={text('unread')} />}
     <button type="button" className="session-sidebar-row-action" title={text('assign')} aria-label={`${text('assign')} · ${session.title || text('untitled')}`} onClick={event => openMenu(event, 'session', session.session_id)}><FolderPlus size={13} /></button>
   </div>;

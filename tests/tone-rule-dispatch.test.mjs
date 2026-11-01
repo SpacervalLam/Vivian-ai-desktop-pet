@@ -36,11 +36,17 @@ name="vivian-tone-rule-tests"
 version="0.1.0"
 edition="2021"
 [dependencies]
+serde_json="1"
 `);
 
 await writeFile(path.join(dir, 'src', 'lib.rs'), `#![allow(dead_code)]
+mod pipeline {
+#[path="${path.join(root,'src-tauri/src/pipeline/prompt_templates.rs').replaceAll('\\','/')}"] pub mod prompt_templates;
+pub mod prompt_modules {
 ${normalize}
 ${rewritten}
+}}
+use pipeline::prompt_modules::*;
 
 #[cfg(test)]
 mod dispatch {

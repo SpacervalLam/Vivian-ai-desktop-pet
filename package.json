@@ -1,6 +1,6 @@
 {
   "name": "vivian",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Vivian AI Desktop Pet - Rust + Tauri + React",
   "type": "module",
   "scripts": {
@@ -26,7 +26,7 @@
     "predev": "npm run build:mobile",
     "dev": "vite",
     "build:mobile": "esbuild src/mobileMemory.ts --bundle --format=iife --global-name=MemoryPresentation --target=es2020 --outfile=src-tauri/src/remote/frontend/memory-presentation.js",
-    "build": "npm run build:mobile && tsc && vite build && npm run compress:chibi && npm run package:resources && npm run package:browser-runtime && node scripts/check-apartment-plugin.mjs --core",
+    "build": "npm run build:mobile && tsc && vite build && npm run compress:chibi && npm run package:resources && node scripts/check-apartment-plugin.mjs --core",
     "package:resources": "node scripts/package-resources.mjs",
     "audit:rust-size": "node scripts/audit-rust-size.mjs",
     "audit:comic-assets": "node scripts/audit-mind-comic-assets.mjs",

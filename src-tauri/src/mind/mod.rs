@@ -30,6 +30,7 @@
 //! - Mind 不替代 PsychologyManager，只聚合它 —— 已有心理状态不重写
 
 pub mod attention;
+pub mod personal;
 
 pub(crate) const COGNITIVE_EVIDENCE_RULES: &str = include_str!("../../prompts/framework/cognitive_evidence.en.md");
 pub mod belief;
@@ -37,6 +38,8 @@ pub mod belief_generator;
 pub mod belief_sources;
 pub mod current_activity;
 pub mod conversation;
+pub mod inbox;
+pub mod continuation;
 pub mod goal;
 pub mod goal_service;
 pub mod mind;
@@ -44,6 +47,7 @@ pub mod reasoning_trace;
 pub mod temporal_context;
 pub mod thought_synthesis;
 pub mod thought_threads;
+pub mod peer_learning;
 pub mod user_cognition;
 pub mod user_goals;
 pub mod working_memory;

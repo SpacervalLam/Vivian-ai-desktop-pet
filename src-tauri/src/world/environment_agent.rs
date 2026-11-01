@@ -37,6 +37,7 @@ struct Observations {
 
 #[derive(Default)]
 pub struct EnvironmentAgent {
+    pub(crate) perception: Arc<super::perception::PerceptionStore>,
     foreground: Mutex<ForegroundContext>,
     foreground_started: AtomicBool,
     foreground_provider: OnceLock<std::sync::Weak<super::WorldStateProvider>>,
@@ -303,6 +304,7 @@ impl EnvironmentAgent {
 
     /// The scheduler only performs atomic admission; observation/classification runs off-thread.
     pub fn tick(self: &Arc<Self>, state: &Arc<AppState>) {
+        super::perception_runtime::tick(self,state);
         let Some(priority) = self.background_priority() else {
             return;
         };
@@ -437,6 +439,9 @@ impl EnvironmentAgent {
             }
             let had_pending = obs.policy.pending_deadline().is_some();
             observe(&mut obs, &snap, &roles, idle, now);
+            for change in self.perception.changes(now as i64) {
+                obs.policy.observe(SceneEvent { id:change.id,stimulus:Stimulus::WorldChanged,fact:change.fact,owner:change.owner,at:change.at as f64 });
+            }
             for source in &evidence {
                 if source.kind != "dialogue" && now - source.at < 1800.0 {
                     obs.policy.observe(SceneEvent { id:source.id.clone(),stimulus:Stimulus::CharacterEvent,
@@ -475,7 +480,15 @@ impl EnvironmentAgent {
             return;
         };
         let scene = self.observations.lock().hint.clone();
-        let world_observations = scene_observations(self,&snap);
+        let mut world_observations = scene_observations(self,&snap);
+        let (sensor_revision,sensors)=self.perception.context_with_revision(now as i64,Some(&focus_id),true);
+        world_observations["perception"]=sensors;
+        let owned_reminders:Vec<_>=state.scheduler.list_pending().into_iter().filter(|task|task.char_id==focus_id
+            && (0.0..=3600.0).contains(&(task.scheduled_time-now))).take(6).map(|task|json!({"id":task.id,"scheduled_time":task.scheduled_time,
+                "message":task.message.map(|text|super::perception::clean_text(&text,160))})).collect();
+        world_observations["owned_tasks"]=json!({"owner":focus_id,"running_work":crate::commands::coding_agent::CODING_AGENT.has_running_work_for(&focus_id),
+            "upcoming_reminders":owned_reminders,"pending_work_notice":crate::brain::work_notices::global().has_report_for(&focus_id)
+                || crate::brain::work_notices::global().next_alert_for(&focus_id).is_some()});
         let activity = focus.brain.proactive.activity_journal().to_brief();
         let topic_window = self.topics.snapshot(&focus_id, None, now);
         let language = focus.brain.config.base.language.clone();
@@ -525,6 +538,7 @@ impl EnvironmentAgent {
             let current_roles = participants(&state);
             let currently_chatting = state.session_coordinator.any_user_turn_active();
             let permitted = !state.session_coordinator.any_user_turn_active()
+                && agent.perception.revision.load(Ordering::Acquire)==sensor_revision
                 && cfg.proactive.enabled
                 && crate::companion_runtime::quiet_reason(&state).is_none()
                 && !state.is_factory_reset_in_progress()
@@ -692,8 +706,7 @@ pub(crate) fn scene_observations(agent: &EnvironmentAgent, snapshot: &WorldSnaps
         map.insert("network".into(),json!(snapshot.network_status));
         map.insert("calendar".into(),json!({"is_weekend":snapshot.is_weekend,"season":snapshot.season,
             "solar_term":snapshot.solar_term,"festival":snapshot.festival}));
-        map.insert("system_load".into(),json!(snapshot.system.as_ref().map(|system|
-            json!({"cpu_percent":system.cpu_usage,"memory_percent":system.memory_usage_pct}))));
+        map.insert("perception".into(),agent.perception.context(snapshot.timestamp,None,true));
         map.insert("user_presence".into(),json!(snapshot.user_presence.as_ref().map(|user| &user.presence)));
     }
     observed

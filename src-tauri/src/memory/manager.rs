@@ -7,7 +7,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
-use super::age::{bump_visit, init_heat, staleness_text};
+use super::age::{bump_visit, init_heat};
 use super::conflict::{
     build_score_input, resolve_action, score_conflict, simple_merge, ConflictAction,
 };
@@ -947,17 +947,6 @@ impl MemoryManager {
         drop(inner);
         self.search_cache.lock().clear();
         out
-    }
-
-    /// 为给定记忆列表附加陈旧度提示，返回提示文本（按 id 索引）。
-    ///
-    /// 调用方可在组装 memory_text 时，对超过 1 天的记忆追加提示。
-    pub fn staleness_hints(&self, items: &[MemoryItem]) -> Vec<(String, Option<String>)> {
-        let now = current_timestamp();
-        items
-            .iter()
-            .map(|m| (m.id.clone(), staleness_text(m.timestamp, now)))
-            .collect()
     }
 
     /// Durable operation receipts remain discoverable after a fact is archived.
@@ -1997,6 +1986,12 @@ impl MemoryManager {
         };
         self.recycle_bin.push(backup_item, reason);
         self.recycle_bin.save()?;
+
+        // Invalidate personal plans/interpretations that cite this source before
+        // removing it. A failed durable invalidation must not report deletion success.
+        if let Some(brain)=crate::character_registry::get_brain(self.char_id()) {
+            brain.mind.personal.invalidate_source(id).map_err(crate::error::VivianError::Memory)?;
+        }
 
         let removed_item = {
             let mut inner = self.inner.write();

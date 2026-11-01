@@ -43,9 +43,37 @@ pub const WORK_AGENT_ONLY_TOOLS: &[&str] = &[
     "work_isolate",
 ];
 
+/// 陪伴侧只保留简单能力；下面这些「复杂自执行」工具一律收口到工作智能体。
+///
+/// 判定口径来自实际故障（2026-10-31）：陪伴侧拿到写入 / 命令 / 后台作业后，
+/// 会把「整理数据」这类多步文件处理当成一次性脚本自己跑——没有工作会话进度，
+/// 也没有可验证的产物。陪伴侧因此只保留查看、检索、记忆、笔记、对话与轻量 UI
+/// 操作；文件写入、命令执行、持久终端与后台作业从工具面和 `tool_search` 中移除，
+/// 执行层另有硬门兜底（防幻觉盲调 / 历史重放），错误信息直接引导
+/// `delegate_to_work_agent`。
+pub const COMPANION_SIMPLE_ONLY_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "run_command",
+    "run_job",
+    "manage_job",
+    "pwsh_persistent",
+    "terminal_open",
+    "terminal_send",
+    "terminal_read",
+    "terminal_signal",
+    "terminal_list",
+    "terminal_close",
+];
+
+/// 判断工具是否属于「陪伴侧不能自执行」的复杂能力
+pub fn is_companion_simple_only(name: &str) -> bool {
+    COMPANION_SIMPLE_ONLY_TOOLS.contains(&name)
+}
+
 /// 判断工具是否为工作智能体专属工具
 pub fn is_work_agent_only(name: &str) -> bool {
-    WORK_AGENT_ONLY_TOOLS.contains(&name)
+    WORK_AGENT_ONLY_TOOLS.contains(&name) || is_companion_simple_only(name)
 }
 
 /// 陪伴侧无论如何都要保留完整 schema 的工具：发现入口 + 记忆读写 +
@@ -57,6 +85,8 @@ pub const SCHEMA_FLOOR_TOOLS: &[&str] = &[
     "tool_search",
     "search_memory",
     "save_memory",
+    "personal_companion",
+    "inspect_personal_companion",
     "talk_to_character",
     "get_roommate_status",
     "continue_thinking",
@@ -131,7 +161,7 @@ impl ToolScope {
 
 /// 推导工具归属侧别（单一真相源）。
 pub fn tool_scope(name: &str) -> ToolScope {
-    if WORK_AGENT_ONLY_TOOLS.contains(&name) {
+    if is_work_agent_only(name) {
         ToolScope::Work
     } else if crate::brain::coding_agent::CODING_TOOLS.contains(&name) || crate::brain::coding_agent::WORK_WEB_BROWSER_TOOLS.contains(&name) {
         ToolScope::Both
@@ -867,6 +897,21 @@ mod tests {
         }
         assert_eq!(tool_scope("review_diff"), ToolScope::Both);
         assert_eq!(tool_scope("search_memory"), ToolScope::Companion);
+    }
+
+    /// 陪伴侧只做简单任务：写入 / 命令 / 终端 / 后台作业一律归工作侧，
+    /// 简单查看与检索仍留在陪伴侧。
+    #[test]
+    fn complex_self_execution_is_work_only_while_inspection_stays_companion() {
+        for name in COMPANION_SIMPLE_ONLY_TOOLS {
+            assert_eq!(tool_scope(name), ToolScope::Work, "{name}");
+            assert!(is_work_agent_only(name), "{name}");
+        }
+        for name in ["read_file", "list_dir", "grep_search", "glob", "read_spilled_result"] {
+            assert!(!is_companion_simple_only(name), "{name}");
+            assert_eq!(tool_scope(name), ToolScope::Both, "{name}");
+        }
+        assert_eq!(tool_scope("delegate_to_work_agent"), ToolScope::Companion);
     }
 
     #[test]

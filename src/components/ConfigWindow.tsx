@@ -2791,9 +2791,7 @@ const ConfigWindow: React.FC = () => {
                 value={get('base.apartment_enabled', true)}
                 onChange={(v) => setNested('base.apartment_enabled', v)}
               />
-            ) : (
-              <div style={{ opacity: 0.65, padding: '8px 0' }}>{t('config.apartment_not_installed')}</div>
-            )}
+            ) : null}
             <OptionalResourceSettings />
             <ShortcutsDrawer
               label={t('config.section_shortcuts')}

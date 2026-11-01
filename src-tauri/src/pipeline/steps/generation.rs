@@ -707,10 +707,14 @@ impl AIResponseGenerationRunnable {
         {
             return false;
         }
-        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) { return false; }
+        // Explicit authorization outranks a stale host-task continuation.
+        // The old order checked `reply_only` first, so while a background task was
+        // still "running" an unambiguous "那你委派吧" was downgraded to chat: no
+        // tools were sent, and the character could only promise to delegate.
         if let Some(context) = state.metadata.get("contextual_intent") {
             return context["action"] == true && context["needs_clarification"] != true;
         }
+        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only) { return false; }
         if state.metadata.get("task_continuation").is_some() { return true; }
         // Capability questions such as “can you make a PPT?” are requests too.
         // This lexical fallback must also work when embeddings are unavailable.
@@ -738,6 +742,18 @@ impl AIResponseGenerationRunnable {
                 || crate::tools::types::contains_task_keyword(&state.user_input),
             _ => false,
         }
+    }
+
+    /// A reply-only turn must be generated without tools. Ambiguity, chatter and
+    /// terminal continuations stay here; an explicit fresh authorization never does.
+    /// Without this escape, a still-running host task kept every follow-up in chat,
+    /// so "delegate it then" could only be answered with a promise.
+    pub(crate) fn reply_only_turn(state: &PipelineState) -> bool {
+        let explicit = state.metadata.get("contextual_intent")
+            .is_some_and(|context| context["action"] == true && context["needs_clarification"] != true);
+        if explicit { return false; }
+        state.metadata.get("contextual_intent").is_some_and(|context| context["action"] == false)
+            || state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only)
     }
 
     /// Decide before prompt budgeting, schema selection and the first model call.
@@ -1184,6 +1200,14 @@ impl Runnable for AIResponseGenerationRunnable {
             state.response_mode = "ignore".into();
             state.ai_response = Some(AiResponse::new(String::new()));
         }
+        // 工作侧完成报告只在真的产出了回复时才算说出去。生成失败或本轮没说话时
+        // 不做确认——条目留在队列里，下一次领取会把它回收并重试，只是晚说一次。
+        // 两处例外（`Err` 提前返回、被中断）都在这里表现为没有正文。
+        if !state.response_text.trim().is_empty() {
+            if let Some(char_id) = state.metadata.get("work_report_char_id").and_then(Value::as_str) {
+                crate::brain::work_notices::global().confirm_reports(char_id);
+            }
+        }
         Ok(state.to_json())
     }
 }
@@ -1212,13 +1236,20 @@ impl AIResponseGenerationRunnable {
         let mut messages_vec = if let Some(prompt) = &companion {
             prompt.messages_with_communication(&state.messages, api_input, system_directive, status.as_deref(), communication.as_ref())
         } else {
+            let language = crate::i18n::get_language();
+            let now = chrono::Local::now();
             let context = crate::pipeline::message_context::split_prompt_context(
-                &state.system_prompt, &state.user_input, &crate::i18n::get_language());
+                &state.system_prompt, &state.user_input, &language);
             let mut messages = Vec::new();
             if !context.system.is_empty() { messages.push(ChatMessage::system(context.system)); }
             if let Some(note) = context.dynamic { messages.push(ChatMessage::system(note)); }
-            crate::pipeline::message_context::append_history(&mut messages, &state.messages);
+            crate::pipeline::message_context::append_history_with_time(
+                &mut messages, &state.messages, now, &language);
             if let Some(status) = &status { messages.push(ChatMessage::system(status)); }
+            if let Some(anchor) = crate::pipeline::message_context::temporal_anchor_note(
+                &state.messages, now, &language) {
+                messages.push(ChatMessage::system(anchor));
+            }
             crate::pipeline::message_context::append_current_turn(&mut messages, api_input, system_directive, communication.as_ref());
             messages
         };
@@ -1282,8 +1313,7 @@ impl AIResponseGenerationRunnable {
 
         let mut messages_vec = Self::dialogue_messages(&state);
         let task_request = Self::execution_user_request(&state);
-        if state.metadata.get("task_continuation").is_some_and(crate::pipeline::task_continuity::reply_only)
-            || state.metadata.get("contextual_intent").is_some_and(|context| context["action"] == false) {
+        if Self::reply_only_turn(&state) {
             // Ambiguity and terminal tasks are reply-only turns. Even a hallucinated
             // text-protocol call must never reach either native or text execution.
             let reply_instruction = if state.current_channel == "broadcast"
@@ -2032,6 +2062,45 @@ mod tests {
         for input in ["不要给我换张壁纸", "别给我换壁纸", "如果给我换张壁纸会怎样", "这张壁纸挺好看"] {
             assert!(!AIResponseGenerationRunnable::requests_execution(&state(crate::providers::base::TASK_COMPANION, 0.99, input)), "{input}");
         }
+    }
+
+    /// 运行中的旧任务不能把新的显式授权降级成纯聊天：否则角色只能口头答应委派，
+    /// 本轮请求的工具列表会是空的（2026-10-31 日志 08:41 就是这样）。
+    #[test]
+    fn explicit_action_is_executable_while_a_host_task_is_running() {
+        let mut state = PipelineState { user_input: "那你委派吧".into(), ..Default::default() };
+        state.metadata["contextual_intent"] = json!({
+            "action": true, "continues_task": true, "needs_clarification": false,
+            "task": "把整理动漫收藏夹数据的任务交给办公智能体"
+        });
+        state.metadata["task_continuation"] = json!({
+            "task": {"goal": "整理动漫收藏夹的数据", "phase": "running", "candidates": [],
+                "offered": [], "selected": null, "last_outcomes": []},
+            "needs_clarification": false, "retry": false
+        });
+        assert!(AIResponseGenerationRunnable::requests_execution(&state));
+        assert_eq!(AIResponseGenerationRunnable::generation_task(&state, crate::providers::base::TASK_COMPANION), "reasoning");
+        assert!(!AIResponseGenerationRunnable::reply_only_turn(&state));
+    }
+
+    #[test]
+    fn chatter_and_clarification_remain_reply_only_without_tools() {
+        let mut chat = PipelineState { user_input: "你怎么不委派呀".into(), ..Default::default() };
+        chat.metadata["contextual_intent"] = json!({
+            "action": false, "continues_task": false, "needs_clarification": false, "task": ""});
+        assert!(AIResponseGenerationRunnable::reply_only_turn(&chat));
+        assert!(!AIResponseGenerationRunnable::requests_execution(&chat));
+
+        let mut ambiguous = PipelineState { user_input: "那换哪个".into(), ..Default::default() };
+        ambiguous.metadata["contextual_intent"] = json!({
+            "action": false, "continues_task": true, "needs_clarification": true, "task": ""});
+        ambiguous.metadata["task_continuation"] = json!({
+            "task": {"goal": "整理动漫收藏夹的数据", "phase": "running", "candidates": [],
+                "offered": [], "selected": null, "last_outcomes": []},
+            "needs_clarification": true, "retry": false
+        });
+        assert!(AIResponseGenerationRunnable::reply_only_turn(&ambiguous));
+        assert!(!AIResponseGenerationRunnable::requests_execution(&ambiguous));
     }
 
     #[test]

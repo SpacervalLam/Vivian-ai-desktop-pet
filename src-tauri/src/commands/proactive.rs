@@ -27,6 +27,7 @@ fn retain_topic_channel(char_id: &str, presence: crate::presence::PresenceState,
     let mut channel = crate::conversation::CONVERSATION_MANAGER.user_channel(char_id)
         .map(|c| if c == "wechat" { DeliveryChannel::ChatWindow } else { DeliveryChannel::Bubble });
     messages.retain(|a| {
+        if crate::character_registry::get_brain(char_id).is_some_and(|brain|!brain.mind.personal.contact_allowed(&a.content)){return false;}
         if a.wakeup_id.as_deref().is_some_and(|id| !crate::proactive::wakeup::get_scheduler(char_id).is_due(id, chrono::Utc::now().timestamp() as f64)) { return false; }
         let expected = channel.get_or_insert(a.delivery_channel);
         // A user may have changed channels while generation was in flight. Drop stale prose;
@@ -45,6 +46,7 @@ fn remember_delivered_channel(char_id: &str, action: &crate::proactive::Proactiv
 }
 
 fn deliverable_proactive_action(action: &crate::proactive::ProactiveAction) -> bool {
+    if action.trigger == "system_pressure" || action.trigger == "pressure" { return false; }
     if action.work_notice_id.as_deref().is_some_and(|id| !crate::brain::work_notices::global().has_alert(id)) {
         return false;
     }
@@ -463,7 +465,22 @@ pub fn get_proactive_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Value, String> {
     let brain = state.get_character(character_id.as_deref())?.brain;
-    Ok(brain.proactive.get_status())
+    let mut status = brain.proactive.get_status();
+    status["resident_brain"] = crate::brain::resident::status(&brain.char_id);
+    status["private_continuation"] = brain.mind.conversation_opportunities.read().threads.continuation.status();
+    status["inbox"] = brain.mind.inbox.status();
+    status["perception"] = state.world_provider.environment.perception.status(chrono::Utc::now().timestamp());
+    Ok(status)
+}
+
+/// Explicitly retry an interrupted peer response; accepted content and routing stay fixed.
+#[tauri::command]
+pub fn retry_interaction_message(character_id: Option<String>, message_id: String, state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    if state.is_factory_reset_in_progress() || state.is_rebuild_in_progress() { return Err("角色正在重建，请稍后重试".into()); }
+    let brain = state.get_character(character_id.as_deref())?.brain;
+    let retried = brain.mind.inbox.retry_interrupted_peer(&message_id, chrono::Utc::now().timestamp())?;
+    if retried { brain.mind.cognition_wake.notify_one(); }
+    Ok(retried)
 }
 
 /// 启动主动交互
@@ -1519,7 +1536,7 @@ async fn proactive_tick_inner(
 ///
 /// 从 `proactive_tick` 的 leader 和非 leader 路径抽取的公共逻辑。
 /// 跨角色消息通过 `CROSS_CHARACTER_BUS` 发送，不写入对话历史/记忆/LAST_SPOKEN。
-async fn deliver_cross_character_messages(
+pub(crate) async fn deliver_cross_character_messages(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
     char_id: &str,
@@ -1528,9 +1545,11 @@ async fn deliver_cross_character_messages(
     if cross_messages.is_empty() {
         return;
     }
+    let mut deferred = Vec::new();
     for msg in &cross_messages {
         if crate::companion_runtime::quiet_reason(state).is_some() { break; }
-        if state.session_coordinator.any_user_turn_active() { break; }
+        let Ok(source) = state.get_character(Some(char_id)) else { break; };
+        if !source.brain.mind.peer_draft_is_current(&msg.content, chrono::Utc::now().timestamp()) { continue; }
         let source_allowed = state.characters.read().get(char_id).is_some_and(|source|
             *source.online.read() && source.brain.proactive.autonomous_contact_allowed()
                 && source.brain.presence.current() == crate::presence::PresenceState::Online);
@@ -1545,7 +1564,10 @@ async fn deliver_cross_character_messages(
                 .map(|(id, inst)| (id.clone(), inst.name.clone()))
         };
         if let Some((target_id, _)) = target {
-            if !crate::world::environment_agent::allows_peer_contact(state, char_id, &target_id) { continue; }
+            if state.is_factory_reset_in_progress() || state.is_rebuild_in_progress() {
+                deferred.push(msg.clone());
+                continue;
+            }
             if msg.content.trim().is_empty() {
                 tracing::info!(
                     "[Proactive:{}] 跨角色空文本消息，跳过发送: trigger={}",
@@ -1564,6 +1586,11 @@ async fn deliver_cross_character_messages(
             };
             match CROSS_CHARACTER_BUS.send_autonomous(app, state, req).await {
                 Ok(reply) => {
+                    if reply.message_id.is_some() {
+                        if let Ok(source) = state.get_character(Some(char_id)) {
+                            source.brain.mind.record_opportunity_delivered(&msg.content, chrono::Utc::now().timestamp() as f64);
+                        }
+                    }
                     tracing::info!(
                         "[Proactive:{}] 跨角色对话 → {}: {:?} | 回复: {:?}",
                         char_id,
@@ -1597,6 +1624,9 @@ async fn deliver_cross_character_messages(
                     }
                 }
                 Err(e) => {
+                    // Autonomous send now only accepts into durable mail. An error
+                    // means it was not accepted; keep the same draft and identity.
+                    deferred.push(msg.clone());
                     tracing::warn!(
                         "[Proactive:{}] 跨角色对话失败 → {}: {}",
                         char_id,
@@ -1606,8 +1636,14 @@ async fn deliver_cross_character_messages(
                 }
             }
         } else {
+            deferred.push(msg.clone());
             tracing::debug!(character = char_id, listener = ?msg.listener,
-                "跨角色消息原定对象不在线，丢弃");
+                "跨角色消息原定对象不在线，暂缓并保留原对象");
+        }
+    }
+    if !deferred.is_empty() {
+        if let Ok(source) = state.get_character(Some(char_id)) {
+            source.brain.proactive.requeue_messages(deferred);
         }
     }
 }

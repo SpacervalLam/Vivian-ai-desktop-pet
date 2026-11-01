@@ -13,13 +13,17 @@ struct Entry {
     next_attempt: f64,
 }
 pub fn scope_key(trigger: &str, hint: Option<&str>) -> String {
-    if trigger == "spontaneous" {
+    if matches!(trigger, "spontaneous" | "cross_character_reply") {
         if let Some(proposal) = hint.and_then(|hint| serde_json::from_str::<serde_json::Value>(hint).ok()) {
             return format!("{trigger}:{}", serde_json::json!({"meaning_key":proposal["meaning_key"],
-                "evidence":proposal["evidence"],"event_id":proposal["event_id"]}));
+                "evidence":proposal["evidence"],"event_id":proposal["event_id"],"listener_id":proposal["listener_id"]}));
         }
     }
     trigger.to_owned()
+}
+pub fn conversation_hint(trigger: &str, hint: Option<&str>) -> Option<String> {
+    if matches!(trigger, "spontaneous" | "cross_character_reply") { hint.map(str::to_owned) }
+    else { None }
 }
 impl RetryGate {
     pub fn retry_pending(&self, key: &str) -> bool { self.entries.contains_key(key) }
@@ -69,6 +73,16 @@ impl Drop for Attempt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_peer_purpose_reaches_generation_intact_and_retries_belong_to_its_actual_recipient() {
+        let first = serde_json::json!({"intent":"AskPeer","meaning_key":"understand_choice","event_id":"thought:choice:3",
+            "evidence":"先观察再选择","listener_id":"nana","personal_thought":{"open_question":"先观察怎样帮助选择？"}}).to_string();
+        assert_eq!(conversation_hint("cross_character_reply",Some(&first)).as_deref(),Some(first.as_str()));
+        assert!(conversation_hint("cross_character_reply",None).is_none());
+        assert!(conversation_hint("work_notice",Some(&first)).is_none());
+        let second = first.replace("nana","vivian");
+        assert_ne!(scope_key("cross_character_reply",Some(&first)),scope_key("cross_character_reply",Some(&second)));
+    }
     #[test]
     fn failures_back_off_and_success_resets_without_recording_speech() {
         let gate = Arc::new(Mutex::new(RetryGate::default()));

@@ -155,6 +155,8 @@ async fn observe_game(app: &tauri::AppHandle, state: &Arc<AppState>, window: &Fo
     let description: String = description.chars().take(1600).collect();
     if description.trim().is_empty() { return; }
     OBSERVER.lock().report = Some((now, description.clone()));
+    let observation_owner=state.active_character_id.read().clone();
+    crate::world::perception_runtime::visual_report(&state.world_provider.environment,&observation_owner,&description,"game_window_snapshot");
     // Only speak in a lull. A snapshot can inform a manual reply during intense play.
     if !proactive || !state.world_provider.environment.game_input_activity().allows_comment()
         || companion.quiet_reason(chrono::Local::now().hour()).is_some()

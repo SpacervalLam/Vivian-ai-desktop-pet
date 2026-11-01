@@ -5,25 +5,23 @@ use chrono::Timelike;
 use parking_lot::Mutex;
 use serde_json::json;
 use tauri::{Emitter, Manager};
-use crate::companion_policy::{ClipboardChanges, HourlyClock, PressureState};
+use crate::companion_policy::{ClipboardChanges, HourlyClock};
 use crate::state::AppState;
 
 #[derive(Default)]
 struct FeedbackState {
-    clock: HourlyClock, cpu: PressureState, memory: PressureState,
-    network: Option<bool>, last_pressure_notice: Option<i64>, last_network_notice: Option<i64>,
+    clock: HourlyClock,
+    network: Option<bool>, last_network_notice: Option<i64>,
     clipboard: ClipboardChanges, rain: Option<bool>, song: Option<String>, music_initialized: bool,
     last_weather_notice: Option<i64>, last_music_notice: Option<i64>,
 }
 static FEEDBACK: LazyLock<Mutex<FeedbackState>> = LazyLock::new(Default::default);
-static RESOURCE_FEEDBACK: AtomicBool = AtomicBool::new(false);
 static MUSIC_FEEDBACK: AtomicBool = AtomicBool::new(false);
 static FEEDBACK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 struct FeedbackPermit;
 impl Drop for FeedbackPermit {
     fn drop(&mut self) { FEEDBACK_IN_FLIGHT.store(false, Ordering::Release); }
 }
-pub fn resource_feedback_enabled() -> bool { RESOURCE_FEEDBACK.load(Ordering::Relaxed) }
 pub fn music_feedback_enabled() -> bool { MUSIC_FEEDBACK.load(Ordering::Relaxed) }
 
 pub fn quiet_reason(state: &AppState) -> Option<&'static str> {
@@ -38,10 +36,10 @@ pub fn tick(app: &tauri::AppHandle) {
     if !state.initialized.load(Ordering::Relaxed) { return; }
     crate::game_companion::tick(app, &state);
     if state.is_factory_reset_in_progress() { return; }
+    if !state.is_rebuild_in_progress() { crate::brain::resident::ensure_started(app, &state); }
     state.world_provider.environment.tick(&state);
     flush_interaction_episodes(&state);
     let cfg = state.config.read().get_all();
-    RESOURCE_FEEDBACK.store(cfg.companion.resource_feedback && cfg.proactive.enable_system_pressure_trigger, Ordering::Relaxed);
     MUSIC_FEEDBACK.store(cfg.companion.music_feedback, Ordering::Relaxed);
     // Detect changes independently of the pet's online/busy state. Never read content here.
     {
@@ -53,7 +51,7 @@ pub fn tick(app: &tauri::AppHandle) {
         }
     }
     let now = chrono::Local::now();
-    let (_process, connected, metrics) = state.world_provider.companion_observation();
+    let (_process, connected, _metrics) = state.world_provider.companion_observation();
     let quiet = quiet_reason(&state);
     let active = state.active_character_id.read().clone();
     let character = {
@@ -65,8 +63,6 @@ pub fn tick(app: &tauri::AppHandle) {
     let busy = character.think_lock.try_lock().is_err() || state.playback_gate.is_playing();
     let mut feedback = FEEDBACK.lock();
     let hourly = feedback.clock.observe(now.timestamp(), now.minute(), now.second());
-    let cpu_entered = feedback.cpu.sample(now.timestamp(), metrics.as_ref().map(|m| m.cpu_usage), 85.0, 70.0);
-    let memory_entered = feedback.memory.sample(now.timestamp(), metrics.as_ref().map(|m| m.memory_usage_pct), 90.0, 80.0);
     let network_changed = connected.is_some() && feedback.network.is_some() && connected != feedback.network;
     if connected.is_some() { feedback.network = connected; }
     let eligible = quiet.is_none() && !busy && !FEEDBACK_IN_FLIGHT.load(Ordering::Acquire)
@@ -107,14 +103,6 @@ pub fn tick(app: &tauri::AppHandle) {
         messages.push(("hourly", if zh { format!("现在是 {} 点整。", now.hour()) }
             else if ja { format!("{}時になったよ。", now.hour()) }
             else { format!("It's {}:00.", now.hour()) }, "remind"));
-    }
-    if eligible && resource_feedback_enabled() && (cpu_entered || memory_entered)
-        && feedback.last_pressure_notice.is_none_or(|last| now.timestamp() - last >= 1800) {
-        feedback.last_pressure_notice = Some(now.timestamp());
-        let text = if memory_entered {
-            if zh { "内存有点紧张，可以看看有没有暂时不用的应用。" } else if ja { "メモリが混み合っているね。使っていないアプリを確認してみよう。" } else { "Memory is running low. Check for apps you aren't using." }
-        } else if zh { "电脑持续有点忙，CPU 占用比较高。" } else if ja { "CPUの負荷がしばらく高くなっているね。" } else { "The CPU has been working hard for a while." };
-        messages.push(("pressure", text.to_string(), "tired"));
     }
     if eligible && cfg.companion.network_feedback && network_changed
         && feedback.last_network_notice.is_none_or(|last| now.timestamp() - last >= 60) {
@@ -190,8 +178,8 @@ fn flush_interaction_episodes(state: &Arc<AppState>) {
 #[tauri::command]
 pub fn companion_status(state: tauri::State<'_, Arc<AppState>>) -> serde_json::Value {
     let feedback = FEEDBACK.lock();
-    json!({"quiet_reason": quiet_reason(&state), "cpu_pressure":feedback.cpu.active,
-        "memory_pressure":feedback.memory.active,"network_connected":feedback.network,
+    json!({"quiet_reason": quiet_reason(&state), "resource_pressure_owner":"environment",
+        "network_connected":feedback.network,
         "game":crate::game_companion::status(),
         "game_input":state.world_provider.environment.game_input_activity()})
 }

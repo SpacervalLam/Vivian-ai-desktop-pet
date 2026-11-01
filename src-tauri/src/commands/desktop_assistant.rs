@@ -166,6 +166,7 @@ pub(crate) async fn analyze_snapshot(_app: &AppHandle, state: &Arc<AppState>, ch
     tracing::info!(character_id, "开始分析截图快照");
     // Desktop screenshots produce a pet bubble, not a persisted chat turn.
     // Calling respond_to_image here emits chat:start and records the image marker.
+    // This analysis was addressed to a pet; its result returns directly to that pet.
     Box::pin(crate::vision::recognize_image(&router, image, &context, Some(character_id))).await
 }
 

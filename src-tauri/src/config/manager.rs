@@ -416,6 +416,8 @@ fn default_deepseek_timeout_secs() -> u64 {
 /// 这些功能会加大 token 消耗，可由 `enable` 总开关统一关闭。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldConfig {
+    #[serde(default)]
+    pub perception: crate::world::perception::PerceptionConfig,
     /// 总开关：关闭后所有"活着"功能停止（不感知世界、不内心独白、不记忆巩固）
     #[serde(default = "default_true")]
     pub enable: bool,
@@ -466,6 +468,7 @@ pub struct WorldConfig {
 impl Default for WorldConfig {
     fn default() -> Self {
         Self {
+            perception: crate::world::perception::PerceptionConfig::default(),
             enable: true,
             inject_into_prompt: true,
             enable_weather: true,
@@ -1663,7 +1666,7 @@ pub struct ProactiveConfig {
     /// 退避自然衰减窗口（秒）：距上次主动打扰超过该时长后退避计数减半回落
     #[serde(default = "default_backoff_grace_secs")]
     pub backoff_grace_secs: u64,
-    /// 是否启用系统资源压力触发器（内存占用越过阈值时提醒用户）
+    /// Report sustained resource transitions to the environment agent; never a direct reminder.
     #[serde(default = "default_true")]
     pub enable_system_pressure_trigger: bool,
     /// 是否启用主动截屏观察触发器（窗口切换引发好奇，经用户同意后截屏理解并搭话）

@@ -21,6 +21,9 @@ pub mod budget;
 pub mod callbacks;
 pub mod chat_chain;
 pub mod cognitive_tick;
+pub mod resident;
+pub(crate) mod interaction_runtime;
+pub(crate) mod resident_tasks;
 pub mod control_action_executor;
 pub mod interruption_controller;
 pub mod jobs;
@@ -57,6 +60,7 @@ pub mod topic_signal;
 pub mod workflow;
 pub mod work_question;
 pub mod work_notices;
+pub mod work_stage;
 
 // 主要导出（保持向后兼容）
 pub use brain::Brain;

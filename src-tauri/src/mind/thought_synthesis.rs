@@ -39,16 +39,18 @@ fn thought_output_schema() -> serde_json::Value {
                 "maximum": 1.0,
                 "description": "Current desire for contact; this score alone never authorizes speech. conversation_intent decides whether to speak."
             },
-            "conversation_intent": { "type": "string", "enum": ["silent", "greet", "follow_up", "share", "ask_user"] },
+            "conversation_intent": { "type": "string", "enum": ["silent", "greet", "follow_up", "share", "ask_user", "ask_peer", "share_peer"] },
             "conversation_source": { "type": "string", "enum": ["none", "user_message", "world_observation", "scene_event", "thought_thread"] },
             "conversation_topic": { "type": "string", "description": "A specific topic worth sharing now, or empty string" },
             "conversation_reason": { "type": "string", "description": "Short communicative purpose explaining why this point fits now; time elapsed alone is insufficient" },
             "conversation_key": { "type": "string", "description": "Stable semantic identity of the point, reused for paraphrases; do not encode the clock or a random id" },
             "conversation_event_id": { "type": "string", "description": "Id of the provided scene event motivating this turn, or empty string; never invent one" },
             "conversation_evidence": { "type": "string", "description": "Exact short quote from the provided source, including a personal_thought record for thought_thread; empty for greeting or silence" },
-            "thread_updates": super::thought_threads::update_schema()
+            "thread_updates": super::thought_threads::update_schema(),
+            "learning_updates": super::peer_learning::update_schema(),
+            "next_thought": super::continuation::request_schema()
         },
-        "required": ["thought", "social_urge", "conversation_intent", "conversation_source", "conversation_topic", "conversation_evidence", "conversation_reason", "conversation_key", "conversation_event_id", "thread_updates"],
+        "required": ["thought", "social_urge", "conversation_intent", "conversation_source", "conversation_topic", "conversation_evidence", "conversation_reason", "conversation_key", "conversation_event_id", "thread_updates", "learning_updates", "next_thought"],
         "additionalProperties": false
     })
 }
@@ -446,6 +448,8 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
                     conversation_key: parsed.conversation_key.chars().take(100).collect(),
                     conversation_event_id: parsed.conversation_event_id.chars().take(100).collect(),
                     thread_updates: parsed.thread_updates.into_iter().take(2).collect(),
+                    learning_updates: parsed.learning_updates.into_iter().take(2).collect(),
+                    next_thought: parsed.next_thought,
                 });
             }
         }
@@ -472,6 +476,8 @@ fn parse_thought_output(raw: &str, max_len: usize) -> VivianResult<ThoughtSynthe
         conversation_key: String::new(),
         conversation_event_id: String::new(),
         thread_updates: Vec::new(),
+        learning_updates: Vec::new(),
+        next_thought: None,
     })
 }
 
@@ -555,6 +561,7 @@ fn build_world_brief_section(brief: &WorldBrief, language: &str) -> String {
 /// fire-and-forget 调用：失败时不写入缓存，保留上次成功结果或 None。
 pub async fn refresh_current_thought(
     mind: &Arc<crate::mind::Mind>,
+    memory: &Arc<crate::memory::MemoryManager>,
     router: &Arc<ModelRouter>,
     world_provider: &Arc<WorldStateProvider>,
     language: &str,
@@ -621,9 +628,19 @@ pub async fn refresh_current_thought(
                 user_quotes.extend(dialogue.iter().filter(|message| message["user_evidence"] == true)
                     .filter_map(|message| Some((message["text"].as_str()?, message["timestamp"].as_i64()?))));
             }
-            let world_observations: Vec<&str> = [world_brief.weather_desc.as_deref(),
+            // Persisted affairs can outlive the short dialogue window. Only the
+            // host-validated, original user quotes ground their later follow-up.
+            for record in conversation_data["personal_continuity"]["records"].as_array().into_iter().flatten() {
+                if matches!(record["state"].as_str(),Some("active"|"waiting")) {
+                    user_quotes.extend(record["evidence"].as_array().into_iter().flatten()
+                        .filter(|source|source["kind"]=="user")
+                        .filter_map(|source|Some((source["quote"].as_str()?,source["at"].as_i64()?))));
+                }
+            }
+            let mut world_observations: Vec<&str> = [world_brief.weather_desc.as_deref(),
                 world_brief.foreground_title.as_deref(), world_brief.music_desc.as_deref()]
                 .into_iter().flatten().collect();
+            world_observations.extend(crate::world::perception::grounded_texts(&conversation_data["environment_observations"],&mind.char_id,snapshot_at as i64));
             let mut events: Vec<super::conversation::ConversationEvent> =
                 serde_json::from_value(conversation_data["observed_conversation_events"].clone()).unwrap_or_default();
             events.extend(serde_json::from_value::<Vec<super::conversation::ConversationEvent>>(
@@ -632,9 +649,17 @@ pub async fn refresh_current_thought(
                 .map(|(_, text, _)| text.as_str()).collect();
             let grounding = super::thought_threads::ThoughtGrounding { persona: persona_context,
                 user_quotes: &user_quotes, world: &world_observations, scene: &events, reflections: &reflections };
-            mind.set_current_thought(output, &grounding, world_brief.user_presence == UserPresence::Present, snapshot_at, context_version);
+            let notes = mind.set_current_thought(output, &grounding, world_brief.user_presence == UserPresence::Present, snapshot_at, context_version);
+            for note in notes {
+                let (text, metadata) = note.memory_record(&mind.char_id);
+                if let Err(error) = memory.add_memory_with_metadata(&text, crate::memory::types::MemoryType::Knowledge, 0.55,
+                    vec!["peer_learning".into(),"peer_report".into(),"unverified".into()], metadata).await {
+                    tracing::warn!("同伴知识索引写入失败，原始学习记录仍已保留: {error}");
+                }
+            }
         }
         Err(e) => {
+            mind.retry_continuation(chrono::Utc::now().timestamp());
             tracing::debug!("[thought_synthesis] LLM 合成失败: {}", e);
         }
     }

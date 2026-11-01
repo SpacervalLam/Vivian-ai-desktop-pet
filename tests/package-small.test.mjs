@@ -18,6 +18,7 @@ try {
   put('dist/assets/MemoryWindow-current.css', 'current styles');
   put('src-tauri/windows/resource-packages.nsh', 'current resources');
   put('release/resource-packs.json', '[]');
+  put('src/optional-resources.json', '[]');
   const published = put('release/Vivian_1.0.1_x64-small-setup.exe', 'keep published installer');
   const setup = put('src-tauri/target/release/bundle/nsis/Vivian_1.0.1_x64-setup.exe', 'stale installer');
   const old = new Date(Date.now() - 60000);

@@ -67,7 +67,7 @@ pub mod user_model;
 pub mod verifier;
 pub mod vector_search;
 
-pub use age::{bump_visit, compute_heat_score, init_heat, staleness_text};
+pub use age::{bump_visit, compute_heat_score, init_heat};
 pub use embedding::{build_embedding, default_embedding, HashingMemoryEmbedding, MemoryEmbeddingProvider};
 pub use embedding_registry::{
     all_models, lookup as lookup_embedding_model, normalize_dimension, resolve_dimension,

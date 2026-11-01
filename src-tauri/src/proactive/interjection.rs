@@ -103,12 +103,20 @@ impl Drop for OpportunityPermit {
 
 pub struct PendingInterjection {
     pub directive: String,
+    /// The overheard user/roommate exchange. Persisted after delivery as a
+    /// system observation so future turns have the conversation context that
+    /// this character only witnessed.
+    pub observed_exchange: String,
     permit: OpportunityPermit,
 }
 
 impl PendingInterjection {
     pub fn new(directive: String, permit: OpportunityPermit) -> Self {
-        Self { directive, permit }
+        Self { directive, observed_exchange: String::new(), permit }
+    }
+    pub fn with_observed_exchange(mut self, exchange: impl Into<String>) -> Self {
+        self.observed_exchange = exchange.into();
+        self
     }
     pub fn mark_spoken(&mut self, now: f64, text: &str) {
         if text.trim().is_empty() {

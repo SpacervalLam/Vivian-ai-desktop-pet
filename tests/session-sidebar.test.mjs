@@ -37,4 +37,9 @@ assert.deepEqual(mergeSidebarSessions([opened], [other], opened.session_id, new 
 assert.deepEqual(mergeSidebarSessions([other], snapshot, null, deleted), [other], 'a refresh started before deletion stays filtered');
 deleted.clear();
 assert.equal(mergeSidebarSessions([opened, other], snapshot, opened.session_id, deleted).length, 2, 'failed deletion can restore the session');
-console.log('Session sidebar: global latest 40 across channels, all workspace projects, path normalization, immutable special groups and persisted custom membership passed.');
+// stage is host-derived and must follow the refresh. Keeping the opened copy's
+// value would make "this session was unblocked" lag a poll behind reality.
+const staged = mergeSidebarSessions([{ ...opened, stage: 'working' }], [{ ...opened, stage: 'blocked' }], null, new Set());
+assert.equal(staged[0].stage, 'blocked', 'a refresh replaces the derived stage instead of keeping a stale one');
+assert.deepEqual(staged[0].messages, ['loaded history'], 'stage refresh must not disturb hydrated history');
+console.log('Session sidebar: global latest 40 across channels, all workspace projects, path normalization, immutable special groups, persisted custom membership and derived stage refresh passed.');

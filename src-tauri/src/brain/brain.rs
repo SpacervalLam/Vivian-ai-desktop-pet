@@ -23,6 +23,14 @@ use crate::world::WorldState;
 
 use super::chat_chain::BrainChatChain;
 
+pub(crate) struct StreamEmitterScope {
+    shared: Option<crate::pipeline::steps::generation::SharedStreamEmitter>,
+    previous: Option<crate::pipeline::steps::generation::StreamEmitter>,
+}
+impl Drop for StreamEmitterScope {
+    fn drop(&mut self) { if let Some(shared) = &self.shared { *shared.write() = self.previous.take(); } }
+}
+
 /// Brain - AI 大脑，集成所有子系统
 ///
 /// 包含 13 个子系统：
@@ -608,8 +616,19 @@ impl Brain {
 
     /// 内部插话指令不是用户发言；调用方只保存实际说出的回复。
     pub async fn think_system_directive(&self, directive: &str) -> VivianResult<AiResponse> {
+        self.think_system_directive_with_observation(directive, None).await
+    }
+
+    /// 与 `think_system_directive` 相同，并记录插话者旁听到的对话片段。
+    /// 只在实际生成并写出回复时落为不可记忆的 observation，避免未来轮次
+    /// 只看到自己的半截发言。
+    pub async fn think_system_directive_with_observation(
+        &self,
+        directive: &str,
+        observation: Option<&str>,
+    ) -> VivianResult<AiResponse> {
         match &self.chat_chain {
-            Some(chain) => chain.ainvoke_system_directive(directive).await,
+            Some(chain) => chain.ainvoke_system_directive_with_observation(directive, observation).await,
             None => Err(VivianError::Engine("聊天链未初始化".to_string())),
         }
     }
@@ -749,6 +768,13 @@ impl Brain {
         }
     }
 
+    pub(crate) fn stream_emitter_scope(&self, emitter: crate::pipeline::steps::generation::StreamEmitter) -> StreamEmitterScope {
+        let shared = self.chat_chain.as_ref().map(|chain| chain.stream_emitter.clone());
+        let previous = shared.as_ref().and_then(|shared| shared.read().clone());
+        self.set_stream_emitter(Some(emitter));
+        StreamEmitterScope { shared, previous }
+    }
+
     pub fn clear_memory(&self) -> VivianResult<()> {
         let memory = self.memory.clone();
         tokio::spawn(async move {
@@ -775,11 +801,8 @@ impl Brain {
 
     /// 单次主动对话 tick（由前端定时调用）
     ///
-    /// 由 CognitiveTickRunner 执行统一 6 阶段认知循环：
-    /// WorldIngest → SelfUpdate → Observe → Think → Act → Speak
-    ///
-    /// 仅 Speak 阶段调用 LLM（主动消息触发器命中时），其余阶段纯规则。
-    /// Tick 之外仍处理：夜间记忆巩固 / 日常 pipeline.run()。
+    /// Native actors maintain private cognition and memory. This presentation pass
+    /// reuses their state; before native attachment the old full tick is a fallback.
     pub async fn proactive_tick(
         &self,
         context: &crate::proactive::TickContext,
@@ -814,6 +837,12 @@ impl Brain {
         //
         // pipeline.run() 内部各 Stage 自带条件门控，不满足时直接返回 None 不调 LLM，
         // 因此高频轮询是安全的；运行锁防止与对话路径并发竞态。
+        if !self.cognitive_tick.resident_active() { self.check_memory_maintenance(); }
+
+        Ok(produced)
+    }
+
+    pub(crate) fn check_memory_maintenance(&self) {
         if let Some(chat_chain) = &self.chat_chain {
             let pipeline = chat_chain.pipeline.clone();
             let memory = self.memory.clone();
@@ -824,7 +853,6 @@ impl Brain {
             });
         }
 
-        Ok(produced)
     }
 
     /// 消费所有待发送的主动行为

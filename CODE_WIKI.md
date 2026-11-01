@@ -930,6 +930,39 @@ Markdown 文件另有**源码 / 渲染两态**（顶栏切换）：渲染态交�
 而是下面「沙箱确认回调（`coding_sandbox_confirm`）」那条规则的自然结果：无工作区时确认一律被拒
 （子 agent 面前没有应答者）。
 
+#### 结算状态与「在等谁」（`work_contract` / `work_stage`）
+
+工作会话有两个互不替代的状态维度，混用会让「已完成」和「还需要人」互相污染：
+
+- **`CodingStatus`**（`idle` / `running` / `canceled`）回答「agent 在不在跑」。
+- **`work_stage`**（`brain/work_stage.rs`）回答「现在需不需要我」。它是**纯派生**函数，
+  从待办、未收集后台任务、未答提问、最后一次结算四个标量算出来，不新增存储；
+  `CodingSession.stage` 只填在会话列表头，序列化时跳过（不落盘，因此没有迁移与陈旧值问题）。
+
+规则按表从上到下取第一条命中的，**顺序即语义**（提问优先于正在跑：提问可以在跑的时候抛出）：
+
+| 顺序 | 条件 | stage | 含义 |
+|---|---|---|---|
+| 1 | 有未答提问 | `answer` | 等你回答 |
+| 2 | 正在跑 | `working` | 执行中 |
+| 3 | 上次结算 `blocked` | `blocked` | 卡住了，要人推动 |
+| 4 | 有待办或未收集后台任务 | `queued` | 还有活没干完 |
+| 5 | 其余 | `idle` | 等新指令 |
+
+刻意没有「等你验收」一档：工作侧是对话式会话，结果直接落在对话里，没有需要单独签收的交付物；
+硬加一档只会让每个完成的会话都挂上「需要你」。
+
+结算状态（`work_contract::TaskStatus`）中 `dropped` 与 `completed` 都属于**已结束**
+（`is_settled()`），区别在是否宣称交付：`dropped` 表示查过了、这次请求没有需要做的事
+（不复现 / 不是缺陷 / 已在别处处理），因此要求 `remaining_work` 为空，且**不并入**会话里
+其他请求的待办——`completed` 才要求「会话里也没有未完成工作」。这样模型不必再把「不用做」
+写成 `completed`（谎报交付）或 `partial`（假装失败）。
+
+转达侧（`brain/work_notices.rs`）的完成报告是**两段式消费**：注入提示词时只 `claim`
+（标记占用、留在队列里），本轮生成出正文之后才 `confirm` 移除。上一轮领走却没确认的条目
+在下次领取时自动回收重试（连续 3 次说不出去才丢弃），所以生成失败、被中断或进程崩溃
+都不会让一份报告悄悄消失——代价只是被晚说一次。
+
 ### task_service —— 自治任务与后台回流
 
 [`brain/task_service.rs`](src-tauri/src/brain/task_service.rs) 是自治任务执行服务（`ctx.tasks` 能力缝），支撑陪伴对话直接用工作侧能力派活（`run_job` / `spawn_subagent` / `run_workflow` / `delegate_to_work_agent`），并负责把任务状态与完成报告**回流到陪伴对话**。
@@ -977,7 +1010,9 @@ PreProcessing → UserMemorySaving
 | [`state.rs`](src-tauri/src/pipeline/state.rs) | `PipelineState` 贯穿全链，携带共享查询嵌入、分类信号、回复前心情及阶段元数据 |
 | [`advisor.rs`](src-tauri/src/pipeline/advisor.rs) | Advisor 拦截器链（日志/限流/Re2/循环检测） |
 | [`prompt_modules.rs`](src-tauri/src/pipeline/prompt_modules.rs) | Prompt 模块构建、渠道风格与软预算；按模型窗口、用户等级和任务类型计算预算，并按优先级裁剪动态段落 |
-| [`companion_prompt.rs`](src-tauri/src/pipeline/companion_prompt.rs) | 陪伴聊天实际请求编排：短角色指令、角色卡、独立虚构示例、真实历史、系统上下文与后置指令；JSON 路径在末尾保留紧凑格式协议，原生工具路径不强制文本 JSON。输出所保留 block 的元数据，供 Mind Inspector 展示；预算优先保护历史与核心证据 |
+| [`companion_prompt.rs`](src-tauri/src/pipeline/companion_prompt.rs) | 陪伴聊天实际请求编排：短角色指令、角色卡、独立虚构示例、真实历史、系统上下文与后置指令；JSON 路径在末尾保留紧凑格式协议，原生工具路径不强制文本 JSON。输出所保留 block 的元数据，供 Mind Inspector 展示；预算优先保护历史与核心证据。真实历史经 `append_history_with_time` 渲染，并在当轮发言之前放一条 `[CURRENT TIME]` 锚点 |
+| [`message_context.rs`](src-tauri/src/pipeline/message_context.rs) | 角色保留的上下文组装（聊天与主动生成共用）。历史渲染层按相邻真实发言的间隔插入 `[TIME GAP]` 数据消息、在窗口开头插入 `[HISTORY START]` 锚点；跨自然日额外标注，避免旧话题被当成刚刚发生。标记只进 prompt，不修改、不持久化真实消息，UI 与记忆抽取不受影响 |
+| [`temporal_consistency.rs`](src-tauri/src/pipeline/temporal_consistency.rs) | 生成后的时间措辞收敛，只用于主动消息：没有当轮用户发言可指代时，若最近真实发言早于 5 分钟，就把「刚才/刚刚」替换为「之前」，引号内文本原样保留 |
 | [`template_engine.rs`](src-tauri/src/pipeline/template_engine.rs) | Prompt 模板引擎，`section_schema()` 定义 32 个 section 的结构元数据（9 静态 + 23 动态），`build_prompt_with_sections()` 产出 prompt + 逐 section 元数据（char_count / token_estimate / present） |
 | [`context_compress.rs`](src-tauri/src/pipeline/context_compress.rs) | 上下文压缩与工具结果摘要；识别宿主执行回执 JSON，保留全部调用 ID、状态、错误和停止原因，仅裁剪证据并标明 `evidence_truncated` |
 | [`compaction_reminder.rs`](src-tauri/src/pipeline/compaction_reminder.rs) | 压缩后提醒，从丢弃消息提取活跃工具名与最后话题 |
@@ -1043,6 +1078,9 @@ pub fn build_memory_block(memory_text: &str, lang: &str) -> String
 // 在记忆块末尾追加忠实度约束 + 时间感知指引：
 // - 记忆可能过时，与用户矛盾时以用户为准
 // - 每条记忆带时间戳，需与「## 你周围正在发生什么」中的当前时间对比
+// - 时间标签统一由 utils::prompt_time::format_timestamp_age 生成：本地自然日判断
+//   跨天（今天/昨天/前天）+ 相对年龄，中/英/日同源，记忆召回、对话历史、RECAP、
+//   记忆存档共用一套，不再各自实现
 // - 区分已发生/正在发生/未来计划（"下周要做xx"那一周没到就是未来计划）
 
 // prompt_modules.rs —— Agent 状态栏
@@ -1553,6 +1591,8 @@ Prompt 构建调用 `PsychologyManager::compute_mood()` 并保存 `metadata.mood
 [`proactive/`](src-tauri/src/proactive) 实现自适应间隔 tick 调度的主动行为。
 
 主动消息在生成前确定 `direct` / `wechat`：明显情境走规则捷径，模糊的新话题才调用轻量语义判断；存续话题优先继承会话渠道。生成结果的 `delivery_channel` 必须与已确定渠道一致，分别投递到桌宠气泡或 ChatWindow，避免同一话题中途换媒介。
+
+主动发言先过时间与复读门控，再看内容。本轮普通聊天回复同样算「自己刚说过话」——`seconds_since_own_utterance` 取对话中最后一条 assistant 消息的时间戳，因此非事件响应触发器在回复后 90 秒内直接跳过，问候类用更长的静默窗口并取「上次主动发言」与「最近普通回复」的较大值。每条主动 prompt 都注入 `[TIMING]`（当前时间 / 距用户上一条 / 距自己上一条）和统一的 echo guard，明确要求刚说过就不要换说法再说一遍。投递前 `push_action` 用归一化字符二元组相似度（阈值 0.82）比对最近 15 分钟内自己的发言与待发队列，近义重复直接丢弃；去重维度仍是内容 + 渠道，同一句话换渠道是刻意的触达选择。旁观插话成功投递后，把当时听到的交流以 `[OBSERVED EXCHANGE]` 系统数据写入该角色对话历史（`is_memory_disabled`），避免下一轮只剩自己的半截发言。
 
 | 文件 | 职责 |
 |------|------|

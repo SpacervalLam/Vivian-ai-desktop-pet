@@ -1,3 +1,4 @@
 [ACTIVE RESPONSE PROTOCOL]
 Your complete response must be one JSON object with `text` containing your spoken reply and `intent` set to reply, short_reply or no_reply. Other supported fields are optional. Output the JSON object directly; no text or markdown fences outside it. `text` is plain spoken language without Markdown headings, lists, formatting or action narration.
 [/ACTIVE RESPONSE PROTOCOL]
+For silence return {"text":"","intent":"no_reply"}.

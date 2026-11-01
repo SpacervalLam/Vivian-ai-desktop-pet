@@ -385,7 +385,6 @@ impl InnerMonologueGenerator {
                 environment: "## Around me right now",
                 env_music: "- Music playing: ",
                 env_foreground: "- The user is currently using: ",
-                env_system: "- System load: ",
                 env_muted: "- The system volume is muted",
                 env_offline: "- The network is currently disconnected",
                 closing: "\nWrite a thought that naturally pops into your head right now.",
@@ -408,7 +407,6 @@ impl InnerMonologueGenerator {
                 environment: "## 今の周りの様子",
                 env_music: "- 流れている音楽：",
                 env_foreground: "- ユーザーが今使っているアプリ：",
-                env_system: "- システム負荷：",
                 env_muted: "- システム音量がミュートになっている",
                 env_offline: "- ネットワークが切断されている",
                 closing: "\n今、脳に自然に浮かんだ考えを書いて。",
@@ -431,7 +429,6 @@ impl InnerMonologueGenerator {
                 environment: "## 此刻的环境",
                 env_music: "- 正在放的音乐：",
                 env_foreground: "- 用户正在用的应用：",
-                env_system: "- 系统负载：",
                 env_muted: "- 系统音量被静音了",
                 env_offline: "- 网络当前断开了",
                 closing: "\n写一段此刻脑子里自然冒出来的想法吧。",
@@ -547,24 +544,6 @@ impl InnerMonologueGenerator {
                     });
                 }
             }
-            if let Some(s) = &snap.system {
-                if s.cpu_usage >= 60.0 || s.memory_usage_pct >= 85.0 {
-                    env_lines.push(match lang_norm {
-                        "en" => format!(
-                            "{}{:.0}% CPU, {:.0}% RAM",
-                            labels.env_system, s.cpu_usage, s.memory_usage_pct
-                        ),
-                        "ja" => format!(
-                            "{}{:.0}% CPU、メモリ {:.0}%",
-                            labels.env_system, s.cpu_usage, s.memory_usage_pct
-                        ),
-                        _ => format!(
-                            "{}{:.0}% CPU、内存 {:.0}%",
-                            labels.env_system, s.cpu_usage, s.memory_usage_pct
-                        ),
-                    });
-                }
-            }
             if let Some(v) = &snap.volume {
                 if v.muted {
                     env_lines.push(labels.env_muted.to_string());
@@ -671,7 +650,6 @@ struct UserPromptLabels {
     environment: &'static str,
     env_music: &'static str,
     env_foreground: &'static str,
-    env_system: &'static str,
     env_muted: &'static str,
     env_offline: &'static str,
     closing: &'static str,

@@ -15,6 +15,8 @@ pub mod entity_state;
 pub mod events;
 pub mod environment_agent;
 pub mod environment_input;
+pub mod perception;
+pub(crate) mod perception_runtime;
 pub mod environment_policy;
 pub mod interaction_guidance;
 pub mod topic_window;
@@ -194,6 +196,7 @@ pub struct WorldStateProvider {
     system_collector: parking_lot::Mutex<SystemMetricsCollector>,
     /// 缓存的系统指标快照
     cached_system: RwLock<Option<SystemMetrics>>,
+    system_observed_at: std::sync::atomic::AtomicI64,
     /// 系统指标轮询循环是否已启动（幂等保护）
     system_polling_started: AtomicBool,
     /// 缓存的地理位置快照
@@ -228,6 +231,7 @@ impl WorldStateProvider {
             music_polling_started: AtomicBool::new(false),
             system_collector: parking_lot::Mutex::new(SystemMetricsCollector::new()),
             cached_system: RwLock::new(None),
+            system_observed_at: std::sync::atomic::AtomicI64::new(0),
             system_polling_started: AtomicBool::new(false),
             cached_location: RwLock::new(None),
             cached_volume: RwLock::new(None),
@@ -527,6 +531,11 @@ impl WorldStateProvider {
     pub fn refresh_system(&self) {
         let metrics = self.system_collector.lock().refresh();
         *self.cached_system.write() = Some(metrics);
+        self.system_observed_at.store(chrono::Utc::now().timestamp(), Ordering::Release);
+    }
+
+    pub(crate) fn observed_system(&self) -> (i64, Option<SystemMetrics>) {
+        (self.system_observed_at.load(Ordering::Acquire), self.cached_system.read().clone())
     }
 
     /// 读取最近一次轮询的系统指标缓存（10s 轮询；缓存为空时同步采集一次）
@@ -564,13 +573,19 @@ impl WorldStateProvider {
 
     /// Prompt reads cached observations only; no SMTC/CLI call on the conversation path.
     pub fn desktop_context(&self, query: &str) -> Option<String> {
+        self.desktop_context_for(query, None)
+    }
+    pub fn desktop_context_for(&self, query: &str, character: Option<&str>) -> Option<String> {
         let now = chrono::Utc::now().timestamp();
         let observed_at = self.music_observed_at.load(Ordering::Acquire);
         let media = if observed_at > 0 && (0..=45).contains(&(now - observed_at)) {
             serde_json::json!({"observed_at":observed_at, "source":"windows_smtc",
                 "current":self.now_playing()})
         } else { serde_json::json!({"status":"unknown_or_stale", "observed_at":observed_at}) };
-        desktop_state::relevant_context(query, &desktop_state::WALLPAPER.read(), Some(&media), now)
+        let existing = desktop_state::relevant_context(query, &desktop_state::WALLPAPER.read(), Some(&media), now);
+        let sensory = self.environment.perception.query_context(query, character, now);
+        let parts: Vec<_> = existing.into_iter().chain(sensory).collect();
+        (!parts.is_empty()).then(||parts.join("\n"))
     }
 
     /// 按需采集内存占用最高的前 `n` 组进程（按可执行名聚合，排除自身）。

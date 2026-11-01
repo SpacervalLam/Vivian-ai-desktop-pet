@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::memory::age::staleness_text;
 use crate::memory::embedding::MemoryEmbeddingProvider;
 use crate::memory::graph_store::KnowledgeGraph;
 use crate::memory::retriever::{attach_items_with_weights, hybrid_search_with_arms, RecallArms, RetrievalWeights};
@@ -271,7 +270,6 @@ impl MemoryRetrievalStrategy for AutoStrategy {
             if !hits.is_empty() {
                 let attached = attach_items_with_weights(hits, ctx.entries, ctx.effective_weights(), query);
                 let mut items: Vec<MemoryItem> = attached.into_iter().map(|h| h.item).collect();
-                inject_staleness(&mut items);
                 apply_temporal_decay(&mut items);
                 return items;
             }
@@ -279,17 +277,6 @@ impl MemoryRetrievalStrategy for AutoStrategy {
         }
 
         search_keyword_impl(ctx.entries, query, limit)
-    }
-}
-
-fn inject_staleness(items: &mut [MemoryItem]) {
-    let now = chrono::Utc::now().timestamp() as f64;
-    for item in items {
-        if let Some(hint) = staleness_text(item.timestamp, now) {
-            if let Some(obj) = item.metadata.as_object_mut() {
-                obj.insert("staleness".into(), serde_json::json!(hint));
-            }
-        }
     }
 }
 
@@ -415,7 +402,6 @@ impl MemoryRetrievalStrategy for GraphStrategy {
             })
             .collect();
 
-        inject_staleness(&mut results);
         results
     }
 }

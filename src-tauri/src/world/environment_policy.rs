@@ -381,7 +381,7 @@ impl ScenePolicy {
         user_chatting: bool,
         now: f64,
     ) -> bool {
-        if self.contact_suppressed(now)
+        if selection.audience != "user" || self.contact_suppressed(now)
             || selection.delay_seconds > 900
             || !selection.confidence.is_finite()
             || !(0.65..=1.0).contains(&selection.confidence)
@@ -424,17 +424,6 @@ impl ScenePolicy {
                     && speaker.can_address_user =>
             {
                 "user".to_owned()
-            }
-            "roommate" =>
-            {
-                let Some(peer) = participants
-                    .iter()
-                    .filter(|p| p.id != speaker.id && p.available)
-                    .min_by_key(|p| &p.id)
-                else {
-                    return false;
-                };
-                peer.id.clone()
             }
             _ => return false,
         };
@@ -556,7 +545,7 @@ mod tests {
         assert!(!policy().accept(made_up, &roles(), true, false, 1000.0));
         assert!(!policy().accept(selection("nana", "user"), &roles(), false, false, 1000.0));
         let mut busy = policy();
-        assert!(busy.accept(selection("nana", "roommate"), &roles(), true, true, 1000.0));
+        assert!(busy.accept(selection("nana", "user"), &roles(), true, true, 1000.0));
         assert!(busy.take("nana", 1001.0).is_none());
         let mut disabled = roles();
         disabled[1].available = false;
@@ -571,17 +560,16 @@ mod tests {
         assert!(!policy().accept(selection("nana", "user"), &roles(), true, false, 2800.0));
     }
     #[test]
-    fn absence_allows_peer_contact_and_freezes_recipient() {
+    fn environment_cannot_author_peer_contact_even_when_the_user_is_away() {
         let mut p = policy();
-        assert!(p.accept(
+        assert!(!p.accept(
             selection("nana", "roommate"),
             &roles(),
             false,
             false,
             1000.0
         ));
-        let op = p.take("nana", 1001.0).unwrap();
-        assert_eq!(op.listener_id, "vivian");
+        assert!(p.take("nana", 1001.0).is_none());
         let mut p = policy();
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
         assert!(p.take("nana", 1800.0).is_some());
@@ -603,16 +591,16 @@ mod tests {
         let mut p = policy();
         p.events[0].owner = Some("nana".into());
         assert!(!p.accept(
-            selection("vivian", "roommate"),
+            selection("vivian", "user"),
             &roles(),
-            false,
+            true,
             false,
             1000.0
         ));
         assert!(p.accept(
-            selection("nana", "roommate"),
+            selection("nana", "user"),
             &roles(),
-            false,
+            true,
             false,
             1000.0
         ));
@@ -630,15 +618,15 @@ mod tests {
     fn settings_changes_new_input_and_departures_cancel_pending_contact() {
         let mut p = policy();
         assert!(p.accept(
-            selection("nana", "roommate"),
+            selection("nana", "user"),
             &roles(),
-            false,
+            true,
             false,
             1000.0
         ));
         let mut gone = roles();
-        gone[0].available = false;
-        p.reconcile(&gone, false, false, 1001.0);
+        gone[1].available = false;
+        p.reconcile(&gone, true, false, 1001.0);
         assert!(p.take("nana", 1001.0).is_none());
         let mut p = policy();
         assert!(p.accept(selection("nana", "user"), &roles(), true, false, 1000.0));
@@ -715,7 +703,7 @@ mod tests {
         };
         assert!(!p.accept(to_user, &roles(), true, false, 1001.0));
 
-        // 同一次对话仍允许转述给室友，只是不能马上又对用户续话。
+        // A completed user turn is not authority for the environment to start a peer exchange.
         let to_roommate = Selection {
             event_id: turn_id,
             speaker_id: "nana".into(),
@@ -723,7 +711,7 @@ mod tests {
             confidence: 0.9,
             delay_seconds: 0,
         };
-        assert!(p.accept(to_roommate, &roles(), true, false, 1002.0));
+        assert!(!p.accept(to_roommate, &roles(), true, false, 1002.0));
     }
 
     fn intent(

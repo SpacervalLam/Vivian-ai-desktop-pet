@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { resolve, dirname, join } from 'node:path';
 
-const packs = JSON.parse(await readFile('src/optional-resources.json', 'utf8'));
+// Packs that declare `download` are published on their own by a dedicated script; the
+// installer only embeds the rest, so they stay out of the NSIS defines.
+const packs = JSON.parse(await readFile('src/optional-resources.json', 'utf8')).filter(pack => !pack.download);
 const fromStaging = process.argv.includes('--from-staging');
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 await mkdir('release', { recursive: true });
@@ -35,7 +37,11 @@ for (const pack of packs) {
   definitions.push(`!define ${pack.id.toUpperCase()}_PACKAGE "${filename}"\n!define ${pack.id.toUpperCase()}_SHA256 "${hash}"`);
 }
 await writeFile('src-tauri/windows/resource-packages.nsh', definitions.join('\n') + '\n');
-await writeFile('release/resource-packs.json', JSON.stringify(artifacts, null, 2) + '\n');
+// Release metadata is shared with the on-demand packs; replace only the ids rebuilt here.
+let released = [];
+try { released = JSON.parse(await readFile('release/resource-packs.json', 'utf8')); } catch {}
+released = [...released.filter(pack => !artifacts.some(built => built.id === pack.id)), ...artifacts];
+await writeFile('release/resource-packs.json', JSON.stringify(released, null, 2) + '\n');
 // Only remove after every archive is successfully built; the installer embeds core only.
 if (!fromStaging) for (const pack of packs) for (const path of pack.files) await unlink(join('dist', path));
 for (const pack of artifacts) console.log(`[optional-resources] ${pack.label}: ${(pack.bytes / 1048576).toFixed(2)} MiB -> ${pack.filename}`);

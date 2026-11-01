@@ -11,7 +11,10 @@ use crate::state::AppState;
 // Mode transitions remain in the pets' context, but are not chat messages.
 // Filter by source as older entries may have inherited a chat channel.
 fn visible_in_chat(metadata: &Value) -> bool {
-    metadata.get("source").and_then(Value::as_str) != Some("quiet_control")
+    !matches!(
+        metadata.get("source").and_then(Value::as_str),
+        Some("quiet_control") | Some("bystander_observation")
+    )
 }
 
 /// 聊天窗口「查找聊天记录」的渠道白名单：私聊 `wechat`（含无 channel 标签的旧数据）

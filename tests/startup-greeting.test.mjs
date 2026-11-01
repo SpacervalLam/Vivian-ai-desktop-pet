@@ -36,7 +36,10 @@ serde_json="1"
 `);
 await writeFile(path.join(dir, 'src/lib.rs'), `#![allow(dead_code)]
 use serde_json::json;
-mod pipeline { pub mod prompt_modules { ${normalize}\n${dispatch}\n${banned} } }
+mod pipeline {
+ #[path="${path.join(root, 'src-tauri/src/pipeline/prompt_templates.rs').replaceAll('\\', '/')}"] pub mod prompt_templates;
+ pub mod prompt_modules { ${normalize}\n${dispatch}\n${banned} }
+}
 struct Weather {description:String,temperature:f64,cached_at:i64}
 struct Location {city:Option<String>}
 struct Foreground {process:String}

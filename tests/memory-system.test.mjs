@@ -299,18 +299,19 @@ const authoredStart = memoryStep.indexOf('fn is_authored_context(');
 const authoredEnd = memoryStep.indexOf('// ============================================================================', authoredStart);
 if (authoredStart < 0 || authoredEnd < authoredStart) throw new Error('authored recall formatter not found');
 source = source.replace('pub mod memory {', 'pub mod memory { pub use types::MemoryItem;');
-source += `mod seed_prompt { use serde_json::Value;
+source += `mod seed_prompt { use serde_json::Value; use chrono::{DateTime,Local};
 ${memoryStep.slice(authoredStart, authoredEnd)}
 #[test] fn recall_keeps_authored_dates_and_distinguishes_environment_presets() {
     let bundle = crate::memory::seed::load("vivian").unwrap();
     let mut item = bundle.memories[0].clone();
-    let expected = crate::utils::prompt_time::format_prompt_time(item.timestamp);
-    assert!(memory_time_label(&item).starts_with("前史设定时间："));
-    assert!(memory_time_label(&item).contains(&expected));
+    let now=Local::now();
+    let expected = crate::utils::prompt_time::format_timestamp_age(item.timestamp,now,"zh");
+    assert!(memory_time_label(&item,now,"zh").starts_with("前史设定时间："));
+    assert!(memory_time_label(&item,now,"zh").contains(&expected));
     item.metadata = serde_json::json!({"source":"environment_preset"});
-    assert_eq!(memory_time_label(&item), "预置背景");
+    assert_eq!(memory_time_label(&item,now,"zh"), "预置背景");
     item.id = "runtime".into(); item.metadata = serde_json::json!({"source":"direct"});
-    assert_eq!(memory_time_label(&item), expected);
+    assert_eq!(memory_time_label(&item,now,"zh"), expected);
 }}
 `;
 // Run the production reset sweep against an isolated root, including the shared clock.

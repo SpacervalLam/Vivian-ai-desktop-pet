@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Local};
 use parking_lot::RwLock;
 use serde_json::{json, Value};
 
@@ -15,7 +16,7 @@ use crate::error::VivianResult;
 use crate::memory::filter::MemoryFilter;
 use crate::memory::user_model::UserModelManager;
 use crate::memory::types::current_timestamp;
-use crate::memory::{estimate_tokens, staleness_text, MemoryManager, MemoryType, RetrievalStrategy};
+use crate::memory::{estimate_tokens, MemoryManager, MemoryType, RetrievalStrategy};
 use crate::pipeline::base::{Runnable, RunnableConfig};
 use crate::pipeline::prompt_modules::MEMORY_CONTEXT_MAX_TOKENS;
 use crate::pipeline::state::PipelineState;
@@ -32,13 +33,22 @@ fn is_authored_context(memory: &crate::memory::MemoryItem) -> bool {
     )
 }
 
-fn memory_time_label(memory: &crate::memory::MemoryItem) -> String {
+/// 召回条目的时间标签。
+///
+/// 唯一实现：和对话历史、RECAP、存档共用 `format_timestamp_age`，因此日界统一按
+/// **本地**自然日判断，措辞随界面语言切换。预置背景与运行期事件不是同一类时间，
+/// 它们只标来源，不给相对年龄——把初始化时间说成"3 天前发生过"会让模型误判。
+fn memory_time_label(
+    memory: &crate::memory::MemoryItem,
+    now: DateTime<Local>,
+    lang: &str,
+) -> String {
     if memory.metadata["source"] == "system_seed" && memory.metadata["fictional_backstory"] == true {
-        format!("前史设定时间：{}", crate::utils::prompt_time::format_prompt_time(memory.timestamp))
+        format!("前史设定时间：{}", crate::utils::prompt_time::format_timestamp_age(memory.timestamp, now, lang))
     } else if is_authored_context(memory) {
         "预置背景".into()
     } else {
-        crate::utils::prompt_time::format_prompt_time(memory.timestamp)
+        crate::utils::prompt_time::format_timestamp_age(memory.timestamp, now, lang)
     }
 }
 
@@ -506,6 +516,8 @@ impl MemoryRetrievalStep {
 
         // 组装记忆文本（自然语言化：时间 + 类型 + 说话者 + 内容；数值元数据不进 prompt）
         let now = current_timestamp();
+        let now_local = Local::now();
+        let lang = crate::pipeline::prompt_modules::normalize_lang(&crate::i18n::get_language());
         let mut memory_parts: Vec<String> = Vec::new();
         let mut memory_details: Vec<serde_json::Value> = Vec::new();
         for (index, mem) in filtered_items.iter().enumerate() {
@@ -528,10 +540,8 @@ impl MemoryRetrievalStep {
             let role_prefix = if attribution.is_empty() { String::new() } else { format!("{}：", attribution) };
             // Escape retrieved text; it remains evidence inside the retrieval data boundary.
             let content = content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-            let time = memory_time_label(mem);
-            let stale_hint = staleness_text(mem.timestamp, now)
-                .map(|s| format!(" [{}]", s))
-                .unwrap_or_default();
+            // 时间标签自带相对年龄（"昨天 21:14（1 天前）"），不再单独追加陈旧度后缀。
+            let time = memory_time_label(mem, now_local, lang);
             // Vector-only relevance is not proof of a remembered detail. Batch
             // rank and age never become confidence labels; disputes stay separate.
             let confidence_hint = {
@@ -569,8 +579,8 @@ impl MemoryRetrievalStep {
             // 不再输出 imp=x.xx / mood=... 等数据库元数据——重要性由 [重点] 标记表达，
             // 数值符号只会把"自然回忆"变成"查表结果"。
             memory_parts.push(format!(
-                "[{} | {}] {}{}{}{}{}{}",
-                time, type_label, role_prefix, content, emphasis_mark, stale_hint,
+                "[{} | {}] {}{}{}{}{}",
+                time, type_label, role_prefix, content, emphasis_mark,
                 confidence_hint, evidence_hint
             ));
             memory_details.push(json!({
@@ -1244,12 +1254,31 @@ mod tests {
     fn dated_backstory_retains_its_authored_time_in_recall() {
         let bundle = crate::memory::seed::load("vivian").unwrap();
         let memory = &bundle.memories[0];
-        let label = memory_time_label(memory);
+        let now = Local::now();
+        let label = memory_time_label(memory, now, "zh");
         assert!(label.starts_with("前史设定时间："));
-        assert!(label.contains(&crate::utils::prompt_time::format_prompt_time(memory.timestamp)));
+        assert!(label.contains(&crate::utils::prompt_time::format_timestamp_age(memory.timestamp, now, "zh")));
         let mut environment = memory.clone();
         environment.metadata = json!({"source":"environment_preset"});
-        assert_eq!(memory_time_label(&environment), "预置背景");
+        assert_eq!(memory_time_label(&environment, now, "zh"), "预置背景");
+    }
+
+    #[test]
+    fn recalled_memory_time_uses_local_day_boundary_and_language() {
+        let now = Local::now();
+        let mut memory = crate::memory::MemoryItem::new(
+            "用户说想去看那部电影".into(), crate::memory::types::Granularity::Turn, 0.5);
+        memory.metadata = json!({"source":"direct", "speaker":"user"});
+        memory.timestamp = (now - chrono::Duration::hours(3)).timestamp() as f64;
+        let zh = memory_time_label(&memory, now, "zh");
+        assert!(zh.contains("小时前"), "{zh}");
+        assert!(!zh.contains("天前"), "{zh}");
+        let en = memory_time_label(&memory, now, "en");
+        assert!(en.contains("h ago"), "{en}");
+        // 昨天的同一时刻必须落在"昨天"，而不是按小时数凑出的天数。
+        memory.timestamp = (now - chrono::Duration::days(1)).timestamp() as f64;
+        let yesterday = memory_time_label(&memory, now, "zh");
+        assert!(yesterday.contains("昨天") || yesterday.contains("天前"), "{yesterday}");
     }
 
     #[test]

@@ -161,7 +161,7 @@ pub async fn send_message(
     let brain = instance.brain.clone();
     cancel_close(&char_id);
 
-    state.session_coordinator.signal_user_input(&char_id);
+    let pending_input = state.session_coordinator.signal_user_input(&char_id);
     state.interrupt_companion_execution(&char_id);
 
     // 串行化 brain.think，与流式路径共用 brain_lock。
@@ -207,6 +207,7 @@ pub async fn send_message(
         &brain.memory,
         &brain.dialogue,
     );
+    pending_input.admitted();
 
     // ── World Model：从用户消息抽取预期回归时间 ──
     brain.world_state.ingest_dialogue(&message);
@@ -651,8 +652,9 @@ async fn send_message_stream_impl(
     // 记录排队时刻：brain.think 完成后用此时刻修正用户消息的 timestamp，
     // 确保并发发送时用户消息按实际发送顺序排列（而非 think 完成顺序）。
     let queued_at = chrono::Local::now();
+    let Some(mut input_receipt) = crate::brain::interaction_runtime::receive_user(&app, &brain, &stream_id, &channel_str, &message)? else { return Ok(None); };
     crate::voice_diagnostics::mark_chat("queue_entered");
-    state.session_coordinator.signal_user_input(&char_id);
+    let pending_input = state.session_coordinator.signal_user_input(&char_id);
     state.interrupt_companion_execution(&char_id);
     let _brain_lock = instance.think_lock.clone();
     // 等待必须有上限：持锁方一旦卡死（例如在持有 Mind / 记忆锁时死锁），
@@ -680,6 +682,7 @@ async fn send_message_stream_impl(
         }
     };
     crate::voice_diagnostics::mark_chat("generation_lock_acquired");
+    input_receipt.claim()?;
     // 排队耗时打点：定位「发出去后久久没有反应」是卡在排队还是卡在 think 内部
     tracing::info!(
         "[Chat:{}] 已获得 think_lock stream_id={} 排队等待 {}ms",
@@ -694,7 +697,7 @@ async fn send_message_stream_impl(
     state.reset_generation_cancel(&char_id);
 
     // 设置消息渠道标记（影响 dialogue 写入的 metadata.channel）
-    brain.dialogue.set_channel(&channel_str);
+    let channel_guard = state.session_coordinator.enter_channel(&brain.dialogue, &channel_str);
 
     // ── 会话生命周期：获取或创建 User↔Agent 会话 ──
     let conv = crate::conversation::CONVERSATION_MANAGER
@@ -711,8 +714,9 @@ async fn send_message_stream_impl(
         &brain.memory,
         &brain.dialogue,
     );
+    pending_input.admitted();
 
-    brain.set_stream_emitter(Some(emitter));
+    let emitter_guard = brain.stream_emitter_scope(emitter);
 
     // 临时开启路由回退事件发送（仅本次用户消息期间）
     if let Some(router) = state.model_router.read().as_ref() {
@@ -887,14 +891,16 @@ async fn send_message_stream_impl(
     }
 
     // 清理流式回调（避免非流式调用误触发）
-    brain.set_stream_emitter(None);
+    drop(emitter_guard);
     // 重置消息渠道标记为默认值
-    brain.dialogue.set_channel("wechat");
+    drop(channel_guard);
     drop(_session_guard);
+    let was_cancelled = state.is_generation_cancelled(&char_id);
+    input_receipt.finish(result.is_ok() && !was_cancelled);
     // 释放串行化锁，让排队中的下一个请求开始执行
     drop(_brain_guard);
 
-    if state.is_generation_cancelled(&char_id) {
+    if was_cancelled {
         let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
         return Ok(None);
     }
@@ -1183,6 +1189,7 @@ async fn send_message_stream_impl(
                             .await
                         {
                             // 决定插话：spawn 延迟投递任务，让 A 先说完再插话
+                            let observed_exchange = interjection.observed_exchange.clone();
                             let app_clone2 = app_clone.clone();
                             let playback_gate_clone = playback_gate.clone();
                             let other_id_clone = other_id.clone();
@@ -1230,7 +1237,10 @@ async fn send_message_stream_impl(
                                 // 内部指令以 system 身份生成，不写入用户历史或记忆。
                                 let priority = environment_state.session_coordinator.background_priority();
                                 let result = priority.run(observer_brain_clone
-                                    .think_system_directive(&interjection.directive)).await;
+                                    .think_system_directive_with_observation(
+                                        &interjection.directive,
+                                        Some(&observed_exchange),
+                                    )).await;
 
                                 // 恢复渠道
                                 observer_dialogue_clone.set_channel(&prev_channel);

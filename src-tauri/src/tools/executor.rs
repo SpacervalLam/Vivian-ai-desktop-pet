@@ -567,12 +567,25 @@ async fn execute_tool_use_inner(
     // 1.06 工作智能体专属工具的调用方硬门：create_tool（重进化事件）的执行
     // 主体统一收口到工作智能体。工具面（schema / prompt 工具清单 / 延迟列表 /
     // tool_search 检索域）已在陪伴侧隐藏，此处防御幻觉盲调与历史重放。
+    //
+    // 同一硬门也覆盖「陪伴侧只做简单任务」：文件写入 / 命令执行 / 持久终端 /
+    // 后台作业在陪伴侧没有工具面，模型若凭历史重放调用，必须被引导去委派，
+    // 而不是真的动用户的文件或起进程。
     if is_work_agent_only(tool_name) && context.agent_kind != "work" {
         tracing::warn!(
             "[ToolExecutor] 陪伴侧（agent_kind={}）发起 {}，已拒绝",
             context.agent_kind,
             tool_name
         );
+        if crate::tools::registry::is_companion_simple_only(tool_name) {
+            return ToolResult::standard_error(
+                &format!(
+                    "{tool_name} 属于文件写入、命令执行、持久终端或后台作业，陪伴侧只做简单任务。请用 delegate_to_work_agent 把这项需要持续多步执行的工作交给工作智能体；查看、检索、记忆与对话仍可自己完成。"
+                ),
+                Some("CompanionSimpleOnly"),
+                None,
+            );
+        }
         return ToolResult::standard_error(
             &format!(
                 "{tool_name} 仅由工作智能体执行。请用 delegate_to_work_agent 把需要构建新工具的任务派发给工作智能体；若只是想沉淀可复用的做法，改用 create_skill 即可。"
@@ -1152,7 +1165,7 @@ mod initiative_confirmation_tests {
             access_level: Some(AgentAccessLevel::FsWrite),
             user_message: Some("好，执行吧".into()),
             ..Default::default()
-        };
+        }.with_agent_kind("work");
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = calls.clone();
         let confirm: CanUseTool = Arc::new(move |name, args| {
@@ -1169,18 +1182,19 @@ mod initiative_confirmation_tests {
 
     #[tokio::test]
     async fn sandbox_confirmation_without_a_user_interface_does_not_execute() {
+        // 文件写入已收口到工作侧（工作区内的写会自动确认），所以这条沙箱闸门
+        // 用陪伴侧仍然可用的高风险工具验证：没有 UI 时请求确认必须返回 None。
         let system = ToolSystem::new();
-        system.register_tool(Arc::new(crate::tools::builtin::coding_tools::WriteFileTool::new()));
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("initiative-test-must-not-be-created.txt");
-        let context = ToolUseContext::default().with_working_directory(directory.path().to_string_lossy());
-        let result = execute_tool_use("write_file", serde_json::json!({
-            "path": path, "content": "not approved"
+        system.register_tool(Arc::new(
+            crate::tools::builtin::system_ops::CloseApplicationTool::new(),
+        ));
+        let context = ToolUseContext::default();
+        let result = execute_tool_use("close_application", serde_json::json!({
+            "application": "vivian-test-nonexistent-process"
         }), &system, &context, None).await;
         assert!(!result.success);
         assert_eq!(result.error.as_deref(), Some("SandboxConfirmationRequired"));
-        assert!(!path.exists());
-        let records = system.observability.get_recent_records("write_file", 1, false);
+        let records = system.observability.get_recent_records("close_application", 1, false);
         assert_eq!(records.len(), 1);
         assert!(!records[0].success);
         assert_eq!(records[0].phase, "sandbox");

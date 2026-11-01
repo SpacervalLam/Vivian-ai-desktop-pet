@@ -1,4 +1,4 @@
-//! 记忆热度评分与陈旧度提示。
+//! 记忆热度评分。
 //!
 //! 热度公式：H = α·visit_count + β·length + γ·R_recency
 //! - α：访问次数权重
@@ -6,8 +6,9 @@
 //! - γ：近期性权重
 //! - R_recency = exp(-delta_hours / 24)，取值 (0, 1]
 //!
-//! 陈旧度提示：超过 1 天的记忆返回提示文本，由 pipeline 注入到记忆上下文，
-//! 让 LLM 自行判断是否仍然有效，而非自动过期。
+//! 时间的**展示**不在这里：一旦某条记忆要进 prompt，统一走
+//! `utils::prompt_time::format_relative_age_at`（本地日界 + 三语）。
+//! 本模块只回答"这条记忆该排多前"，不回答"它看起来是多久以前"。
 
 use super::types::{current_timestamp, MemoryItem};
 
@@ -52,50 +53,6 @@ pub fn compute_heat_score(
     };
 
     ALPHA * n + BETA * l + GAMMA * r_recency
-}
-
-/// 返回记忆的时间感知标签（用于 prompt 注入，让 LLM 直观感知记忆的新旧）。
-///
-/// - 1 小时内：`刚刚`
-/// - 1 天内：`N小时前`
-/// - 超过 1 天：`N天前`
-///
-/// `timestamp` 为记忆创建时间戳（秒），`now` 为当前时间戳（秒）。
-pub fn staleness_text(timestamp: f64, now: f64) -> Option<String> {
-    if timestamp <= 0.0 || now <= 0.0 {
-        return None;
-    }
-    let age_secs = (now - timestamp).max(0.0);
-    let hours = (age_secs / 3600.0) as i64;
-    let days = day_diff(timestamp, now);
-
-    if hours < 1 {
-        Some("刚刚".to_string())
-    } else if days < 1 {
-        Some(format!("{}小时前", hours))
-    } else {
-        Some(format!("{}天前", days))
-    }
-}
-
-/// 计算两个时间戳之间的"自然天"差值（按 UTC 日期边界）。
-fn day_diff(timestamp: f64, now: f64) -> i64 {
-    use chrono::{DateTime, Utc};
-
-    let ts_secs = timestamp.max(0.0) as i64;
-    let now_secs = now.max(0.0) as i64;
-
-    let ts_date = DateTime::<Utc>::from_timestamp(ts_secs, 0)
-        .map(|dt| dt.date_naive())
-        .or_else(|| DateTime::<Utc>::from_timestamp(0, 0).map(|dt| dt.date_naive()));
-    let now_date = DateTime::<Utc>::from_timestamp(now_secs, 0)
-        .map(|dt| dt.date_naive())
-        .or_else(|| DateTime::<Utc>::from_timestamp(0, 0).map(|dt| dt.date_naive()));
-
-    match (ts_date, now_date) {
-        (Some(a), Some(b)) => (b - a).num_days().max(0),
-        _ => 0,
-    }
 }
 
 /// 检索命中后更新记忆热度：增加访问次数、刷新最近命中时间、重算热度分数。
@@ -154,30 +111,6 @@ mod tests {
         let old = compute_heat_score(1, 10, now - 72.0 * 3600.0, now);
         assert!(recent > old, "近期命中应高于旧命中");
     }
-
-    #[test]
-    fn staleness_recent_returns_none() {
-        let now = now_secs();
-        assert_eq!(staleness_text(now, now), Some("刚刚".into()));
-        assert_eq!(staleness_text(now - 3600.0, now), Some("1小时前".into()));
-    }
-
-    #[test]
-    fn staleness_old_returns_hint() {
-        let now = now_secs();
-        let ts = now - 3.0 * 24.0 * 3600.0;
-        let hint = staleness_text(ts, now).expect("3 天前应有提示");
-        assert!(hint.contains("3天前"), "提示文本应含天数: {hint}");
-    }
-
-    #[test]
-    fn staleness_one_day_boundary() {
-        let now = now_secs();
-        let ts = now - 25.0 * 3600.0;
-        let hint = staleness_text(ts, now).expect("25 小时前应触发提示");
-        assert!(hint.contains("1天前"), "跨天边界应记为 1 天: {hint}");
-    }
-
     #[test]
     fn bump_visit_increments_and_updates_heat() {
         let now = now_secs();
@@ -193,13 +126,5 @@ mod tests {
         let h2 = bump_visit(&mut item, now);
         assert_eq!(item.visit_count, 2);
         assert!(h2 > h1, "二次命中应进一步提升热度");
-    }
-
-    #[test]
-    fn day_diff_handles_zero_timestamp() {
-        let now = now_secs();
-        // 时间戳为 0（1970-01-01）应返回一个很大的正数，不 panic
-        let d = day_diff(0.0, now);
-        assert!(d > 0);
     }
 }

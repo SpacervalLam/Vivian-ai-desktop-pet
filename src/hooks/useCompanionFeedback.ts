@@ -11,8 +11,6 @@ import { openReminderWindow } from '../utils/reminderWindow';
 
 export interface CompanionStatus {
   quiet_reason: 'focus' | 'game_companion' | 'quiet_hours' | 'do_not_disturb' | null;
-  cpu_pressure: boolean;
-  memory_pressure: boolean;
   network_connected: boolean | null;
 }
 export function useCompanionFeedback(pet: RefObject<ModelRendererHandle | null>): CompanionStatus | null {

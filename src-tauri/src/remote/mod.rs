@@ -779,11 +779,11 @@ async fn chat_handler(
     }
 
     // ── 设置渠道 ──
-    brain.dialogue.set_channel(&channel_str);
 
     // ── 串行化 brain.think ──
     // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让 HTTP 请求永久挂起。
-    state.app_state.session_coordinator.signal_user_input(&char_id);
+    let pending_input = state.app_state.session_coordinator.signal_user_input(&char_id);
+    let _foreground = state.app_state.session_coordinator.background_priority().enter();
     state.app_state.interrupt_companion_execution(&char_id);
     let _brain_lock = instance.think_lock.clone();
     let _brain_guard = match tokio::time::timeout(
@@ -806,6 +806,7 @@ async fn chat_handler(
         }
     };
     state.app_state.reset_generation_cancel(&char_id);
+    let channel_guard = state.app_state.session_coordinator.enter_channel(&brain.dialogue, &channel_str);
 
     // ── 会话生命周期：获取或创建会话 ──
     let conv = CONVERSATION_MANAGER
@@ -814,6 +815,8 @@ async fn chat_handler(
             CONVERSATION_MANAGER.force_new_session("user", &char_id, &message)
         });
     CONVERSATION_MANAGER.touch_user_message(&char_id);
+    let _session_guard = state.app_state.session_coordinator.enter_user_turn(&char_id, &conv.id, &brain.memory, &brain.dialogue);
+    pending_input.admitted();
     brain.presence.record_user_interaction();
 
     // ── World Model：抽取预期回归时间等 ──
@@ -901,11 +904,13 @@ async fn chat_handler(
 
     // 清理流式回调 + 重置渠道
     brain.set_stream_emitter(None);
-    brain.dialogue.set_channel("wechat");
+    drop(channel_guard);
+    drop(_session_guard);
+    let was_cancelled = state.app_state.is_generation_cancelled(&char_id);
     drop(_brain_guard);
 
     // 检查取消
-    if state.app_state.is_generation_cancelled(&char_id) {
+    if was_cancelled {
         return Err((StatusCode::OK, "已取消".to_string()));
     }
 

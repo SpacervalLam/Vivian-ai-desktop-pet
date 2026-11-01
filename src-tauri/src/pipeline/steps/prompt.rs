@@ -929,7 +929,7 @@ impl PromptBuildingStep {
         let desktop_query = crate::world::desktop_state::topic_query(&state.user_input, &recent);
         // Media is maintained continuously, but only relevant topics enter this prompt.
         env_ctx.music = None;
-        env_ctx.desktop_state = self.world_provider.as_ref().and_then(|wp| wp.desktop_context(&desktop_query));
+        env_ctx.desktop_state = self.world_provider.as_ref().and_then(|wp| wp.desktop_context_for(&desktop_query, Some(&self.char_id)));
 
         // Worldbook selection is read-only and scoped to this conversation. Prompt
         // previews, retries and proactive preparation must not advance global state.
@@ -1340,7 +1340,8 @@ fn build_recent_self_utterances(
 /// 构建后台任务段落。三个来源互相独立：
 ///
 /// - **自治任务**（`TaskService`）：本角色自己派出去的活，运行中的 + 刚完成待汇报的
-/// - **工作完成报告**（`work_notices`）：工作智能体（编程向）刚干完的事，取走即消费
+/// - **工作完成报告**（`work_notices`）：工作智能体（编程向）刚干完的事，本轮领取、
+///   生成成功后才确认消费（失败则放回队列重试）
 /// - **等你拍板的提问**：工作智能体正卡在用户那儿，用户没回答前每轮都注入——
 ///   它是阻塞用户任务的未闭合环，不能像报告那样说一次就丢
 ///
@@ -1355,9 +1356,9 @@ fn build_background_tasks_section(char_id: &str, language: &str) -> String {
         .as_ref()
         .map(|ts| ts.unconsumed_reports_for(char_id))
         .unwrap_or_default();
-    // 工作智能体的完成报告：取走即消费（每份只说一次）
+    // 工作智能体的完成报告：领取（每份只说一次），本轮生成成功后才由调用方确认移除
     let notices = crate::brain::work_notices::global();
-    let work_reports = notices.take_reports_for(char_id);
+    let work_reports = notices.claim_reports_for(char_id);
     let work_running: Vec<_> = crate::commands::coding_agent::CODING_AGENT.list_sessions()
         .into_iter().filter(|session| session.char_id == char_id
             && session.status == crate::brain::coding_agent::CodingStatus::Running).take(5).collect();
@@ -1724,6 +1725,8 @@ impl PromptBuildingStep {
 
         // Actual retained companion blocks drive both API assembly and Inspector.
         state.metadata["sticker_character_id"] = json!(parts.char_id);
+        // 本轮领取的工作侧完成报告要等生成成功才算说出去，生成层据此确认。
+        state.metadata["work_report_char_id"] = json!(parts.char_id);
         let companion = crate::pipeline::companion_prompt::CompanionPrompt::build_with_visual_evidence(&parts, &state.messages, state.metadata.get("visual_evidence").and_then(serde_json::Value::as_str));
         let prompt_text = companion.render();
         let enriched = crate::pipeline::template_engine::PromptRenderResult {
@@ -1748,6 +1751,13 @@ impl PromptBuildingStep {
             })).collect::<Vec<_>>()
         );
         state.metadata["prompt_sections_breakdown"] = prompt_sections;
+
+        // 供 Mind Inspector / 时序排查使用：与发送给模型的当前时间锚点一致。
+        let time_now = chrono::Local::now();
+        if let Some(anchor) = crate::pipeline::message_context::temporal_anchor_note(
+            &state.messages, time_now, &self.current_language()) {
+            state.metadata["temporal_anchor"] = json!(anchor);
+        }
 
         let mut prompt = enriched.prompt;
 

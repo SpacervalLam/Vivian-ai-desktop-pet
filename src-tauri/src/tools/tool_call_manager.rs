@@ -1441,7 +1441,7 @@ pub const CHAT_MEMORY_TOOLS: &[&str] = &[
 /// 闲聊场景即使超出 schema 预算也优先保留的常用能力。
 ///
 /// 这些是陪伴对话里最可能被立刻用到、又不属于“每轮必备”的工具：
-/// 查资料、打开网页、截图、制定计划、委派工作、后台任务、加待办。
+/// 查资料、打开网页、截图、制定计划、委派工作、加待办。
 const CHAT_DEFAULT_TOOLS: &[&str] = &[
     "web_search",
     "read_content",
@@ -1449,7 +1449,6 @@ const CHAT_DEFAULT_TOOLS: &[&str] = &[
     "take_screenshot",
     "plan_task",
     "delegate_to_work_agent",
-    "run_job",
     "add_todo",
 ];
 

@@ -412,10 +412,12 @@ fn disabled_plugins() -> Result<std::collections::HashSet<String>, String> {
 }
 
 pub fn is_plugin_enabled(key: &str) -> bool {
+    if key == "3d-apartment" && !cfg!(debug_assertions) { return false; }
     BUILTIN_PLUGIN_DIRS.contains(&key) || disabled_plugins().is_ok_and(|disabled|!disabled.contains(key))
 }
 
 pub fn set_plugin_enabled(key: &str, enabled: bool) -> Result<(), String> {
+    if key == "3d-apartment" && !cfg!(debug_assertions) { return Err("3D apartment is unavailable in this release".into()); }
     if !valid_plugin_dir_name(key) { return Err("插件目录名无效".into()); }
     if BUILTIN_PLUGIN_DIRS.contains(&key) { return Err("内置配置插件不可禁用".into()); }
     let _guard = preferences_lock().lock().unwrap();
@@ -1690,6 +1692,7 @@ pub fn scan_inventory() -> Vec<PluginInventoryEntry> {
         if !pdir.join("plugin.json").exists() {
             continue;
         }
+        if !cfg!(debug_assertions) && pdir.file_name().is_some_and(|name|name=="3d-apartment") { continue; }
         let dir_str = pdir.display().to_string();
         match read_manifest(&pdir) {
             Ok((name, manifest)) => {

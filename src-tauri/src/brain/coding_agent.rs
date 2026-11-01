@@ -73,6 +73,11 @@ pub const CODING_TOOLS: &[&str] = &[
     "write_file",
     "edit_file",
     "run_command",
+    // 耗时命令放后台：工作会话里的长构建/安装不应阻塞本轮决策。
+    // 这两个工具已收口到工作侧（陪伴侧只做简单任务），必须留在白名单里，
+    // 否则两侧都看不到。
+    "run_job",
+    "manage_job",
     "grep_search",
     "list_dir",
     // 按文件名找文件（grep 要读内容，按名字找时贵一个量级）
@@ -499,6 +504,13 @@ pub struct CodingSession {
     /// Host interruption state, persisted so a reload can offer direct resume.
     #[serde(default)]
     pub resume_available: bool,
+    /// 「在等谁」的派生状态（`idle` / `working` / `queued` / `answer` / `blocked`）。
+    ///
+    /// 只填在会话列表头，由 `work_stage` 从待办、后台任务、未答提问和最后一次
+    /// 结算派生。序列化时跳过，所以不落盘：旧存档不需要迁移，也不会在下次启动
+    /// 时变成一个与当时不符的陈旧值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
     /// 最近更新时间，**毫秒**时间戳（与 `CodingMessage.timestamp` 一致）。
     ///
     /// 前端「按最近使用排序」与持久化时的保留策略都依赖它，单位必须统一：
@@ -861,7 +873,7 @@ fn default_history_loaded() -> bool { true }
 fn should_pause_input_queue(session: &CodingSession, status: CodingStatus, pending_jobs: bool) -> bool {
     status != CodingStatus::Idle || session.resume_available || pending_jobs || !unfinished_todos(session).is_empty()
         || session.task.as_ref().and_then(|task| task.result.as_ref())
-            .is_some_and(|result| result.contract_validated && result.status != TaskStatus::Completed)
+            .is_some_and(|result| result.contract_validated && !result.status.is_settled())
 }
 impl CodingSession {
     pub fn message_count(&self) -> usize { if self.history_loaded { self.messages.len() } else { self.stored_message_count } }
@@ -892,6 +904,7 @@ fn coding_session_head(session: &CodingSession) -> CodingSession {
         "model_id": session.model_id, "reasoning_level": session.reasoning_level,
         "messages": [], "history_loaded": false, "stored_message_count": session.message_count(),
         "resume_available": session.resume_available,
+        "stage": crate::brain::work_stage::work_stage(work_signals(session)).as_str(),
         "last_reply_preview": preview, "status": session.status, "updated_at": session.updated_at, "stats": session.stats
     })).expect("valid session header")
 }
@@ -1080,6 +1093,7 @@ impl CodingAgentService {
             memory_policy: Default::default(), role_memory_context: String::new(),
             goal: None,
             task: None,
+            stage: None,
             plan_mode: false,
             plan: None,
             feedback: Vec::new(),
@@ -3185,8 +3199,16 @@ impl CodingAgentService {
             // 防止多轮工具调用的历史累积超出模型上下文窗口
             self.consume_steering(&app, session_id);
             let user_revision = self.sessions.read().get(session_id).map(|s| s.messages.iter().filter(|m| m.role == CodingRole::User).count()).unwrap_or(0);
+            let job_registry = super::work_jobs::global_work_job_registry();
+            let job_settlements = job_registry.pending_settlements(session_id);
+            let append_settlements = |messages: &mut Vec<ChatMessage>| {
+                for job in &job_settlements {
+                    messages.push(ChatMessage::system(&super::work_jobs::render_settlement(job)));
+                }
+            };
             let mut messages = self.build_llm_messages(session_id, &char_id, &mode);
             append_work_tool_index(&mut messages, &display_available, &definitions);
+            append_settlements(&mut messages);
             // 上下文构成估算：写会话供前端「上下文空间」展示 system/工具/对话 占比
             self.update_context_breakdown(session_id, &messages, &definitions);
             tracing::debug!(session_id, elapsed_us = preparing.elapsed().as_micros() as u64,
@@ -3195,6 +3217,7 @@ impl CodingAgentService {
                 if !self.maybe_auto_compact(&app, session_id, router, &mut compaction_gate).await { break; }
                 messages = self.build_llm_messages(session_id, &char_id, &mode);
                 append_work_tool_index(&mut messages, &display_available, &definitions);
+                append_settlements(&mut messages);
                 self.update_context_breakdown(session_id, &messages, &definitions);
             }
             let oversized = self.sessions.read().get(session_id).is_some_and(|s|
@@ -3203,15 +3226,6 @@ impl CodingAgentService {
                 self.finish_stopped_turn(&app, session_id, router, "当前上下文仍无法安全容纳，原始历史已保留。",
                     "检查压缩模型配置，或使用更大上下文窗口后继续；不要重复已成功的操作。").await;
                 return;
-            }
-            // 后台子任务结算：任务终结后主动把结果送进上下文——模型不必记得回查，
-            // 它很可能压根不再调用工具就结束本轮，那样结果就白白丢了。
-            for settled in crate::brain::work_jobs::global_work_job_registry()
-                .drain_settlements(session_id)
-            {
-                messages.push(ChatMessage::system(&crate::brain::work_jobs::render_settlement(
-                    &settled,
-                )));
             }
             // 清单已全部完成但循环仍在继续：提醒一次收尾，避免模型无视计划继续空转
             if !plan_done_hinted && self.plan_all_completed(session_id) {
@@ -3526,6 +3540,12 @@ impl CodingAgentService {
                 pending_hint.offer(5, "[用户补充] 用户刚刚补充了要求，请先阅读最新消息，再决定下一步；上一份尚未执行的调用已作废。".into());
                 continue;
             }
+            if !calls.is_empty() || !streamed_text.trim().is_empty() {
+                let ids: Vec<_> = job_settlements.iter().map(|job| job.job_id.clone()).collect();
+                if let Err(error) = job_registry.acknowledge_settlements(session_id, &ids) {
+                    tracing::error!(session_id, "后台结算确认未能保存，将保留待投递状态: {error}");
+                }
+            }
 
             // 无工具调用：assistant 文本回复即轮次结束（流式已逐步推送，此处落库 + 通知前端定型）
             if calls.is_empty() {
@@ -3535,7 +3555,7 @@ impl CodingAgentService {
                 if !plan_mode && !open.is_empty() && premature_returns < 2 {
                     premature_returns += 1;
                     self.record_work_text(&app, session_id, CodingRole::Commentary, &content);
-                    pending_hint.offer(4, format!("[任务结算检查] 仍有未完成待办或未收集子任务：{open:?}。继续推进；若确实需要结束，单独调用 return_task_result，status=partial/blocked 并说明 remaining_work。不要因只输出文本而把整个任务标为完成。"));
+                    pending_hint.offer(4, format!("[任务结算检查] 仍有未完成待办或未收集子任务：{open:?}。继续推进；若确实需要结束，单独调用 return_task_result，status=partial/blocked 并说明 remaining_work。若核对后确认这些待办本身无需处理，先用 work_todo_write 把清单改成实际剩余（可为空），再以 status=dropped 结束并说明查了什么。不要因只输出文本而把整个任务标为完成。"));
                     continue;
                 }
                 self.push_message(
@@ -4021,7 +4041,12 @@ impl CodingAgentService {
         // 智能压缩：以上一请求的真实上下文为依据（code 模式走非流式 generate，
         // 无 usage 上报，跨轮次沿用历史记录值）
         let _ = self.maybe_auto_compact(&app, session_id, router, &mut super::work_harness::CompactionGate::default()).await;
+        let job_registry = super::work_jobs::global_work_job_registry();
+        let job_settlements = job_registry.pending_settlements(session_id);
         let mut messages = self.build_llm_messages(session_id, char_id, "code");
+        for job in &job_settlements {
+            messages.push(ChatMessage::system(&super::work_jobs::render_settlement(job)));
+        }
         let extension_names = tool_system.work_extension_names();
         let extensions = Self::coding_definitions(tool_system, &extension_names.iter().map(String::as_str).collect::<Vec<_>>());
         if !extensions.is_empty() {
@@ -4085,6 +4110,10 @@ impl CodingAgentService {
             self.finish_stopped_turn(&app, session_id, router,
                 "编排步骤超过上限，程序未执行。", "缩短程序或改用逐轮执行；不要把被裁掉的步骤视为已执行。").await;
             return;
+        }
+        if let Err(error) = job_registry.acknowledge_settlements(session_id,
+            &job_settlements.iter().map(|job| job.job_id.clone()).collect::<Vec<_>>()) {
+            tracing::error!(session_id, "编排模式后台结算确认未能保存: {error}");
         }
 
         // 3. 记录程序卡片（tool_use 消息 + 事件，前端渲染为"组合程序"卡片）
@@ -4415,9 +4444,11 @@ impl CodingAgentService {
             }
             return;
         }
+        // A drop is a finished task whose answer is "nothing to do", not an
+        // interrupted one: it reports the result instead of a leftover.
         let unfinished = !self.open_task_work(session_id).is_empty() || self.sessions.read().get(session_id)
             .and_then(|s| s.task.as_ref()).and_then(|t| t.result.as_ref())
-            .is_some_and(|r| r.status != TaskStatus::Completed);
+            .is_some_and(|r| !r.status.is_settled());
         self.report_work_completion(session_id,
             if unfinished { "任务未完成" } else { "工作结果已返回" },
             &trimmed.chars().take(1600).collect::<String>());
@@ -4678,6 +4709,7 @@ impl CodingAgentService {
         }))));
         context.set("recent_tool_receipts", serde_json::to_value(&receipts).unwrap_or_default());
         context.set("pending_or_uncollected_jobs", serde_json::json!(super::work_jobs::global_work_job_registry().pending_for(session_id)));
+        context.set("recent_background_results", serde_json::json!(super::work_jobs::global_work_job_registry().recent_results(session_id)));
         if mode != "code" { system.push_str(&format!("\n\n{}", work_contract::RETURN_INSTRUCTIONS)); }
         context.instructions = system;
         let mut messages = vec![ChatMessage::system(&context.instructions)];
@@ -4995,6 +5027,21 @@ fn task_receipts(session: &CodingSession) -> Vec<Evidence> {
 
 fn unfinished_todos(session: &CodingSession) -> Vec<String> {
     session.work_todos.iter().filter(|t| t.is_valid() && !t.is_completed()).map(|t| t.content.clone()).collect()
+}
+
+/// 把会话收敛成「在等谁」判定所需的标量。
+///
+/// 未答提问与未收集后台任务都读实时注册表而非会话快照：它们可能在两次保存之间
+/// 变化，用陈旧快照判断"现在需不需要人"没有意义。待办只读会话本身（那是用户和
+/// 模型共同维护的清单，没有第二份源头）。
+fn work_signals(session: &CodingSession) -> crate::brain::work_stage::WorkSignals {
+    crate::brain::work_stage::WorkSignals {
+        running: session.status == CodingStatus::Running,
+        open_todos: unfinished_todos(session).len(),
+        pending_jobs: super::work_jobs::global_work_job_registry().pending_for(&session.session_id).len(),
+        question_pending: super::work_question::global_work_question_registry().pending_for(&session.session_id).is_some(),
+        last_settlement: session.task.as_ref().and_then(|task| task.result.as_ref()).map(|result| result.status),
+    }
 }
 
 fn task_artifacts(session: &CodingSession) -> Vec<Artifact> {
@@ -6548,7 +6595,7 @@ mod compaction_boundary_tests {
             working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
             mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
             memory_policy: Default::default(), role_memory_context: String::new(),
-            reasoning_level: "low".into(), goal: None, task: None, plan_mode: false, plan: None,
+            reasoning_level: "low".into(), stage: None, goal: None, task: None, plan_mode: false, plan: None,
             feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
             file_changes: Vec::new(), message_feedback: HashMap::new(),
             message_changes: HashMap::new(), history_loaded: true, stored_message_count: 0, last_reply_preview: None, search_excerpt: None, messages: vec![message(CodingRole::User, "old")],
@@ -6598,7 +6645,7 @@ mod compaction_boundary_tests {
             working_directory: String::new(), extra_workspaces: Vec::new(), title: String::new(),
             mode: "standard".into(), permission: "workspace_write".into(), model_id: None,
             memory_policy: Default::default(), role_memory_context: String::new(),
-            reasoning_level: "low".into(), goal: None, task: None, plan_mode: false, plan: None,
+            reasoning_level: "low".into(), stage: None, goal: None, task: None, plan_mode: false, plan: None,
             feedback: Vec::new(), compacted: None, context_start: 0, deliverables: Vec::new(),
             file_changes: Vec::new(), message_feedback: HashMap::new(),
             message_changes: HashMap::new(), history_loaded: true, stored_message_count: 0, last_reply_preview: None, search_excerpt: None, messages: vec![message(CodingRole::User, "old")],

@@ -25,7 +25,7 @@ struct CoordinatorInner {
     next_turn: AtomicU64,
     background_priority: Arc<super::background_priority::BackgroundPriority>,
     current_turns: Mutex<HashMap<String, TurnSlot>>,
-    pending_user: Mutex<HashMap<String, bool>>,
+    pending_user: Mutex<HashMap<String, usize>>,
 }
 
 pub struct SessionCoordinator {
@@ -61,8 +61,11 @@ impl SessionCoordinator {
         self.inner.background_priority.clone()
     }
 
-    fn clear_pending(&self, char_id: &str) {
-        self.inner.pending_user.lock().remove(char_id);
+    /// Call after acquiring the character's writer lock. Restores on cancellation too.
+    pub fn enter_channel(&self, dialogue: &Arc<DialogueManager>, channel: &str) -> ChannelGuard {
+        let previous = dialogue.get_channel();
+        dialogue.set_channel(channel);
+        ChannelGuard { dialogue:dialogue.clone(), previous }
     }
 
     /// 标记用户输入已到达，让正在运行或即将运行的 proactive tick / cross-character turn 主动让出。
@@ -70,12 +73,11 @@ impl SessionCoordinator {
     /// 应在获取 think_lock 之前调用：若 proactive/cross 正在执行 LLM 调用，
     /// think_lock 会阻塞用户对话；proactive/cross 结束后释放 think_lock，
     /// 用户对话进入；下一次 proactive tick 看到 pending 标记后跳过。
-    pub fn signal_user_input(&self, char_id: &str) {
-        self.inner
-            .pending_user
-            .lock()
-            .insert(char_id.to_string(), true);
+    #[must_use = "hold the pending receipt until admission or cancellation"]
+    pub fn signal_user_input(&self, char_id: &str) -> PendingInputGuard {
+        *self.inner.pending_user.lock().entry(char_id.to_string()).or_default() += 1;
         self.inner.background_priority.interrupt();
+        PendingInputGuard { inner:self.inner.clone(), char_id:Some(char_id.to_string()) }
     }
 
     /// 用户对话 turn：设置 memory + dialogue 的 session_id，登记 turn ownership。
@@ -92,7 +94,6 @@ impl SessionCoordinator {
         let prev_dialogue_sid = dialogue.get_session_id();
         memory.set_session_id(Some(session_id.to_string()));
         dialogue.set_session_id(Some(session_id.to_string()));
-        self.clear_pending(char_id);
         let turn_id = self.register_turn(char_id, TurnKind::UserChat);
         TurnGuard {
             turn_id,
@@ -119,7 +120,7 @@ impl SessionCoordinator {
     ) -> Option<TurnGuard> {
         {
             let pending = self.inner.pending_user.lock();
-            if pending.get(char_id).copied().unwrap_or(false) {
+            if pending.get(char_id).copied().unwrap_or(0) > 0 {
                 return None;
             }
         }
@@ -152,7 +153,7 @@ impl SessionCoordinator {
     ) -> Option<TurnGuard> {
         {
             let pending = self.inner.pending_user.lock();
-            if pending.get(char_id).copied().unwrap_or(false) {
+            if pending.get(char_id).copied().unwrap_or(0) > 0 {
                 return None;
             }
         }
@@ -177,7 +178,7 @@ impl SessionCoordinator {
 
     pub fn any_user_turn_active(&self) -> bool {
         self.inner.current_turns.lock().values().any(|turn| turn.kind == TurnKind::UserChat)
-            || self.inner.pending_user.lock().values().any(|pending| *pending)
+            || self.inner.pending_user.lock().values().any(|pending| *pending > 0)
     }
 
     /// 查询指定角色当前 turn 类型（None = 空闲）
@@ -205,9 +206,26 @@ impl SessionCoordinator {
             .lock()
             .get(char_id)
             .copied()
-            .unwrap_or(false)
+            .unwrap_or(0) > 0
     }
 }
+
+/// An admitted request releases only its own pending receipt. A timeout or
+/// disconnected caller also releases it, without erasing another channel's input.
+pub struct PendingInputGuard { inner: Arc<CoordinatorInner>, char_id: Option<String> }
+impl PendingInputGuard {
+    pub fn admitted(mut self) { self.release(); }
+    fn release(&mut self) {
+        if let Some(id) = self.char_id.take() {
+            let mut pending = self.inner.pending_user.lock();
+            if let Some(count) = pending.get_mut(&id) { *count -= 1; if *count == 0 { pending.remove(&id); } }
+        }
+    }
+}
+impl Drop for PendingInputGuard { fn drop(&mut self) { self.release(); } }
+
+pub struct ChannelGuard { dialogue: Arc<DialogueManager>, previous: String }
+impl Drop for ChannelGuard { fn drop(&mut self) { self.dialogue.set_channel(&self.previous); } }
 
 impl Default for SessionCoordinator {
     fn default() -> Self {

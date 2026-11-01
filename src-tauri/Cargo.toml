@@ -1,6 +1,6 @@
 [package]
 name = "vivian"
-version = "1.0.8"
+version = "1.0.9"
 description = "Vivian AI Desktop Pet"
 authors = ["Vivian"]
 edition = "2021"
@@ -80,6 +80,9 @@ tiktoken-rs = "0.12"
 # JavaScript 插件宿主（boa_engine 0.21）——让插件贡献任意可执行 JS 代码
 boa_engine = { version = "0.21", features = [] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
+# 可选资源包里的重型二进制以 .lz 存放（纯 Rust，无 C 依赖）：
+# 同一份 node.exe，DEFLATE 压到 31.5 MiB，LZMA 只要 21.1 MiB
+lzma-rs = "0.3"
 # 随机数（TTS 口型同步随机开合值）
 rand = "0.9"
 # 非 UTF-8（GBK 等）文本检测与解码

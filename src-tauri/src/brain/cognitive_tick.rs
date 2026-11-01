@@ -144,17 +144,19 @@ impl CognitiveTickResult {
 
 /// Cognitive Tick 调度器
 ///
-/// 把 Brain 的 30s mind_tick 与 10s proactive_tick 合并为统一的 6 阶段认知循环。
-/// 每阶段独立决策是否执行，仅 Speak 阶段调用 LLM（Think 阶段的 LLM 调用
-/// 由 proactive.tick 内的 inner monologue 机制完成）。
+/// Native actors run the private phases; presentation reuses their prepared state.
+/// Thought synthesis and maintenance run asynchronously with independent budgets.
 pub struct CognitiveTickRunner {
+    resident_owned: std::sync::atomic::AtomicBool,
+    private_pulse: Mutex<()>,
+    last_private_result: Mutex<CognitiveTickResult>,
     /// 上次完整 mind_tick 时间戳（30s 节流）
     last_self_update_at: Arc<Mutex<f64>>,
     /// 上次 Think 决策通过时间戳（5 分钟节流）
     last_think_at: Arc<Mutex<f64>>,
     /// 上次 Observe 决策通过时间戳
     last_observe_at: Arc<Mutex<f64>>,
-    /// 上次 LLM 合成 current_thought 时间戳（60s 节流）
+    /// Last thought request: event-driven, with a low-frequency fallback.
     last_thought_at: Arc<Mutex<f64>>,
     /// 上次 Act 决策通过时间戳（60s 节流）
     last_act_at: Arc<Mutex<f64>>,
@@ -165,6 +167,9 @@ pub struct CognitiveTickRunner {
 impl Default for CognitiveTickRunner {
     fn default() -> Self {
         Self {
+            resident_owned: std::sync::atomic::AtomicBool::new(false),
+            private_pulse: Mutex::new(()),
+            last_private_result: Mutex::new(CognitiveTickResult::default()),
             last_self_update_at: Arc::new(Mutex::new(0.0)),
             last_think_at: Arc::new(Mutex::new(0.0)),
             last_observe_at: Arc::new(Mutex::new(0.0)),
@@ -180,16 +185,33 @@ impl CognitiveTickRunner {
         Self::default()
     }
 
-    /// 执行一次完整的 Cognitive Tick
-    ///
-    /// 替换原 Brain::proactive_tick 内的双 tick 逻辑，统一为 6 阶段流水线。
-    /// 返回各阶段决策结果，调用方据此更新 Focus cooldown 等下游逻辑。
+    /// Presentation pass. Private phases are a fallback only before native attachment.
     pub fn run(
         &self,
         brain: &Brain,
         context: &TickContext,
     ) -> VivianResult<CognitiveTickResult> {
         if crate::companion_quiet::active() { return Ok(CognitiveTickResult::default()); }
+        let mut result = if self.resident_active() {
+            self.last_private_result.lock().clone()
+        } else { self.run_private(brain, context) };
+        result.speak = self.phase_speak(brain, context, result.think.executed)?;
+        result.produced_user_message = result.speak.produced;
+        Ok(result)
+    }
+
+    pub fn resident_active(&self) -> bool {
+        self.resident_owned.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Native actor owns private cognition; presentation polling cannot repeat it.
+    pub fn run_background(&self, brain: &Brain, context: &TickContext) -> CognitiveTickResult {
+        self.resident_owned.store(true, std::sync::atomic::Ordering::Release);
+        self.run_private(brain, context)
+    }
+
+    fn run_private(&self, brain: &Brain, context: &TickContext) -> CognitiveTickResult {
+        let Some(_pulse) = self.private_pulse.try_lock() else { return self.last_private_result.lock().clone(); };
         let now = context.now;
         let mut result = CognitiveTickResult::default();
 
@@ -221,10 +243,8 @@ impl CognitiveTickRunner {
         // - update_mind_state
         // - try_special_date_greeting / 触发器检查 / 内容生成（Speak）
         // - maybe_spawn_inner_monologue（受 Think 决策门控）
-        result.speak = self.phase_speak(brain, context, result.think.executed)?;
-        result.produced_user_message = result.speak.produced;
-
-        Ok(result)
+        *self.last_private_result.lock() = result.clone();
+        result
     }
 
     // ── 阶段 1: World ingest ──
@@ -325,27 +345,44 @@ impl CognitiveTickRunner {
         // 受 enable_inner_monologue 开关控制（与内心独白共享同一滑块）
         {
             if brain.config.world.enable_inner_monologue {
+                let can_think = !context.is_user_chatting
+                    && !matches!(context.character_presence, crate::presence::PresenceState::Rest | crate::presence::PresenceState::Offline)
+                    && !brain.mind.thought_refresh_in_flight.load(std::sync::atomic::Ordering::SeqCst);
+                if can_think { brain.mind.claim_due_continuation(now as i64); }
                 let refresh_requested = brain.mind.thought_refresh_requested();
+                let continuation_waiting = brain.mind.conversation_opportunities.read().threads.continuation.has_pending();
                 let mut last_thought = self.last_thought_at.lock();
                 let thought_dt = now - *last_thought;
                 if should_refresh_thought(thought_dt, refresh_requested, context.user_present)
-                    && !context.is_user_chatting
+                    && (refresh_requested || !continuation_waiting)
+                    && can_think
                     && !brain.mind.thought_refresh_in_flight.load(std::sync::atomic::Ordering::SeqCst) {
                     *last_thought = now;
                     drop(last_thought);
                     // Only consume after admission. A rapid second user event remains pending.
                     brain.mind.consume_thought_refresh();
                     let mind = Arc::clone(&brain.mind);
+                    let memory = Arc::clone(&brain.memory);
                     let router = Arc::clone(&brain.router);
                     let world_provider = Arc::clone(&brain.world_provider);
                     let lang = lang_code_from_config(&brain.config);
                     let conversation_context = brain.proactive.thought_conversation_context(context.is_user_chatting);
                     let persona_context = brain.persona.thought_persona_context();
                     tauri::async_runtime::spawn(async move {
-                        crate::mind::thought_synthesis::refresh_current_thought(
-                            &mind, &router, &world_provider, &lang, &conversation_context, &persona_context,
-                        )
-                        .await;
+                        let refresh = crate::mind::thought_synthesis::refresh_current_thought(
+                            &mind, &memory, &router, &world_provider, &lang, &conversation_context, &persona_context,
+                        );
+                        tokio::select! {
+                            _ = crate::utils::cancel_token::cancel_token().cancelled() => {
+                                mind.retry_continuation(chrono::Utc::now().timestamp());
+                            },
+                            result = tokio::time::timeout(std::time::Duration::from_secs(120), refresh) => {
+                                if result.is_err() {
+                                    mind.retry_continuation(chrono::Utc::now().timestamp());
+                                    tracing::warn!(character=%mind.char_id, "私下思考超时，保留有界接续计划");
+                                }
+                            }
+                        }
                     });
                 }
             } else {
@@ -478,8 +515,8 @@ impl CognitiveTickRunner {
         }
 
         // 防打扰窗口下不主动行动
-        if context.lay_low {
-            return PhaseDecision::skipped("lay_low active");
+        if context.lay_low || context.user_contact_blocked {
+            return PhaseDecision::skipped("lay_low or user contact blocked");
         }
 
         // 收集规划输入：active goals + current behavior drive
@@ -561,7 +598,7 @@ impl CognitiveTickRunner {
 
 /// Keep thoughts fresh for meaningful events without paying for an unchanged scene each minute.
 fn should_refresh_thought(elapsed: f64, requested: bool, user_present: bool) -> bool {
-    (requested && user_present) || elapsed >= if user_present { 900.0 } else { 3600.0 }
+    requested || elapsed >= if user_present { 900.0 } else { 3600.0 }
 }
 
 #[cfg(test)]

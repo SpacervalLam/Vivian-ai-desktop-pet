@@ -5,7 +5,10 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import packs from '../src/optional-resources.json' with { type: 'json' };
 
-assert.deepEqual(packs.map(pack => pack.id), ['fonts', 'stickers']);
+// Packs without `download` are embedded by the installer; the rest are published separately.
+const bundled = packs.filter(pack => !pack.download);
+assert.deepEqual(packs.map(pack => pack.id), ['fonts', 'stickers', 'browser-runtime']);
+assert.deepEqual(bundled.map(pack => pack.id), ['fonts', 'stickers']);
 const stickerCatalog = JSON.parse(await readFile('public/stickers/catalog.json', 'utf8'));
 assert.deepEqual(new Set(packs.find(pack => pack.id === 'stickers').files), new Set(stickerCatalog.map(row => `stickers/${row.filename}`)));
 assert.equal(new Set(packs.flatMap(pack => pack.files)).size, packs.reduce((total, pack) => total + pack.files.length, 0));
@@ -45,8 +48,10 @@ delete globalThis.__resourceStatus;
 
 if (process.argv.includes('--dist')) {
   const artifacts = JSON.parse(await readFile('release/resource-packs.json', 'utf8'));
-  assert.equal(artifacts.length, 2);
-  for (const pack of packs) {
+  for (const pack of bundled) {
+    assert.ok(artifacts.some(item => item.id === pack.id), `installed pack is published: ${pack.id}`);
+  }
+  for (const pack of bundled) {
     for (const file of pack.files) await assert.rejects(access(`dist/${file}`), { code: 'ENOENT' });
     const artifact = artifacts.find(item => item.id === pack.id);
     assert.ok(artifact);

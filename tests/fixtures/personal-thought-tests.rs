@@ -16,6 +16,86 @@ fn state() -> ConversationOpportunities {
     assert!(state.threads.apply(&[update("fresh_start")], &grounding(&[], &[], &[]), 100));
     state
 }
+
+fn next_thought(key: &str) -> crate::continuation::ContinuationRequest {
+    crate::continuation::ContinuationRequest { concern_key: key.into(), after_seconds: 60, purpose: "想清楚其中尚未明确的区别".into() }
+}
+
+#[test]
+fn a_private_deadline_needs_a_live_concern_and_waiting_for_a_person_does_not_poll_them() {
+    let mut state = state();
+    assert!(state.threads.plan_continuation(Some(&next_thought("fresh_start")), 100));
+    let mut restored: ThoughtThreads = serde_json::from_str(&serde_json::to_string(&state.threads).unwrap()).unwrap();
+    let anchors = restored.continuation_anchors(160, true);
+    assert!(restored.continuation.claim(&anchors, 160));
+    let id = restored.snapshot(160, 1)[0].event_id();
+    restored.delivered(&id, ConversationIntent::AskUser, 161);
+    restored.plan_continuation(Some(&next_thought("fresh_start")), 161);
+    assert!(restored.continuation.status()["next_thought"].is_null());
+    restored.plan_continuation(Some(&next_thought("fabricated")), 162);
+    assert!(restored.continuation.status()["next_thought"].is_null());
+}
+
+#[test]
+fn temporarily_waiting_and_rewording_do_not_renew_a_private_source_budget() {
+    let mut state = state();
+    for now in [100, 200] {
+        state.threads.plan_continuation(Some(&next_thought("fresh_start")), now);
+        let anchors = state.threads.continuation_anchors(now + 60, true);
+        assert!(state.threads.continuation.claim(&anchors, now + 60));
+    }
+    let id = state.threads.snapshot(261, 1)[0].event_id();
+    state.threads.delivered(&id, ConversationIntent::AskUser, 261);
+    state.threads.plan_continuation(None, 262);
+    // New private prose may not create a fresh budget while awaiting an answer.
+    state.threads.plan_continuation(Some(&next_thought("fresh_start")), 263);
+    assert!(state.threads.continuation.status()["next_thought"].is_null());
+}
+
+#[test]
+fn simultaneous_audiences_cannot_consume_each_others_candidate() {
+    let mut state = state();
+    let events = state.threads.offers(101);
+    state.apply_synthesis(&proposal(&state), &grounding(&[], &events, &[]), true, 101.0);
+    assert!(state.take_for(true, 102.0).is_none());
+    assert!(state.take_for(false, 102.0).is_some());
+}
+
+#[test]
+fn malformed_private_plans_keep_valid_thoughts_silent() {
+    let output = crate::parse_thought_output(r#"{"thought":"先静静想一会儿","next_thought":{"concern_key":"invented","after_seconds":"now","purpose":""}}"#, 100).unwrap();
+    assert!(output.next_thought.is_none());
+    assert_eq!(output.conversation_intent, ConversationIntent::Silent);
+}
+
+#[test]
+fn changing_excerpts_or_revisiting_an_old_observation_cannot_refill_a_private_budget() {
+    let mut threads = ThoughtThreads::default();
+    let ground = ThoughtGrounding { persona: PERSONA, user_quotes: &[], scene: &[], reflections: &[],
+        world: &["窗外有雨，也许正在下雨", "窗外晴朗"] };
+    let mut item = update("weather");
+    item.origin = ThoughtOrigin::WorldObservation;
+    item.evidence = "窗外有雨".into();
+    item.next_step = ThoughtStep::Reflect;
+    assert!(threads.apply(&[item.clone()], &ground, 100));
+    for now in [100, 200] {
+        threads.plan_continuation(Some(&next_thought("weather")), now);
+        let anchors = threads.continuation_anchors(now + 60, true);
+        assert!(threads.continuation.claim(&anchors, now + 60));
+    }
+    item.evidence = "正在下雨".into();item.stance = "雨天让我留意不同的声响".into();
+    assert!(threads.apply(&[item.clone()], &ground, 300));
+    threads.plan_continuation(Some(&next_thought("weather")), 300);
+    assert!(threads.continuation.status()["next_thought"].is_null());
+    item.evidence = "窗外晴朗".into();item.stance = "晴朗时也有另一种声响".into();
+    assert!(threads.apply(&[item.clone()], &ground, 400));
+    threads.plan_continuation(Some(&next_thought("weather")), 400);
+    assert!(threads.continuation.has_pending());
+    item.evidence = "窗外有雨".into();item.stance = "我又回头琢磨雨声".into();
+    assert!(threads.apply(&[item], &ground, 500));
+    threads.plan_continuation(Some(&next_thought("weather")), 500);
+    assert!(threads.continuation.status()["next_thought"].is_null());
+}
 fn proposal(state: &ConversationOpportunities) -> ThoughtSynthesisOutput {
     let thread = state.threads.snapshot(101, 1).remove(0);
     serde_json::from_value(serde_json::json!({"thought":"还在琢磨重新开始的吸引力", "social_urge":0.5,
@@ -257,4 +337,143 @@ fn an_unanswered_concern_can_be_parked_without_inventing_an_answer() {
     assert!(state.threads.apply(&[park], &grounding(&[], &[], &[]), 106));
     assert!(state.threads.snapshot(106, 1)[0].awaiting_reply);
     assert!(state.threads.offers(107).is_empty());
+}
+
+fn general_question() -> ConversationOpportunities {
+    let mut state = ConversationOpportunities::default();
+    let mut concern = update("fresh_start");
+    concern.question_scope = QuestionScope::General;
+    concern.peer_fallback = true;
+    assert!(state.threads.apply(&[concern], &grounding(&[], &[], &[]), 100));
+    state
+}
+
+#[test]
+fn a_character_can_choose_a_real_peer_question_while_the_user_is_away() {
+    let mut state = ConversationOpportunities::default();
+    let mut concern = update("fresh_start");
+    concern.next_step = ThoughtStep::AskPeer;
+    concern.question_scope = QuestionScope::General;
+    state.threads.apply(&[concern], &grounding(&[], &[], &[]), 100);
+    let events = state.threads.offers(101);
+    let mut output = proposal(&state);
+    output.conversation_intent = ConversationIntent::AskPeer;
+    state.apply_synthesis(&output, &grounding(&[], &events, &[]), false, 101.0);
+    assert!(state.fresh(101.0).unwrap().intent.is_peer());
+    state.take(102.0).unwrap();
+    assert!(state.threads.offers(103).is_empty(), "one concern cannot start a peer loop each tick");
+}
+
+#[test]
+fn user_silence_only_offers_one_optional_general_peer_fallback_after_delivery() {
+    let mut state = general_question();
+    deliver_question(&mut state);
+    assert!(!state.threads.activate_peer_fallbacks(104 + PEER_FALLBACK_AFTER_SECS - 1));
+    assert!(state.threads.offers(283).is_empty());
+    assert!(state.threads.activate_peer_fallbacks(284));
+    assert!(!state.threads.activate_peer_fallbacks(285));
+    let events = state.threads.offers(285);
+    assert_eq!(events.len(),1);
+    assert!(events[0].fact.contains("ask_peer"));
+    assert!(state.fresh(285.0).is_none(), "eligibility is not an agent's decision to speak");
+    let mut output = proposal(&state);
+    output.conversation_intent = ConversationIntent::AskPeer;
+    state.apply_synthesis(&output, &grounding(&[], &events, &[]), false, 285.0);
+    let fallback = state.take(286.0).expect("the earlier user question must not deduplicate the peer audience");
+    state.record_prepared(fallback, "你对这个机制有什么看法？", 286.0);
+    state.record_delivered("你对这个机制有什么看法？", 287.0);
+    assert!(state.threads.snapshot(288,1)[0].awaiting_reply, "contacting a peer does not fabricate an answer");
+    assert!(state.threads.offers(1000).is_empty());
+    let mut restored: ThoughtThreads = serde_json::from_str(&serde_json::to_string(&state.threads).unwrap()).unwrap();
+    assert!(!restored.activate_peer_fallbacks(1000));
+    assert!(restored.offers(1000).is_empty());
+}
+
+#[test]
+fn private_preferences_permissions_and_legacy_questions_cannot_fall_back_to_a_peer() {
+    let mut state = state();
+    deliver_question(&mut state);
+    assert!(!state.threads.activate_peer_fallbacks(10000));
+    assert!(state.threads.offers(10000).is_empty());
+    let mut private = update("private_choice");
+    private.next_step = ThoughtStep::AskPeer;
+    private.peer_fallback = true;
+    assert_eq!(private.question_scope, QuestionScope::UserOnly);
+    assert!(!state.threads.apply(&[private], &grounding(&[], &[], &[]), 101));
+}
+
+#[test]
+fn a_draft_never_starts_the_unanswered_user_timer() {
+    let mut state = general_question();
+    let events = state.threads.offers(101);
+    state.apply_synthesis(&proposal(&state), &grounding(&[], &events, &[]), true, 101.0);
+    let draft = state.take(102.0).unwrap();
+    state.record_prepared(draft, "尚未发出的草稿", 103.0);
+    assert!(!state.threads.activate_peer_fallbacks(10000));
+    assert!(!state.threads.snapshot(10000,1)[0].awaiting_reply);
+}
+
+#[test]
+fn an_actual_correlated_peer_answer_can_change_understanding_and_become_attributed_knowledge() {
+    use crate::peer_learning::{PeerLearning, LearningUpdate};
+    let mut state = general_question();
+    deliver_question(&mut state);
+    let event_id = state.threads.snapshot(105,1)[0].event_id();
+    let mut book = PeerLearning::default();
+    let unrelated = book.receive("vivian","nana","unrelated","先观察再选择，比较容易知道自己在意什么。",Some("thought:other:1".into()),300).unwrap();
+    let mut answer = update("fresh_start");
+    answer.origin = ThoughtOrigin::SceneEvent;
+    answer.question_scope = QuestionScope::General;
+    answer.evidence = "先观察再选择".into();
+    answer.stance = "先观察可能比急着选择更能发现自己的关注点".into();
+    answer.open_question.clear(); answer.next_step = ThoughtStep::Rest; answer.status = ThreadStatus::Resolved;
+    assert!(!state.threads.apply(&[answer.clone()], &grounding(&[], &[unrelated.event()], &[]), 301));
+    let actual = book.receive("vivian","nana","actual-answer","先观察再选择，比较容易知道自己在意什么。",Some(event_id),301).unwrap();
+    assert!(state.threads.apply(&[answer], &grounding(&[], &[actual.event()], &[]), 302));
+    assert_eq!(state.threads.snapshot(302,1)[0].status, ThreadStatus::Resolved);
+    assert!(!state.threads.snapshot(302,1)[0].awaiting_reply);
+    let learned = book.learn(&[LearningUpdate {key:"observe_before_choice".into(),source_id:"actual-answer".into(),
+        quote:"先观察再选择".into(),understanding:"可以先通过观察澄清自己关注的因素，而不是急着选一个答案".into()}],302);
+    assert_eq!(learned.len(),1);
+    let (_, metadata) = learned[0].memory_record("vivian");
+    assert_eq!(metadata["speaker"],"nana"); assert_eq!(metadata["source_utterance_id"],"actual-answer");
+    assert_eq!(metadata["verified"],false);
+    assert!(crate::provenance::recall_label(&metadata).contains("待核实"));
+    assert!(crate::provenance::visible_to(&metadata,"vivian"));
+    assert!(!crate::provenance::visible_to(&metadata,"nana"), "the learner's interpretation is not silently copied into the other mind");
+    assert!(state.threads.offers(303).is_empty(), "learning need not manufacture another question");
+}
+
+#[test]
+fn the_users_real_answer_retires_an_already_offered_peer_fallback() {
+    let mut state = general_question();
+    deliver_question(&mut state);
+    state.threads.activate_peer_fallbacks(284);
+    let events = state.threads.offers(285);
+    let mut output = proposal(&state); output.conversation_intent = ConversationIntent::AskPeer;
+    state.apply_synthesis(&output, &grounding(&[], &events, &[]), true, 285.0);
+    assert!(state.fresh(285.0).is_some());
+    let mut answer = update("fresh_start");
+    answer.origin = ThoughtOrigin::UserMessage; answer.evidence = "我喜欢创造的过程".into();
+    answer.stance = "用户看重的是创造过程".into();answer.open_question.clear();
+    answer.status=ThreadStatus::Resolved;answer.next_step=ThoughtStep::Rest;
+    assert!(state.threads.apply(&[answer],&grounding(&[("我喜欢创造的过程",286)],&[],&[]),287));
+    assert!(state.fresh(287.0).is_none());
+}
+
+#[test]
+fn a_busy_peer_keeps_the_same_draft_but_new_user_context_cancels_it() {
+    let mut state = general_question();
+    deliver_question(&mut state);
+    state.threads.activate_peer_fallbacks(284);
+    let events=state.threads.offers(285);
+    let mut output=proposal(&state);output.conversation_intent=ConversationIntent::AskPeer;
+    state.apply_synthesis(&output,&grounding(&[],&events,&[]),false,285.0);
+    let candidate=state.take(286.0).unwrap();
+    state.record_prepared(candidate,"关于选择的方法，你怎么看？",286.0);
+    assert!(state.peer_draft_is_current("关于选择的方法，你怎么看？",300));
+    assert!(state.threads.offers(300).is_empty(),"waiting for delivery must not generate another draft");
+    state.cancel_peer_drafts();
+    assert!(!state.peer_draft_is_current("关于选择的方法，你怎么看？",301));
+    assert!(state.threads.snapshot(301,1)[0].awaiting_reply);
 }

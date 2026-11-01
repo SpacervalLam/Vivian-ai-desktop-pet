@@ -6,6 +6,8 @@ use tauri::State;
 use crate::state::AppState;
 
 pub fn plugin_dir() -> Option<std::path::PathBuf> {
+    // Temporarily unavailable in distributed builds, including old installations.
+    if !cfg!(debug_assertions) { return None; }
     if cfg!(debug_assertions) {
         return Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../plugins/3d-apartment"));

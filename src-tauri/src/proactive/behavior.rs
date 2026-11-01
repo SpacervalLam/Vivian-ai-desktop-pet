@@ -187,6 +187,12 @@ pub struct LlmContext {
     pub last_own_utterance: String,
     /// 距角色自己上一条发言的秒数；无历史时为 f64::MAX
     pub seconds_since_own_utterance: f64,
+    /// 当前 Unix 秒（供主动 prompt 的时间锚点使用）
+    pub now: f64,
+    /// 当前本地时间（带 UTC 偏移）
+    pub current_time: String,
+    /// 距最近一次用户发言的秒数；无记录时 None
+    pub seconds_since_user_message: Option<f64>,
     /// 当前亲密度（0-100），用于调整语气
     pub intimacy: f64,
     /// 用户离开的秒数（WelcomeBack 触发器使用）
@@ -286,7 +292,12 @@ impl BehaviorDecider {
         let mut messages = vec![ChatMessage::system(format!("{sys}\n{voice}"))];
         // Even the fallback retains real roles and third-party attribution. Flattened
         // assistant text could otherwise become the wrong character's autobiography.
-        crate::pipeline::message_context::append_history(&mut messages, dialogue_messages);
+        crate::pipeline::message_context::append_history_with_time(
+            &mut messages, dialogue_messages, chrono::Local::now(), lang);
+        if let Some(anchor) = crate::pipeline::message_context::temporal_anchor_note(
+            dialogue_messages, chrono::Local::now(), lang) {
+            messages.push(ChatMessage::system(anchor));
+        }
         messages.push(ChatMessage::system(format!("[Proactive event; not a new user request]\n{prompt}")));
         messages.push(ChatMessage::system(format!("{}\n{}",
             proactive_output_format(crate::pipeline::prompt_modules::normalize_lang(lang)),
@@ -594,7 +605,7 @@ fn build_proactive_directive(
                 "ja" => ("シーン：話題を振って会話を広げたい。".to_string(), format!("今の話や自分の興味（{}）から具体的な新しい思いがある時だけ伝える。質問は必須ではなく、視聴や活動を捏造しない。なければ DONT_NOTIFY。", interest_ja)),
                 _ => ("场景：你想抛个话题把对话延续下去。".to_string(), format!("只有当前话题或自己的兴趣（{}）里有具体的新想法且适合此刻时才分享。陈述也可以，不凑泛泛的问题，不编造观看或活动；否则选择 DONT_NOTIFY。", interest_zh)),
             };
-            (s, String::new(), format!("{c}{}", own_utterance_echo_guard(ctx, lang_norm)))
+            (s, String::new(), c)
         }
         ProactiveTrigger::MoodDriven => {
             let (s, c) = match lang_norm {
@@ -607,9 +618,9 @@ fn build_proactive_directive(
         ProactiveTrigger::CrossCharacterReply => {
             let companions = if ctx.online_companions.is_empty() { String::new() } else { ctx.online_companions.clone() };
             let (s, c) = match lang_norm {
-                "en" => ("Scene: you just overheard your roommate say something TO THE USER (not to you). You're a third party chiming in.".to_string(), "Only send a message if there is a fresh, natural follow-up; otherwise return empty text and expression. Address her directly and respond to the specific point she made (<30 chars). Tease only when it genuinely fits; don't use a stock denial/tsundere line or invent shared history. Don't answer a question she asked the USER.".to_string()),
-                "ja" => ("シーン：ルームメイトがユーザーに向かって何か言うのを聞いた（あなた宛じゃない）。第三者として口を挟む。".to_string(), "自然で新鮮な続きがあるときだけ送る。なければ text と expression は空にする。彼女に直接話し、具体的に言った内容に応える（30字以内）。本当に合う時だけからかい、定型のツンデレ否定や共有したことの捏造はしない。ユーザー宛ての質問には答えない。".to_string()),
-                _ => ("场景：你刚听到室友对用户说了什么（不是对你说的）。你作为第三方插嘴。".to_string(), "只有自然接得上、有新内容时才发；否则 text 和 expression 留空。直接对她说，回应她刚才的具体意思（<30字）。确实合适时再调侃；不要套用固定的嘴硬否认句，也不要编造你们过去的共同经历。她问用户的问题不要代答。".to_string()),
+                "en" => ("You chose a concrete question or unspoken point from your own continuing concern for this roommate.".to_string(), "Express the supplied purpose directly to her in your own voice. Ask the actual unresolved question or share the actual insight; do not invent a topic, obligation, shared history or an extra question. Her presence or earlier speech alone does not require contact. Silence is valid. Do not decide the user's private facts or permissions.".to_string()),
+                "ja" => ("自分が継続して気にしていることから、ルームメイトに尋ねたいことか伝えたいことを選んだ。".to_string(), "与えられた本当の疑問や共有したい点を、自分の言葉で相手に伝える。話題や義務、過去の体験、余分な質問を作らない。相手がいる、話した、というだけで交流しない。沈黙もよい。ユーザーの私的事実や許可を代わりに決めない。".to_string()),
+                _ => ("你从自己持续在意的事情里，选出一个确实想问室友的问题或想让她听到的看法。".to_string(), "把给定的真实疑问或分享目的直接、自然地对她说。不要为了接话编话题、共同经历、义务或额外的问题，也不因为她在线、刚说过话就必须互动。可以不说。不要替用户决定私人事实、偏好或授权。".to_string()),
             };
             (s, companions, c)
         }
@@ -743,8 +754,61 @@ fn build_proactive_directive(
         }
     }
     parts.push(constraint);
+    // Universal echo guard: a normal chat reply is also "already said", not
+    // fresh material for any proactive trigger (not only TopicExtension).
+    let echo_guard = own_utterance_echo_guard(ctx, lang_norm);
+    if !echo_guard.is_empty() {
+        parts.push(echo_guard);
+    }
+    parts.push(proactive_timing_block(ctx, lang_norm));
     parts.push(crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm).to_string());
     Some(parts.join("\n"))
+}
+
+/// Timing data shown to every proactive trigger.
+///
+/// Prompt-side timing is intentionally near the final instruction: the model
+/// otherwise sees a plausible old conversation as a continuous present.
+fn proactive_timing_block(ctx: &LlmContext, lang_norm: &str) -> String {
+    let now = if ctx.current_time.trim().is_empty() {
+        if ctx.now.is_finite() && ctx.now > 0.0 {
+            crate::utils::prompt_time::format_prompt_time(ctx.now)
+        } else {
+            crate::utils::prompt_time::format_local_time(chrono::Local::now())
+        }
+    } else {
+        ctx.current_time.clone()
+    };
+    let user_age = ctx.seconds_since_user_message
+        .filter(|seconds| seconds.is_finite())
+        .map(|seconds| crate::utils::prompt_time::format_age_seconds(seconds, lang_norm))
+        .unwrap_or_else(|| match lang_norm {
+            "en" => "no recorded user message".into(),
+            "ja" => "記録されたユーザーメッセージなし".into(),
+            _ => "没有记录到用户消息".into(),
+        });
+    let own_age = if ctx.seconds_since_own_utterance.is_finite()
+        && ctx.seconds_since_own_utterance < 86400.0
+    {
+        crate::utils::prompt_time::format_age_seconds(ctx.seconds_since_own_utterance, lang_norm)
+    } else {
+        match lang_norm {
+            "en" => "no recent own utterance".into(),
+            "ja" => "直近の発言なし".into(),
+            _ => "没有最近的发言".into(),
+        }
+    };
+    match lang_norm {
+        "en" => format!(
+            "[TIMING — DATA]\nNow: {now}.\nLatest user message: {user_age}.\nYour latest utterance: {own_age}.\nThis is a proactive opportunity, not a reply to a new user message. If you already answered or greeted just now, do not repeat it with different wording. Do not call an older event \"just now\"; after a long gap, do not pretend the conversation was continuous.\n[/TIMING]"
+        ),
+        "ja" => format!(
+            "[TIMING — DATA]\n現在：{now}。\n最新のユーザーメッセージ：{user_age}。\nあなたの最新の発言：{own_age}。\nこれは新規ユーザーへの返信ではなく、主動の発言機会。直前に答えたり挨拶したなら、言い換えて繰り返さない。古い出来事を「たった今」と言わない。長い空白の後は、会話が続いていたふりをしない。\n[/TIMING]"
+        ),
+        _ => format!(
+            "[TIMING — 数据]\n现在：{now}。\n最近用户消息：{user_age}。\n你上次发言：{own_age}。\n这是一次主动开口机会，不是回复新的用户消息。如果你刚刚已经回答或问候过，不要换个说法再说一遍。不要把更早的事说成“刚才”；跨过较长间隔后，不要假装对话一直连续。\n[/TIMING]"
+        ),
+    }
 }
 
 /// Shared by both full-context and fallback generation. ChatWindow is an internal channel.
@@ -842,16 +906,15 @@ mod non_response_prompt_tests {
             ).unwrap();
             let system = messages.iter().filter(|m| m.role == "system")
                 .map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n");
-            assert!(system.contains("Talking to Nana as Vivian"));
-            assert!(system.contains("relaxed and candid"));
-            assert!(system.contains("genuinely touches a feeling"));
-            assert!(!system.contains("Talking to Vivian as Nana"));
+            assert!(system.contains("[CROSS_CHARACTER_VOICE]"), "{system}");
+            assert!(system.contains("Keep Vivian"), "{system}");
+            assert!(!system.contains("Keep Nana"), "{system}");
         }
         let plain = BehaviorDecider::build_messages(
             ProactiveTrigger::HourlyGreeting, &ctx, "", "zh", "vivian", None,
             "", "", &[], "", 0,
         ).unwrap();
-        assert!(!plain[0].content.contains("Talking to Nana as Vivian"));
+        assert!(!plain[0].content.contains("[CROSS_CHARACTER_VOICE]"));
     }
 
     #[test]
@@ -908,6 +971,21 @@ mod delivery_channel_tests {
 #[cfg(test)]
 mod structured_context_tests {
     use super::*;
+    #[test]
+    fn proactive_directive_always_carries_real_timing_and_echo_guard() {
+        let mut ctx = LlmContext::default();
+        ctx.last_own_utterance = "你好呀，很高兴认识你。".into();
+        ctx.seconds_since_own_utterance = 16.0;
+        ctx.seconds_since_user_message = Some(120.0);
+        let directive = build_proactive_directive(
+            ProactiveTrigger::Spontaneous, &ctx, "zh", "nana").unwrap();
+        assert!(directive.contains("[TIMING — 数据]"), "{directive}");
+        assert!(directive.contains("最近用户消息：2 分钟前"), "{directive}");
+        assert!(directive.contains("你上次发言：16 秒前"), "{directive}");
+        assert!(!directive.contains("1970-01-01"), "{directive}");
+        assert!(directive.contains("16 秒前刚说过"), "{directive}");
+    }
+
     #[test]
     fn proactive_context_keeps_history_roles_and_system_protocol() {
         let mut ctx = LlmContext::default();

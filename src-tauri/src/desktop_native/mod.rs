@@ -167,6 +167,8 @@ pub struct Reply {
     pub images: Vec<Pixels>,
 }
 pub enum Request {
+    /// Read-only foreground perception. No screenshots, focus, input or action handles.
+    Perception { expected_pid: u32, include_text: bool, include_windows: bool },
     Windows,
     Observe {
         window: WindowTarget,

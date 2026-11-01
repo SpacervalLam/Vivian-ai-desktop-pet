@@ -678,7 +678,7 @@ impl AugmentReplyService {
         // 按 importance 升序排序（重要的排在后面，LLM 对列表末尾注意力更佳）
         let mut sorted_memories: Vec<&MemoryEntry> = req.new_memories.iter().collect();
         sorted_memories.sort_by(|a, b| a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal));
-        let now_ts = crate::memory::types::current_timestamp();
+        let now_local = chrono::Local::now();
         let mem_lines: Vec<String> = sorted_memories
             .iter()
             .take(5)
@@ -688,7 +688,8 @@ impl AugmentReplyService {
                 if content.is_empty() {
                     None
                 } else {
-                    let time_label = format_memory_time_label(mem.timestamp, now_ts, lang_norm);
+                    let time_label = crate::utils::prompt_time::format_timestamp_age(
+                        mem.timestamp, now_local, lang_norm);
                     let importance_label = match lang_norm {
                         "en" => format!("Importance {:.2}", mem.importance),
                         "ja" => format!("重要度 {:.2}", mem.importance),
@@ -1105,67 +1106,6 @@ fn now_ts() -> f64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
-}
-
-/// 将记忆时间戳格式化为人类可读的时间标签（含距今跨度），让 LLM 感知记忆的新旧
-fn format_memory_time_label(ts: f64, now: f64, lang: &str) -> String {
-    if ts <= 0.0 {
-        return match lang {
-            "en" => "Unknown time".to_string(),
-            "ja" => "時期不明".to_string(),
-            _ => "时间不详".to_string(),
-        };
-    }
-    let dt = chrono::DateTime::from_timestamp(ts as i64, 0)
-        .map(|d| d.with_timezone(&chrono::Local))
-        .unwrap_or_else(|| chrono::Local::now());
-    let now_dt = chrono::DateTime::from_timestamp(now as i64, 0)
-        .map(|d| d.with_timezone(&chrono::Local))
-        .unwrap_or_else(|| chrono::Local::now());
-    let elapsed = now_dt.signed_duration_since(dt);
-    let hours = elapsed.num_hours();
-    let days = elapsed.num_days();
-
-    let date_str = if dt.date_naive() == now_dt.date_naive() {
-        match lang {
-            "en" => dt.format("Today %H:%M").to_string(),
-            "ja" => dt.format("今日 %H:%M").to_string(),
-            _ => dt.format("今天 %H:%M").to_string(),
-        }
-    } else if dt.date_naive() == (now_dt - chrono::Duration::days(1)).date_naive() {
-        match lang {
-            "en" => dt.format("Yesterday %H:%M").to_string(),
-            "ja" => dt.format("昨日 %H:%M").to_string(),
-            _ => dt.format("昨天 %H:%M").to_string(),
-        }
-    } else if days < 7 {
-        dt.format("%m-%d %H:%M").to_string()
-    } else {
-        dt.format("%m-%d").to_string()
-    };
-
-    let span = if hours < 1 {
-        let mins = elapsed.num_minutes().max(1);
-        match lang {
-            "en" => format!("{}m ago", mins),
-            "ja" => format!("{}分前", mins),
-            _ => format!("{}分钟前", mins),
-        }
-    } else if hours < 24 {
-        match lang {
-            "en" => format!("{}h ago", hours),
-            "ja" => format!("{}時間前", hours),
-            _ => format!("{}小时前", hours),
-        }
-    } else {
-        match lang {
-            "en" => format!("{}d ago", days),
-            "ja" => format!("{}日前", days),
-            _ => format!("{}天前", days),
-        }
-    };
-
-    format!("{}（{}）", date_str, span)
 }
 
 #[cfg(test)]

@@ -205,7 +205,22 @@ impl TaskTracker {
                 task.idle_turns = 0;
                 context = Some(Continuation { task: task.clone(), needs_clarification, retry });
             } else if reference && matches!(task.phase, Phase::Completed | Phase::Cancelled | Phase::Running) {
-                context = Some(Continuation { task: task.clone(), needs_clarification: true, retry: false });
+                // A fresh explicit human authorization is a new instruction, not an
+                // ambiguous continuation. Emitting needs_clarification here made the
+                // whole turn reply-only, so "delegate it then" could never reach a tool.
+                // Reopening the host task keeps its real goal; the resolved task text
+                // still reaches the executor through contextual_intent.
+                let authorized = resolved.is_some_and(|turn| {
+                    turn.action && !turn.needs_clarification && !turn.task.trim().is_empty()
+                });
+                if authorized {
+                    task.phase = Phase::Ready;
+                    task.updated_at = now;
+                    task.idle_turns = 0;
+                    context = Some(Continuation { task: task.clone(), needs_clarification: false, retry: false });
+                } else {
+                    context = Some(Continuation { task: task.clone(), needs_clarification: true, retry: false });
+                }
             } else { task.idle_turns += 1; }
         }
         if context.is_none() && new_request {
@@ -561,5 +576,32 @@ mod tests {
         assert_eq!(tracker.task.as_ref().unwrap().phase, Phase::Running);
         let context = tracker.begin("再试一次", false, false, 102.0).1.unwrap();
         assert!(reply_only(&json!(context)));
+    }
+
+    #[test]
+    fn explicit_authorization_reopens_a_running_task_instead_of_reply_only() {
+        let mut tracker = TaskTracker::default();
+        let (revision, _) = tracker.begin("整理动漫收藏夹的数据", true, true, 100.0);
+        tracker.observe_settlement(revision, &json!({"task":{"settlement":{"status":"waiting"}}}));
+        assert_eq!(tracker.task.as_ref().unwrap().phase, Phase::Running);
+        let resolved = ResolvedTurn { action: true, continues_task: true, needs_clarification: false,
+            task: "把整理动漫收藏夹数据的任务交给办公智能体".into(), execution_actor: None };
+        let (_, context) = tracker.begin_resolved("那你委派吧", true, false, 102.0, Some(&resolved));
+        let context = context.expect("explicit authorization stays attached to the host task");
+        assert!(!reply_only(&json!(context)), "an explicit instruction must stay executable");
+        assert_eq!(tracker.task.as_ref().unwrap().phase, Phase::Ready);
+        assert_eq!(tracker.task.as_ref().unwrap().goal, "整理动漫收藏夹的数据",
+            "reopening keeps the real goal instead of the follow-up wording");
+    }
+
+    #[test]
+    fn ambiguous_reference_to_a_running_task_still_requires_clarification() {
+        let mut tracker = TaskTracker::default();
+        let (revision, _) = tracker.begin("整理动漫收藏夹的数据", true, true, 100.0);
+        tracker.observe_settlement(revision, &json!({"task":{"settlement":{"status":"waiting"}}}));
+        let chat = ResolvedTurn { action: false, continues_task: true, needs_clarification: false,
+            task: String::new(), execution_actor: None };
+        let (_, context) = tracker.begin_resolved("再试一次", false, false, 102.0, Some(&chat));
+        assert!(reply_only(&json!(context.unwrap())), "a retry guess must not silently restart work");
     }
 }

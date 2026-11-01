@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ConversationIntent { #[default] Silent, Greet, FollowUp, Share, AskUser }
+pub enum ConversationIntent { #[default] Silent, Greet, FollowUp, Share, AskUser, AskPeer, SharePeer }
+impl ConversationIntent {
+    pub fn is_peer(self) -> bool { matches!(self, Self::AskPeer | Self::SharePeer) }
+}
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +27,10 @@ pub struct ThoughtSynthesisOutput {
     #[serde(default)] pub conversation_event_id: String,
     #[serde(default, deserialize_with = "parse_thread_updates")]
     pub thread_updates: Vec<super::thought_threads::ThreadUpdate>,
+    #[serde(default, deserialize_with = "super::peer_learning::parse_updates")]
+    pub learning_updates: Vec<super::peer_learning::LearningUpdate>,
+    #[serde(default, deserialize_with = "super::continuation::parse_request")]
+    pub next_thought: Option<super::continuation::ContinuationRequest>,
 }
 pub fn default_social_urge() -> f32 { 0.5 }
 
@@ -71,13 +78,14 @@ pub struct ConversationScene {
 impl ThoughtSynthesisOutput {
     pub fn validated_opportunity(&self, user_quotes: &[(&str, i64)], world_observations: &[&str],
         events: &[ConversationEvent], user_present: bool, now: f64) -> Option<ConversationOpportunity> {
-        if !user_present || !now.is_finite() || self.conversation_intent == ConversationIntent::Silent
+        if (!user_present && !self.conversation_intent.is_peer()) || !now.is_finite() || self.conversation_intent == ConversationIntent::Silent
             || self.conversation_topic.trim().is_empty() || self.conversation_reason.trim().is_empty()
             || normalize(&self.conversation_key).is_empty() { return None; }
         let event = events.iter().find(|event| event.id == self.conversation_event_id && event.at <= now);
         if !self.conversation_event_id.is_empty() && event.is_none() { return None; }
         let evidence = self.conversation_evidence.trim();
         if self.conversation_intent == ConversationIntent::AskUser && self.conversation_source != ConversationSource::ThoughtThread { return None; }
+        if self.conversation_intent.is_peer() && self.conversation_source != ConversationSource::ThoughtThread { return None; }
         let grounded = match self.conversation_source {
             ConversationSource::None => self.conversation_intent == ConversationIntent::Greet && evidence.is_empty(),
             // Provided context and corrections decide relevance, not a ten-minute cutoff.
@@ -87,7 +95,7 @@ impl ThoughtSynthesisOutput {
                 && evidence.chars().count() >= 3 && world_observations.iter().any(|text| text.contains(evidence)),
             ConversationSource::SceneEvent => evidence.chars().count() >= 3
                 && event.is_some_and(|event| event.kind != "personal_thought" && event.fact.contains(evidence)),
-            ConversationSource::ThoughtThread => matches!(self.conversation_intent, ConversationIntent::Share | ConversationIntent::AskUser)
+            ConversationSource::ThoughtThread => matches!(self.conversation_intent, ConversationIntent::Share | ConversationIntent::AskUser | ConversationIntent::AskPeer | ConversationIntent::SharePeer)
                 && evidence.chars().count() >= 3
                 && event.is_some_and(|event| event.kind == "personal_thought" && event.fact.contains(evidence)),
         };
@@ -105,7 +113,8 @@ fn normalize(text: &str) -> String {
     text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 fn same_meaning(a: &ConversationOpportunity, b: &ConversationOpportunity) -> bool {
-    normalize(&a.meaning_key) == normalize(&b.meaning_key) && a.source == b.source
+    a.intent.is_peer() == b.intent.is_peer()
+        && normalize(&a.meaning_key) == normalize(&b.meaning_key) && a.source == b.source
         && normalize(&a.evidence) == normalize(&b.evidence) && a.event_id == b.event_id
 }
 #[derive(Debug, Default)]
@@ -171,6 +180,11 @@ impl ConversationOpportunities {
         true
     }
     pub fn events(&self) -> &[ConversationEvent] { &self.events }
+    pub fn record_peer_event(&mut self, event: ConversationEvent) {
+        if self.events.iter().any(|previous| previous.id == event.id) { return; }
+        self.events.push(event);
+        if self.events.len() > 8 { self.events.remove(0); }
+    }
     /// Deferral keeps the proposal. Context changes or handling retire it; its age is
     /// supplied to the final generator so an awkward delayed remark can be declined.
     pub fn fresh(&self, now: f64) -> Option<ConversationOpportunity> {
@@ -186,14 +200,18 @@ impl ConversationOpportunities {
         let proposal = self.fresh(now);
         self.pending = None;
         if let Some(proposal) = &proposal {
-            if proposal.source == ConversationSource::ThoughtThread { self.threads.attempt(&proposal.event_id); }
+            if proposal.source == ConversationSource::ThoughtThread { self.threads.attempt(&proposal.event_id, proposal.intent); }
             self.attempted.push(proposal.clone());
             if self.attempted.len() > 32 { self.attempted.remove(0); }
         }
         proposal
     }
+    pub fn take_for(&mut self, peer: bool, now: f64) -> Option<ConversationOpportunity> {
+        if self.fresh(now)?.intent.is_peer() != peer { return None; }
+        self.take(now)
+    }
     pub fn restore_after_failure(&mut self, proposal: ConversationOpportunity) {
-        if proposal.source == ConversationSource::ThoughtThread { self.threads.restore(&proposal.event_id); }
+        if proposal.source == ConversationSource::ThoughtThread { self.threads.restore(&proposal.event_id, proposal.intent); }
         self.attempted.retain(|previous| !same_meaning(previous, &proposal));
         if self.pending.is_none() { self.pending=Some(proposal); }
     }
@@ -201,6 +219,22 @@ impl ConversationOpportunities {
         self.prepared.retain(|(_, content)| content != text);
         self.prepared.push((proposal,text.to_owned()));
         if self.prepared.len() > 16 { self.prepared.remove(0); }
+    }
+    pub fn prepared_personal_event(&self, text: &str) -> Option<String> {
+        self.prepared.iter().find(|(proposal, content)| content == text && proposal.source == ConversationSource::ThoughtThread)
+            .map(|(proposal, _)| proposal.event_id.clone())
+    }
+    pub fn prepared_peer_message_id(&self, character: &str, text: &str) -> Option<String> {
+        self.prepared.iter().find(|(proposal, content)| proposal.intent.is_peer() && content == text)
+            .map(|(proposal, _)| format!("peer:{character}:{}:{}:{}", proposal.event_id, proposal.meaning_key, proposal.generated_at))
+    }
+    pub fn peer_draft_is_current(&self, text: &str, now: i64) -> bool {
+        self.prepared.iter().any(|(proposal, content)| content == text && proposal.intent.is_peer()
+            && self.threads.snapshot(now, 6).iter().any(|thread| thread.event_id() == proposal.event_id
+                && thread.status == super::thought_threads::ThreadStatus::Active))
+    }
+    pub fn cancel_peer_drafts(&mut self) {
+        self.prepared.retain(|(proposal, _)| !proposal.intent.is_peer());
     }
     pub fn record_delivered(&mut self, text: &str, now: f64) {
         if let Some(index)=self.prepared.iter().position(|(_,content)|content==text) {

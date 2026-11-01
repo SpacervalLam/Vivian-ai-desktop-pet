@@ -158,6 +158,7 @@ impl Engine {
         self.snapshots
             .retain(|_, s| s.at.elapsed() < Duration::from_secs(120));
         match request {
+            Request::Perception { expected_pid, include_text, include_windows } => self.perception(expected_pid, include_text, include_windows, deadline),
             Request::Windows => Ok(Reply {
                 data: json!({"windows":windows()?.into_iter().map(window_data).collect::<Vec<_>>(),"coordinate_space":"window_physical_pixels","capabilities":["screenshot","accessibility","window_binding","unicode_input","secondary_actions"]}),
                 images: vec![],
@@ -195,7 +196,7 @@ impl Engine {
             }
         }
     }
-    fn tree(&self, w: WindowTarget, deadline: &Deadline) -> Result<(Value, Vec<Control>), String> {
+    fn tree(&self, w: WindowTarget, deadline: &Deadline, visible_only: bool) -> Result<(Value, Vec<Control>), String> {
         let window_rect = rect(w)?;
         let uia = self.uia.as_ref().ok_or_else(|| {
             self.uia_error
@@ -213,6 +214,8 @@ impl Engine {
             let mut selected_text = Vec::new();
             while let Some((el, depth)) = queue.pop_front() {
                 deadline.check()?;
+                let offscreen = el.CurrentIsOffscreen().map(|v|v.as_bool()).unwrap_or(true);
+                if visible_only && offscreen { continue; }
                 if elements.len() >= 400 {
                     truncated = true;
                     break;
@@ -271,7 +274,7 @@ impl Engine {
                     right: r.right - window_rect.left,
                     bottom: r.bottom - window_rect.top,
                 };
-                lines.push(json!({"index":elements.len(),"depth":depth,"name":el.CurrentName().map(|v|v.to_string().chars().take(500).collect::<String>()).unwrap_or_default(),"automation_id":el.CurrentAutomationId().map(|v|v.to_string()).unwrap_or_default(),"control_type":el.CurrentLocalizedControlType().map(|v|v.to_string()).unwrap_or_default(),"enabled":el.CurrentIsEnabled().map(|v|v.as_bool()).unwrap_or(false),"offscreen":el.CurrentIsOffscreen().map(|v|v.as_bool()).unwrap_or(true),"focused":el.CurrentHasKeyboardFocus().map(|v|v.as_bool()).unwrap_or(false),"password":password,"value":value,"bounds":bounds(local),"actions":patterns}));
+                lines.push(json!({"index":elements.len(),"depth":depth,"name":el.CurrentName().map(|v|v.to_string().chars().take(500).collect::<String>()).unwrap_or_default(),"automation_id":el.CurrentAutomationId().map(|v|v.to_string()).unwrap_or_default(),"control_type":el.CurrentLocalizedControlType().map(|v|v.to_string()).unwrap_or_default(),"enabled":el.CurrentIsEnabled().map(|v|v.as_bool()).unwrap_or(false),"offscreen":offscreen,"focused":el.CurrentHasKeyboardFocus().map(|v|v.as_bool()).unwrap_or(false),"password":password,"value":value,"bounds":bounds(local),"actions":patterns}));
                 if depth < 16 && !password {
                     let mut child = walker.GetFirstChildElement(&el).ok();
                     let mut siblings = 0;
@@ -299,6 +302,24 @@ impl Engine {
             ))
         }
     }
+    fn perception(&self, expected_pid: u32, text: bool, inventory: bool, deadline: &Deadline) -> Result<Reply, String> {
+        let h = unsafe { GetForegroundWindow() };
+        let w = target(h)?;
+        if w.pid != expected_pid { return Err("Foreground process changed before sampling".into()); }
+        if w.pid == std::process::id() { return Err("Companion window is focused; external contents were not read".into()); }
+        let before = label(h);
+        let (accessibility, error) = if text {
+            match self.tree(w, deadline, true) { Ok((data, _)) => (Some(data), None), Err(error) => (None, Some(error)) }
+        } else { (None, None) };
+        deadline.check()?;
+        if unsafe { GetForegroundWindow() } != h || target(h)? != w || label(h) != before {
+            return Err("Foreground changed while sampling; observation discarded".into());
+        }
+        let visible = if inventory { windows()?.into_iter().filter(|window|window.pid != std::process::id())
+            .take(16).map(window_data).collect::<Vec<_>>() } else { vec![] };
+        Ok(Reply { data:json!({"window":window_data(w),"accessibility":accessibility,"accessibility_error":error,
+            "visible_windows":visible,"source":"windows_uia_foreground","untrusted":true}),images:vec![] })
+    }
     fn observe(
         &mut self,
         owner: &str,
@@ -313,7 +334,7 @@ impl Engine {
             return Err("Window is minimized; focus it before observing".into());
         }
         let (accessibility, elements, accessibility_error) = if text {
-            match self.tree(w, deadline) {
+            match self.tree(w, deadline, false) {
                 Ok((v, e)) => (Some(v), e, None),
                 Err(e) => (None, vec![], Some(e)),
             }

@@ -45,7 +45,7 @@ fn copy_directory(source: &Path, destination: &Path, files: &mut usize, bytes: &
     Ok(())
 }
 
-fn extract_zip(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn extract_zip(source: &Path, destination: &Path) -> Result<(), String> {
     let file = std::fs::File::open(source).map_err(|e|e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e|format!("ZIP 无效: {e}"))?;
     if zip.len() > MAX_FILES { return Err("ZIP 条目过多".into()); }

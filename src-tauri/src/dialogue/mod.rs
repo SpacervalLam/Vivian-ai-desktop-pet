@@ -798,15 +798,20 @@ impl DialogueManager {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
-                let meta = match (channel.as_ref(), kind.as_ref()) {
-                    (Some(ch), Some(k)) => {
-                        Some(crate::messages::MessageMeta::user().with_channel(ch).with_kind(k))
-                    }
-                    (Some(ch), None) => Some(crate::messages::MessageMeta::user().with_channel(ch)),
-                    (None, Some(k)) => Some(crate::messages::MessageMeta::user().with_kind(k)),
-                    (None, None) => None,
+                use crate::messages::MessageSource;
+                let source = match e.metadata.get("source").and_then(|v| v.as_str()) {
+                    Some("mirror") | Some("bystander_observation") => MessageSource::Mirror,
+                    Some("tool") => MessageSource::Tool,
+                    Some("inner_monologue") => MessageSource::InnerMonologue,
+                    _ if e.role == "assistant" => MessageSource::Assistant,
+                    _ => MessageSource::User,
                 };
-                let mut meta = meta.unwrap_or_default();
+                let mut meta = crate::messages::MessageMeta::new(source);
+                if let Some(ch) = channel.as_ref() { meta.channel = Some(ch.clone()); }
+                if let Some(k) = kind.as_ref() { meta.kind = Some(k.clone()); }
+                if e.metadata.get("is_memory_disabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    meta.is_memory_disabled = true;
+                }
                 meta.communication = Some(crate::messages::CommunicationContext::from_metadata(&e.metadata, &self.char_id));
                 let meta = Some(meta);
                 let sticker = e.metadata.get("sticker").and_then(|s|serde_json::from_value(s.clone()).ok());
@@ -1282,6 +1287,30 @@ mod tests {
         }
         assert_eq!(mgr.get_history().len(), 3);
         assert_eq!(mgr.get_history()[0].content, "msg 2");
+    }
+
+    #[test]
+    fn bystander_observation_restores_as_non_memory_system_data() {
+        let mgr = DialogueManager::new(10, "test");
+        let entry = HistoryEntry {
+            id: "obs".into(),
+            role: "system".into(),
+            content: "[OBSERVED EXCHANGE] user -> vivian".into(),
+            timestamp: chrono::Local::now().timestamp() as f64,
+            session_id: None,
+            metadata: serde_json::json!({
+                "source": "bystander_observation",
+                "is_memory_disabled": true,
+                "channel": "proactive",
+                "communication": {"speaker": "user", "listener": "test", "knowledge_source": "observed"}
+            }),
+        };
+        let message = mgr.restore_message(entry);
+        assert_eq!(message.role, "system");
+        let meta = message.meta.unwrap();
+        assert_eq!(meta.source, crate::messages::MessageSource::Mirror);
+        assert!(meta.is_memory_disabled);
+        assert_eq!(meta.channel.as_deref(), Some("proactive"));
     }
 
     #[test]

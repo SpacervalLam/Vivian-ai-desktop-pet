@@ -146,7 +146,7 @@ impl UserGoalLedger {
     pub fn active_briefs(&self, n: usize) -> Vec<UserGoalBrief> {
         self.active_goals()
             .into_iter()
-            .take(n)
+            .take(n.min(MAX_ACTIVE_GOALS))
             .map(|g| {
                 let days = g.days_to_deadline();
                 UserGoalBrief {
@@ -252,28 +252,10 @@ impl UserGoalLedger {
         matched
     }
 
-    /// 活跃目标数超限淘汰：保留 deadline 最紧迫的 MAX_ACTIVE_GOALS 条
+    /// Compatibility hook: presentation limits never abandon user goals.
     pub fn enforce_capacity(&self) {
-        let mut goals = self.goals.write();
-        let active_count = goals.iter().filter(|g| g.is_active_track()).count();
-        if active_count <= MAX_ACTIVE_GOALS {
-            return;
-        }
-        // 收集活跃目标的索引与 deadline
-        let mut indexed: Vec<(usize, i64)> = goals
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| g.is_active_track())
-            .map(|(i, g)| (i, g.days_to_deadline().unwrap_or(i64::MAX)))
-            .collect();
-        indexed.sort_by(|a, b| b.1.cmp(&a.1)); // 最不紧迫的在前
-        let drop_n = active_count - MAX_ACTIVE_GOALS;
-        for (idx, _) in indexed.into_iter().take(drop_n) {
-            goals[idx].state = UserGoalState::Abandoned;
-            goals[idx].last_updated_at = Local::now().timestamp() as f64;
-        }
-        drop(goals);
-        let _ = self.persist();
+        // Capacity limits prompt attention, never the user's real goal state.
+        // active_briefs applies the presentation limit without rewriting the ledger.
     }
 
     /// 清空全部目标（恢复出厂设置 / 清空记忆时调用）
@@ -366,6 +348,17 @@ mod tests {
             quote: "我明年要考研".to_string(),
             extracted_at: 0.0,
         }
+    }
+    #[test]
+    fn capacity_only_limits_attention_and_preserves_paused_and_active_goals() {
+        let dir=tempfile::tempdir().unwrap();
+        let ledger=UserGoalLedger::new(dir.path().join("goals.json"));
+        for i in 0..8 {ledger.create(&format!("目标 {i}"),None,make_dialogue_source());}
+        ledger.transition_state("目标 0",UserGoalState::Paused);
+        ledger.enforce_capacity();
+        assert_eq!(ledger.active_goals().len(),8);
+        assert_eq!(ledger.active_briefs(100).len(),5);
+        assert!(ledger.active_goals().iter().any(|g|g.label=="目标 0"&&g.state==UserGoalState::Paused));
     }
 
     #[test]

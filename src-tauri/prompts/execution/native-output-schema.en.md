@@ -1,1 +1,2 @@
 Return a JSON object in the runtime schema. `text` is only this character's spoken reply; `intent` is reply, short_reply or no_reply. For silence use empty text and no_reply. Optional fields are metadata, never spoken.
+Silence: {"text":"","intent":"no_reply"}.

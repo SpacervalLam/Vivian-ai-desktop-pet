@@ -19,6 +19,8 @@
 .session-sidebar-project { padding-left: 6px; }
 .session-sidebar .codex-session-item { display: flex; align-items: center; gap: 5px; min-width: 0; padding: 7px 8px; margin: 2px 0; }
 .session-sidebar .codex-session-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 阻塞角标：不同于"执行中"，它表示这个会话自己走不下去，只有人能解开。 */
+.session-sidebar .codex-session-blocked { flex-shrink: 0; color: var(--codex-danger, currentColor); }
 .session-sidebar .session-sidebar-row-action { opacity: 0; flex-shrink: 0; }
 .session-sidebar .codex-session-item:is(:hover,:focus-within) .session-sidebar-row-action { opacity: 1; }
 .session-sidebar-empty { margin: 4px 10px 10px 27px; color: var(--codex-ink-faint); font-size: 11px; font-weight: 400; line-height: 1.7; }

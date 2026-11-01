@@ -359,6 +359,22 @@ impl TimeStampedMemory {
         }
     }
 
+    /// 测试专用：直接放入一条带时间范围的摘要，避免为时间格式测试构造完整对话。
+    #[cfg(test)]
+    pub(crate) fn with_test_summary(
+        content: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+    ) -> Self {
+        let mut memory = Self::new();
+        memory.summaries.push(TimeStampedSummary {
+            content: content.to_string(),
+            start_time,
+            end_time,
+        });
+        memory
+    }
+
     /// 获取最近一条摘要内容（无则空字符串）。
     pub fn recent_summary(&self) -> String {
         self.summaries

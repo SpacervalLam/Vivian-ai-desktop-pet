@@ -160,6 +160,9 @@ impl Tool for TalkToCharacterTool {
             .to_string();
 
         let stream_id = generate_cross_stream_id();
+        if crate::character_registry::get_brain(&ctx.char_id).is_some_and(|brain|!brain.mind.personal.permits_peer_text(&message)) {
+            return ToolResult::standard_error("Message contains a private personal record; ask the user before sharing it",None,None);
+        }
         let req = CrossCharacterRequest {
             source_id: ctx.char_id.clone(),
             target_id: target_id.clone(),
@@ -306,7 +309,7 @@ impl Tool for GetRoommateStatusTool {
         match CROSS_CHARACTER_BUS.roommate_status_text(&ctx.char_id, "zh") {
             Some(status) => ToolResult::standard_success(
                 &status,
-                Some(json!({ "status": status })),
+                Some(json!({ "status": status,"shared_profiles":crate::character_registry::list_character_ids().into_iter().filter(|id|id!=&ctx.char_id).filter_map(|id|crate::character_registry::get_brain(&id).map(|brain|json!({"character_id":id,"profile":brain.mind.personal.peer_context()}))).collect::<Vec<_>>() })),
             ),
             None => ToolResult::standard_error(
                 "当前没有可查询的室友",
@@ -336,6 +339,11 @@ impl Tool for GetRoommateStatusTool {
 /// 只客观呈现对方说了什么/做了什么，不注入对对方意图的主观解读，
 /// 让源角色基于回复内容本身判断是否继续。
 fn format_reply_for_llm(target_id: &str, reply: &CrossCharacterReply) -> String {
+    if reply.conv_state == "interrupted" { return format!("{target_id} 已收到消息，但处理被中断，尚未完成。不要编造回答；需要明确重试。回执 ID：{}",reply.message_id.as_deref().unwrap_or("unknown")); }
+    if reply.conv_state == "completed" { return format!("这条消息此前已处理，本次没有再次生成回答。回执 ID：{}。不要把接收状态当成新答复。",reply.message_id.as_deref().unwrap_or("unknown")); }
+    if reply.conv_state == "queued" {
+        return format!("消息已送达 {target_id} 的收件箱，尚未回复。回执 ID：{}。这只是接收确认，不是对方的答案；不要代替对方回答或立刻重复发送。后续回复会回到你的同伴消息信道。",reply.message_id.as_deref().unwrap_or("unknown"));
+    }
     match reply.response_mode.as_str() {
         "speak" => {
             if reply.reply.is_empty() {

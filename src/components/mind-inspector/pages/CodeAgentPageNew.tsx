@@ -224,6 +224,14 @@ interface CodingSession {
   reasoning_level?: 'low' | 'medium' | 'high' | string;
   messages: CodingMessage[];
   status: 'idle' | 'running' | 'canceled';
+  /**
+   * 宿主算出的「在等谁」：`idle` / `working` / `queued` / `answer` / `blocked`。
+   *
+   * 与 `status` 互补而非重复——`status` 说 agent 在不在跑，它说这个会话此刻
+   * 停在哪一步、需不需要人。`blocked` 的会话 `status` 同样是 `idle`。
+   * 只在会话列表头下发，不存在于会话存档。
+   */
+  stage?: 'idle' | 'working' | 'queued' | 'answer' | 'blocked' | string;
   resume_available?: boolean;
   updated_at: number;
   /** 会话目标（/goal 设置） */

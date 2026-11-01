@@ -614,9 +614,13 @@ struct Runtime {
 }
 static TASKS: once_cell::sync::Lazy<tokio::sync::Mutex<HashMap<String, Arc<Runtime>>>> =
     once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
-fn runtime_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
-    let installed =
-        node_path(app.path().resource_dir().map_err(|e| e.to_string())?).join("browser-runtime");
+fn runtime_paths(_app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    if let Some(installed) = crate::commands::optional_resources::pack_root("browser-runtime") {
+        return Ok((
+            node_path(installed.join("node.exe")),
+            installed.join("host.mjs"),
+        ));
+    }
     #[cfg(debug_assertions)]
     {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -636,10 +640,16 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
             return Ok((node, host));
         }
     }
-    if installed.join("node.exe").is_file() && installed.join("host.mjs").is_file() {
-        return Ok((installed.join("node.exe"), installed.join("host.mjs")));
-    }
-    Err("Original Playwright runtime is missing. Build/package browser-runtime before using browser_execute".into())
+    // The size hint follows the manifest so it cannot drift from the published archive.
+    Err(match crate::commands::optional_resources::spec("browser-runtime")
+        .and_then(|spec| spec.download)
+    {
+        Some(download) => format!(
+            "浏览器自动化运行时未安装。请在设置 → 插件中下载并安装（约 {} MB），或选择本地运行时 ZIP。",
+            download.approx_mb
+        ),
+        None => "浏览器自动化运行时未安装。请在设置 → 插件中安装。".into(),
+    })
 }
 async fn launch(app: tauri::AppHandle, key: String, tab: String) -> Result<Arc<Runtime>, String> {
     let (node, host) = runtime_paths(&app)?;

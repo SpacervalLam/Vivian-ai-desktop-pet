@@ -7,7 +7,12 @@ const ACTIVE_TTL: i64 = 14 * 86400;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThoughtStep { #[default] Reflect, AskUser, Share, Rest }
+pub enum ThoughtStep { #[default] Reflect, AskUser, AskPeer, Share, SharePeer, Rest }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionScope { General, #[default] UserOnly }
+pub const PEER_FALLBACK_AFTER_SECS: i64 = 180;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +34,8 @@ pub struct ThreadUpdate {
     pub status: ThreadStatus,
     pub origin: ThoughtOrigin,
     pub evidence: String,
+    #[serde(default)] pub question_scope: QuestionScope,
+    #[serde(default)] pub peer_fallback: bool,
 }
 
 pub struct ThoughtGrounding<'a> {
@@ -56,6 +63,10 @@ pub struct ThoughtThread {
     attempted_revision: u64,
     source_token: u64,
     reflections: u8,
+    #[serde(default)] pub question_scope: QuestionScope,
+    #[serde(default)] pub peer_fallback: bool,
+    #[serde(default)] peer_attempted_revision: u64,
+    #[serde(default)] fallback_ready: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -64,6 +75,8 @@ pub struct ThoughtThreads {
     sequence: u64,
     #[serde(default)]
     retired: Vec<RetiredThought>,
+    #[serde(default)]
+    pub continuation: super::continuation::ContinuationState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +109,11 @@ impl ThoughtGrounding<'_> {
             ThoughtOrigin::Reflection if self.reflections.iter().any(|text| text.contains(quote)) => None,
             _ => return None,
         };
-        Some((token(update.origin, quote, at), at))
+        // Different excerpts of the same cached observation are the same source.
+        let source = if update.origin == ThoughtOrigin::WorldObservation {
+            *self.world.iter().find(|text| text.contains(quote))?
+        } else { quote };
+        Some((token(update.origin, source, at), at))
     }
 }
 
@@ -106,12 +123,39 @@ impl ThoughtThread {
         self.status == ThreadStatus::Active && !self.awaiting_reply
             && self.revision > self.attempted_revision
             && self.updated_at <= now && now - self.updated_at <= ACTIVE_TTL
-            && matches!(self.next_step, ThoughtStep::AskUser | ThoughtStep::Share)
-            && (self.next_step != ThoughtStep::AskUser || !self.open_question.is_empty())
+            && matches!(self.next_step, ThoughtStep::AskUser | ThoughtStep::AskPeer | ThoughtStep::Share | ThoughtStep::SharePeer)
+            && (!matches!(self.next_step, ThoughtStep::AskUser | ThoughtStep::AskPeer) || !self.open_question.is_empty())
+            && (self.next_step != ThoughtStep::AskPeer || self.question_scope == QuestionScope::General)
+    }
+    fn fallback_due(&self, now: i64) -> bool {
+        self.status == ThreadStatus::Active && self.awaiting_reply && self.next_step == ThoughtStep::AskUser
+            && self.question_scope == QuestionScope::General && self.peer_fallback
+            && !self.open_question.is_empty() && self.peer_attempted_revision < self.revision
+            && self.last_spoken_at.is_some_and(|at| now >= at && now - at >= PEER_FALLBACK_AFTER_SECS)
+            && now >= self.updated_at && now - self.updated_at <= ACTIVE_TTL
     }
 }
 
 impl ThoughtThreads {
+    pub fn continuation_anchors(&self, now: i64, eligible_only: bool) -> Vec<super::continuation::ConcernAnchor> {
+        self.entries.iter().filter(|thread| !eligible_only || (
+            thread.status == ThreadStatus::Active && !thread.awaiting_reply
+            && thread.updated_at <= now && now - thread.updated_at <= ACTIVE_TTL
+            && thread.next_step != ThoughtStep::Rest && thread.reflections < 2
+            && (thread.next_step == ThoughtStep::Reflect || thread.revision > thread.attempted_revision)
+        )).map(|thread| super::continuation::ConcernAnchor {
+            key: thread.key.clone(), revision: thread.revision, source: thread.source_token,
+        }).collect()
+    }
+
+    pub fn plan_continuation(&mut self, request: Option<&super::continuation::ContinuationRequest>, now: i64) -> bool {
+        let before = self.continuation.clone();
+        let live = self.continuation_anchors(now, false);
+        self.continuation.retain_sources(&live);
+        self.continuation.finish(request, &self.continuation_anchors(now, true), now);
+        self.continuation != before
+    }
+
     /// Also sanitizes restored state. Expiry never manufactures a new speaking reason.
     pub fn prune(&mut self, now: i64) {
         self.entries.retain(|thread| now.saturating_sub(thread.updated_at) <= ACTIVE_TTL
@@ -143,7 +187,8 @@ impl ThoughtThreads {
             let stance = clip(&update.stance, 180);
             let question = clip(&update.open_question, 120);
             if topic.is_empty() || relevance.is_empty() || stance.is_empty()
-                || (update.next_step == ThoughtStep::AskUser && question.is_empty()) { continue; }
+                || (matches!(update.next_step, ThoughtStep::AskUser | ThoughtStep::AskPeer) && question.is_empty())
+                || (update.next_step == ThoughtStep::AskPeer && update.question_scope != QuestionScope::General) { continue; }
             let is_external = matches!(update.origin, ThoughtOrigin::UserMessage | ThoughtOrigin::WorldObservation | ThoughtOrigin::SceneEvent);
             if let Some(thread) = self.entries.iter_mut().find(|thread| thread.key == key) {
                 let fresh_external = is_external && source_token != thread.source_token
@@ -151,8 +196,13 @@ impl ThoughtThreads {
                 // Silence is not an answer. Only a cited subsequent user reply can clear a pending question.
                 let answered = update.origin == ThoughtOrigin::UserMessage
                     && source_at.zip(thread.last_spoken_at).is_some_and(|(at, spoken)| at > spoken);
+                let peer_answered = thread.question_scope == QuestionScope::General && update.origin == ThoughtOrigin::SceneEvent
+                    && grounding.scene.iter().any(|event| event.kind == "peer_answer"
+                        && event.id.starts_with(&format!("peer_answer:{}:", thread.event_id()))
+                        && event.fact.contains(update.evidence.trim())
+                        && event.at as i64 >= thread.last_spoken_at.unwrap_or(thread.created_at));
                 let parking = update.status == ThreadStatus::Parked && update.next_step == ThoughtStep::Rest;
-                if (thread.awaiting_reply && !answered && !parking)
+                if (thread.awaiting_reply && !answered && !peer_answered && !parking)
                     || (thread.status != ThreadStatus::Active && !fresh_external)
                     || (!fresh_external && thread.reflections >= 2) { continue; }
                 let semantic_change = normalized(&thread.stance) != normalized(&stance)
@@ -165,12 +215,15 @@ impl ThoughtThreads {
                 thread.stance = stance;
                 thread.open_question = question;
                 thread.next_step = update.next_step;
+                thread.question_scope = update.question_scope;
+                thread.peer_fallback = update.peer_fallback && update.question_scope == QuestionScope::General;
+                thread.fallback_ready = false;
                 thread.status = update.status;
                 thread.updated_at = now;
                 thread.revision = self.sequence;
                 thread.reflections = if fresh_external { 0 } else { thread.reflections + 1 };
                 if fresh_external { thread.source_token = source_token; }
-                if answered { thread.awaiting_reply = false; }
+                if answered || peer_answered { thread.awaiting_reply = false; }
             } else {
                 // Reflective prose is not independent evidence for inventing a new concern.
                 if update.origin == ThoughtOrigin::Reflection || update.status != ThreadStatus::Active { continue; }
@@ -190,7 +243,9 @@ impl ThoughtThreads {
                 self.entries.push(ThoughtThread { key, topic, personal_relevance: relevance, stance,
                     open_question: question, next_step: update.next_step, status: update.status,
                     created_at: now, updated_at: now, revision: self.sequence, awaiting_reply: false,
-                    last_spoken_at: None, attempted_revision: 0, source_token, reflections: 0 });
+                    last_spoken_at: None, attempted_revision: 0, source_token, reflections: 0,
+                    question_scope: update.question_scope, peer_fallback: update.peer_fallback && update.question_scope == QuestionScope::General,
+                    peer_attempted_revision: 0, fallback_ready: false });
             }
             changed = true;
         }
@@ -206,12 +261,22 @@ impl ThoughtThreads {
     }
 
     pub fn offers(&self, now: i64) -> Vec<super::conversation::ConversationEvent> {
-        self.snapshot(now, CAPACITY).into_iter().filter(|thread| thread.speakable(now)).take(3)
+        self.snapshot(now, CAPACITY).into_iter().filter(|thread| thread.speakable(now) || (thread.fallback_ready && thread.fallback_due(now))).take(3)
             .map(|thread| super::conversation::ConversationEvent { id: thread.event_id(),
                 kind: "personal_thought".into(), at: thread.updated_at as f64,
                 fact: serde_json::json!({"topic":thread.topic,"personal_relevance":thread.personal_relevance,
-                    "stance":thread.stance,"open_question":thread.open_question,"next_step":thread.next_step,
+                    "stance":thread.stance,"open_question":thread.open_question,
+                    "next_step":if thread.awaiting_reply { ThoughtStep::AskPeer } else { thread.next_step },
+                    "question_scope":thread.question_scope,"fallback_from_unanswered_user":thread.awaiting_reply,
                     "subjective":true}).to_string() }).collect()
+    }
+
+    pub fn activate_peer_fallbacks(&mut self, now: i64) -> bool {
+        let mut changed = false;
+        for thread in &mut self.entries {
+            if !thread.fallback_ready && thread.fallback_due(now) { thread.fallback_ready = true; changed = true; }
+        }
+        changed
     }
 
     pub fn prompt_snapshot(&self, now: i64, limit: usize) -> Vec<serde_json::Value> {
@@ -219,30 +284,36 @@ impl ThoughtThreads {
             "key":thread.key,"topic":thread.topic,"personal_relevance":thread.personal_relevance,
             "stance":thread.stance,"open_question":thread.open_question,"next_step":thread.next_step,
             "status":thread.status,"awaiting_reply":thread.awaiting_reply,
+            "question_scope":thread.question_scope,"peer_fallback":thread.peer_fallback,
         })).collect()
     }
 
     pub fn permits(&self, event_id: &str, intent: super::conversation::ConversationIntent, now: i64) -> bool {
         use super::conversation::ConversationIntent;
-        self.entries.iter().any(|thread| thread.event_id() == event_id && thread.speakable(now)
-            && matches!((thread.next_step, intent), (ThoughtStep::AskUser, ConversationIntent::AskUser) | (ThoughtStep::Share, ConversationIntent::Share)))
+        self.entries.iter().any(|thread| thread.event_id() == event_id && (
+            (thread.speakable(now) && matches!((thread.next_step, intent),
+                (ThoughtStep::AskUser, ConversationIntent::AskUser) | (ThoughtStep::Share, ConversationIntent::Share)
+                | (ThoughtStep::AskPeer, ConversationIntent::AskPeer) | (ThoughtStep::SharePeer, ConversationIntent::SharePeer)))
+            || (intent == ConversationIntent::AskPeer && thread.fallback_ready && thread.fallback_due(now))))
     }
 
-    pub fn attempt(&mut self, event_id: &str) {
+    pub fn attempt(&mut self, event_id: &str, intent: super::conversation::ConversationIntent) {
         if let Some(thread) = self.entries.iter_mut().find(|thread| thread.event_id() == event_id) {
-            thread.attempted_revision = thread.revision;
+            if intent.is_peer() { thread.peer_attempted_revision = thread.revision; }
+            if !thread.awaiting_reply { thread.attempted_revision = thread.revision; }
         }
     }
-    pub fn restore(&mut self, event_id: &str) {
-        if let Some(thread) = self.entries.iter_mut().find(|thread| thread.event_id() == event_id && !thread.awaiting_reply) {
-            thread.attempted_revision = thread.revision.saturating_sub(1);
+    pub fn restore(&mut self, event_id: &str, intent: super::conversation::ConversationIntent) {
+        if let Some(thread) = self.entries.iter_mut().find(|thread| thread.event_id() == event_id) {
+            if intent.is_peer() { thread.peer_attempted_revision = thread.revision.saturating_sub(1); }
+            if !thread.awaiting_reply { thread.attempted_revision = thread.revision.saturating_sub(1); }
         }
     }
     pub fn delivered(&mut self, event_id: &str, intent: super::conversation::ConversationIntent, now: i64) {
         if let Some(thread) = self.entries.iter_mut().find(|thread| thread.event_id() == event_id) {
             thread.attempted_revision = thread.revision;
-            thread.last_spoken_at = Some(now);
-            thread.awaiting_reply = intent == super::conversation::ConversationIntent::AskUser;
+            if !intent.is_peer() { thread.last_spoken_at = Some(now); }
+            if !intent.is_peer() { thread.awaiting_reply = intent == super::conversation::ConversationIntent::AskUser; }
         }
     }
 }
@@ -251,9 +322,10 @@ pub fn update_schema() -> serde_json::Value {
     serde_json::json!({"type":"array","maxItems":2,"items":{"type":"object","additionalProperties":false,
         "properties":{"key":{"type":"string"},"topic":{"type":"string"},"personal_relevance":{"type":"string"},
             "stance":{"type":"string"},"open_question":{"type":"string"},
-            "next_step":{"type":"string","enum":["reflect","ask_user","share","rest"]},
+            "next_step":{"type":"string","enum":["reflect","ask_user","ask_peer","share","share_peer","rest"]},
+            "question_scope":{"type":"string","enum":["general","user_only"]},"peer_fallback":{"type":"boolean"},
             "status":{"type":"string","enum":["active","resolved","parked"]},
             "origin":{"type":"string","enum":["persona","user_message","world_observation","scene_event","reflection"]},
             "evidence":{"type":"string"}},
-        "required":["key","topic","personal_relevance","stance","open_question","next_step","status","origin","evidence"]}})
+        "required":["key","topic","personal_relevance","stance","open_question","next_step","status","origin","evidence","question_scope","peer_fallback"]}})
 }

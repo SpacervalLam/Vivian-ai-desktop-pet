@@ -18,6 +18,7 @@ pub mod jobs_tools;
 pub mod lsp_tools;
 pub mod media_tools;
 pub mod memory_tools;
+pub mod personal_companion;
 pub mod music_tools;
 pub mod notebook_tools;
 pub mod user_quick_notes;
@@ -93,6 +94,8 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(provider_preset_tools::ManageProviderPresetTool::new()),
         // 记忆工具
         Arc::new(memory_tools::SaveMemoryTool::new()),
+        Arc::new(personal_companion::PersonalCompanion),
+        Arc::new(personal_companion::InspectPersonalCompanion),
         Arc::new(memory_tools::SearchMemoryTool::new()),
         // 深查：模型一次给多组关键词/渠道，内部并行跨日记/笔记/摘要/事实/原文检索。
         Arc::new(memory_tools::DeepRecallTool::new()),

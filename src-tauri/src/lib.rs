@@ -504,6 +504,7 @@ pub fn run() {
             commands::system::open_application,
             commands::system::close_application,
             commands::proactive::get_proactive_status,
+            commands::proactive::retry_interaction_message,
             commands::diary::get_diary_entries,
             commands::diary::get_diary_range,
             commands::diary::generate_diary,
@@ -586,6 +587,7 @@ pub fn run() {
             commands::plugins::list_plugins,
             commands::apartment::apartment_plugin_status,
             commands::optional_resources::optional_resource_status,
+            commands::optional_resources::install_optional_resource,
             commands::plugins::plugin_paths,
             commands::plugins::plugin_diagnostics,
             commands::plugins::list_skills,
@@ -886,6 +888,10 @@ pub fn run() {
                         || crate::companion_runtime::quiet_reason(&gate_app.state::<Arc<AppState>>()).is_none()
                 }));
                 crate::brain::work_notices::set_app_handle(app.handle().clone());
+                let inbox_app = app.handle().clone();
+                crate::brain::work_notices::set_message_sink(Arc::new(move |character, id, session, title, body| {
+                    crate::brain::interaction_runtime::receive_work(&inbox_app, character, id, session, title, body);
+                }));
                 crate::tools::builtin::work_todo_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_question_tools::set_app_handle(app.handle().clone());
                 crate::tools::builtin::work_subagent_tools::set_app_handle(app.handle().clone());
@@ -1050,41 +1056,8 @@ pub fn run() {
                                 }
                             }
 
-                            // 启动时立即为所有在线角色触发一次 current_thought 合成
-                            // 避免 Mind Inspector 首次打开时显示空白
-                            // 受 enable_inner_monologue 开关控制（与内心独白共享同一滑块）
-                            {
-                                let config_snap = state.config.read().get_all().clone();
-                                let enable_thought = config_snap.world.enable_inner_monologue;
-                                let language = config_snap.base.language.clone();
-                                let lang_code = if language.starts_with("ja") {
-                                    "ja"
-                                } else if language.starts_with("en") {
-                                    "en"
-                                } else {
-                                    "zh"
-                                };
-                                let chars = state.characters.read();
-                                for instance in chars.values() {
-                                    if *instance.online.read() {
-                                        let mind = instance.brain.mind.clone();
-                                        if !enable_thought {
-                                            mind.clear_current_thought();
-                                            continue;
-                                        }
-                                        let router = instance.brain.router.clone();
-                                        let world_provider = instance.brain.world_provider.clone();
-                                        let lang = lang_code.to_string();
-                                        let conversation_context = instance.brain.proactive.thought_conversation_context(false);
-                                        let persona_context = instance.brain.persona.thought_persona_context();
-                                        tauri::async_runtime::spawn(async move {
-                                            crate::mind::thought_synthesis::refresh_current_thought(
-                                                &mind, &router, &world_provider, &lang, &conversation_context, &persona_context,
-                                            ).await;
-                                        });
-                                    }
-                                }
-                            }
+                            // Idempotent: the native actor owns cold start and restored deadlines.
+                            crate::brain::resident::ensure_started(&handle, &state);
 
                             // 注册所有角色的 TtsManager 到全局 SpeechPlanner,并启动 pump 循环
                             {

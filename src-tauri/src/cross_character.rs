@@ -195,6 +195,7 @@ pub(crate) fn current_utterance_id(speaker: &str) -> Option<String> {
 }
 
 /// 跨角色消息请求
+#[derive(Clone)]
 pub struct CrossCharacterRequest {
     /// 源角色 ID（发起方）
     pub source_id: String,
@@ -405,7 +406,11 @@ impl CrossCharacterBus {
                 "AppHandle 未注入，无法发起跨角色对话".to_string(),
             ))?;
         let state = handle.state::<Arc<AppState>>().inner().clone();
-        self.send(&handle, &state, req).await
+        let reply = self.send(&handle, &state, req.clone()).await?;
+        if ["target_busy","peer_busy","user_input_pending"].contains(&reply.conv_state.as_str()) {
+            return self.send_autonomous(&handle, &state, req).await;
+        }
+        Ok(reply)
     }
 
     /// 生成室友的 Public State 一句话描述（共享世界，不共享心智）
@@ -729,6 +734,20 @@ impl CrossCharacterBus {
 
     pub async fn send_autonomous(&self, app: &AppHandle, state: &Arc<AppState>, req: CrossCharacterRequest)
         -> VivianResult<CrossCharacterReply> {
+        let receipt = crate::brain::interaction_runtime::receive_peer(app, state, &req).map_err(crate::error::VivianError::Engine)?;
+        let receipt_state = state.get_character(Some(&req.target_id)).ok()
+            .and_then(|target| target.brain.mind.inbox.get(&receipt)).map(|message| message.state);
+        let conv_state = match receipt_state {
+            Some(crate::mind::inbox::MessageState::Interrupted) => "interrupted",
+            Some(crate::mind::inbox::MessageState::Completed) => "completed",
+            _ => "queued",
+        };
+        Ok(CrossCharacterReply { message_id:Some(receipt), reply:String::new(), response_mode:"internal".into(),
+            conv_state:conv_state.into(), should_continue:false, expression:String::new(), motion:String::new() })
+    }
+
+    pub(crate) async fn process_received(&self, app: &AppHandle, state: &Arc<AppState>, req: CrossCharacterRequest)
+        -> VivianResult<CrossCharacterReply> {
         self.send_inner(app, state, req, true).await
     }
 
@@ -780,21 +799,6 @@ impl CrossCharacterBus {
             .map(|c| c.name.clone())
             .unwrap_or_else(|_| req.source_id.clone());
         let target_name = target_instance.name.clone();
-
-        // 通知前端：跨角色对话开始（源角色即将说话）
-        let _ = app.emit(
-            "cross:start",
-            json!({
-                "stream_id": req.stream_id,
-                "speaker_id": req.source_id,
-                "speaker_name": source_name,
-                "listener_id": req.target_id,
-                "listener_name": target_name,
-                "message": req.message,
-                "conv_id": conv.id,
-                "conv_state": conv.state.as_str(),
-            }),
-        );
 
         // 构造目标角色的流式 emitter，将 chunk 转发为 cross:chunk 事件
         // 注意：此时 brain.think() 是在目标角色上执行的，生成的是目标角色的回复，
@@ -887,7 +891,6 @@ impl CrossCharacterBus {
         };
 
         let brain = target_instance.brain.clone();
-        brain.set_stream_emitter(Some(emitter));
 
         // TOCTOU 加固：获取 think_lock 后再次检查目标角色是否已进入 UserChat turn 或收到 pending_user。
         // 互锁检测（行 694-726）与 think_lock 获取之间存在时间窗口，
@@ -925,8 +928,7 @@ impl CrossCharacterBus {
 
         // 临时切换 channel 为 cross_character，确保 brain.think 写入 dialogue 时 channel 正确
         // 完成后恢复原 channel，避免影响后续正常对话
-        let original_channel = brain.dialogue.get_channel();
-        brain.dialogue.set_channel("cross_character");
+        let channel_guard = state.session_coordinator.enter_channel(&brain.dialogue, "cross_character");
         let _session_guard = match state.session_coordinator.try_enter_cross_turn(
             &req.target_id,
             &conv.id,
@@ -936,8 +938,7 @@ impl CrossCharacterBus {
             Some(g) => g,
             None => {
                 // 用户输入等待中：放弃跨角色对话，让位给用户
-                brain.dialogue.set_channel(&original_channel);
-                brain.set_stream_emitter(None);
+                drop(channel_guard);
                 drop(_guard);
                 let _ = app.emit(
                     "cross:done",
@@ -961,6 +962,22 @@ impl CrossCharacterBus {
                 });
             }
         };
+
+        // 通知前端：跨角色对话开始（源角色即将说话）
+        let emitter_guard = brain.stream_emitter_scope(emitter);
+        let _ = app.emit(
+            "cross:start",
+            json!({
+                "stream_id": req.stream_id,
+                "speaker_id": req.source_id,
+                "speaker_name": source_name,
+                "listener_id": req.target_id,
+                "listener_name": target_name,
+                "message": req.message,
+                "conv_id": conv.id,
+                "conv_state": conv.state.as_str(),
+            }),
+        );
 
         // 记忆触发锚点：从统一事件账本检索源角色与目标角色最近的共同事件，
         // 注入到合成输入中，让目标角色能围绕已有记忆展开对话，避免无意义空聊。
@@ -1018,8 +1035,9 @@ impl CrossCharacterBus {
 
         // 构建交接上下文包：打包源角色当前状态与最近用户对话，让目标角色感知源角色刚才在做什么
         // 同时注入共同情境：双方都在观察同一个用户，用户最近的活动是天然共同话题
-        let handoff_text = match state.get_character(Some(&req.source_id)) {
-            Ok(source_instance) => {
+        let handoff_text = match (autonomous, state.get_character(Some(&req.source_id))) {
+            (true, _) => "\n\n[Peer exchange]\nRespond to the actual question or point your roommate chose to bring. Use what you know, distinguish uncertainty and differing views, and say when you do not know. Ask a follow-up only for a real missing detail. Agreement is not verification. Do not disclose private user dialogue or decide the user's preferences or permissions. A useful exchange may end without another question.".into(),
+            (false, Ok(source_instance)) => {
                 let ctx = build_handoff_context(&source_instance.brain, &brain, &req.target_id, "cross_character_reply");
                 let rendered = ctx.render(&source_name);
                 let activity_brief = source_instance.brain.proactive.activity_journal().to_brief();
@@ -1034,7 +1052,7 @@ impl CrossCharacterBus {
                     format!("\n\n{}{}", rendered, shared_context)
                 }
             }
-            Err(_) => String::new(),
+            (false, Err(_)) => String::new(),
         };
         let synthesized_input = format!("{}{}", synthesized_input, handoff_text);
 
@@ -1073,17 +1091,17 @@ impl CrossCharacterBus {
         drop(_focus_lease);
 
         // 恢复原 channel
-        brain.dialogue.set_channel(&original_channel);
+        drop(channel_guard);
         drop(_session_guard);
-        brain.set_stream_emitter(None);
+        drop(emitter_guard);
         drop(_guard);
 
         let Some(result) = result else {
             let _ = app.emit("cross:done", json!({"stream_id":req.stream_id,
                 "speaker_id":req.target_id,"listener_id":req.source_id,
-                "response_mode":"ignore","conv_state":"user_input_pending","should_continue":false}));
+                "response_mode":"ignore","conv_state":"preempted","should_continue":false}));
             return Ok(CrossCharacterReply { message_id:None, reply:String::new(), response_mode:"ignore".into(),
-                conv_state:"user_input_pending".into(), should_continue:false, expression:String::new(), motion:String::new() });
+                conv_state:"preempted".into(), should_continue:false, expression:String::new(), motion:String::new() });
         };
 
         match result {
@@ -1095,6 +1113,15 @@ impl CrossCharacterBus {
                     ai_response.response_mode.clone()
                 };
                 let response_mode = crate::conversation::ResponseMode::from_str(&response_mode_str);
+                let heard_at = chrono::Utc::now().timestamp();
+                brain.mind.receive_peer_statement(&req.source_id, &input_id, &req.message, None, heard_at);
+                if response_mode.needs_speech() && !final_text.trim().is_empty() {
+                    if let Ok(source) = state.get_character(Some(&req.source_id)) {
+                        let concern = source.brain.mind.prepared_personal_event(&req.message)
+                            .or_else(|| brain.mind.inbox.get(&input_id).and_then(|message| message.concern_id));
+                        source.brain.mind.receive_peer_statement(&req.target_id, &reply_id, &final_text, concern, heard_at);
+                    }
+                }
 
                 // ── 会话状态更新：根据本轮响应模式、Energy、Novelty 计算 Continuation Score ──
                 let updated_conv = crate::conversation::CONVERSATION_MANAGER.update_after_round(

@@ -23,9 +23,13 @@
 //! 下一个 tick。第三类刻意不进——它的语义纯粹是"主动说出去"，放进段落只会让
 //! 同一件事多出一条并行路径、被说两遍。
 //!
-//! 完成报告在**注入提示词时即消费**（`background_tasks` 段落每轮都会注入，
-//! 不消费会让角色反复念同一件事）。代价是"拼好了提示词但本轮生成失败"会丢掉
-//! 这份报告——相比反复重提同一件事，这个损失更小，且有 TTL 兜住上限。
+//! 完成报告的消费是**两段式**：注入提示词时只把条目「领取」（`claim`，标记已占用
+//! 但留在队列里），这一轮真的把回复产出之后再「确认」（`confirm`）才移除。生成失败
+//! 就 `release` 放回队列等下个 tick 重试——代价只是被晚说一次，而不是悄悄消失。
+//! 这是 `next_alert_for` 早就采用的「先看后取」语义，报告这条路径此前是唯一的例外。
+//! 连续 3 次都没说出去才真正丢弃并留一条 warn：重提太多次也伤，但那是"陈旧"这个
+//! 第三种情形，不该由"生成失败"来承担。进程重启时所有领取标记作废（`persistent`
+//! 会清掉），因为不会有谁来确认它们了。
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -38,6 +42,20 @@ use super::work_question::WorkQuestionRequest;
 
 // Emit desktop notifications independently of companion generation and tick timing.
 static NOTIFICATION_APP: Lazy<RwLock<Option<tauri::AppHandle>>> = Lazy::new(|| RwLock::new(None));
+type MessageSink = Arc<dyn Fn(&str, &str, &str, &str, &str) + Send + Sync>;
+static MESSAGE_SINK: Lazy<RwLock<Option<MessageSink>>> = Lazy::new(|| RwLock::new(None));
+pub fn set_message_sink(sink: MessageSink) { *MESSAGE_SINK.write() = Some(sink); }
+fn forward_message(char_id: &str, id: &str, session: &str, title: &str, body: &str) {
+    let sink = MESSAGE_SINK.read().clone();
+    if let Some(sink) = sink { sink(char_id, id, session, title, body); }
+}
+fn report_message_id(session: &str, at: f64, title: &str, body: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in title.bytes().chain(std::iter::once(0)).chain(body.bytes()) {
+        hash ^= u64::from(byte); hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("report:{session}:{}:{hash}",at.to_bits())
+}
 
 pub fn set_app_handle(app: tauri::AppHandle) {
     *NOTIFICATION_APP.write() = Some(app);
@@ -68,6 +86,12 @@ const REPORT_TTL_SECS: f64 = 300.0;
 
 /// 单角色报告队列上限。
 const MAX_REPORTS_PER_CHAR: usize = 8;
+
+/// 一份完成报告最多被"领走"几次。
+///
+/// 领取后生成失败会把报告放回队列；连续失败到这个次数才放弃。3 次足够跨过一次
+/// 网络抖动或一轮模型报错，又不至于让一份说不出去的报告无限占用队列位置。
+const MAX_REPORT_ATTEMPTS: u32 = 3;
 
 /// 「必须转达」的存活时长（秒）。
 ///
@@ -114,6 +138,13 @@ struct Entry {
     char_id: String,
     report: WorkReport,
     at: f64,
+    /// 已被某一轮生成领走、正在等确认。领取的条目不再参与下一轮注入，但**不删除**：
+    /// 生成失败时它还要回来。进程重启会清掉这个标记。
+    #[serde(default)]
+    claimed: bool,
+    /// 已因生成失败被放回的次数。到上限才真正丢弃，避免永不成功的报告一直转圈。
+    #[serde(default)]
+    attempts: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -162,6 +193,9 @@ impl WorkNoticeStore {
         let now = chrono::Local::now().timestamp() as f64;
         Self::prune_locked(&mut snapshot.entries, now);
         Self::prune_alerts_locked(&mut snapshot.alerts, now);
+        // A crashed process never confirms its claims, so a restart has to
+        // hand them back rather than leave them claimed forever.
+        for entry in &mut snapshot.entries { entry.claimed = false; }
         let mut store = Self::new();
         store.path = Some(path);
         *store.entries.write() = snapshot.entries;
@@ -202,6 +236,8 @@ impl WorkNoticeStore {
                 body: body.to_string(),
             },
             at: now,
+            claimed: false,
+            attempts: 0,
         });
         // 超限时丢该角色最早的一条
         loop {
@@ -223,29 +259,67 @@ impl WorkNoticeStore {
         }
         drop(entries);
         self.persist();
+        forward_message(char_id, &report_message_id(session_id,now,title,body), session_id, title, body);
         true
     }
 
-    /// 取该角色尚未转告过的完成报告，取走即移除。
-    pub fn take_reports_for(&self, char_id: &str) -> Vec<WorkReport> {
+    /// 领取该角色尚未转告的完成报告。
+    ///
+    /// 只标记不删除：这一轮生成成功与否此时还不知道，成功后才由 [`confirm_reports`]
+    /// 移除。领走的条目在确认前不会被再次领取，所以同一件事不会在一轮里被念两遍。
+    ///
+    /// **上一轮领走却没确认的条目在这里先放回**——生成失败、被用户打断、请求被丢弃，
+    /// 或进程在生成中途退出，都表现为"领了没确认"。下一次领取就是天然的回收点，
+    /// 不需要超时计时器去猜一轮该有多长。这份报告因此只是被晚说一次。
+    pub fn claim_reports_for(&self, char_id: &str) -> Vec<WorkReport> {
         if char_id.is_empty() {
             return Vec::new();
         }
         let now = chrono::Local::now().timestamp() as f64;
         let mut entries = self.entries.write();
+        let abandoned = Self::requeue_claims_locked(&mut entries, char_id, now);
         Self::prune_locked(&mut entries, now);
         let mut out = Vec::new();
-        entries.retain(|e| {
-            if e.char_id == char_id {
-                out.push(e.report.clone());
-                false
-            } else {
-                true
-            }
-        });
+        for entry in entries.iter_mut().filter(|e| e.char_id == char_id) {
+            entry.claimed = true;
+            out.push(entry.report.clone());
+        }
         drop(entries);
+        if abandoned > 0 {
+            tracing::warn!("[WorkNotices] {char_id}: {abandoned} 条完成报告连续 {MAX_REPORT_ATTEMPTS} 次没能说出去，已丢弃");
+        }
         self.persist();
         out
+    }
+
+    /// 本轮生成成功：领取过的报告确实进了这一轮回复，可以移除。
+    pub fn confirm_reports(&self, char_id: &str) {
+        let mut entries = self.entries.write();
+        entries.retain(|e| !(e.char_id == char_id && e.claimed));
+        drop(entries);
+        self.persist();
+    }
+
+    /// 把上一轮领走却没确认的条目标回未领取，并计一次失败；到上限的丢弃。
+    ///
+    /// `at` 一并重置：重试期的条目不该被 TTL 按"原始入队时间"判成陈旧。
+    /// "说不出去"和"已经过期"是两件事，各管各的。返回被丢弃的条数。
+    fn requeue_claims_locked(entries: &mut Vec<Entry>, char_id: &str, now: f64) -> usize {
+        let mut abandoned = 0usize;
+        entries.retain_mut(|e| {
+            if e.char_id != char_id || !e.claimed {
+                return true;
+            }
+            e.claimed = false;
+            e.attempts = e.attempts.saturating_add(1);
+            if e.attempts >= MAX_REPORT_ATTEMPTS {
+                abandoned += 1;
+                return false;
+            }
+            e.at = now;
+            true
+        });
+        abandoned
     }
 
     /// 登记一条「必须转达」——工作智能体已显式要求把这件事告诉用户。
@@ -273,9 +347,11 @@ impl WorkNoticeStore {
             && a.alert.title == title && a.alert.body == body) {
             let promoted = required && !existing.alert.required;
             existing.alert.required |= required;
+            let message_id = existing.alert.notice_id.clone();
             drop(alerts);
             self.persist();
             if promoted { notify_desktop(char_id, session_id, title); }
+            forward_message(char_id, &message_id, session_id, title, body);
             return true;
         }
         // A final result subsumes undelivered milestones and outdated blockers for this run.
@@ -286,10 +362,11 @@ impl WorkNoticeStore {
             alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id && a.alert.title == title));
         }
         if !required { alerts.retain(|a| !(a.char_id == char_id && a.alert.session_id == session_id && !a.alert.required)); }
+        let message_id = uuid::Uuid::new_v4().to_string();
         alerts.push(AlertEntry {
             char_id: char_id.to_string(),
             alert: WorkAlert {
-                notice_id: uuid::Uuid::new_v4().to_string(), required,
+                notice_id: message_id.clone(), required,
                 session_id: session_id.to_string(),
                 title: title.to_string(),
                 body: body.to_string(),
@@ -314,6 +391,7 @@ impl WorkNoticeStore {
         drop(alerts);
         self.persist();
         if required { notify_desktop(char_id, session_id, title); }
+        forward_message(char_id, &message_id, session_id, title, body);
         true
     }
 
@@ -364,8 +442,9 @@ impl WorkNoticeStore {
 
     /// 该角色是否还有待转告的完成报告。
     ///
-    /// 只看不取：报告由提示词段落消费（`take_reports_for`），
-    /// 这里只是让 tick 判断"值不值得给一次搭话机会"。
+    /// 只看不取：报告由提示词段落领取（`claim_reports_for`）并在生成成功后确认，
+    /// 这里只是让 tick 判断"值不值得给一次搭话机会"。已领取但还没确认的条目也算在内，
+    /// 因为那份报告确实还没说出去。
     pub fn has_report_for(&self, char_id: &str) -> bool {
         if char_id.is_empty() {
             return false;
@@ -374,6 +453,15 @@ impl WorkNoticeStore {
         let mut entries = self.entries.write();
         Self::prune_locked(&mut entries, now);
         entries.iter().any(|e| e.char_id == char_id)
+    }
+
+    /// Non-destructive transport view. Receiving is independent of presenting a callback.
+    pub fn inbox_facts_for(&self, char_id: &str) -> Vec<(String, WorkReport, i64)> {
+        let mut facts: Vec<_> = self.entries.read().iter().filter(|entry| entry.char_id == char_id).map(|entry|
+            (report_message_id(&entry.report.session_id,entry.at,&entry.report.title,&entry.report.body),entry.report.clone(),entry.at as i64)).collect();
+        facts.extend(self.alerts.read().iter().filter(|entry| entry.char_id == char_id).map(|entry|
+            (entry.alert.notice_id.clone(),WorkReport { session_id:entry.alert.session_id.clone(),title:entry.alert.title.clone(),body:entry.alert.body.clone() },entry.at as i64)));
+        facts
     }
 
     /// 会话被取消 / 重置时丢弃其未转告的报告与待转达项。
@@ -529,6 +617,47 @@ mod callback_tests {
         assert_eq!(old.notice_id, promoted.notice_id);
         assert!(promoted.required);
         assert_eq!(store.alerts.read().len(), 1);
+    }
+
+    #[test]
+    fn reports_are_only_dropped_after_the_reply_is_delivered() {
+        let store = WorkNoticeStore::new();
+        store.push_report("vivian", "s1", "工作结果已返回", "改了三处");
+        let claimed = store.claim_reports_for("vivian");
+        assert_eq!(claimed.len(), 1);
+        // A claim is not a delivery: a reply that fails must not cost the report.
+        assert!(store.has_report_for("vivian"));
+        // Each claim builds a new reply prompt; the API has no turn identifier.
+        // A new prompt retries the previous unconfirmed claim.
+        assert_eq!(store.claim_reports_for("vivian").len(), 1);
+        store.confirm_reports("vivian");
+        assert!(!store.has_report_for("vivian"));
+        assert!(store.claim_reports_for("vivian").is_empty());
+    }
+
+    #[test]
+    fn a_report_that_never_gets_delivered_is_abandoned_after_the_retry_budget() {
+        let store = WorkNoticeStore::new();
+        store.push_report("nana", "s1", "工作结果已返回", "结果");
+        for _ in 0..MAX_REPORT_ATTEMPTS {
+            assert_eq!(store.claim_reports_for("nana").len(), 1);
+        }
+        assert!(store.claim_reports_for("nana").is_empty(), "an undeliverable report must not cycle forever");
+        assert!(!store.has_report_for("nana"));
+    }
+
+    #[test]
+    fn a_restart_hands_claimed_reports_back_instead_of_swallowing_them() {
+        let path = std::env::temp_dir().join(format!("vivian-reports-{}.json", uuid::Uuid::new_v4()));
+        let store = WorkNoticeStore::persistent(path.clone());
+        store.push_report("vivian", "s1", "工作结果已返回", "结果");
+        assert_eq!(store.claim_reports_for("vivian").len(), 1);
+        drop(store);
+        // A crashed process never confirms, so the claim must not survive it.
+        let restored = WorkNoticeStore::persistent(path.clone());
+        assert!(restored.has_report_for("vivian"));
+        assert_eq!(restored.claim_reports_for("vivian").len(), 1);
+        let _ = std::fs::remove_file(path);
     }
 }
 

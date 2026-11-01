@@ -2391,7 +2391,7 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [proactiveStarted]);
 
-  // 主动对话 tick 轮询：间隔由 proactive.tick_interval 配置项驱动（动态递归 setTimeout）
+  // 主动发言呈现轮询；各角色的内部认知由 Rust 常驻任务驱动。间隔由 proactive.tick_interval 配置。
   useEffect(() => {
     if (!proactiveStarted) return;
     let cancelled = false;

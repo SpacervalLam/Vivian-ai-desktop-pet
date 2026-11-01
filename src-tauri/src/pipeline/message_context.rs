@@ -1,6 +1,8 @@
 //! Shared role-preserving context assembly for chat and proactive generation.
+use chrono::{DateTime, Local};
 use crate::types::response::ChatMessage;
-use super::prompt_modules::{section_heading, STATIC_OPEN, STATIC_CLOSE, SYSTEM_PROMPT_DYNAMIC_BOUNDARY};
+use crate::utils::prompt_time::{format_duration, format_local_time, format_relative_age_at};
+use super::prompt_modules::{normalize_lang, section_heading, STATIC_OPEN, STATIC_CLOSE, SYSTEM_PROMPT_DYNAMIC_BOUNDARY};
 
 pub struct PromptContext<'a> {
     pub system: &'a str,
@@ -127,9 +129,72 @@ pub fn append_current_turn(messages: &mut Vec<ChatMessage>, input: &str, interna
     messages.push(ChatMessage::user(input));
 }
 
+/// Role-preserving history without temporal annotations.
+///
+/// Kept for callers that deliberately need the raw sequence (tests, export,
+/// compatibility paths). Production chat/proactive prompt assembly should use
+/// [`append_history_with_time`].
 pub fn append_history(messages: &mut Vec<ChatMessage>, history: &[ChatMessage]) {
+    append_history_impl(messages, history, None);
+}
+
+/// Role-preserving history with a bounded temporal axis.
+///
+/// Timestamps never modify the real `ChatMessage` objects. Gap markers and a
+/// one-time history-start anchor are inserted as `system` data messages, so
+/// UI history, persistence and memory extraction remain untouched.
+pub fn append_history_with_time(
+    messages: &mut Vec<ChatMessage>,
+    history: &[ChatMessage],
+    now: DateTime<Local>,
+    lang: &str,
+) {
+    append_history_impl(messages, history, Some((now, normalize_lang(lang))));
+}
+
+const GAP_MARKER_THRESHOLD_SECS: f64 = 120.0;
+const HISTORY_START_ANCHOR_SECS: f64 = 300.0;
+const MAX_GAP_MARKERS: usize = 4;
+
+fn append_history_impl(
+    messages: &mut Vec<ChatMessage>,
+    history: &[ChatMessage],
+    time: Option<(DateTime<Local>, &str)>,
+) {
+    let mut last_utterance: Option<DateTime<Local>> = None;
+    let mut gap_markers = 0usize;
+
+    if let Some((now, lang)) = time {
+        if let Some(first) = history.iter().find_map(|message| {
+            matches!(message.role.as_str(), "user" | "assistant")
+                .then_some(message.timestamp)
+                .flatten()
+        }) {
+            let age = (now - first).num_seconds().max(0) as f64;
+            if age >= HISTORY_START_ANCHOR_SECS {
+                messages.push(ChatMessage::system(history_start_note(first, now, lang)));
+            }
+        }
+    }
+
     for original in history {
         let mut message = original.clone();
+        // Update the temporal cursor before conversion: third-party speech is
+        // still a real utterance on the timeline even when rendered as data.
+        let utterance_time = matches!(message.role.as_str(), "user" | "assistant")
+            .then_some(message.timestamp)
+            .flatten();
+        if let (Some((_now, lang)), Some(prev), Some(current)) = (time, last_utterance, utterance_time) {
+            let gap = (current - prev).num_seconds().max(0) as f64;
+            if gap >= GAP_MARKER_THRESHOLD_SECS && gap_markers < MAX_GAP_MARKERS {
+                messages.push(ChatMessage::system(gap_note(prev, current, lang)));
+                gap_markers += 1;
+            }
+        }
+        if utterance_time.is_some() {
+            last_utterance = utterance_time;
+        }
+
         if let Some(context) = message.meta.as_ref().and_then(|m| m.communication.as_ref()) {
             let third_party = context.speaker.as_deref().zip(context.current_character.as_deref())
                 .map(|(speaker, owner)| speaker != "user" && speaker != owner).unwrap_or(false);
@@ -149,6 +214,89 @@ pub fn append_history(messages: &mut Vec<ChatMessage>, history: &[ChatMessage]) 
         }
         messages.push(message);
     }
+}
+
+fn history_start_note(first: DateTime<Local>, now: DateTime<Local>, lang: &str) -> String {
+    let age = format_relative_age_at(first, now, lang);
+    match lang {
+        "en" => format!(
+            "[HISTORY START — DATA] The earliest visible historical message is from {} ({}). Do not treat it as a fresh event from this turn.\n[/HISTORY START]",
+            format_local_time(first), age
+        ),
+        "ja" => format!(
+            "[履歴の起点 — データ] 表示されている最も古い履歴は {}（{}）。今回のターンで起きた新しい出来事として扱わないこと。\n[/HISTORY START]",
+            format_local_time(first), age
+        ),
+        _ => format!(
+            "[历史起点 — 数据] 当前可见的最早一条历史消息在 {}（{}）。不要把它当作本轮刚发生的事。\n[/HISTORY START]",
+            format_local_time(first), age
+        ),
+    }
+}
+
+fn gap_note(previous: DateTime<Local>, current: DateTime<Local>, lang: &str) -> String {
+    let elapsed = format_duration((current - previous).num_seconds().max(0) as f64, lang);
+    // Crossing midnight is a stronger signal than a duration: 22 hours and a
+    // 40-minute gap on the same evening produce opposite phrasing.
+    let crossed_day = previous.date_naive() != current.date_naive();
+    match lang {
+        "en" => format!(
+            "[TIME GAP — DATA] Previous message at {}; current message at {}; about {} elapsed{} with no conversation in between. Do not treat the previous message as happening just now.\n[/TIME GAP]",
+            format_local_time(previous), format_local_time(current), elapsed,
+            if crossed_day { ", across a calendar day" } else { "" }
+        ),
+        "ja" => format!(
+            "[時間間隔 — データ] 前のメッセージは {}、現在は {}、その間に約 {}{} の会話がない。前の内容を「たった今」の出来事として扱わないこと。\n[/TIME GAP]",
+            format_local_time(previous), format_local_time(current), elapsed,
+            if crossed_day { "（日をまたいでいる）" } else { "" }
+        ),
+        _ => format!(
+            "[时间间隔 — 数据] 上一条消息在 {}，当前消息在 {}，中间约 {}{} 没有对话。不要把上一条消息当作刚刚发生的事。\n[/TIME GAP]",
+            format_local_time(previous), format_local_time(current), elapsed,
+            if crossed_day { "（跨越了一个自然日，属于两段不同的对话）" } else { "" }
+        ),
+    }
+}
+
+/// A single near-current-turn anchor. It is deliberately placed immediately
+/// before the current utterance by prompt assembly so recency beats distant
+/// context blocks.
+pub fn temporal_anchor_note(
+    history: &[ChatMessage],
+    now: DateTime<Local>,
+    lang: &str,
+) -> Option<String> {
+    let lang = normalize_lang(lang);
+    let last_user = history.iter().rev().find(|message| message.role == "user")
+        .and_then(|message| message.timestamp);
+    let last_assistant = history.iter().rev().find(|message| message.role == "assistant")
+        .and_then(|message| message.timestamp);
+    let user_line = last_user
+        .map(|ts| format_relative_age_at(ts, now, lang))
+        .unwrap_or_else(|| match lang {
+            "en" => "no previous user message".into(),
+            "ja" => "以前のユーザーメッセージなし".into(),
+            _ => "没有更早的用户消息".into(),
+        });
+    let self_line = last_assistant
+        .map(|ts| format_relative_age_at(ts, now, lang))
+        .unwrap_or_else(|| match lang {
+            "en" => "no previous reply".into(),
+            "ja" => "以前の発言なし".into(),
+            _ => "没有更早的发言".into(),
+        });
+    let now_text = format_local_time(now);
+    Some(match lang {
+        "en" => format!(
+            "[CURRENT TIME — DATA]\nNow: {now_text}.\nPrevious user message before this turn: {user_line}.\nYour previous reply: {self_line}.\nOnly call something \"just now\" when it happened within the last 5 minutes; otherwise use earlier / today / yesterday / last time. After a long gap, do not pretend the conversation was continuous.\n[/CURRENT TIME]"
+        ),
+        "ja" => format!(
+            "[現在時刻 — データ]\n現在：{now_text}。\n今回のターン以前のユーザーメッセージ：{user_line}。\nあなたの前回の発言：{self_line}。\n直近5分以内の出来事だけを「たった今／さっき」と言う。それ以外は「以前／今日の早い時間／昨日／前回」を使う。長い空白の後は、会話がずっと続いていたふりをしないこと。\n[/CURRENT TIME]"
+        ),
+        _ => format!(
+            "[当前时间 — 数据]\n现在：{now_text}。\n本轮之前的用户消息：{user_line}。\n你上一次发言：{self_line}。\n只有距今 5 分钟内的事才能说“刚才/刚刚”；更早用“之前/今天早些时候/昨天/上次”。跨过较长间隔后，不要假装对话一直连续。\n[/CURRENT TIME]"
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -267,5 +415,83 @@ mod tests {
         assert_eq!(messages[0].content, "hello");
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].content, "hi");
+    }
+
+    fn timed(role: &str, content: &str, ts: DateTime<Local>) -> ChatMessage {
+        let mut message = if role == "user" { ChatMessage::user(content) } else { ChatMessage::assistant(content) };
+        message.timestamp = Some(ts);
+        message
+    }
+
+    #[test]
+    fn temporal_history_marks_old_gaps_without_mutating_messages() {
+        let now = Local::now();
+        let history = vec![
+            timed("user", "早上的问题", now - chrono::Duration::minutes(200)),
+            timed("assistant", "早上的回答", now - chrono::Duration::minutes(198)),
+            timed("user", "现在的问题", now - chrono::Duration::minutes(10)),
+        ];
+        let mut messages = Vec::new();
+        append_history_with_time(&mut messages, &history, now, "zh");
+        assert!(messages.iter().any(|message| message.content.contains("[历史起点 — 数据]")), "{messages:?}");
+        assert!(messages.iter().any(|message| message.content.contains("[时间间隔 — 数据]")), "{messages:?}");
+        assert!(messages.iter().any(|message| message.content.contains("3小时")), "{messages:?}");
+        assert_eq!(history[0].content, "早上的问题");
+        assert_eq!(messages.iter().filter(|message| message.role == "user").count(), 2);
+        assert_eq!(messages.iter().filter(|message| message.role == "assistant").count(), 1);
+    }
+
+    #[test]
+    fn short_gap_has_no_marker_and_anchor_is_near_current_turn() {
+        let now = Local::now();
+        let history = vec![
+            timed("user", "刚刚的问题", now - chrono::Duration::seconds(40)),
+            timed("assistant", "刚刚的回答", now - chrono::Duration::seconds(10)),
+        ];
+        let mut messages = Vec::new();
+        append_history_with_time(&mut messages, &history, now, "zh");
+        assert!(!messages.iter().any(|message| message.content.contains("[时间间隔 — 数据]")));
+        let anchor = temporal_anchor_note(&history, now, "zh").unwrap();
+        assert!(anchor.contains("[当前时间 — 数据]"));
+        assert!(anchor.contains("只有距今 5 分钟内的事"));
+        assert!(anchor.contains("刚刚"));
+    }
+
+    #[test]
+    fn english_and_japanese_gap_markers_are_localized() {
+        let now = Local::now();
+        let history = vec![
+            timed("user", "old", now - chrono::Duration::hours(2)),
+            timed("assistant", "new", now),
+        ];
+        let mut en = Vec::new();
+        append_history_with_time(&mut en, &history, now, "en");
+        assert!(en.iter().any(|message| message.content.contains("[TIME GAP — DATA]")));
+        let mut ja = Vec::new();
+        append_history_with_time(&mut ja, &history, now, "ja");
+        assert!(ja.iter().any(|message| message.content.contains("[時間間隔 — データ]")));
+    }
+
+    #[test]
+    fn gap_across_midnight_is_labeled_as_a_different_day() {
+        let now = Local::now();
+        let previous = now - chrono::Duration::hours(14);
+        // Only meaningful when the two timestamps really fall on different dates.
+        if previous.date_naive() != now.date_naive() {
+            let history = vec![timed("user", "昨晚的事", previous), timed("assistant", "今天的事", now)];
+            let mut zh = Vec::new();
+            append_history_with_time(&mut zh, &history, now, "zh");
+            assert!(zh.iter().any(|message| message.content.contains("跨越了一个自然日")), "{zh:?}");
+            let mut en = Vec::new();
+            append_history_with_time(&mut en, &history, now, "en");
+            assert!(en.iter().any(|message| message.content.contains("across a calendar day")), "{en:?}");
+        }
+        let same_day = vec![
+            timed("user", "晚饭前", now - chrono::Duration::minutes(90)),
+            timed("assistant", "晚饭后", now),
+        ];
+        let mut zh = Vec::new();
+        append_history_with_time(&mut zh, &same_day, now, "zh");
+        assert!(!zh.iter().any(|message| message.content.contains("跨越了一个自然日")), "{zh:?}");
     }
 }

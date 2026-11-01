@@ -15,7 +15,7 @@ pub(crate) fn drain_foreground_events() -> Vec<(ForegroundWindowSnapshot, i64)> 
 }
 
 /// Stateless OS primitive. Application tracking and history belong to EnvironmentAgent.
-pub(super) fn get_current_foreground_window() -> ForegroundWindowSnapshot {
+pub(crate) fn get_current_foreground_window() -> ForegroundWindowSnapshot {
     #[cfg(target_os = "windows")]
     {
         try_get_foreground_windows().unwrap_or_default()

@@ -10,6 +10,8 @@ import { spawnSync } from 'node:child_process';
 const source = (await readFile('src-tauri/src/brain/coding_agent.rs', 'utf8')).replaceAll('\r\n', '\n');
 const inputService = (await readFile('src-tauri/src/brain/coding_input_service.rs', 'utf8')).replaceAll('\r\n', '\n');
 const child = (await readFile('src-tauri/src/brain/coding_subagent.rs', 'utf8')).replaceAll('\r\n', '\n');
+const jobTools = (await readFile('src-tauri/src/tools/builtin/work_subagent_tools.rs', 'utf8')).replaceAll('\r\n', '\n');
+const jobToolImpl = item(jobTools, 'impl Tool for WorkJobTool {');
 
 function endOf(text, start, block = true) {
   let depth = 0, quoted = false, line = false, comment = 0;
@@ -61,6 +63,80 @@ const directory = await mkdtemp(path.join(tmpdir(), 'vivian-work-task-contract-'
 try {
   await writeFile(path.join(directory, 'lib.rs'), `#![allow(dead_code, unused_imports)]
 #[path=${JSON.stringify(path.resolve('src-tauri/src/provider_preset_updates.rs').replaceAll('\\', '/'))}] pub mod provider_preset_updates;
+#[cfg(test)] mod work_job_tool_contracts {
+  use serde_json::{json,Value};
+  use crate::brain::work_jobs::{global_work_job_registry,output_page,WorkJobStatus};
+  struct ToolUseContext {session_id:String}
+  struct ToolResult {success:bool,text:String,data:Option<Value>}
+  impl ToolResult {
+    fn standard_success(text:&str,data:Option<Value>)->Self {Self {success:true,text:text.into(),data}}
+    fn standard_error(text:&str,_:Option<&str>,data:Option<Value>)->Self {Self {success:false,text:text.into(),data}}
+  }
+  struct ValidationResult {valid:bool}
+  impl ValidationResult {
+    fn success(_:Option<Value>)->Self {Self {valid:true}}
+    fn failure(_:&str,_:u8)->Self {Self {valid:false}}
+  }
+  struct WorkJobTool;
+  impl WorkJobTool {
+    ${item(jobToolImpl, 'async fn validate_input(')}
+    ${item(jobToolImpl, 'async fn call(')}
+  }
+  ${item(jobTools, 'fn truncate_for_display(')}
+  fn context()->ToolUseContext {ToolUseContext {session_id:uuid::Uuid::new_v4().to_string()}}
+  fn complete(id:&str,text:String) {
+    use crate::brain::{coding_subagent::{SubagentOutcome,SubagentStop},work_contract::{unvalidated_return,TaskStatus}};
+    global_work_job_registry().complete(id,SubagentOutcome {
+      result:unvalidated_return(text.clone(),TaskStatus::Partial,vec!["verify".into()],vec![]),
+      output:text,rounds:1,tool_calls:0,stop:SubagentStop::Completed,
+    },false);
+  }
+  #[tokio::test] async fn another_session_cannot_read_or_cancel_a_job() {
+    let owner=context();let other=context();let jobs=global_work_job_registry();
+    let id=jobs.create(owner.session_id.clone(),"private task".into(),1).unwrap();
+    for action in ["output","cancel"] {
+      let result=WorkJobTool.call(json!({"action":action,"job_id":id}),&other).await;
+      assert!(!result.success); assert!(!result.text.contains("private task"));
+    }
+    assert_eq!(jobs.get(&id).unwrap().status,WorkJobStatus::Running);
+    jobs.cancel(&id);
+  }
+  #[tokio::test] async fn tool_pages_preserve_unicode_and_the_complete_structured_result() {
+    let ctx=context();let jobs=global_work_job_registry();
+    let id=jobs.create(ctx.session_id.clone(),"inspect".into(),1).unwrap();
+    let original="中文🦀e\\u{301}\\n".repeat(1000);complete(&id,original.clone());
+    for section in ["output","task_result"] {
+      let mut text=String::new();let mut offset=0;
+      loop {
+        let result=WorkJobTool.call(json!({"action":"output","job_id":id,"section":section,"offset":offset,"limit":113}),&ctx).await;
+        assert!(result.success);
+        text.push_str(result.text.split("\\n\\n[结果尚未读完").next().unwrap());
+        let data=result.data.unwrap();
+        match data["next_offset"].as_u64() {Some(next)=>offset=next,None=>break}
+      }
+      if section=="output" {assert_eq!(text,original);}
+      else {let value:Value=serde_json::from_str(&text).unwrap();assert_eq!(value["summary"],original);assert_eq!(value["status"],"partial");}
+    }
+  }
+  #[tokio::test] async fn list_pages_are_compact_and_never_embed_the_results() {
+    let ctx=context();let jobs=global_work_job_registry();
+    for _ in 0..35 {
+      let id=jobs.create(ctx.session_id.clone(),"inspect".into(),1).unwrap();complete(&id,"PRIVATE_LARGE_BODY".repeat(500));
+    }
+    let first=WorkJobTool.call(json!({"action":"list"}),&ctx).await.data.unwrap();
+    assert_eq!(first["jobs"].as_array().unwrap().len(),32);assert_eq!(first["total"],35);
+    assert!(!first.to_string().contains("PRIVATE_LARGE_BODY"));
+    let second=WorkJobTool.call(json!({"action":"list","offset":first["next_offset"]}),&ctx).await.data.unwrap();
+    assert_eq!(second["jobs"].as_array().unwrap().len(),3);assert!(second["next_offset"].is_null());
+  }
+  #[tokio::test] async fn paging_arguments_are_validated_before_use() {
+    let ctx=context();
+    for args in [json!({"action":"output","job_id":"x","offset":-1}),json!({"action":"list","limit":0}),
+      json!({"action":"list","limit":1.5}),json!({"action":"output","job_id":"x","section":"invalid"})] {
+      assert!(!WorkJobTool.validate_input(&args,&ctx).await.valid);
+    }
+  }
+}
 // This fixture isolates work settlement; the advisor's persisted context is tested in the desktop crate.
 pub mod plugin_advisor { pub fn context(_:&str)->String {String::new()} }
 pub mod types { pub mod response {
@@ -87,7 +163,17 @@ pub mod browser_bridge { pub mod tools {
   pub struct Bridge; impl Bridge { pub fn is_connected(&self)->bool {false} }
   pub fn global_bridge()->Option<Bridge> {None}
 }}
-pub mod utils { pub mod token_estimate { const BYTES_PER_TOKEN:usize=4; ${item(tokenSource, 'pub fn estimate_tokens(')} } }
+#[path=${JSON.stringify(path.resolve('src-tauri/src/utils/fs.rs').replaceAll('\\', '/'))}] pub mod work_fs;
+pub mod utils {
+  pub use crate::work_fs as fs;
+  pub mod path {
+    pub fn get_user_data_dir()->std::path::PathBuf {
+      static DIR:once_cell::sync::Lazy<tempfile::TempDir>=once_cell::sync::Lazy::new(||tempfile::tempdir().unwrap());
+      DIR.path().to_path_buf()
+    }
+  }
+  pub mod token_estimate { const BYTES_PER_TOKEN:usize=4; ${item(tokenSource, 'pub fn estimate_tokens(')} }
+}
 pub mod tools {
   pub mod types {
     #[derive(Clone,Default)] pub struct ToolUseContext;
@@ -289,11 +375,13 @@ tracing="0.1"
 tempfile="3"
 uuid={version="1",features=["v4"]}
 tokio={version="1",features=["macros","rt-multi-thread","sync","time"]}
+[target.'cfg(windows)'.dependencies]
+windows={version="0.61",features=["Win32_Storage_FileSystem"]}
 `);
   const result = spawnSync('cargo', ['test', '--offline', '--quiet', '--manifest-path', path.join(directory, 'Cargo.toml'),
     '--target-dir', path.resolve('tmp/work-task-contract-target')], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  console.log('Actual work context, task scope, settlement and background job contracts:');
+  console.log('Actual work context, task scope, settlement, persistent jobs and job tool contracts:');
   console.log(result.stdout.trim());
 } finally {
   await rm(directory, { recursive: true, force: true });

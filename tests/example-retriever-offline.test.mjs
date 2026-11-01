@@ -86,7 +86,7 @@ pub mod error { pub type VivianResult<T> = Result<T, String>; }
 // (modern_net_examples_reach_companion_prompt_without_remote_embeddings) that
 // exercises the real CompanionPrompt; it is skipped below because a stub here
 // could only test the stub. Full-crate cargo test covers it.
-pub mod pipeline { pub mod prompt_modules {
+pub mod pipeline { #[path="${rustPath(path.join(root,'src-tauri/src/pipeline/prompt_templates.rs'))}"] pub mod prompt_templates; pub mod prompt_modules {
 ${normalize}
     #[derive(Default)]
     pub struct PromptParts {

@@ -240,7 +240,7 @@ pub mod memory {
 `.replace('__MODULES__', ['age','evidence','tokenize','entity_extract','graph_store','relational_recall','kinds','query_embedding'].map(name => `#[path="${rustPath(`src-tauri/src/memory/${name}.rs`)}"] pub mod ${name};`).join('\n') + `\n#[path="${path.join(dir,'src/strategy.rs').replaceAll('\\','/')}"] pub mod strategy;`)
   .replace('__SUMMARY_HELPERS__', rustItem(summaries,'pub fn summary_id(')+'\n'+rustItem(summaries,'pub fn is_active_summary('))
   .replace('__DECAY__', decay).replace('__HASHING__', hashing.slice(0,hashing.lastIndexOf('}')+1)).replace('__DEDUP__', dedup)
-  .replace('__SUMMARIZED__',summarized).replace('__INNER_STRUCT__',innerStruct).replace('__INNER_IMPL__',innerImpl)
+  .replace('__SUMMARIZED__',summarized+'\n'+(manager.includes('fn stamp_legacy_diary_record(')?rustItem(manager,'fn stamp_legacy_diary_record('):'')).replace('__INNER_STRUCT__',innerStruct).replace('__INNER_IMPL__',innerImpl)
   .replace('__ACCESS_TESTS__',incremental?`#[cfg(test)] #[path="${rustPath('src-tauri/src/memory/manager_access_tests.rs')}"] mod access_tests;`:'')
   .replace('__INDEXED_MANAGER__',indexedManager)
   .replace('__TRACKER_INIT__',incremental?'changes:Default::default(),revision:0,':'persisted:super::entry_store::fingerprint_all(&entries),')

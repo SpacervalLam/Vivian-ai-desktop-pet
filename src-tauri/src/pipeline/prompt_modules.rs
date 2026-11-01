@@ -1134,20 +1134,7 @@ impl EnvironmentContext {
             let artist = if m.artist.is_empty() { "Unknown Artist".to_string() } else { m.artist.clone() };
             self.music = Some(format!("{} - {} ({})", artist, m.title, m.status.as_str()));
         }
-        if let Some(s) = &snap.system {
-            let mem_used_gb = s.memory_used as f64 / (1024.0 * 1024.0 * 1024.0);
-            let mem_total_gb = s.memory_total as f64 / (1024.0 * 1024.0 * 1024.0);
-            let mut parts = vec![
-                format!("CPU {:.0}%", s.cpu_usage),
-                format!("{:.1}/{:.1} GB RAM", mem_used_gb, mem_total_gb),
-            ];
-            if s.net_download_bps > 0 || s.net_upload_bps > 0 {
-                let dl = s.net_download_bps as f64 / (1024.0 * 1024.0);
-                let ul = s.net_upload_bps as f64 / (1024.0 * 1024.0);
-                parts.push(format!("↓{:.1} MB/s ↑{:.1} MB/s", dl, ul));
-            }
-            self.system_status = Some(parts.join(", "));
-        }
+        // Passive CPU/memory telemetry is routed to the environment agent.
         if let Some(loc) = &snap.location {
             let parts: Vec<&str> = [loc.city.as_deref(), loc.region.as_deref(), loc.country.as_deref()]
                 .into_iter()

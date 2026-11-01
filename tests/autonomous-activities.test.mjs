@@ -38,6 +38,9 @@ const bridge = await readFile(source('tools/builtin/work_agent_tools.rs'), 'utf8
 const bridgeHelpers = bridge.slice(bridge.indexOf('fn latest_work_summary('), bridge.indexOf('// ===== delegate_to_work_agent'));
 const proactive = await readFile(source('proactive/mod.rs'), 'utf8');
 const delivery = proactive.slice(proactive.indexOf('    fn push_action(&self,'), proactive.indexOf('    /// 推进触发器冷却时间'));
+const dedup = proactive.slice(proactive.indexOf('fn normalize_for_duplicate('), proactive.indexOf('static RNG_COUNTER:'));
+const dedupThreshold = proactive.match(/const NEAR_DUPLICATE_SIMILARITY:[^;]+;/)?.[0];
+if (!dedup.includes('fn near_duplicate(') || !dedupThreshold) throw new Error('Missing production duplicate policy');
 if (!delivery.includes('record_delivered')) throw new Error('Missing production delivery attribution');
 await writeFile(path.join(dir, 'src', 'lib.rs'), `#![allow(dead_code,unused_imports)]
 extern crate self as tauri;
@@ -146,19 +149,33 @@ pub mod delivery_fixture {
  use parking_lot::RwLock;
  #[derive(Debug,Copy,Clone,PartialEq)] enum DeliveryChannel { Bubble }
  #[derive(Clone)] struct ProactiveAction {work_notice_id:Option<String>,wakeup_id:Option<String>,content:String,delivery_channel:DeliveryChannel,trigger:String}
- #[derive(Copy,Clone)] enum ProactiveTrigger { Spontaneous,WelcomeBack,HourlyGreeting,IdleGreeting,Icebreaker }
+ #[derive(Copy,Clone,PartialEq,Eq)] enum ProactiveTrigger { Spontaneous,WelcomeBack,HourlyGreeting,IdleGreeting,Icebreaker,SystemPressure }
  impl ProactiveTrigger {
   fn all()-> &'static [Self] { &[Self::Spontaneous,Self::WelcomeBack,Self::HourlyGreeting,Self::IdleGreeting,Self::Icebreaker] }
-  fn as_str(&self)-> &'static str { match self { Self::Spontaneous=>"spontaneous",Self::WelcomeBack=>"welcome_back",Self::HourlyGreeting=>"hourly_greeting",Self::IdleGreeting=>"idle_greeting",Self::Icebreaker=>"icebreaker" } }
+  fn as_str(&self)-> &'static str { match self { Self::Spontaneous=>"spontaneous",Self::WelcomeBack=>"welcome_back",Self::HourlyGreeting=>"hourly_greeting",Self::IdleGreeting=>"idle_greeting",Self::Icebreaker=>"icebreaker",Self::SystemPressure=>"system_pressure" } }
  }
  #[derive(Default)] struct State {consecutive_interruptions:u32,last_interruption_at:f64,pending_proactive_at:f64}
  struct Config {backoff_max_level:u32}
  #[derive(Default)] struct Learner(std::sync::atomic::AtomicUsize);
  impl Learner {fn record_trigger_fired(&self,_:ProactiveTrigger){self.0.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}}
- struct Orchestrator {pending_messages:RwLock<Vec<ProactiveAction>>,recent_sent_contents:RwLock<Vec<(String,DeliveryChannel)>>,config:RwLock<Config>,state:RwLock<State>,preference_learner:Learner,speech_desire:RwLock<f64>,char_id:String}
- impl Default for Orchestrator {fn default()->Self {Self{pending_messages:RwLock::new(vec![]),recent_sent_contents:RwLock::new(vec![]),config:RwLock::new(Config{backoff_max_level:5}),state:RwLock::new(State::default()),preference_learner:Learner::default(),speech_desire:RwLock::new(0.9),char_id:"test".into()}}}
- impl Orchestrator { ${delivery} }
+ struct Personal; impl Personal {fn contact_allowed(&self,_:&str)->bool{true}}
+ struct Mind {personal:Personal}
+ struct Orchestrator {mind:RwLock<Option<Mind>>,pending_messages:RwLock<Vec<ProactiveAction>>,recent_sent_contents:RwLock<Vec<(String,DeliveryChannel)>>,config:RwLock<Config>,state:RwLock<State>,preference_learner:Learner,speech_desire:RwLock<f64>,char_id:String}
+ impl Default for Orchestrator {fn default()->Self {Self{mind:RwLock::new(None),pending_messages:RwLock::new(vec![]),recent_sent_contents:RwLock::new(vec![]),config:RwLock::new(Config{backoff_max_level:5}),state:RwLock::new(State::default()),preference_learner:Learner::default(),speech_desire:RwLock::new(0.9),char_id:"test".into()}}}
+ ${dedupThreshold}
+ ${dedup}
+ impl Orchestrator {
+  // This adapter has no DialogueManager; owned history is empty, as in production without one.
+  fn recent_own_utterances(&self,_:f64)->Vec<String>{Vec::new()}
+  ${delivery}
+ }
  fn action()->ProactiveAction {ProactiveAction{work_notice_id:None,wakeup_id:None,content:"下午好".into(),delivery_channel:DeliveryChannel::Bubble,trigger:"hourly_greeting".into()}}
+ #[test] fn legacy_resource_pressure_cannot_enter_the_pet_queue() {
+  let orch=Orchestrator::default();let mut pressure=action();pressure.trigger="system_pressure".into();
+  orch.push_action(pressure,ProactiveTrigger::SystemPressure);
+  assert!(orch.pending_messages.read().is_empty());assert!(orch.recent_sent_contents.read().is_empty());
+  assert_eq!(orch.state.read().consecutive_interruptions,0);assert_eq!(*orch.speech_desire.read(),0.9);
+ }
  #[test] fn queueing_and_dropping_unseen_messages_does_not_teach_rejection_or_suppress_retries() {
   let orch=Orchestrator::default();let action=action();
   orch.push_action(action.clone(),ProactiveTrigger::HourlyGreeting);

@@ -35,6 +35,9 @@ pub fn visible_to(meta: &Value, character: &str) -> bool {
 }
 
 pub fn recall_label(meta: &Value) -> &'static str {
+    if field(meta, "knowledge_source") == Some("peer_report") {
+        return "来自同伴的学习笔记；待核实，不是用户确认";
+    }
     if field(meta, "source") == Some("system_seed") && meta["fictional_backstory"] == true {
         return match field(meta, "record_kind") {
             Some("session_summary") => "角色前史摘要（开发期预设）；非逐字原话",

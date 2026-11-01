@@ -39,6 +39,7 @@ pub mod state;
 pub(crate) mod task_continuity;
 pub mod steps;
 pub mod template_engine;
+pub mod temporal_consistency;
 pub mod topic_injection;
 #[cfg(test)]
 mod prompt_eval;

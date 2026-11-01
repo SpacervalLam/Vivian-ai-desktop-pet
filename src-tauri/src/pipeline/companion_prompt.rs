@@ -1,5 +1,6 @@
 //! Role-separated companion dialogue, inspired by SillyTavern's prompt manager.
 //! Examples are fictional system references, never counterfeit user/assistant turns.
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use crate::types::response::ChatMessage;
 use super::{message_context, prompt_modules::*, template_engine::{SectionLayer, SectionRenderInfo, SectionType}};
@@ -22,7 +23,13 @@ struct Block {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct CompanionPrompt { blocks: Vec<Block> }
+pub struct CompanionPrompt {
+    blocks: Vec<Block>,
+    /// Language used for render-time temporal annotations. Older serialized
+    /// prompts may not carry it, so callers fall back to the global locale.
+    #[serde(default)]
+    language: String,
+}
 
 // 语气框架按界面语言选档（zh/en/ja）；协议/边界类保持英文原文。
 const DATA_BOUNDARY: &str = include_str!("../../prompts/execution/companion-data-boundary.en.md");
@@ -54,6 +61,7 @@ impl CompanionPrompt {
         use Position::*;
         use SectionLayer::*;
         let mut prompt = Self::default();
+        prompt.language = parts.language.clone();
         let has_tools = parts.tools.as_deref().is_some_and(|t| !t.trim().is_empty());
         prompt.push("dialogue", companion_dialogue_rules(&parts.language), Framework, Main, 0);
         // 语气块：chat_style / human_feel / focus / rhythm / banned_phrases 五合一。
@@ -207,9 +215,12 @@ impl CompanionPrompt {
             prompt.push("visual_evidence", crate::visual_evidence::context_block(evidence), World, Context, 0);
         }
         let estimate = crate::memory::time_stamped::estimate_tokens;
+        let now = Local::now();
         let mut rendered_history = Vec::new();
-        message_context::append_history(&mut rendered_history, history);
-        let history_tokens: usize = rendered_history.iter().map(|m| estimate(&m.content) + 8).sum();
+        message_context::append_history_with_time(&mut rendered_history, history, now, &parts.language);
+        let anchor = message_context::temporal_anchor_note(history, now, &parts.language)
+            .map(|note| estimate(&note) + 12).unwrap_or(0);
+        let history_tokens: usize = rendered_history.iter().map(|m| estimate(&m.content) + 8).sum::<usize>() + anchor;
         let native_tools = if parts.enable_native_fc { parts.tools.as_deref().map(estimate).unwrap_or(0) } else { 0 };
         let window = parts.model_context_window.unwrap_or(DEFAULT_PROMPT_BUDGET_TOKENS * 8);
         let budget = resolve_prompt_budget(parts).min(window.saturating_sub(
@@ -237,13 +248,20 @@ impl CompanionPrompt {
 
     pub fn messages_with_communication(&self, history: &[ChatMessage], input: &str, internal: bool,
         status: Option<&str>, communication: Option<&crate::messages::CommunicationContext>) -> Vec<ChatMessage> {
+        let language = if self.language.is_empty() {
+            crate::i18n::get_language()
+        } else {
+            self.language.clone()
+        };
+        let now = Local::now();
         let mut messages = Vec::new();
         let main = self.blocks.iter().filter(|b| b.position == Position::Main && !private_operation(&b.id))
             .map(|b| b.content.as_str()).collect::<Vec<_>>().join("\n\n");
         if !main.is_empty() { messages.push(ChatMessage::system(main)); }
         // Keep append-only real dialogue directly behind the stable character
-        // prefix. Query-specific recall, tools and clocks must not invalidate it.
-        message_context::append_history(&mut messages, history);
+        // prefix. Timestamps are rendered as bounded data markers so the model
+        // can distinguish a fresh turn from an old conversation segment.
+        message_context::append_history_with_time(&mut messages, history, now, &language);
         let context = self.contents(Position::Context).join("\n\n");
         if !context.is_empty() { messages.push(ChatMessage::system(format!("{DATA_BOUNDARY}{context}\n[END CONTEXT DATA]"))); }
         for block in self.blocks.iter().filter(|b| private_operation(&b.id)) {
@@ -256,6 +274,10 @@ impl CompanionPrompt {
         for block in self.contents(Position::VoiceReference) { messages.push(ChatMessage::system(block)); }
         if let Some(status) = status.filter(|s| !s.trim().is_empty()) {
             messages.push(ChatMessage::system(format!("[INTERNAL STATUS — NOT A USER REQUEST]\n{status}")));
+        }
+        // The anchor sits as close as possible to the actual current turn.
+        if let Some(anchor) = message_context::temporal_anchor_note(history, now, &language) {
+            messages.push(ChatMessage::system(anchor));
         }
         if !input.trim().is_empty() {
             message_context::append_current_turn(&mut messages, input, internal, communication);

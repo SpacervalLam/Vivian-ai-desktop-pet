@@ -904,12 +904,16 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
             if archive.is_empty() {
                 let tsm = self.time_stamped.try_read_for(std::time::Duration::from_millis(250))
                     .ok_or_else(|| crate::error::VivianError::Timeout("读取短期记忆超时".into()))?;
-                crate::memory::session_compressor::inject_recap_if_available(
+                let lang = self.prompt_step.current_language();
+                crate::memory::session_compressor::inject_recap_if_available_at(
                     &mut state.messages,
                     &tsm,
+                    chrono::Local::now(),
+                    &lang,
                 );
             } else {
-                archive.inject_into(&mut state.messages);
+                let lang = self.prompt_step.current_language();
+                archive.inject_into_at(&mut state.messages, chrono::Local::now(), &lang);
             }
         }
         state.current_channel = current_ch;
@@ -1437,12 +1441,46 @@ Choose the appropriate expression and motion. Leave empty if nothing fits.",
 
     /// 内部系统指令走生成流水线，跳过用户记忆、画像和对话抽取，仅写回真实回复。
     pub async fn ainvoke_system_directive(&self, directive: &str) -> VivianResult<AiResponse> {
+        self.ainvoke_system_directive_with_observation(directive, None).await
+    }
+
+    /// Internal directive with an optional overheard exchange.
+    ///
+    /// The observation is persisted after successful generation as a system
+    /// data message. It is never memory-eligible and never shown as chat text,
+    /// but it keeps the character's own history from starting mid-conversation.
+    pub async fn ainvoke_system_directive_with_observation(
+        &self,
+        directive: &str,
+        observation: Option<&str>,
+    ) -> VivianResult<AiResponse> {
         let mut state = self.prepare_pipeline_state(directive).await?;
         state.metadata["skip_memory_save"] = serde_json::json!(true);
         state.metadata["system_directive"] = serde_json::json!(true);
         state.metadata["proactive_greeting"] = serde_json::json!(true);
         let (_, response) = self.execute_pipeline_and_build_response(state, false, directive).await?;
         if !response.text.trim().is_empty() {
+            if let Some(exchange) = observation.filter(|value| !value.trim().is_empty()) {
+                let observed_at = crate::utils::prompt_time::format_prompt_time(
+                    chrono::Local::now().timestamp() as f64);
+                let mut message = ChatMessage::system(format!(
+                    "[OBSERVED EXCHANGE — DATA, NOT ADDRESSED TO YOU]\nObserved at {observed_at}.\n{}\n[END OBSERVED EXCHANGE]",
+                    exchange.trim()
+                ));
+                message.meta = Some(
+                    crate::messages::MessageMeta::mirror("bystander_observation")
+                        .with_channel(self.dialogue.get_channel())
+                );
+                self.dialogue.add_message_with_metadata(message, serde_json::json!({
+                    "source": "bystander_observation",
+                    "is_memory_disabled": true,
+                    "speaker": "user",
+                    "listener": self.char_id,
+                    "perspective": "observer",
+                    "knowledge_source": "observed",
+                    "content_type": "bystander_observation",
+                }));
+            }
             let mut message = ChatMessage::assistant(&MemorySavingRunnable::strip_json_if_any(&response.text));
             message.meta = Some(crate::messages::MessageMeta::assistant().with_channel(&self.dialogue.get_channel()));
             self.dialogue.add_message_with_metadata(message, serde_json::json!({ "speaker": self.char_id, "listener": "user", "content_type": "bystander_interjection" }));

@@ -75,6 +75,41 @@ async fn work_file_edits_use_selected_workspace_without_a_blanket_approval_callb
 }
 
 #[tokio::test]
+async fn companion_side_defers_file_writes_and_commands_to_the_work_agent() {
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::WriteFileTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::RunCommandTool::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let ctx = ToolUseContext::default().with_working_directory(directory.path().to_string_lossy());
+    let path = directory.path().join("must-not-exist.txt");
+    let result = execute_tool_use(
+        "write_file",
+        json!({"path": path, "content": "blocked"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("CompanionSimpleOnly"));
+    let message = result
+        .data
+        .as_ref()
+        .and_then(|data| data["message"].as_str())
+        .unwrap_or_default();
+    assert!(message.contains("delegate_to_work_agent"), "{message}");
+    assert!(!path.exists(), "the companion side must not write files itself");
+    let result = execute_tool_use(
+        "run_command",
+        json!({"command": "Write-Output 'blocked'"}),
+        &system,
+        &ctx,
+        None,
+    )
+    .await;
+    assert_eq!(result.error.as_deref(), Some("CompanionSimpleOnly"));
+}
+
+#[tokio::test]
 async fn readonly_work_and_child_workflows_cannot_obtain_implicit_shell_approval() {
     let system = ToolSystem::new();
     system.register_tool(Arc::new(

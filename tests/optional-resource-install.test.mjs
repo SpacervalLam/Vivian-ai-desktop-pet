@@ -22,11 +22,15 @@ if (process.platform !== 'win32') {
         resolve('src-tauri/windows/install-resources.ps1'), '-Package', resolve(packagePath), '-InstallRoot', root,
         '-PackId', id, '-ExpectedHash', hash, '-ManifestPath', resolve('src/optional-resources.json')], { encoding: 'utf8', windowsHide: true });
     }
-    for (const pack of artifacts) {
+    // Only installer-bundled packs run through this script; published packs install in-app.
+    const declared = JSON.parse(await readFile('src/optional-resources.json', 'utf8'));
+    const bundledIds = new Set(declared.filter(pack => !pack.download).map(pack => pack.id));
+    for (const pack of artifacts.filter(pack => bundledIds.has(pack.id))) {
       const result = install(`release/${pack.filename}`, pack.id, pack.sha256);
       assert.equal(result.status, 0, result.stderr);
       await access(join(root, 'optional', pack.id, 'pack.json'));
     }
+    assert.equal(artifacts.filter(pack => bundledIds.has(pack.id)).length, bundledIds.size);
     // Replacement, paths containing spaces, corrupt archives and ZIP traversal.
     const fonts = artifacts.find(pack => pack.id === 'fonts');
     const current = await readFile(join(root, 'optional/fonts/fonts/ma-shan-zheng.woff2'));

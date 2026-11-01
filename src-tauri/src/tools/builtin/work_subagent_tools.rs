@@ -22,7 +22,7 @@ use crate::brain::coding_subagent::{
     run_subagent, SubagentRequest, SubagentStop, SUBAGENT_DEFAULT_ROUNDS, SUBAGENT_DEFAULT_TOOLS,
     SUBAGENT_MAX_DEPTH, SUBAGENT_MAX_ROUNDS,
 };
-use crate::brain::work_jobs::{global_work_job_registry, WorkJobStatus};
+use crate::brain::work_jobs::{global_work_job_registry, output_page, WorkJobStatus};
 use crate::state::AppState;
 use crate::tools::types::{
     AgentAccessLevel, PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
@@ -76,19 +76,20 @@ const DESC_DELEGATE_JA: &str = "自己完結したサブタスクを新しいサ
 あるいは一つも与えないこともできます（自分が持っていないディレクトリは渡せません）。";
 
 const DESC_JOB_EN: &str = "Collect, cancel, or list background subagent jobs started with \
-`work_delegate` (`background: true`). `output` returns a finished job's full text; if it is still \
+`work_delegate` (`background: true`). `output` returns a character-based page of a finished job; \
+follow next_offset for the rest, or use section=task_result for the full structured receipt. If it is still \
 running it says so instead of blocking. `cancel` abandons a job you no longer need. `list` shows \
 every job in this session with its status. Finished results are delivered back to you automatically \
 — reach for `output` only when your next action depends on that specific result.";
 
 const DESC_JOB_ZH: &str = "收集 / 取消 / 列出后台子任务（由 `work_delegate` 的 `background: true` \
-派发）。`output` 取回已完成任务的结果全文；任务仍在跑时会直接说明，不会阻塞等待。\
+派发）。`output` 按字符分页读取已完成任务，以 next_offset 续读；section=task_result 读取完整结构化结算。任务仍在跑时会直接说明，不会阻塞等待。\
 `cancel` 放弃一个不再需要的任务。`list` 列出本会话所有任务及其状态。\
 已完成的结果会自动送回你的上下文——只有当你下一步确实依赖某个特定结果时，才需要用 `output`。";
 
 const DESC_JOB_JA: &str = "バックグラウンドのサブエージェントジョブを回収・中止・一覧します\
-（`work_delegate` の `background: true` で開始したもの）。`output` は完了済みジョブの全文を\
-返します。実行中ならブロックせずその旨を伝えます。`cancel` は不要になったジョブを放棄します。\
+（`work_delegate` の `background: true` で開始したもの）。`output` は文字単位でページを返し、next_offset で続きを読みます。\
+section=task_result で構造化された結果も読めます。実行中ならブロックせずその旨を伝えます。`cancel` は不要になったジョブを放棄します。\
 `list` はセッション内の全ジョブと状態を表示します。完了した結果は自動的に届くため、\
 次の一手が特定の結果に依存するときだけ `output` を使ってください。";
 
@@ -469,6 +470,7 @@ impl Tool for WorkDelegateTool {
                         "tool_calls": outcome.tool_calls,
                         "execution_ended": outcome.stop == SubagentStop::Completed,
                         "completed": outcome.result.status == crate::brain::work_contract::TaskStatus::Completed,
+                        "dropped": outcome.result.status == crate::brain::work_contract::TaskStatus::Dropped,
                         "task_result": outcome.result,
                     })),
                 )
@@ -544,6 +546,17 @@ impl Tool for WorkJobTool {
         if action != "list" && input.get("job_id").and_then(|v| v.as_str()).is_none() {
             return ValidationResult::failure("output / cancel 需要提供 job_id", 2);
         }
+        for name in ["offset", "limit"] {
+            if input.get(name).is_some_and(|value| value.as_u64().is_none()) {
+                return ValidationResult::failure(&format!("{name} 必须是非负整数"), 2);
+            }
+        }
+        if input.get("limit").and_then(Value::as_u64) == Some(0) {
+            return ValidationResult::failure("limit 必须大于零", 2);
+        }
+        if input.get("section").is_some_and(|value| !matches!(value.as_str(), Some("output" | "task_result"))) {
+            return ValidationResult::failure("section 必须是 output / task_result", 2);
+        }
         ValidationResult::success(Some(input.clone()))
     }
 
@@ -554,6 +567,15 @@ impl Tool for WorkJobTool {
     async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
         let jobs = global_work_job_registry();
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("list");
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(usize::MAX as u64) as usize;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(if action == "list" { 32 } else { 4000 })
+            .clamp(1, crate::brain::work_jobs::MAX_OUTPUT_PAGE_CHARS as u64) as usize;
+        if action != "list" {
+            let id = args.get("job_id").and_then(Value::as_str).unwrap_or("");
+            if !jobs.get(id).is_some_and(|job| job.session_id == context.session_id) {
+                return ToolResult::standard_error("本会话没有该后台任务。", Some("JobNotFound"), None);
+            }
+        }
         match action {
             "list" => {
                 let list = jobs.list_for(&context.session_id);
@@ -563,7 +585,10 @@ impl Tool for WorkJobTool {
                         Some(json!({ "jobs": [] })),
                     );
                 }
-                let lines: Vec<String> = list
+                let offset = offset.min(list.len());
+                let page: Vec<_> = list.iter().skip(offset).take(limit.min(64)).collect();
+                let next_offset = (offset + page.len() < list.len()).then_some(offset + page.len());
+                let lines: Vec<String> = page
                     .iter()
                     .map(|j| {
                         format!(
@@ -578,7 +603,8 @@ impl Tool for WorkJobTool {
                     .collect();
                 ToolResult::standard_success(
                     &format!("本会话共 {} 个后台子任务：\n{}", list.len(), lines.join("\n")),
-                    Some(json!({ "jobs": list })),
+                    Some(json!({ "jobs": page.iter().map(|job| job.summary()).collect::<Vec<_>>(),
+                        "offset":offset,"total":list.len(),"next_offset":next_offset })),
                 )
             }
             "cancel" => {
@@ -614,36 +640,37 @@ impl Tool for WorkJobTool {
                         ),
                         Some(json!({ "job_id": job_id, "status": "running" })),
                     ),
-                    Some(job) if job.status == WorkJobStatus::Completed => {
-                        let mut text = job.output.clone().unwrap_or_default();
+                    Some(job) => {
+                        let section = args.get("section").and_then(Value::as_str).unwrap_or("output");
+                        let source = if section == "task_result" {
+                            serde_json::to_string_pretty(&job.task_result).unwrap_or_default()
+                        } else { job.output.clone().or_else(|| job.error.clone()).unwrap_or_default() };
+                        let page = output_page(&source, offset, limit);
+                        let mut text = page.text;
+                        if let Some(next) = page.next_offset {
+                            text.push_str(&format!("\n\n[结果尚未读完；work_job action=output job_id={job_id} section={section} offset={next} limit={limit}]"));
+                        }
                         if job.budget_exhausted {
                             text.push_str(
                                 "\n\n（该任务用尽轮次预算才停下，结果可能不完整）",
                             );
                         }
-                        ToolResult::standard_success(
-                            &text,
-                            Some(json!({
+                        let data = Some(json!({
                                 "job_id": job_id,
-                                "status": "completed",
+                                "status": job.status,
                                 "rounds": job.rounds,
                                 "tool_calls": job.tool_calls,
-                                "task_result": job.task_result,
-                            })),
-                        )
+                                "task_result": job.result_summary(),
+                                "section": section,"offset":page.offset,"total_chars":page.total_chars,"next_offset":page.next_offset,
+                            }));
+                        if job.status == WorkJobStatus::Completed {
+                            ToolResult::standard_success(&text, data)
+                        } else {
+                            ToolResult::standard_error(
+                                &format!("任务 {job_id} 状态：{}\n{text}", job.status.as_str()),
+                                Some("JobNotCompleted"), data)
+                        }
                     }
-                    Some(job) => ToolResult::standard_error(
-                        &format!(
-                            "任务 {job_id} 未能产出结果（状态：{}）{}",
-                            job.status.as_str(),
-                            job.error
-                                .as_deref()
-                                .map(|e| format!("，原因：{e}"))
-                                .unwrap_or_default()
-                        ),
-                        Some("JobNotCompleted"),
-                        None,
-                    ),
                 }
             }
         }
@@ -765,7 +792,10 @@ impl WorkJobTool {
                     "enum": ["output", "cancel", "list"],
                     "description": action
                 },
-                "job_id": { "type": "string", "description": job_id }
+                "job_id": { "type": "string", "description": job_id },
+                "section": { "type": "string", "enum": ["output", "task_result"], "description": "Result body or complete structured receipt; default output." },
+                "offset": { "type": "integer", "minimum": 0, "description": "Character offset for output; item offset for list. Use next_offset to continue." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 8000, "description": "Characters per output page (default 4000), or list items (default 32, maximum 64)." }
             },
             "required": ["action"]
         })

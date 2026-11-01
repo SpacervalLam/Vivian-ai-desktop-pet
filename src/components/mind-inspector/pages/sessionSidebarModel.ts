@@ -1,4 +1,12 @@
-export interface SidebarSession { session_id: string; title: string; working_directory: string; updated_at: number; status: string }
+export interface SidebarSession {
+  session_id: string; title: string; working_directory: string; updated_at: number; status: string;
+  /**
+   * 「在等谁」的派生状态，由宿主从待办、后台任务、未答提问和最后一次结算算出：
+   * `idle` / `working` / `queued` / `answer` / `blocked`。它不能由 `status` 推出——
+   * 一个 `blocked` 的会话 `status` 同样是 `idle`，只是它自己走不下去了。
+   */
+  stage?: string;
+}
 export interface SessionGroup { id: string; name: string }
 export interface SessionGroupState { groups: SessionGroup[]; membership: Record<string, string> }
 export const SESSION_GROUP_KEY = 'vivian.workbench.session-groups.v1';
@@ -8,7 +16,9 @@ export function mergeSidebarSessions<T extends SidebarSession & { history_loaded
   const loaded = new Map(previous.filter(session => session.history_loaded !== false).map(session => [session.session_id, session]));
   const rows = [...new Map(list.filter(session => !deleted.has(session.session_id)).map(session => {
     const opened = loaded.get(session.session_id);
-    return [session.session_id, opened ? { ...opened, title: session.title, status: session.status, updated_at: session.updated_at, working_directory: session.working_directory, extra_workspaces: session.extra_workspaces } : session] as const;
+    // `stage` 必须随每次列表刷新重算：它是宿主当下算出的状态，不是会话内容，
+    // 沿用旧值会让"会话已经解除阻塞"这种变化在侧栏里滞后一个刷新周期。
+    return [session.session_id, opened ? { ...opened, title: session.title, status: session.status, stage: session.stage, updated_at: session.updated_at, working_directory: session.working_directory, extra_workspaces: session.extra_workspaces } : session] as const;
   })).values()];
   const active = previous.find(session => session.session_id === activeId && !deleted.has(session.session_id));
   if (active && !rows.some(session => session.session_id === active.session_id)) rows.push(active);
