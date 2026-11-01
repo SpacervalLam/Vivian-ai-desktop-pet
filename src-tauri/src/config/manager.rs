@@ -1888,6 +1888,13 @@ pub struct ConfigManager {
 /// 只补缺失项，绝不覆盖用户已填的值；目录里已经不存在的键一并清掉，避免
 /// 已删除任务残留在用量报告与连通性测试里。
 fn ensure_task_routes(cfg: &mut AppConfig) {
+    // Migrate the retired shared reply slot without overwriting either pet.
+    if let Some(old)=cfg.routing_matrix.get("companion").filter(|route|!route.model.trim().is_empty()).cloned(){
+        for key in ["companion_vivian","companion_nana"] {
+            if cfg.routing_matrix.get(key).is_none_or(|route|route.model.trim().is_empty()) {cfg.routing_matrix.insert(key.into(),old.clone());}
+        }
+    }
+    cfg.routing_matrix.insert("companion".into(),TaskRouteConfig::empty());
     let tasks = crate::providers::task_catalog::tasks();
     cfg.routing_matrix.retain(|key, _| tasks.iter().any(|spec| &spec.id == key));
     for spec in tasks.iter() {
@@ -1897,6 +1904,29 @@ fn ensure_task_routes(cfg: &mut AppConfig) {
     cfg.routing_tiers.retain(|key, _| tiers.iter().any(|spec| &spec.id == key));
     for spec in tiers.iter() {
         cfg.routing_tiers.entry(spec.id.clone()).or_insert_with(TaskRouteConfig::empty);
+    }
+}
+
+#[cfg(test)]
+mod character_reply_route_tests {
+    use super::*;
+    #[test]
+    fn migrates_legacy_reply_model_without_overwriting_explicit_character_models() {
+        let mut cfg=AppConfig::default();
+        cfg.routing_matrix.get_mut("companion").unwrap().model="legacy".into();
+        cfg.routing_matrix.get_mut("companion_vivian").unwrap().model="vivian-own".into();
+        ensure_task_routes(&mut cfg);
+        assert_eq!(cfg.routing_matrix["companion_vivian"].model,"vivian-own");
+        assert_eq!(cfg.routing_matrix["companion_nana"].model,"legacy");
+        assert!(cfg.routing_matrix["companion"].model.is_empty());
+        cfg.routing_matrix.get_mut("companion_nana").unwrap().model.clear();
+        ensure_task_routes(&mut cfg);
+        assert!(cfg.routing_matrix["companion_nana"].model.is_empty());
+    }
+    #[test]
+    fn fresh_config_has_only_empty_character_reply_models_and_no_shared_model() {
+        let mut cfg=AppConfig::default();ensure_task_routes(&mut cfg);
+        for key in ["companion","companion_vivian","companion_nana"] {assert!(cfg.routing_matrix[key].model.is_empty());}
     }
 }
 

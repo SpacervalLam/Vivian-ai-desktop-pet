@@ -81,6 +81,7 @@ impl RouteProvider<'_> {
 /// - 支持客户端缓存 + 热重载（`clear_client_cache` / `reload`）
 #[derive(Clone)]
 pub struct ModelRouter {
+    default_character: Option<String>,
     /// 主 LLM API provider —— 由 `config.ai` 构建，必须配置
     main_provider: Arc<Option<Box<dyn BaseProvider>>>,
     /// 任务专属 provider —— 每个任务独立配置的模型实例
@@ -388,6 +389,7 @@ impl ModelRouter {
             jev_decision,
             reasoning_override: Arc::new(RwLock::new(reasoning_override)),
             enable_routing_matrix: config.enable_routing_matrix,
+            default_character: None,
             enable_search: Arc::new(AtomicBool::new(false)),
             client_cache,
             app_handle: Arc::new(RwLock::new(None)),
@@ -611,7 +613,7 @@ impl ModelRouter {
             presence_penalty,
             frequency_penalty,
             reasoning: Some(
-                self.effective_request_reasoning(&request.task_type, request.reasoning),
+                self.effective_request_reasoning(self.character_route(&request.task_type,request.character_id.as_deref().unwrap_or("")).unwrap_or(&request.task_type), request.reasoning),
             ),
             json_schema: request.json_schema.clone().map(Arc::new),
             disable_json_schema: false,
@@ -780,19 +782,44 @@ impl ModelRouter {
 
     /// One ordered candidate list for all four invocation modes.
     fn route_candidates(&self, task_type: &str, require_tools: bool) -> Vec<RouteProvider<'_>> {
+        self.route_candidates_for(task_type,require_tools,"")
+    }
+
+    /// A cheap role-bound view; provider instances and caches remain shared.
+    pub fn for_character(&self, character: &str) -> Self {
+        let mut router=self.clone();router.default_character=Some(character.into());router
+    }
+
+    fn character_route(&self,task:&str,character:&str)->Option<&'static str>{
+        if !self.enable_routing_matrix || matches!(task,"chat_partner"|"companion_vivian"|"companion_nana") || !super::task_catalog::find(task).is_some_and(|spec|spec.spoken){return None;}
+        let character=if character.is_empty(){self.default_character.as_deref().unwrap_or("")}else{character};
+        let key=match character{"vivian"=>"companion_vivian","nana"=>"companion_nana",_=>return None};
+        if self.task_providers.contains_key(key){Some(key)}else{
+            let other=if key=="companion_vivian"{"companion_nana"}else{"companion_vivian"};
+            self.task_providers.contains_key(other).then_some(other)
+        }
+    }
+
+    fn route_candidates_for(&self, task_type: &str, require_tools: bool, character: &str) -> Vec<RouteProvider<'_>> {
         let mut candidates = Vec::new();
+        if let Some(key)=self.character_route(task_type,character){
+            if let Some((route,provider))=self.task_providers.get_key_value(key){candidates.push(RouteProvider::Task{route,provider});}
+            let other=if key=="companion_vivian"{"companion_nana"}else{"companion_vivian"};
+            if let Some((route,provider))=self.task_providers.get_key_value(other){candidates.push(RouteProvider::Task{route,provider});}
+        }
         if let Some(provider) = self.override_provider_for(task_type) {
             candidates.push(RouteProvider::Override(provider));
         }
         if self.enable_routing_matrix {
             for key in super::task_catalog::route_keys(task_type) {
+                if key=="companion" && self.character_route(task_type,character).is_some(){continue;}
                 if let Some((route, provider)) = self.task_providers.get_key_value(key) {
                     candidates.push(RouteProvider::Task { route, provider });
                 }
             }
             // 档位是"任务完全没配模型时的替代"，不是额外的兜底层：任务级（含 fallback
             // 链上的邻居）已有配置时不再叠加，避免同一个模型被当成两级候选重试一遍。
-            if candidates.is_empty() {
+            if candidates.is_empty() || self.character_route(task_type,character).is_some() {
                 if let Some((tier, provider)) = self.tier_route(task_type) {
                     candidates.push(RouteProvider::Tier { tier, provider });
                 }
@@ -929,7 +956,7 @@ impl ModelRouter {
     ) -> VivianResult<String> {
         Self::log_llm_request(task_type, &messages, &[]);
         let _permit = self.acquire_route_permit(task_type).await?;
-        let candidates = self.route_candidates(task_type, false);
+        let candidates = self.route_candidates_for(task_type, false, character_id);
         let mut last_error = VivianError::Provider("没有可用的提供商".into());
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
@@ -988,7 +1015,7 @@ impl ModelRouter {
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &[]);
         let permit = self.acquire_route_permit(task_type).await?;
-        let candidates = self.route_candidates(task_type, false);
+        let candidates = self.route_candidates_for(task_type, false, character_id);
         let mut last_error = VivianError::Provider("没有可用的流式提供商".into());
         let mut endpoint = String::new();
         for (index, candidate) in candidates.iter().enumerate() {
@@ -1116,6 +1143,7 @@ impl ModelRouter {
     /// 注意：返回 true 仅表示 provider 实现了 `bind_tools` / `invoke`，
     /// 实际是否走原生路径还需 config 开关 `enable_native_function_calling` 配合。
     pub fn supports_native_function_calling(&self, task_type: &str) -> bool {
+        if let Some(key)=self.character_route(task_type,""){return self.task_providers[key].supports_native_function_calling();}
         if self
             .override_provider_for(task_type)
             .is_some_and(|p| p.supports_native_function_calling())
@@ -1147,6 +1175,7 @@ impl ModelRouter {
 
     /// 陪伴对话路由的 provider 是否支持原生 JSON Schema 约束
     pub fn supports_structured_output(&self) -> bool {
+        if let Some(key)=self.character_route("companion",""){let p=&self.task_providers[key];return p.supports_structured_output()||p.supports_json_mode();}
         let companion = crate::providers::base::TASK_COMPANION;
         if self.enable_routing_matrix
             && self
@@ -1580,6 +1609,7 @@ impl ModelRouter {
     }
 
     fn prepare_request(&self, request: &mut LLMRequest) -> VivianResult<()> {
+        if request.character_id.as_deref().is_none_or(str::is_empty){request.character_id=self.default_character.clone();}
         if crate::companion_quiet::blocks_route(&request.task_type) {
             return Err(VivianError::Provider("陪伴侧发言已因勿扰模式暂停".into()));
         }
@@ -1694,6 +1724,7 @@ impl ModelRouter {
     }
 
     fn resolve_provider(&self, task_type: &str) -> Option<&Box<dyn BaseProvider>> {
+        if let Some(key)=self.character_route(task_type,""){return self.task_providers.get(key);}
         if self.enable_routing_matrix {
             for key in super::task_catalog::route_keys(task_type) {
                 if let Some(provider) = self.task_providers.get(key) { return Some(provider); }
@@ -1729,7 +1760,7 @@ impl ModelRouter {
     ) -> VivianResult<ChatResponse> {
         Self::log_llm_request(task_type, &messages, &tools);
         let _permit = self.acquire_route_permit(task_type).await?;
-        let candidates = self.route_candidates(task_type, true);
+        let candidates = self.route_candidates_for(task_type, true, character_id);
         let mut last_error =
             VivianError::NotImplemented(format!("任务 {task_type} 没有支持工具调用的 provider"));
         let mut endpoint = String::new();
@@ -1871,7 +1902,7 @@ impl ModelRouter {
     ) -> VivianResult<mpsc::Receiver<StreamEvent>> {
         Self::log_llm_request(task_type, &messages, &tools);
         let permit = self.acquire_route_permit(task_type).await?;
-        let candidates = self.route_candidates(task_type, true);
+        let candidates = self.route_candidates_for(task_type, true, character_id);
         let mut last_error = VivianError::NotImplemented(format!(
             "任务 {task_type} 没有支持流式工具调用的 provider"
         ));
@@ -2326,6 +2357,34 @@ mod task_contract_tests {
         let mut text = String::new();
         while let Some(event) = rx.recv().await { if let StreamEvent::Text { content } = event { text.push_str(&content); } }
         assert_eq!(text, expected);
+    }
+    #[tokio::test]
+    async fn character_reply_routes_are_independent_in_all_transports() {
+        let (router,_)=fixture();
+        for character in ["vivian","nana"] {
+            let expected=format!("companion_{character}");
+            let scoped=router.for_character(character);
+            assert_eq!(scoped.generate(request("companion")).await.unwrap(),expected);
+            drain(scoped.generate_stream(request("companion")).await.unwrap(),&expected).await;
+            assert_eq!(scoped.generate_with_tools(request("companion")).await.unwrap().content,expected);
+            drain(scoped.generate_stream_with_tools(request("companion")).await.unwrap(),&expected).await;
+            assert_eq!(scoped.generate(request("pet_reaction")).await.unwrap(),expected);
+            assert_eq!(scoped.generate(request("reasoning")).await.unwrap(),"reasoning");
+            assert_eq!(scoped.generate(request("chat_partner")).await.unwrap(),"chat_partner");
+        }
+        assert_eq!(router.generate(request("companion")).await.unwrap(),"companion");
+        assert_eq!(router.for_character("nana").generate(request("companion").with_character_id("vivian")).await.unwrap(),"companion_vivian");
+    }
+    #[tokio::test]
+    async fn missing_failed_and_disabled_character_routes_keep_shared_fallback() {
+        let (mut router,probe)=fixture();
+        Arc::get_mut(&mut router.task_providers).unwrap().remove("companion_nana");
+        assert_eq!(router.for_character("nana").generate(request("companion")).await.unwrap(),"companion_vivian");
+        let mut failed=probe.clone();failed.failed=true;
+        Arc::get_mut(&mut router.task_providers).unwrap().insert("companion_vivian".into(),Box::new(failed));
+        assert_eq!(router.for_character("vivian").generate(request("companion")).await.unwrap(),"main");
+        router.enable_routing_matrix=false;
+        assert_eq!(router.for_character("vivian").generate(request("companion")).await.unwrap(),"main");
     }
     #[tokio::test]
     async fn every_task_reaches_its_provider_with_a_distinct_prompt_in_all_four_modes() {

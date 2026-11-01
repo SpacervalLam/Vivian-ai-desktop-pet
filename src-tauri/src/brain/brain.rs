@@ -143,7 +143,7 @@ impl Brain {
         tool_system: Arc<ToolSystem>,
         world_provider: Arc<crate::world::WorldStateProvider>,
     ) -> VivianResult<Self> {
-        let router = Arc::new(router);
+        let router = Arc::new(router.for_character(char_id));
         let memory = Arc::new(memory);
 
         // Episode 经历封包索引：与 unified_memory.json 同目录

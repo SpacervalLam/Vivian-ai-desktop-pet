@@ -59,7 +59,30 @@
       "concurrency": "dialogue",
       "spoken": true,
       "fallback": null,
-      "instruction": "Generate the selected character’s next spoken contribution using the caller’s character identity, current conversation, language and active response protocol. Respond to the actual latest speaker; current corrections and boundaries take precedence over old records and fictional references. Internal planning, routing and tool payloads stay out of spoken text. Do not invent shared experiences or completed actions. Use evidence for factual and completion claims; ordinary reactions do not require tool receipts. Allow silence when the caller’s protocol supports it. Execution-specific instructions, when relevant, are supplied by the caller for that turn."
+      "instruction": "Generate the selected character’s next spoken contribution using the caller’s character identity, current conversation, language and active response protocol. Respond to the actual latest speaker; current corrections and boundaries take precedence over old records and fictional references. Internal planning, routing and tool payloads stay out of spoken text. Do not invent shared experiences or completed actions. Use evidence for factual and completion claims; ordinary reactions do not require tool receipts. Allow silence when the caller’s protocol supports it. Execution-specific instructions, when relevant, are supplied by the caller for that turn.",
+      "hidden": true
+    },
+    {
+      "id": "companion_vivian",
+      "tier": "dialogue",
+      "groupKey": "config.routing_group_conversation",
+      "labelKey": "config.routing_companion_vivian",
+      "helpKey": "config.routing_companion_vivian_help",
+      "concurrency": "dialogue",
+      "spoken": true,
+      "fallback": null,
+      "instruction": "Character-specific model configuration for vivian. Generate the selected character’s next spoken contribution using the caller’s character identity, current conversation, language and active response protocol. Respond to the actual latest speaker; current corrections and boundaries take precedence over old records and fictional references. Internal planning, routing and tool payloads stay out of spoken text. Do not invent shared experiences or completed actions. Use evidence for factual and completion claims; ordinary reactions do not require tool receipts. Allow silence when the caller’s protocol supports it. Execution-specific instructions, when relevant, are supplied by the caller for that turn."
+    },
+    {
+      "id": "companion_nana",
+      "tier": "dialogue",
+      "groupKey": "config.routing_group_conversation",
+      "labelKey": "config.routing_companion_nana",
+      "helpKey": "config.routing_companion_nana_help",
+      "concurrency": "dialogue",
+      "spoken": true,
+      "fallback": null,
+      "instruction": "Character-specific model configuration for nana. Generate the selected character’s next spoken contribution using the caller’s character identity, current conversation, language and active response protocol. Respond to the actual latest speaker; current corrections and boundaries take precedence over old records and fictional references. Internal planning, routing and tool payloads stay out of spoken text. Do not invent shared experiences or completed actions. Use evidence for factual and completion claims; ordinary reactions do not require tool receipts. Allow silence when the caller’s protocol supports it. Execution-specific instructions, when relevant, are supplied by the caller for that turn."
     },
     {
       "id": "pet_reaction",
