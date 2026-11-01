@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn gap_across_midnight_is_labeled_as_a_different_day() {
-        let now = Local::now();
+        let now = Local::now().date_naive().and_hms_opt(12,0,0).unwrap().and_local_timezone(Local).single().unwrap();
         let previous = now - chrono::Duration::hours(14);
         // Only meaningful when the two timestamps really fall on different dates.
         if previous.date_naive() != now.date_naive() {
