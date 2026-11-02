@@ -284,20 +284,24 @@ impl ToolSandbox {
             args.get("text").and_then(Value::as_str).map(str::to_owned)
         } else { extract_command(args) };
         if let Some(cmd) = &command {
-            if is_dangerous_command(cmd, command_shell(tool_name)) {
-                return SafetyResult::denied(format!(
-                    "检测到危险命令被沙箱拦截: {}",
-                    tool_name
-                ));
+            let dangerous = is_dangerous_command(cmd, command_shell(tool_name))
+                || super::builtin::coding_tools::FORBIDDEN_FRAGMENTS.iter().any(|f|cmd.to_ascii_lowercase().contains(&f.to_ascii_lowercase()));
+            if dangerous && !context.is_some_and(|c|c.is_work_agent() && c.subagent_depth==0 && c.access_level==Some(super::types::AgentAccessLevel::FullControl)) {
+                return SafetyResult::needs_confirmation(ToolRiskLevel::High,
+                    "该命令包含删除、系统修改或下载执行操作，请确认具体命令的影响。", None);
             }
         }
 
         // 2. 路径穿越检查（search_files 豁免工作目录约束：其语义就是跨目录查找）
         let external_read = super::permission::file_operation_for_call(tool_name, args) == Some("read")
             && context.is_some_and(ToolUseContext::allows_external_file_reads);
-        let enforce_working_dir = tool_name != "search_files" && !external_read;
+        let brokered = context.is_some_and(|c|c.is_work_agent()) && super::access::process_tool(tool_name);
+        let full_access = context.is_some_and(|c| c.is_work_agent() && c.subagent_depth == 0
+            && c.access_level == Some(super::types::AgentAccessLevel::FullControl));
+        let enforce_working_dir = tool_name != "search_files" && !external_read && !brokered
+            && !(context.is_some_and(|c| c.is_work_agent()) && matches!(tool_name, "working_directory" | "terminal_open"));
         for path in extract_paths(args) {
-            if !external_read && !is_path_safe(&path) {
+            if !external_read && !brokered && !full_access && !is_path_safe(&path) {
                 return SafetyResult::denied(format!(
                     "路径包含穿越序列被沙箱拦截: {}",
                     path
@@ -339,26 +343,16 @@ impl ToolSandbox {
         // 只对**工作会话**生效：陪伴侧没有"声明过的工作区"（其 working_directory 只是
         // 进程 cwd），拿它当边界属于凭空收紧，会误伤用户正常的跨目录操作。
         if let (Some(cmd), Some(c)) = (&command, context) {
-            // The Windows restricted-token backend permits reads using the user's
-            // existing rights while limiting writes to granted workspace/scratch dirs.
-            // Full access can use it to inspect external data (e.g. SQLite via Python).
-            // Other command backends retain the literal-path guard.
-            let isolated_full_access = cfg!(windows) && tool_name == "run_command"
-                && crate::tools::sandbox_env::enabled()
-                && c.allows_external_file_reads()
-                && c.access_level == Some(super::types::AgentAccessLevel::FullControl);
-            if c.is_work_agent() && !c.working_directory.is_empty() && !isolated_full_access {
+            let brokered = super::access::process_tool(tool_name) && c.is_work_agent();
+            if !brokered && c.is_work_agent() && !c.working_directory.is_empty() {
                 for path in extract_literal_absolute_paths(cmd) {
-                    if !c.is_path_authorized(&path) {
-                        return SafetyResult::denied(format!(
-                            "命令引用了工作区之外的绝对路径: {path}（主工作区: {}）。\
-                             需要访问该目录时，请用户在工作页把它挂为会话的附加工作区，\
-                             或改用工作区内的相对路径。",
-                            c.working_directory
-                        ));
-                    }
+                    if !c.is_path_authorized(&path) { return SafetyResult::denied(format!("命令引用了任务范围之外的路径: {path}")); }
                 }
             }
+        }
+
+        if context.is_some_and(|c| c.is_work_agent()) && super::access::process_tool(tool_name) {
+            return SafetyResult::allowed(ToolRiskLevel::Low, "命令由任务进程服务落实当前读写边界");
         }
 
         // 3. 风险评估
@@ -760,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_reaching_outside_workspace_is_denied() {
+    fn brokered_shell_command_can_read_outside_workspace() {
         let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
         let ctx = work_ctx("G:\\work");
         let r = sandbox.check_tool_safety(
@@ -768,8 +762,7 @@ mod tests {
             &json!({ "command": "type D:\\other\\secret.txt" }),
             Some(&ctx),
         );
-        assert!(!r.allowed, "工作区外的绝对路径必须被拒");
-        assert!(r.message.contains("D:\\other\\secret.txt"), "{}", r.message);
+        assert!(r.allowed, "外部读取由 worker 的写限制保护，不应按字面路径拒绝");
     }
 
     #[cfg(windows)]
@@ -780,12 +773,12 @@ mod tests {
         ctx.access_level = Some(super::super::types::AgentAccessLevel::FullControl);
         let args = json!({"command":"Get-Content -LiteralPath 'D:/other/data.txt'"});
         let result = sandbox.check_tool_safety("run_command", &args, Some(&ctx));
-        assert_eq!(result.allowed, crate::tools::sandbox_env::enabled(), "{result:?}");
+        assert!(result.allowed, "{result:?}");
         // Persistent terminals may not use this backend, so retain their guard.
         let result = sandbox.check_tool_safety("terminal_send", &json!({"text":"Get-Content -LiteralPath 'D:/other/data.txt'"}), Some(&ctx));
-        assert!(!result.allowed);
+        assert!(result.allowed);
         ctx.subagent_depth = 1;
-        assert!(!sandbox.check_tool_safety("run_command", &args, Some(&ctx)).allowed);
+        assert!(sandbox.check_tool_safety("run_command", &args, Some(&ctx)).allowed);
     }
 
     #[test]
@@ -843,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn traversal_in_command_is_still_caught() {
+    fn parent_directory_reads_are_not_treated_as_write_grants() {
         let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
         let ctx = work_ctx("G:\\work");
         let r = sandbox.check_tool_safety(
@@ -851,7 +844,21 @@ mod tests {
             &json!({ "command": r"type ..\..\outside\x.txt" }),
             Some(&ctx),
         );
-        assert!(!r.allowed, "命令里的 .. 穿越仍应被拦");
+        assert!(r.allowed, "合法父目录访问不应由字符串扫描拒绝，写权限交给 worker");
+    }
+
+    #[test]
+    fn destructive_commands_have_one_review_path_and_full_access_is_explicit() {
+        let sandbox=ToolSandbox::new(ProtectionMode::Permissive,600);
+        let mut ctx=work_ctx("G:/work");
+        for tool in ["run_command","run_job","pwsh_persistent"] {
+            let result=sandbox.check_tool_safety(tool,&json!({"command":"rm -rf ./build"}),Some(&ctx));
+            assert!(result.requires_confirmation,"{tool}: {result:?}");
+        }
+        ctx.access_level=Some(super::super::types::AgentAccessLevel::FullControl);
+        assert!(sandbox.check_tool_safety("run_command",&json!({"command":"rm -rf ./build"}),Some(&ctx)).allowed);
+        ctx.subagent_depth=1;
+        assert!(sandbox.check_tool_safety("run_command",&json!({"command":"rm -rf ./build"}),Some(&ctx)).requires_confirmation);
     }
 
     #[test]

@@ -31,6 +31,8 @@ fn job_to_json(j: &JobInfo) -> Value {
         "exit_code": j.exit_code,
         "output": j.output,
         "truncated": j.truncated,
+        "output_file": j.output_file,
+        "dropped_chars": j.dropped_chars,
         "created_at_ms": j.created_at_ms,
         "finished_at_ms": j.finished_at_ms,
     })
@@ -118,16 +120,19 @@ impl Tool for RunJobTool {
     }
 
     async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
-        PermissionResult::ask("是否允许在后台执行此 PowerShell 命令？")
+        PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let job_id = manager().start(command.clone());
+        let job_id = match manager().start(command.clone(), ctx, args["timeout_secs"].as_u64().unwrap_or(3600).clamp(1,86400)) {
+            Ok(id) => id,
+            Err(e) => return ToolResult::standard_error(&e, Some("PermissionChanged"), None),
+        };
         ToolResult::standard_success(
             &format!("后台任务已启动：{job_id}"),
             Some(json!({ "job_id": job_id, "command": command })),
@@ -250,29 +255,26 @@ impl Tool for ManageJobTool {
 
     async fn check_permissions(&self, input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
         let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        if action == "kill" {
-            PermissionResult::ask("终止后台任务会中断其进程，需要确认")
-        } else {
-            PermissionResult::allow()
-        }
+        let _ = action;
+        PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let job_id = args.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
 
         match action {
-            "get" => match manager().get(job_id) {
+            "get" => match manager().get(job_id, ctx) {
                 Some(j) => ToolResult::standard_success(&format!("任务 {} 状态：{:?}", j.job_id, j.status), Some(job_to_json(&j))),
                 None => ToolResult::standard_error("任务不存在", Some(&format!("未找到 job_id={job_id}")), None),
             },
             "list" => {
-                let jobs = manager().list();
+                let jobs = manager().list(ctx);
                 let arr: Vec<Value> = jobs.iter().map(job_to_json).collect();
                 ToolResult::standard_success(&format!("共 {} 个后台任务", jobs.len()), Some(json!({ "jobs": arr })))
             }
             "kill" => {
-                if manager().kill(job_id) {
+                if manager().kill(job_id, ctx) {
                     ToolResult::standard_success(&format!("任务 {job_id} 已终止"), Some(json!({ "job_id": job_id })))
                 } else {
                     ToolResult::standard_error("任务不存在或已结束", Some(&format!("未找到运行中的 job_id={job_id}")), None)
@@ -283,7 +285,7 @@ impl Tool for ManageJobTool {
     }
 
     fn is_read_only(&self) -> bool {
-        false
+        true
     }
 
     fn category(&self) -> ToolCategory {
@@ -291,7 +293,7 @@ impl Tool for ManageJobTool {
     }
 
     fn risk(&self) -> ToolRiskTier {
-        ToolRiskTier::Shell
+        ToolRiskTier::Safe
     }
 
     fn always_load(&self) -> bool {

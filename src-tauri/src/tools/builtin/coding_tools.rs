@@ -28,45 +28,13 @@ const BINARY_EXTS: &[&str] = &[
     "so", "dylib", "bin", "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
     "ttf", "otf", "woff", "woff2",
 ];
-/// run_command / 自建工具脚本的明显破坏性命令片段（直接拒绝，不进入执行）
+/// 需要复核的命令片段；自建工具的静态审计也复用此表。
 pub(crate) const FORBIDDEN_FRAGMENTS: &[&str] = &[
     "format ", "format-volume", "shutdown", "reg delete", "reg delete ", "diskpart",
     "cipher /w", "rd /s", "del /f /s /q", "Remove-Item -Recurse -Force C:\\",
 ];
-/// 命令输出截断上限（字符）
-const CMD_OUTPUT_MAX_CHARS: usize = 8000;
 /// 命令执行超时（秒）
 const CMD_TIMEOUT_SECS: u64 = 120;
-
-/// 让 PowerShell 以 UTF-8 读写管道的启动前缀。
-///
-/// PowerShell 5.1 在中文 Windows 上按 OEM 代码页（CP936）编码自己的 stdout，
-/// 而 Rust 侧按 UTF-8 读——每个汉字都会退化成 U+FFFD，模型看到的工具结果是
-/// 一团乱码（实测 `目录:` → `Ŀ¼:`、`娘` → `��`），连报错原因都读不出来。
-/// 前缀把控制台输出编码切到 UTF-8；`$OutputEncoding` 负责管道进原生进程的编码。
-const UTF8_CONSOLE_PREFIX: &str =
-    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[Console]::OutputEncoding; ";
-
-/// 解码控制台输出字节。
-///
-/// UTF-8 合法时原样返回。否则先按 GBK（CP936，中文 Windows 的 OEM 代码页）解——
-/// 这条路是确定性的，比"拿几十个字节去猜编码"可靠得多；GBK 也解不干净时再交给
-/// chardetng。兜住的是绕过启动前缀的场景，例如经 `cmd /c` 透传的原生工具输出。
-fn decode_console(bytes: &[u8]) -> String {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_string();
-    }
-    #[cfg(windows)]
-    {
-        let (text, _, had_errors) = encoding_rs::GBK.decode(bytes);
-        if !had_errors {
-            return text.into_owned();
-        }
-    }
-    let mut detector = chardetng::EncodingDetector::new();
-    detector.feed(bytes, true);
-    detector.guess(None, true).decode(bytes).0.into_owned()
-}
 
 /// 外层超时相对内层预算的余量（秒）。
 ///
@@ -155,7 +123,7 @@ impl Tool for WriteFileTool {
         if path.is_empty() {
             return ValidationResult::failure("path 不能为空", 2);
         }
-        if !is_path_safe(path) {
+        if ctx.access_level != Some(crate::tools::types::AgentAccessLevel::FullControl) && !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
         if !ctx.is_path_authorized(&ctx.resolve_path(path)) {
@@ -181,7 +149,7 @@ impl Tool for WriteFileTool {
         let p = std::path::Path::new(&path);
         if let Some(parent) = p.parent() {
             if !parent.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+                if let Err(e) = crate::tools::access::create_dir_all(ctx, parent) {
                     return ToolResult::standard_error(&format!("创建父目录失败: {e}"), None, None);
                 }
             }
@@ -190,7 +158,7 @@ impl Tool for WriteFileTool {
         // 写入前的旧内容：用于生成「变更」页可见的 unified diff。
         // 读不到（新建 / 非 UTF-8 文本）按「无旧内容」处理 → 全文记作新增。
         let previous = if existed { std::fs::read_to_string(p).ok() } else { None };
-        match std::fs::write(p, content.as_bytes()) {
+        match crate::tools::access::write_file(ctx, p, content.as_bytes()) {
             Ok(()) => {
                 let diff = build_write_diff(&path, previous.as_deref(), &content);
                 ToolResult::standard_success(
@@ -610,7 +578,7 @@ impl Tool for EditFileTool {
             return ValidationResult::failure("path 不能为空", 2);
         }
         let resolved = resolve_path(path, ctx);
-        if !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
+        if ctx.access_level != Some(crate::tools::types::AgentAccessLevel::FullControl) && !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
         if !(action == "view" && ctx.allows_external_file_reads()) && !ctx.is_path_authorized(&resolved) {
@@ -698,7 +666,7 @@ impl Tool for EditFileTool {
 
         // 与编辑器动作共用撤销栈：改错了可以用 action="undo" 回退。
         push_undo(&ctx.session_id, &path, raw.clone());
-        match std::fs::write(&path, updated.as_bytes()) {
+        match crate::tools::access::write_file(ctx, &path, updated.as_bytes()) {
             Ok(()) => ToolResult::standard_success(
                 &format!("已编辑「{}」：替换 {count} 处", path, count = if replace_all { count } else { 1 }),
                 Some(json!({
@@ -758,7 +726,7 @@ impl Tool for RunCommandTool {
     }
 
     fn description(&self) -> &str {
-        "Run a PowerShell command in the working directory (non-interactive, timeout 120s, output truncated to 8000 chars). Use for builds, tests, git operations, package installs, and quick inspections (dir, git status, cargo check...). The command runs with the user's permissions — avoid destructive system operations."
+        "Run a PowerShell command in the working directory (non-interactive, timeout 120s, output truncated to 8000 chars). Use for builds, tests, git operations, package installs, and quick inspections (dir, git status, cargo check...). Execution follows the current live task permission. Long output includes a readable output_file."
     }
 
     fn description_in(&self, lang: &str) -> &str {
@@ -799,13 +767,6 @@ impl Tool for RunCommandTool {
         if command.is_empty() {
             return ValidationResult::failure("command 不能为空", 2);
         }
-        let lower = command.to_ascii_lowercase();
-        if let Some(frag) = FORBIDDEN_FRAGMENTS.iter().find(|f| lower.contains(*f)) {
-            return ValidationResult::failure(
-                &format!("命令包含破坏性片段「{frag}」，已被拒绝。如确需执行请让用户手动操作。"),
-                2,
-            );
-        }
         ValidationResult::success(None)
     }
 
@@ -814,130 +775,7 @@ impl Tool for RunCommandTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
-        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let timeout = command_timeout_secs(&args);
-
-        let cwd = if ctx.working_directory.is_empty() {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&ctx.working_directory))
-        };
-
-        // 隔离层（Windows）：命令跑在受限令牌 + 低完整性沙箱里，而不是全权限
-        // 子进程。沙箱建立失败 = 拒绝执行，不回退全权限——与插件脚本路径同一口径。
-        #[cfg(windows)]
-        if crate::tools::sandbox_env::enabled() {
-            let req = crate::tools::sandbox_env::request_for(ctx);
-            let wrapped = format!("{UTF8_CONSOLE_PREFIX}{command}");
-            let cwd_opt = cwd.clone();
-            let secs = timeout;
-            let out = match tokio::task::spawn_blocking(move || {
-                crate::utils::sandbox::run_command_sandboxed(
-                    &req,
-                    &wrapped,
-                    secs,
-                    cwd_opt.as_deref(),
-                )
-            })
-            .await
-            {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => {
-                    return ToolResult::standard_error(
-                        &format!("沙箱执行不可用，已拒绝执行命令: {e}"),
-                        Some("SandboxUnavailable"),
-                        None,
-                    )
-                }
-                Err(e) => {
-                    return ToolResult::standard_error(
-                        &format!("沙箱任务失败: {e}"),
-                        Some("SandboxFailed"),
-                        None,
-                    )
-                }
-            };
-            if out.timed_out {
-                return ToolResult::standard_error(
-                    &format!("命令执行超时（{timeout} 秒），已终止"),
-                    Some("timeout"),
-                    Some(json!({ "command": command })),
-                );
-            }
-            let stdout = out.stdout;
-            let stderr = out.stderr;
-            let code = out.exit_code;
-            let truncated = stdout.len() + stderr.len() > CMD_OUTPUT_MAX_CHARS;
-            let stdout_t = truncate_chars(&stdout, CMD_OUTPUT_MAX_CHARS);
-            let stderr_t = truncate_chars(&stderr, CMD_OUTPUT_MAX_CHARS / 2);
-            return ToolResult::standard_success(
-                &format!("命令退出码 {code}{}", if truncated { "（输出已截断）" } else { "" }),
-                Some(json!({
-                    "command": command,
-                    "exit_code": code,
-                    "success": code == 0,
-                    "stdout": stdout_t,
-                    "stderr": stderr_t,
-                    "truncated": truncated,
-                    "sandboxed": true,
-                })),
-            );
-        }
-
-        // 走到这里说明没有沙箱可用（非 Windows，或沙箱被关闭）。配置要求必须有
-        // 隔离时就地拒绝——宁可不跑，也不退回全权限子进程。
-        if crate::tools::sandbox_env::require_isolation() {
-            return ToolResult::standard_error(
-                "当前环境没有可用的 OS 级沙箱，已按配置拒绝执行命令。若要执行请关闭「要求 OS 级隔离」。",
-                Some("SandboxRequired"),
-                None,
-            );
-        }
-
-        let mut cmd = tokio::process::Command::new("powershell");
-        // 前缀与用户命令同处一个 -Command 串：`;` 连接不影响末条命令的退出码，
-        // 也不会改变 cwd / 变量作用域。
-        let wrapped = format!("{UTF8_CONSOLE_PREFIX}{command}");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &wrapped])
-            .kill_on_drop(true)
-            .creation_flags_windows();
-        if let Some(dir) = cwd.as_ref() {
-            cmd.current_dir(dir);
-        }
-
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout),
-            cmd.output(),
-        )
-        .await;
-        match output {
-            Err(_) => ToolResult::standard_error(
-                &format!("命令执行超时（{timeout} 秒），已终止"),
-                Some("timeout"),
-                Some(json!({ "command": command })),
-            ),
-            Ok(Err(e)) => ToolResult::standard_error(&format!("启动命令失败: {e}"), None, None),
-            Ok(Ok(out)) => {
-                let stdout = decode_console(&out.stdout);
-                let stderr = decode_console(&out.stderr);
-                let code = out.status.code().unwrap_or(-1);
-                let truncated = stdout.len() + stderr.len() > CMD_OUTPUT_MAX_CHARS;
-                let stdout_t = truncate_chars(&stdout, CMD_OUTPUT_MAX_CHARS);
-                let stderr_t = truncate_chars(&stderr, CMD_OUTPUT_MAX_CHARS / 2);
-                let success = out.status.success();
-                ToolResult::standard_success(
-                    &format!("命令退出码 {code}{}", if truncated { "（输出已截断）" } else { "" }),
-                    Some(json!({
-                        "command": command,
-                        "exit_code": code,
-                        "success": success,
-                        "stdout": stdout_t,
-                        "stderr": stderr_t,
-                        "truncated": truncated,
-                    })),
-                )
-            }
-        }
+        super::terminal_tools::execute_process(ctx, &args, None).await
     }
 
     fn is_read_only(&self) -> bool {
@@ -964,39 +802,6 @@ impl Tool for RunCommandTool {
     fn search_hint(&self) -> &str {
         "run command shell powershell terminal build test git npm cargo 执行 命令 构建 测试"
     }
-}
-
-/// Windows 下隐藏 powershell 弹出的控制台窗口（仅 Windows 生效）。
-#[cfg(windows)]
-trait CreationFlagsExt {
-    fn creation_flags_windows(&mut self) -> &mut Self;
-}
-#[cfg(windows)]
-impl CreationFlagsExt for tokio::process::Command {
-    fn creation_flags_windows(&mut self) -> &mut Self {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        self.as_std_mut().creation_flags(CREATE_NO_WINDOW);
-        self
-    }
-}
-#[cfg(not(windows))]
-trait CreationFlagsExt {
-    fn creation_flags_windows(&mut self) -> &mut Self {
-        self
-    }
-}
-#[cfg(not(windows))]
-impl CreationFlagsExt for tokio::process::Command {}
-
-/// 按字符数截断（chars 边界天然安全），超长时附加截断标记。
-pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut result: String = s.chars().take(max).collect();
-    result.push_str("\n…(truncated)");
-    result
 }
 
 // ============================================================================
@@ -1644,39 +1449,6 @@ mod write_diff_tests {
         assert!(d.contains("已截断"), "应标注截断:\n{d}");
         // 兜底路径同样受行数预算约束
         assert!(d.lines().count() <= WRITE_DIFF_MAX_LINES + 1, "not capped");
-    }
-}
-
-#[cfg(test)]
-mod console_decode_tests {
-    use super::*;
-
-    /// UTF-8 合法时不能被动过。
-    #[test]
-    fn keeps_utf8_untouched() {
-        assert_eq!(decode_console("中文测试".as_bytes()), "中文测试");
-        assert_eq!(decode_console(b"plain ascii"), "plain ascii");
-        assert_eq!(decode_console(b""), "");
-    }
-
-    /// 中文 Windows 的 PowerShell 按 CP936 写管道：`中文` = D6 D0 CE C4，
-    /// 这两个字节序列都不是合法 UTF-8，旧的 from_utf8_lossy 会变成两个 U+FFFD。
-    #[cfg(windows)]
-    #[test]
-    fn decodes_cp936_console_output() {
-        assert_eq!(decode_console(&[0xD6, 0xD0, 0xCE, 0xC4]), "中文");
-    }
-
-    /// 旧行为回归防线：GBK 字节经 lossy 会丢字，这里确认新路径不丢。
-    #[cfg(windows)]
-    #[test]
-    fn no_replacement_chars_for_gbk() {
-        let gbk = [0xC4, 0xBF, 0xC2, 0xBC]; // 「目录」
-        let decoded = decode_console(&gbk);
-        assert!(
-            !decoded.contains('\u{FFFD}'),
-            "不应产出替换字符，实际: {decoded:?}"
-        );
     }
 }
 

@@ -243,6 +243,16 @@ impl Tool for DelegateToWorkAgentTool {
         // 创建工作会话并以用户身份发送任务（异步后台执行）
         let session = CODING_AGENT.create_session(&context.char_id, &working_directory, &mode);
         let session_id = session.session_id.clone();
+        let level = context.access_level.unwrap_or_else(|| crate::tools::types::AgentAccessLevel::from_str(&state.config.read().get_all().tools.access_level));
+        let permission = match level {
+            crate::tools::types::AgentAccessLevel::FullControl => "full_access",
+            crate::tools::types::AgentAccessLevel::ReadOnly => "read_only",
+            _ => "workspace_write",
+        };
+        if let Err(error) = CODING_AGENT.set_permission(&session_id, permission) {
+            CODING_AGENT.delete_session(&session_id);
+            return ToolResult::standard_error(&error, Some("DelegatePolicyFailed"), None);
+        }
         if let Err(e) = CODING_AGENT.mark_delegated_by_companion(&session_id) {
             CODING_AGENT.delete_session(&session_id);
             if created_workspace { let _ = std::fs::remove_dir(&working_directory); }

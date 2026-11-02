@@ -4,11 +4,11 @@
 //! 进程（Job Object 只做生命周期遏制）。本模块把子进程放进受限执行环境：
 //! - **特权全剥**：`CreateRestrictedToken(DISABLE_MAX_PRIVILEGE)`——调试、
 //!   备份、加载驱动等特权一概不可用
-//! - **写入受限令牌**：Everyone + BUILTIN\Users + 当前登录会话作为 restricting SID，
+//! - **写入受限令牌**：宿主签发的策略写入 SID + World（系统运行库对象）作为 restricting SID，
 //!   写访问做二次检查；读取沿用用户权限，避免阻断 PowerShell/.NET 的启动读取
 //! - **低完整性级别**（S-1-16-4096）：强制完整性控制下不可写 Medium/High
 //!   IL 对象——用户文件与 HKCU 常规注册表键均拒绝写入
-//! - **可写面收窄**：scratch 目录和显式授权的工作区带 Low IL 标签 + 当前登录会话写
+//! - **可写面收窄**：scratch 目录和显式授权的工作区带 Low IL 标签 + 当前策略 SID 写
 //!   DACL；子进程 TMP/TEMP 指向 `%TEMP%\vivian-sandbox-low` 下的 scratch
 //! - **网络策略**：通过环境变量与本地代理提供协作式约束，不是防火墙级隔离
 //!
@@ -31,6 +31,20 @@ pub struct SandboxOutput {
 }
 
 const LOW_IL_SID: &str = "S-1-16-4096";
+
+thread_local! { static WRITE_IDENTITY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+pub(super) fn active_write_sid() -> Option<String> { WRITE_IDENTITY.with(|sid|sid.borrow().clone()) }
+struct WriteIdentity(Option<String>);
+impl WriteIdentity {
+    fn new(issued: Option<&str>) -> Self {
+        let bytes = *uuid::Uuid::new_v4().as_bytes();
+        let n = |offset| u32::from_le_bytes(bytes[offset..offset+4].try_into().unwrap());
+        let sid = issued.map(str::to_string).unwrap_or_else(||format!("S-1-5-21-{}-{}-{}-{}", n(0), n(4), n(8), n(12)));
+        Self(WRITE_IDENTITY.with(|slot|slot.replace(Some(sid))))
+    }
+}
+impl Drop for WriteIdentity { fn drop(&mut self) { WRITE_IDENTITY.with(|slot|slot.replace(self.0.take())); } }
+
 
 /// 策略类型（网络模式、执行请求描述）放在零依赖的 `sandbox_policy` 里：
 /// 隔离层不该反向依赖配置层，且那部分要能在隔离 harness 里单独编译验证。
@@ -91,8 +105,23 @@ impl Drop for ScriptFile {
 
 /// Per-execution lifetime, nested inside the application's crash-recovery job.
 /// Handles are stored as integers so a persistent shell can cross async tasks.
-struct ProcessJob(usize);
+pub(crate) struct ProcessJob(usize);
 impl ProcessJob {
+    /// Attach an idle user-mode worker before any model command is sent.
+    pub(crate) fn attach(process: usize) -> Result<Self, String> {
+        use windows::Win32::System::JobObjects::*;
+        unsafe {
+            let raw = CreateJobObjectW(None, windows::core::PCWSTR::null()).map_err(|e|e.to_string())?;
+            let job = Self(raw.0 as usize);
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(raw, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32).map_err(|e|e.to_string())?;
+            crate::utils::job_object::assign_process(process as isize);
+            AssignProcessToJobObject(raw, HANDLE(process as *mut _)).map_err(|e|e.to_string())?;
+            Ok(job)
+        }
+    }
+
     fn start(process: HANDLE, thread: HANDLE) -> Result<Self, String> {
         use windows::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -129,7 +158,7 @@ impl ProcessJob {
             result
         }
     }
-    fn kill(&self) {
+    pub(crate) fn kill(&self) {
         unsafe {
             let _ =
                 windows::Win32::System::JobObjects::TerminateJobObject(HANDLE(self.0 as *mut _), 1);
@@ -223,6 +252,18 @@ fn grant_workspaces(req: &SandboxRequest) -> (usize, Option<String>) {
             ));
         }
     }
+    for directory in &req.readonly_dirs {
+        let path=PathBuf::from(directory);
+        if req.workspace_dirs.iter().any(|root| {
+            match (std::fs::canonicalize(&path),std::fs::canonicalize(root)) {
+                (Ok(path),Ok(root))=>std::path::Path::new(&path.to_string_lossy().to_lowercase()).starts_with(std::path::Path::new(&root.to_string_lossy().to_lowercase())),
+                _=>false,
+            }
+        }) {
+            let result=crate::utils::sandbox_workspace::deny_workspace_write(&path);
+            if !result.usable() && first_err.is_none() { first_err=Some(result.error.unwrap_or_else(||"只读覆盖未能完整应用".into())); }
+        }
+    }
     if ok > 0 || !req.workspace_dirs.is_empty() {
         tracing::info!(
             "[sandbox] 工作区授权: 成功 {}/{}，错误 {:?}",
@@ -250,8 +291,9 @@ fn apply_scratch_security(dir: &std::path::Path) -> Result<(), String> {
     unsafe {
         // 当前登录会话访问 + 强制标签 Low（NW：完整性低于对象者不可写）
         let logon = current_logon_sid_sddl()?;
+        let capability = active_write_sid().map(|sid|format!("(A;OICI;FA;;;{sid})")).unwrap_or_default();
         let sddl = wide(&format!(
-            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;{logon})S:PAI(ML;OICI;NW;;;LW)"
+            "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;{logon}){capability}S:PAI(ML;OICI;NW;;;LW)"
         ));
         let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
@@ -427,7 +469,7 @@ pub fn current_integrity_level() -> IntegrityLevel {
 fn build_restricted_token() -> Result<HandleWrap, String> {
     use windows::Win32::Security::{
         CreateRestrictedToken, CreateWellKnownSid, DuplicateTokenEx, SecurityImpersonation,
-        SetTokenInformation, TokenIntegrityLevel, TokenPrimary, WinBuiltinUsersSid, WinWorldSid,
+        SetTokenInformation, TokenIntegrityLevel, TokenPrimary, WinWorldSid,
         DISABLE_MAX_PRIVILEGE, SID_AND_ATTRIBUTES, TOKEN_ALL_ACCESS, TOKEN_DUPLICATE,
         TOKEN_MANDATORY_LABEL, TOKEN_QUERY, WRITE_RESTRICTED,
     };
@@ -445,30 +487,16 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
         .map_err(|e| format!("打开进程令牌失败: {e}"))?;
         let base = HandleWrap::new(base);
 
-        // restricting SIDs：Everyone + BUILTIN\Users + 当前登录会话。
-        // 登录 SID 让会话系统对象及下方默认 DACL 同时通过两轮访问检查。
-        let mut restrict_sids: Vec<SID_AND_ATTRIBUTES> = Vec::new();
-        let mut sid_buffers: Vec<Vec<u8>> = Vec::new();
-        for kind in [WinWorldSid, WinBuiltinUsersSid] {
-            let mut buf = vec![0u8; 68]; // SECURITY_MAX_SID_SIZE
-            let mut size = buf.len() as u32;
-            CreateWellKnownSid(
-                kind,
-                None,
-                Some(windows::Win32::Security::PSID(buf.as_mut_ptr() as *mut _)),
-                &mut size,
-            )
-            .map_err(|e| format!("构造 well-known SID 失败: {e}"))?;
-            sid_buffers.push(buf);
-        }
         let logon = logon_sid(base.get())?;
-        sid_buffers.push(logon.clone());
-        for buf in &sid_buffers {
-            restrict_sids.push(SID_AND_ATTRIBUTES {
-                Sid: windows::Win32::Security::PSID(buf.as_ptr() as *mut _),
-                Attributes: 0,
-            });
-        }
+        let write_sid = active_write_sid().map(|sid|string_to_sid(&sid)).transpose()?;
+        let identity = write_sid.as_deref().unwrap_or(&logon);
+        let mut world = vec![0u8;68];
+        let mut size=world.len() as u32;
+        CreateWellKnownSid(WinWorldSid,None,Some(windows::Win32::Security::PSID(world.as_mut_ptr().cast())),&mut size).map_err(|e|e.to_string())?;
+        let restrict_sids = vec![
+            SID_AND_ATTRIBUTES { Sid: windows::Win32::Security::PSID(identity.as_ptr() as *mut _), Attributes: 0 },
+            SID_AND_ATTRIBUTES { Sid: windows::Win32::Security::PSID(world.as_ptr() as *mut _), Attributes: 0 },
+        ];
 
         // 第 1 步：从**未改动的**进程令牌派生受限令牌
         let mut restricted = HANDLE::default();
@@ -497,7 +525,7 @@ fn build_restricted_token() -> Result<HandleWrap, String> {
         )
         .map_err(|e| format!("复制受限令牌失败: {e}"))?;
         let primary = HandleWrap::new(primary);
-        grant_token_default_dacl(primary.get(), &logon)?;
+        grant_token_default_dacl(primary.get(), &world)?;
 
         // 第 3 步：在副本上降完整性（SetTokenInformation 需要 TOKEN_ADJUST_DEFAULT，
         // 副本带 TOKEN_ALL_ACCESS，够用）
@@ -700,6 +728,9 @@ fn build_env_block(
         vars.push(("TMP".into(), scratch_str.clone()));
         vars.push(("TEMP".into(), scratch_str));
 
+        vars.retain(|(key, _)| !crate::tools::access::secret_environment_key(key));
+        vars.push(("PYTHONUTF8".into(), "1".into()));
+        vars.push(("PYTHONIOENCODING".into(), "utf-8".into()));
         apply_network_env(&mut vars, req);
 
         // 双 null 结尾的 UTF-16 块：NAME=VALUE\0 ... \0\0
@@ -837,10 +868,11 @@ pub fn run_powershell_sandboxed_with(
         STARTUPINFOEXW,
     };
 
-    let scratch = scratch_dir_for(&req.session_id)?;
+    let _identity = WriteIdentity::new(req.write_identity.as_deref());
+    let scratch = scratch_dir_for(&format!("{}:{}", req.session_id, active_write_sid().unwrap()))?;
     let token = build_restricted_token()?;
     let env_block = build_env_block(token.get(), &scratch, req)?;
-    let _ = grant_workspaces(req);
+    if let (_, Some(error)) = grant_workspaces(req) { return Err(error); }
 
     // 脚本落盘（BOM），用后删除
     let script_path = scratch.join(format!(
@@ -911,7 +943,11 @@ pub fn run_powershell_sandboxed_with(
         )
         .map_err(|e| format!("设置句柄白名单失败: {e}"))?;
 
+        // An empty (non-null) desktop avoids inheriting the interactive desktop.
+        // Inheriting it requires logon-SID write authority and defeats policy-scoped grants.
+        let mut desktop = vec![0u16];
         let mut siex = STARTUPINFOEXW::default();
+        siex.StartupInfo.lpDesktop = windows::core::PWSTR(desktop.as_mut_ptr());
         siex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         siex.StartupInfo.hStdInput = child_stdin;
@@ -1111,10 +1147,11 @@ pub fn spawn_sandboxed_shell(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
-    let scratch = scratch_dir_for(&req.session_id)?;
+    let _identity = WriteIdentity::new(req.write_identity.as_deref());
+    let scratch = scratch_dir_for(&format!("{}:{}", req.session_id, active_write_sid().unwrap()))?;
     let token = build_restricted_token()?;
     let env_block = build_env_block(token.get(), &scratch, req)?;
-    let _ = grant_workspaces(req);
+    if let (_, Some(error)) = grant_workspaces(req) { return Err(error); }
 
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     let ps_exe = format!("{system_root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
@@ -1169,7 +1206,11 @@ pub fn spawn_sandboxed_shell(
         )
         .map_err(|e| format!("设置句柄白名单失败: {e}"))?;
 
+        // An empty (non-null) desktop avoids inheriting the interactive desktop.
+        // Inheriting it requires logon-SID write authority and defeats policy-scoped grants.
+        let mut desktop = vec![0u16];
         let mut siex = STARTUPINFOEXW::default();
+        siex.StartupInfo.lpDesktop = windows::core::PWSTR(desktop.as_mut_ptr());
         siex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         siex.StartupInfo.hStdInput = stdin_read.get();
@@ -1389,6 +1430,42 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes"]
+    fn nested_readonly_input_remains_readable_but_not_writable() {
+        let workspace=TestWorkspace::new();
+        let input=workspace.dir.join("input");std::fs::create_dir(&input).unwrap();
+        std::fs::write(input.join("source.txt"),"original").unwrap();
+        let mut req=workspace.request();req.readonly_dirs.push(input.to_string_lossy().into());
+        let out=run_command_sandboxed(&req,r#"$ErrorActionPreference='Stop'
+Write-Output (Get-Content -LiteralPath 'input/source.txt')
+Set-Content -LiteralPath 'report.txt' -Value 'ok'
+try { Set-Content -LiteralPath 'input/source.txt' -Value 'bad'; Write-Output 'BAD-WRITE' } catch { Write-Output 'DENIED-WRITE' }
+try { Remove-Item -Recurse -Force 'input'; Write-Output 'BAD-DELETE' } catch { Write-Output 'DENIED-DELETE' }"#,10,Some(&workspace.dir)).unwrap();
+        assert!(out.stdout.contains("original") && out.stdout.contains("DENIED-WRITE") && out.stdout.contains("DENIED-DELETE"),"{out:?}");
+        assert!(!out.stdout.contains("BAD-"),"{out:?}");
+        assert_eq!(std::fs::read_to_string(input.join("source.txt")).unwrap(),"original");
+        assert!(workspace.dir.join("report.txt").exists());
+    }
+
+    #[test]
+    #[ignore = "launches Windows restricted-token processes"]
+    fn readonly_workers_cannot_reuse_previous_workspace_write_grants() {
+        let workspace=TestWorkspace::new();
+        let first=run_command_sandboxed(&workspace.request(),"Set-Content -LiteralPath 'old.txt' -Value 'original'",10,Some(&workspace.dir)).unwrap();
+        assert_eq!(first.exit_code,0,"{first:?}");
+        let readonly=SandboxRequest {session_id:uuid::Uuid::new_v4().to_string(),..Default::default()};
+        let out=run_command_sandboxed(&readonly,r#"$ErrorActionPreference='Stop'
+Write-Output (Get-Content -LiteralPath 'old.txt')
+try { Set-Content -LiteralPath 'old.txt' -Value 'bad'; Write-Output 'BAD-OLD' } catch { Write-Output 'DENIED-OLD' }
+try { Set-Content -LiteralPath 'new.txt' -Value 'bad'; Write-Output 'BAD-NEW' } catch { Write-Output 'DENIED-NEW' }"#,10,Some(&workspace.dir)).unwrap();
+        assert!(out.stdout.contains("original"),"{out:?}");
+        assert!(out.stdout.contains("DENIED-OLD") && out.stdout.contains("DENIED-NEW"),"{out:?}");
+        assert!(!out.stdout.contains("BAD-"),"{out:?}");
+        assert_eq!(std::fs::read_to_string(workspace.dir.join("old.txt")).unwrap().trim(),"original");
+        assert!(!workspace.dir.join("new.txt").exists());
     }
 
     #[test]

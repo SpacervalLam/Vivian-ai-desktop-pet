@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::builtin::coding_tools::{truncate_chars, FORBIDDEN_FRAGMENTS};
+use super::builtin::coding_tools::FORBIDDEN_FRAGMENTS;
 use super::registry::ToolSystem;
 use super::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext,
@@ -41,7 +41,7 @@ use crate::utils::path::get_user_data_dir;
 /// 脚本执行超时（秒），与 run_command 默认一致
 const SCRIPT_TIMEOUT_SECS: u64 = 120;
 /// stdout/stderr 合计截断上限（字符），与 run_command 一致
-const OUTPUT_MAX_CHARS: usize = 8000;
+
 
 /// 自建工具定义（持久化 schema）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,155 +300,11 @@ impl Tool for DynamicTool {
             );
         }
 
-        // 执行时防御（第三层，Windows）：受限令牌沙箱——特权全剥 + Users
-        // restricting SID + 低完整性级别，唯一可写面是 Low IL scratch 目录。
-        // 建立失败即拒绝执行（不回退全权限）。非 Windows 无此威胁面，走普通 spawn。
-        #[cfg(windows)]
-        if crate::tools::sandbox_env::enabled() {
-            let req = crate::tools::sandbox_env::request_for(context);
-            let script = self.def.script.clone();
-            let payload = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-            let out =
-                match tokio::task::spawn_blocking(move || {
-                    crate::utils::sandbox::run_powershell_sandboxed_with(
-                        &req,
-                        &script,
-                        &payload,
-                        SCRIPT_TIMEOUT_SECS,
-                        None,
-                    )
-                })
-                .await
-                {
-                    Ok(Ok(out)) => out,
-                    Ok(Err(e)) => {
-                        return ToolResult::standard_error(
-                            &format!("沙箱执行不可用，已拒绝执行脚本: {e}"),
-                            Some("SandboxUnavailable"),
-                            None,
-                        );
-                    }
-                    Err(e) => {
-                        return ToolResult::standard_error(
-                            &format!("沙箱任务失败: {e}"),
-                            Some("SandboxFailed"),
-                            None,
-                        );
-                    }
-                };
-            if out.timed_out {
-                return ToolResult::standard_error(
-                    &format!("工具脚本执行超时（{SCRIPT_TIMEOUT_SECS} 秒），已终止"),
-                    Some("timeout"),
-                    None,
-                );
-            }
-            let truncated = out.stdout.len() + out.stderr.len() > OUTPUT_MAX_CHARS;
-            let stdout_t = truncate_chars(&out.stdout, OUTPUT_MAX_CHARS);
-            let stderr_t = truncate_chars(&out.stderr, OUTPUT_MAX_CHARS / 2);
-            return ToolResult::standard_success(
-                &format!(
-                    "脚本退出码 {}{}",
-                    out.exit_code,
-                    if truncated { "（输出已截断）" } else { "" }
-                ),
-                Some(serde_json::json!({
-                    "tool": self.def.name,
-                    "exit_code": out.exit_code,
-                    "success": out.exit_code == 0,
-                    "stdout": stdout_t,
-                    "stderr": stderr_t,
-                    "truncated": truncated,
-                    "sandboxed": true,
-                })),
-            );
-        }
-
-        // 走到这里说明没有沙箱可用（非 Windows，或沙箱被关闭）。配置要求必须有
-        // 隔离时就地拒绝——宁可不跑，也不退回全权限子进程。
-        if crate::tools::sandbox_env::require_isolation() {
-            return ToolResult::standard_error(
-                "当前环境没有可用的 OS 级沙箱，已按配置拒绝执行脚本。若要执行请关闭「要求 OS 级隔离」。",
-                Some("SandboxRequired"),
-                None,
-            );
-        }
-
-        {
-            let cwd = if context.working_directory.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(&context.working_directory))
-            };
-
-            let mut cmd = tokio::process::Command::new("powershell");
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", &self.def.script])
-                .kill_on_drop(true) // 超时 drop future 时同步终止进程
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            if let Some(dir) = cwd.as_ref() {
-                cmd.current_dir(dir);
-            }
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    return ToolResult::standard_error(&format!("启动脚本进程失败: {e}"), None, None)
-                }
-            };
-            // 绑定全局 Job Object：宿主崩溃/强杀时脚本进程由 OS 兜底回收
-            // （kill_on_drop 只覆盖超时/应用层正常清理路径；插件工具执行的是
-            // 不可信 PowerShell，生命周期遏制必须不依赖应用层存活）
-            crate::utils::process::assign_child_to_job(&child);
-
-            // 参数 JSON 写入 stdin 后关闭管道（脚本读到 EOF）
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                let payload = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                if let Err(e) = stdin.write_all(payload.as_bytes()).await {
-                    return ToolResult::standard_error(&format!("写入脚本 stdin 失败: {e}"), None, None);
-                }
-                drop(stdin);
-            }
-
-            let output = tokio::time::timeout(
-                std::time::Duration::from_secs(SCRIPT_TIMEOUT_SECS),
-                child.wait_with_output(),
-            )
-            .await;
-
-            match output {
-                Err(_) => ToolResult::standard_error(
-                    &format!("工具脚本执行超时（{SCRIPT_TIMEOUT_SECS} 秒），已终止"),
-                    Some("timeout"),
-                    None,
-                ),
-                Ok(Err(e)) => {
-                    ToolResult::standard_error(&format!("执行脚本失败: {e}"), None, None)
-                }
-                Ok(Ok(out)) => {
-                    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                    let code = out.status.code().unwrap_or(-1);
-                    let truncated = stdout.len() + stderr.len() > OUTPUT_MAX_CHARS;
-                    let stdout_t = truncate_chars(&stdout, OUTPUT_MAX_CHARS);
-                    let stderr_t = truncate_chars(&stderr, OUTPUT_MAX_CHARS / 2);
-                    let success = out.status.success();
-                    ToolResult::standard_success(
-                        &format!("脚本退出码 {code}{}", if truncated { "（输出已截断）" } else { "" }),
-                        Some(serde_json::json!({
-                            "tool": self.def.name,
-                            "exit_code": code,
-                            "success": success,
-                            "stdout": stdout_t,
-                            "stderr": stderr_t,
-                            "truncated": truncated,
-                        })),
-                    )
-                }
-            }
-        }
+        // Custom scripts share the same revocable worker and cwd as every other command.
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&args).unwrap_or_default());
+        let script = format!("[Console]::SetIn([IO.StringReader]::new([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}')))); & {{ {} }}", self.def.script);
+        crate::tools::builtin::terminal_tools::execute_process(context, &serde_json::json!({"command":script,"timeout_secs":SCRIPT_TIMEOUT_SECS}), None).await
     }
 
     fn is_read_only(&self) -> bool {

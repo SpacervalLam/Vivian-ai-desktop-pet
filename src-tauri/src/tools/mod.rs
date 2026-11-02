@@ -20,6 +20,7 @@
 //! 5. 执行（带超时）
 //! 6. 结果预算、缓存写入与后置策略；所有结果均记录可观测性
 
+pub mod access;
 pub mod builtin;
 pub(crate) mod arguments;
 pub mod cache;

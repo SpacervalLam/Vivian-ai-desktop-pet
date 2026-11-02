@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, ask } from '@tauri-apps/plugin-dialog';
 import { ArrowLeft, ArrowRight, RotateCw, X, Plus, Star, Ellipsis, Globe, Search, Terminal as TerminalIcon, VenetianMask, LoaderCircle, Puzzle, Download, History, ChevronRight, Minus } from 'lucide-react';
 import { browserBytes, browserEntries, browserLibraryPage, browserLibraryUrl, browserLibraryPages, type BrowserLibraryPage, emptyBrowser, mergeBrowserState, type BrowserState } from './browserModel';
 import BrowserSiteIcon from './BrowserSiteIcon';
@@ -308,6 +308,12 @@ export default function BrowserPanel({ visible, fullView, tabHost, onActivate, n
         {active && !active.start && icon('bookmark', <Star size={14} fill={state.bookmarks.some(b => b.url === active.url) ? 'currentColor' : 'none'} />, () => void send('bookmark', { id: active.id }))}
       </form>
       <div className="embedded-browser-actions-capsule" data-browser-menu-trigger>
+        {(error || state.error) && <button type="button" className="embedded-browser-error-indicator" aria-label={t('embeddedBrowser.error', { error: error || state.error })} title={t('embeddedBrowser.error', { error: error || state.error })} onClick={() => {
+          void ask(t('embeddedBrowser.error', { error: error || state.error }), { title: t('embeddedBrowser.title'), kind: 'error', okLabel: t('embeddedBrowser.retry'), cancelLabel: t('embeddedBrowser.close') }).then(retry => {
+            if (retry) void send('init');
+            else { setError(''); setState(current => ({ ...current, error: null })); }
+          }).catch(() => {});
+        }}><span aria-hidden="true">!</span></button>}
         {icon('extensions', <Puzzle size={16} />, () => showMenu('extensions'))}
         {icon('downloads', <Download size={16} />, () => showMenu('downloads'))}
       </div>
@@ -318,7 +324,6 @@ export default function BrowserPanel({ visible, fullView, tabHost, onActivate, n
       <Search size={13} /><input ref={findRef} value={find} aria-label={t('embeddedBrowser.find')} placeholder={t('embeddedBrowser.find')} onChange={event => setFind(event.target.value)} />
       {button('previous', () => act('find_previous', find))}{button('next', () => act('find', find))}{icon('close', <X size={13} />, () => { setFindOpen(false); act('find_stop'); })}
     </form>}
-    {(error || state.error) && <div className="embedded-browser-error" role="alert">{t('embeddedBrowser.error', { error: error || state.error })}{button('retry', () => void send('init'))}{icon('close', <X size={13} />, () => { setError(''); setState(current => ({ ...current, error: null })); })}</div>}
     {!ready && !error && <p role="status">{t('embeddedBrowser.loading')}</p>}
     {state.permissions.map(permission => <div className="embedded-browser-permission" key={permission.id} role="status">
       <p>{t('embeddedBrowser.permission', { origin: permission.origin, kind: t(`embeddedBrowser.permission_${permission.kind}`, { defaultValue: t('embeddedBrowser.permissionOther', { kind: permission.kind }) }) })}</p>

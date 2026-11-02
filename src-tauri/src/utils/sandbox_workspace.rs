@@ -1,23 +1,10 @@
 //! 工作区沙箱写授权 —— 让低完整性沙箱进程在工作区内可读可写
 //!
-//! 为什么需要这一层：受限令牌沙箱跑在低完整性级别（Low IL）。强制完整性控制
-//! 下，Low IL 进程写不动 Medium IL 对象；而用户的工作区默认没有完整性标签，
-//! 按 Medium 处理。结果是沙箱里 `cd` 到工作区能读不能写——持久终端、构建命令、
-//! `git commit` 全部失效。
-//!
-//! 只靠降标签还不够：受限令牌的访问检查要走**两遍**，一遍用令牌里全部 SID，
-//! 一遍只用 restricting SID（包括当前 Windows 登录 SID）。写入检查两遍都通过才放行。
-//! 工作区的默认 DACL 里 Users 通常只有读取，第二遍会把写挡下来。所以授权必须
-//! 同时处理两件事：
-//! - **SACL**：打 Low IL 强制标签（`ML;OICI;NW;;;LW`）
-//! - **DACL**：保留原有 ACL，给当前 Windows 登录 SID 追加 Modify 权限
-//!
-//! 本模块只服务**用户显式声明的工作区**（主工作区与附加工作区），不对用户磁盘
-//! 上的其他位置动手。授权是一次性的、持久落在文件系统上的改动——同一目录只做
-//! 一遍，之后按规范化路径命中缓存。
-//!
-//! 失败语义：单个条目失败不中断，记首条错误返回；调用方据此降级（工作区只读）
-//! 而不是放弃整个命令执行。
+//! Low IL 工作者需要工作区的低完整性标签，以及任务策略专属 SID 的写 ACL。
+//! SID 随权限版本改变，后来的只读工作者不能复用旧工作者的写权限。
+//! 只读子目录追加同一任务 SID 的拒绝写 ACL；不修改宿主用户的访问权限。
+//! ACL 缓存包含规范化路径、文件 ID 和任务 SID。ACL 遍历不完整时拒绝启动，
+//! 不能把受限任务降级成不受限进程。授权不会自动清除既有标签和旧 SID ACE。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -67,6 +54,8 @@ fn granted() -> &'static Mutex<std::collections::HashSet<String>> {
 fn cache_key(dir: &Path) -> Option<String> {
     let norm = std::fs::canonicalize(dir).ok()?;
     #[cfg(windows)]
+    let identity = crate::utils::sandbox::active_write_sid().unwrap_or_default();
+    #[cfg(windows)]
     {
         use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
         use windows::Win32::Foundation::HANDLE;
@@ -83,11 +72,11 @@ fn cache_key(dir: &Path) -> Option<String> {
             GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).ok()?;
         }
         return Some(format!(
-            "{}|{}:{}:{}",
+            "{}|{}:{}:{}|{}",
             norm.to_string_lossy().to_lowercase(),
             info.dwVolumeSerialNumber,
             info.nFileIndexHigh,
-            info.nFileIndexLow
+            info.nFileIndexLow, identity
         ));
     }
     #[cfg(not(windows))]
@@ -99,14 +88,22 @@ pub fn is_granted(dir: &Path) -> bool {
     let Some(key) = cache_key(dir) else {
         return false;
     };
-    granted().lock().map(|g| g.contains(&key)).unwrap_or(false)
+    granted().lock().map(|g| g.contains(&format!("{key}|deny=false"))).unwrap_or(false)
 }
 
 /// 给工作区目录授予沙箱写权限（幂等，同目录只做一次）
 ///
 /// 未启用 / 非 Windows / 目录不存在都返回 `tagged == 0` 的结果，由调用方决定
 /// 降级策略。
-pub fn grant_workspace_write(dir: &Path) -> GrantOutcome {
+pub fn grant_workspace_write(dir: &Path) -> GrantOutcome { grant_workspace_access(dir, false) }
+pub fn deny_workspace_write(dir: &Path) -> GrantOutcome {
+    #[cfg(windows)]
+    if crate::utils::sandbox::active_write_sid().is_none() {
+        return GrantOutcome { error: Some("只读覆盖缺少任务专属身份，拒绝修改宿主 ACL".into()), ..Default::default() };
+    }
+    grant_workspace_access(dir, true)
+}
+fn grant_workspace_access(dir: &Path, deny: bool) -> GrantOutcome {
     let mut out = GrantOutcome::default();
     if dir.as_os_str().is_empty() {
         out.error = Some("工作区路径为空".to_string());
@@ -124,7 +121,7 @@ pub fn grant_workspace_write(dir: &Path) -> GrantOutcome {
         return out;
     }
 
-    let key = cache_key(dir);
+    let key = cache_key(dir).map(|key|format!("{key}|deny={deny}"));
     if key
         .as_ref()
         .is_some_and(|key| granted().lock().map(|g| g.contains(key)).unwrap_or(false))
@@ -133,7 +130,7 @@ pub fn grant_workspace_write(dir: &Path) -> GrantOutcome {
         return out;
     }
 
-    apply_recursive(dir, &mut out);
+    apply_recursive(dir, &mut out, deny);
     if out.usable() && key.is_some() {
         if let Ok(mut g) = granted().lock() {
             g.insert(key.unwrap());
@@ -143,9 +140,9 @@ pub fn grant_workspace_write(dir: &Path) -> GrantOutcome {
 }
 
 #[cfg(windows)]
-fn apply_recursive(root: &Path, out: &mut GrantOutcome) {
+fn apply_recursive(root: &Path, out: &mut GrantOutcome, deny: bool) {
     // 根目录先打标签（继承标志保证之后新建的对象自动拿到）
-    match set_security(root, DIR_SDDL) {
+    match set_security(root, DIR_SDDL, deny) {
         Ok(()) => out.tagged += 1,
         Err(e) => {
             out.error = Some(format!("设置工作区安全描述符失败: {e}"));
@@ -198,13 +195,13 @@ fn apply_recursive(root: &Path, out: &mut GrantOutcome) {
                 continue;
             }
             if meta.is_dir() {
-                match set_security(&path, DIR_SDDL) {
+                match set_security(&path, DIR_SDDL, deny) {
                     Ok(()) => out.tagged += 1,
                     Err(e) => record_error(out, format!("{}: {e}", path.display())),
                 }
                 stack.push((path, depth + 1));
             } else if meta.is_file() {
-                match set_security(&path, FILE_SDDL) {
+                match set_security(&path, FILE_SDDL, deny) {
                     Ok(()) => out.tagged += 1,
                     Err(e) => record_error(out, format!("{}: {e}", path.display())),
                 }
@@ -214,7 +211,7 @@ fn apply_recursive(root: &Path, out: &mut GrantOutcome) {
 }
 
 #[cfg(not(windows))]
-fn apply_recursive(_root: &Path, out: &mut GrantOutcome) {
+fn apply_recursive(_root: &Path, out: &mut GrantOutcome, _deny: bool) {
     out.error = Some("工作区写授权仅支持 Windows".to_string());
 }
 
@@ -234,20 +231,23 @@ fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
 
 /// 用 SDDL 设置对象的安全描述符（DACL + 强制完整性标签）
 #[cfg(windows)]
-fn set_security(path: &Path, sddl: &str) -> Result<(), String> {
+fn set_security(path: &Path, sddl: &str, deny: bool) -> Result<(), String> {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
         GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW, EXPLICIT_ACCESS_W,
-        GRANT_ACCESS, SDDL_REVISION_1, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_W,
+        GRANT_ACCESS, DENY_ACCESS, SDDL_REVISION_1, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_W,
     };
     use windows::Win32::Security::{
         GetSecurityDescriptorSacl, ACE_FLAGS, DACL_SECURITY_INFORMATION,
         LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     };
 
-    let sid_text = crate::utils::sandbox::current_logon_sid_sddl()?;
+    let sid_text = match crate::utils::sandbox::active_write_sid() {
+        Some(sid) => sid,
+        None => crate::utils::sandbox::current_logon_sid_sddl()?,
+    };
     unsafe {
         let sddl_w: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
@@ -293,7 +293,7 @@ fn set_security(path: &Path, sddl: &str) -> Result<(), String> {
         }
         let entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: 0x0013_01bf, // file/directory Modify, no WRITE_DAC/WRITE_OWNER
-            grfAccessMode: GRANT_ACCESS,
+            grfAccessMode: if deny { DENY_ACCESS } else { GRANT_ACCESS },
             grfInheritance: ACE_FLAGS(if sddl == DIR_SDDL { 3 } else { 0 }),
             Trustee: TRUSTEE_W {
                 TrusteeForm: TRUSTEE_IS_SID,

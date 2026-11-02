@@ -424,7 +424,7 @@ pub fn coding_set_workspace(session_id: String, workspace: String) -> Result<(),
     CODING_AGENT.set_workspace(&session_id, &workspace)
 }
 
-/// 挂载附加工作区（目录必须存在；已挂载则更新只读标记；运行中拒绝）。返回最新列表。
+/// 挂载附加工作区（目录必须存在；已挂载则更新只读标记；运行中即时生效）。返回最新列表。
 #[tauri::command]
 pub fn coding_add_workspace(
     session_id: String,
@@ -434,7 +434,7 @@ pub fn coding_add_workspace(
     CODING_AGENT.add_workspace(&session_id, &path, read_only)
 }
 
-/// 卸载附加工作区（运行中拒绝）。返回最新列表。
+/// 卸载附加工作区（运行中即时生效）。返回最新列表。
 #[tauri::command]
 pub fn coding_remove_workspace(
     session_id: String,
@@ -443,7 +443,7 @@ pub fn coding_remove_workspace(
     CODING_AGENT.remove_workspace(&session_id, &path)
 }
 
-/// 切换附加工作区的只读标记（运行中拒绝）。返回最新列表。
+/// 切换附加工作区的只读标记（运行中即时生效）。返回最新列表。
 #[tauri::command]
 pub fn coding_set_workspace_read_only(
     session_id: String,
@@ -453,10 +453,18 @@ pub fn coding_set_workspace_read_only(
     CODING_AGENT.set_workspace_read_only(&session_id, &path, read_only)
 }
 
-/// 设置会话权限等级（read_only / workspace_write / full_access；运行中拒绝）。
+/// 设置会话权限等级（运行中即时生效）。
 #[tauri::command]
-pub fn coding_set_permission(session_id: String, permission: String) -> Result<(), String> {
-    CODING_AGENT.set_permission(&session_id, &permission)
+pub fn coding_set_permission(app: AppHandle, session_id: String, permission: String) -> Result<(), String> {
+    CODING_AGENT.set_permission(&session_id, &permission)?;
+    let _ = tauri::Emitter::emit(&app, "coding:permission_changed", serde_json::json!({"session_id":session_id,"permission":permission}));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn coding_permission_status(session_id: String) -> Result<serde_json::Value, String> {
+    let permission = CODING_AGENT.session_permission(&session_id).ok_or("会话不存在")?;
+    Ok(crate::tools::sandbox_env::capabilities(permission == "full_access"))
 }
 
 /// 设置会话选中的工作模型 id（与 select_work_model 同步；运行中拒绝）。

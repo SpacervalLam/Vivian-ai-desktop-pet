@@ -126,12 +126,6 @@ fn is_session_allowed(tool: &str, ctx: &ToolUseContext) -> bool {
     SESSION_ALLOWED_TOOLS.read().contains(&approval_key(tool, ctx))
 }
 
-/// 将工具加入本次会话放行列表
-fn session_allow(tool: &str, ctx: &ToolUseContext) {
-    SESSION_ALLOWED_TOOLS.write().insert(approval_key(tool, ctx));
-    tracing::info!("[Executor] 工具 {} 已加入会话级放行列表", tool);
-}
-
 /// 查询工具是否已被本次会话放行（供主动截屏等旁路流程复用）
 pub(crate) fn is_session_allowed_tool(tool: &str, char_id: &str) -> bool {
     SESSION_ALLOWED_TOOLS.read().contains(&(tool.into(), String::new(), char_id.into(), "chat".into(), String::new()))
@@ -140,6 +134,26 @@ pub(crate) fn is_session_allowed_tool(tool: &str, char_id: &str) -> bool {
 /// 将工具加入会话级放行列表（旁路流程收到 AllowAlways 后调用）
 pub(crate) fn session_allow_tool(tool: &str, char_id: &str) {
     SESSION_ALLOWED_TOOLS.write().insert((tool.into(), String::new(), char_id.into(), "chat".into(), String::new()));
+}
+
+type ActionKey = (ApprovalKey, String);
+static ACTION_DENIALS: Lazy<RwLock<std::collections::HashSet<ActionKey>>> = Lazy::new(Default::default);
+static ACTION_GRANTS: Lazy<RwLock<std::collections::HashSet<ActionKey>>> = Lazy::new(Default::default);
+fn action_key(tool:&str,args:&Value,ctx:&ToolUseContext)->ActionKey {
+    let family = if super::permission::file_operation_for_call(tool,args)==Some("read") {"file.read"} else {tool};
+    let target = if family=="file.read" {
+        args.get("path").or_else(||args.get("directory")).and_then(Value::as_str)
+            .map(|p| {
+                let resolved=ctx.resolve_path(p);
+                let real=std::fs::canonicalize(&resolved).map(|p|p.to_string_lossy().into_owned()).unwrap_or(resolved);
+                super::types::normalize_path(&real)
+            }).unwrap_or_default()
+    } else { serde_json::to_string(args).unwrap_or_default() };
+    (approval_key(family,ctx),format!("{}:{}",ctx.policy_epoch,target))
+}
+fn is_action_allowed(tool:&str,args:&Value,ctx:&ToolUseContext)->bool {
+    !crate::plugin_advisor_contract::needs_concrete_preview(tool)
+        && (is_session_allowed(tool,ctx) || ACTION_GRANTS.read().contains(&action_key(tool,args,ctx)))
 }
 
 /// 把 `Value` 序列化为紧凑 JSON 字符串，失败时回退到 String 化
@@ -168,6 +182,7 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
     if matches!(tool_name, "read_file" | "read_spilled_result") {
         if let Some(page) = compact_text_page(data.clone(), max_chars.min(2800)) { return page; }
     }
+    if let Some(compact)=compact_process_output(data.clone(),max_chars) { return compact; }
     if tool_name == "wallpaper_list" {
         if let Some(compact) = compact_wallpaper_evidence(data.clone(), max_chars) { return compact; }
     }
@@ -199,6 +214,28 @@ fn enforce_result_budget(tool_name: &str, data: Value, max_chars: usize) -> Valu
             "Full result could not be saved; this preview is incomplete"
         },
     })
+}
+
+/// Keep exit/status and continuation metadata visible when process output is long.
+fn compact_process_output(mut value:Value,max_chars:usize)->Option<Value> {
+    let page=value.get_mut("data")?.as_object_mut()?;
+    if !page.contains_key("exit_code") {return None;}
+    let output=page.get("output")?.as_str()?.to_string();
+    if !page.get("output_file").is_some_and(Value::is_string) {
+        if let Some(path)=spill_result("process-output",&output) {page.insert("output_file".into(),serde_json::json!(path));}
+    }
+    page.insert("output_preview_truncated".into(),Value::Bool(true));
+    value.as_object_mut()?.insert("message".into(),serde_json::json!("Output shortened. Read output_file or terminal_read for more."));
+    let mut chars=(max_chars/5).max(1);
+    loop {
+        let preview:String=output.chars().take(chars).collect();
+        let page=value.get_mut("data")?.as_object_mut()?;
+        page.insert("output".into(),Value::String(preview.clone()));
+        if page.contains_key("stdout") {page.insert("stdout".into(),Value::String(preview));}
+        if value.to_string().chars().count()<=max_chars || chars==1 {break;}
+        chars=(chars*2/3).max(1);
+    }
+    Some(value)
 }
 
 /// Preserve title/ID pairs as valid JSON rather than slicing a wallpaper record.
@@ -247,6 +284,10 @@ fn compact_text_page(mut data: Value, max_chars: usize) -> Option<Value> {
 }
 
 fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationResponse, ctx: &ToolUseContext) {
+    if response == ConfirmationResponse::Deny {
+        ACTION_DENIALS.write().insert(action_key(tool,args,ctx));
+        return;
+    }
     if response != ConfirmationResponse::AllowAlways || crate::plugin_advisor_contract::needs_concrete_preview(tool) {
         return;
     }
@@ -255,7 +296,7 @@ fn remember_confirmation(tool: &str, args: &Value, response: ConfirmationRespons
             super::trust::add_trusted_app(app);
         }
     } else {
-        session_allow(tool, ctx);
+        ACTION_GRANTS.write().insert(action_key(tool,args,ctx));
     }
 }
 
@@ -326,7 +367,7 @@ fn prune_spill_dir() {
 
 /// 把完整结果写入 spill 目录（`%APPDATA%\Vivian\spill\<tool>-<ts>.txt`）。
 /// 返回落盘路径；写入失败返回 None（仅告警，不影响主流程）。
-fn spill_result(tool_name: &str, content: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn spill_result(tool_name: &str, content: &str) -> Option<std::path::PathBuf> {
     let dir = crate::utils::path::get_user_data_dir().join("spill");
     if std::fs::create_dir_all(&dir).is_err() {
         return None;
@@ -408,6 +449,9 @@ pub async fn execute_tool_use(
     can_use_tool: Option<CanUseTool>,
 ) -> ToolResult {
     use futures::FutureExt;
+    let refreshed = crate::commands::coding_agent::CODING_AGENT.refresh_tool_context(context);
+    let (context, permission_changes) = super::access::snapshot(&refreshed);
+    let context = &context;
     if crate::pipeline::execution_control::interrupted() {
         return ToolResult::standard_error("A newer user input or stop request invalidated this decision", Some("ExecutionInterrupted"), None);
     }
@@ -430,12 +474,18 @@ pub async fn execute_tool_use(
     let mut observed = ObservedExecution {
         observability: &tool_system.observability,
         record: Some(tool_system.observability.start_call(&name, arguments.clone())),
-        trace: ExecutionTrace { phase: "lookup", cache_hit: false },
+        trace: ExecutionTrace { phase: "lookup", cache_hit: false, executing: Arc::new(std::sync::atomic::AtomicBool::new(false)) },
     };
     let recommendation = (name == "install_plugin").then(||arguments["recommendationId"].as_str().map(str::to_string)).flatten();
-    let outcome = std::panic::AssertUnwindSafe(execute_tool_use_inner(
-        tool_name, arguments, tool_system, context, can_use_tool, &mut observed.trace, resolved,
-    )).catch_unwind().await;
+    let executing = observed.trace.executing.clone();
+    let outcome = tokio::select! {
+        biased;
+        _ = super::access::invalidated(permission_changes, executing, context.access_level.unwrap_or(AgentAccessLevel::FsWrite)) => Ok(ToolResult::standard_error(
+            "权限已热切换，旧授权已失效；请按当前权限继续。正在执行的操作可能已有部分结果，勿盲目重复写入。", Some("PermissionChanged"), None)),
+        result = std::panic::AssertUnwindSafe(execute_tool_use_inner(
+            tool_name, arguments, tool_system, context, can_use_tool, &mut observed.trace, resolved,
+        )).catch_unwind() => result,
+    };
     let result = outcome.unwrap_or_else(|_| ToolResult::standard_error(
         "Tool pipeline panicked", Some("ToolExecutionPanic"), None));
     observed.finish(&result);
@@ -459,7 +509,7 @@ pub async fn execute_tool_use(
     result
 }
 
-struct ExecutionTrace { phase: &'static str, cache_hit: bool }
+struct ExecutionTrace { phase: &'static str, cache_hit: bool, executing: Arc<std::sync::atomic::AtomicBool> }
 struct ObservedExecution<'a> {
     observability: &'a super::observability::ToolObservability,
     record: Option<super::observability::ObsRecord>,
@@ -620,6 +670,9 @@ async fn execute_tool_use_inner(
         return ToolResult::standard_error(&validation.message, Some("InvalidInput"), None);
     }
     let validated_args = validation.data.unwrap_or(arguments);
+    if ACTION_DENIALS.read().contains(&action_key(tool_name,&validated_args,context)) {
+        return ToolResult::standard_error("你已拒绝本任务的这一操作；改变权限后可重新决定。", Some("UserDenied"), None);
+    }
 
     // A work session's read-only setting is a hard capability boundary, including
     // shell, custom scripts and dispatchers whose parameters are opaque to path checks.
@@ -627,23 +680,15 @@ async fn execute_tool_use_inner(
     let read_only_view = tool_name == "edit_file"
         && validated_args.get("action").and_then(Value::as_str) == Some("view");
     if context.is_work_agent() && context.access_level == Some(AgentAccessLevel::ReadOnly)
-        && !tool.is_read_only() && tool_name != "save_memory" && !read_only_view {
+        && !tool.is_read_only() && tool_name != "save_memory" && !read_only_view
+        && !tool.is_custom() && !super::access::inspect_tool(tool_name, &validated_args) && !super::access::process_tool(tool_name) {
         return ToolResult::standard_error("只读工作会话不能执行有副作用的工具。", Some("PermissionDenied"), None);
     }
-    // This Low-IL backend cannot express an inner read-only mount in an opaque
-    // shell program. Preserve that constraint by refusing execution, rather than
-    // granting the enclosing workspace recursively and silently making it writable.
-    if context.is_work_agent() && context.extra_working_directories.iter().any(|dir| dir.is_read_only)
-        && (tool.is_custom() || matches!(tool_name, "run_command" | "terminal_open" | "terminal_send" | "pwsh_persistent")) {
-        return ToolResult::standard_error("当前 Windows 沙箱无法在任意脚本中保证附加只读工作区的写保护；请使用文件读取工具或单独的工作会话。",
-            Some("ReadOnlyWorkspaceIsolation"), None);
-    }
-
     trace.phase = "sandbox";
     // 2. 沙箱安全检查
     let safety = tool_system
         .sandbox
-        .check_tool_safety(tool_name, &validated_args, Some(context));
+        .check_tool_safety(if tool.is_custom() { "run_command" } else { tool_name }, &validated_args, Some(context));
     let mut action_confirmed = false;
     if !safety.allowed {
         if safety.requires_confirmation {
@@ -655,12 +700,13 @@ async fn execute_tool_use_inner(
                 // permission gate below still enforces nested read-only mounts.
                 action_confirmed = true;
             // 委托给 can_use_tool 回调
-            } else if is_session_allowed(tool_name, context) {
+            } else if is_action_allowed(tool_name, &validated_args, context) {
                 action_confirmed = true;
             } else if context.subagent_depth > 0 {
                 return ToolResult::standard_error("子任务需要新的用户授权，请把待确认操作交回主智能体。", Some("ParentApprovalRequired"), None);
             } else if let Some(cb) = &can_use_tool {
                 if !cb(tool_name, &validated_args) {
+                    remember_confirmation(tool_name,&validated_args,ConfirmationResponse::Deny,context);
                     return ToolResult::standard_error(
                         "用户拒绝了沙箱确认请求",
                         Some("UserDenied"),
@@ -671,15 +717,17 @@ async fn execute_tool_use_inner(
             } else {
                 let (risk, reason) = confirmation_info(tool_name, &validated_args);
                 let scope = if tool_name == "open_application" { "persistent" } else { "session" };
-                match tool_system.request_confirmation(tool_name, &validated_args,
-                    format!("{reason}\n{}", safety.warning), risk, &context.char_id, scope).await
+                match tool_system.request_confirmation_for_task(tool_name, &validated_args,
+                    format!("{reason}\n{}", safety.warning), risk, &context.char_id, scope, context).await
                 {
                     Some(response @ (ConfirmationResponse::AllowOnce | ConfirmationResponse::AllowAlways)) => {
                         remember_confirmation(tool_name, &validated_args, response, context);
                         action_confirmed = true;
                     }
-                    Some(ConfirmationResponse::Deny) => return ToolResult::standard_error(
-                        "用户拒绝了沙箱确认请求", Some("UserDenied"), None),
+                    Some(ConfirmationResponse::Deny) => {
+                        remember_confirmation(tool_name,&validated_args,ConfirmationResponse::Deny,context);
+                        return ToolResult::standard_error("用户拒绝了沙箱确认请求", Some("UserDenied"), None);
+                    },
                     None => return ToolResult::standard_error(
                         &safety.warning, Some("SandboxConfirmationRequired"), None),
                 }
@@ -768,8 +816,8 @@ async fn execute_tool_use_inner(
             super::types::PermissionResult::ask("请审核本次能力创建/安装的完整内容后确认")
         } else { permission };
 
-        if permission.requires_confirmation() && !action_confirmed && !is_session_allowed(tool_name, context) {
-            if context.subagent_depth > 0 && !is_session_allowed(tool_name, context) {
+        if permission.requires_confirmation() && !action_confirmed && !is_action_allowed(tool_name, &validated_args, context) {
+            if context.subagent_depth > 0 && !is_action_allowed(tool_name, &validated_args, context) {
                 return ToolResult::standard_error("子任务需要新的用户授权，请交回主智能体确认。", Some("ParentApprovalRequired"), None);
             }
             // 能力进化事件（create_tool）例外：宿主的 can_use_tool 回调
@@ -779,6 +827,7 @@ async fn execute_tool_use_inner(
             if let Some(cb) = &can_use_tool {
                 if !evolution_gate {
                     if !cb(tool_name, &validated_args) {
+                        remember_confirmation(tool_name,&validated_args,ConfirmationResponse::Deny,context);
                         let info = ToolErrorCode::UserDenied.get_error_info();
                         return ToolResult::standard_error(
                             &info.suggestion,
@@ -790,7 +839,7 @@ async fn execute_tool_use_inner(
             }
             if evolution_gate || can_use_tool.is_none() {
                 // 快速通道 1：会话级放行列表（用户本次运行内已选择"本次运行允许"）
-                if is_session_allowed(tool_name, context) {
+                if is_action_allowed(tool_name, &validated_args, context) {
                     tracing::debug!("[Executor] 工具 {} 命中会话放行列表，跳过确认", tool_name);
                 } else if tool_name == "open_application"
                     && validated_args
@@ -810,13 +859,14 @@ async fn execute_tool_use_inner(
                         "session"
                     };
                     match tool_system
-                        .request_confirmation(
+                        .request_confirmation_for_task(
                             tool_name,
                             &validated_args,
                             reason,
                             risk_level,
                             &context.char_id,
                             scope,
+                            context,
                         )
                         .await
                     {
@@ -827,6 +877,7 @@ async fn execute_tool_use_inner(
                             remember_confirmation(tool_name, &validated_args, ConfirmationResponse::AllowAlways, context);
                         }
                         Some(ConfirmationResponse::Deny) => {
+                            remember_confirmation(tool_name,&validated_args,ConfirmationResponse::Deny,context);
                             let info = ToolErrorCode::UserDenied.get_error_info();
                             return ToolResult::standard_error(
                                 &info.suggestion,
@@ -876,6 +927,7 @@ async fn execute_tool_use_inner(
                         }
                         if let Some(cb) = &can_use_tool {
                             if !cb(tool_name, &validated_args) {
+                        remember_confirmation(tool_name,&validated_args,ConfirmationResponse::Deny,context);
                                 let info = ToolErrorCode::UserDenied.get_error_info();
                                 return ToolResult::standard_error(
                                     &info.suggestion,
@@ -885,7 +937,7 @@ async fn execute_tool_use_inner(
                             }
                         } else {
                             let (risk, _) = confirmation_info(tool_name, &validated_args);
-                            match tool_system.request_confirmation(tool_name, &validated_args, reason.clone(), risk, &context.char_id, "session").await {
+                            match tool_system.request_confirmation_for_task(tool_name, &validated_args, reason.clone(), risk, &context.char_id, "session", context).await {
                                 Some(response @ (ConfirmationResponse::AllowOnce | ConfirmationResponse::AllowAlways)) =>
                                     remember_confirmation(tool_name, &validated_args, response, context),
                                 Some(ConfirmationResponse::Deny) => return ToolResult::standard_error(&reason, Some("UserDenied"), None),
@@ -938,6 +990,8 @@ async fn execute_tool_use_inner(
             tool_system.cache.clear();
             Some(MutationInvalidation(&tool_system.cache))
         } else { None };
+        if !super::access::current(context) { return ToolResult::standard_error("权限已变化，旧操作未执行", Some("PermissionChanged"), None); }
+        trace.executing.store(true, std::sync::atomic::Ordering::Release);
         let outcome = tokio::time::timeout(timeout, tool.call(validated_args.clone(), context)).await;
         drop(mutation);
         match outcome {
@@ -1084,6 +1138,17 @@ async fn flush_reads(
 #[cfg(test)]
 mod paged_budget_tests {
     use super::*;
+    #[test]
+    fn long_process_output_keeps_exit_code_and_a_readable_continuation() {
+        let text="中文🙂".repeat(1000);
+        let result=ToolResult::standard_success(&text,Some(serde_json::json!({"output":text,"stdout":text,"exit_code":9,"terminal_id":"terminal-test","truncated":false})));
+        let compact=enforce_result_budget("run_command",result.data.unwrap(),1200);
+        assert_eq!(compact["data"]["exit_code"],9);
+        assert_eq!(compact["data"]["output_preview_truncated"],true);
+        let path=compact["data"]["output_file"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(),text);
+        assert!(compact.to_string().chars().count()<=1200);
+    }
     use serde_json::json;
 
     #[test]
@@ -1173,7 +1238,8 @@ mod initiative_confirmation_tests {
     #[tokio::test]
     async fn rejected_command_never_reaches_execution() {
         let system = ToolSystem::new();
-        system.register_tool(Arc::new(crate::tools::builtin::coding_tools::RunCommandTool::new()));
+        let effects=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        system.register_tool(Arc::new(PreviewFixture {name:"approval_probe",calls:effects.clone()}));
         let context = ToolUseContext {
             access_level: Some(AgentAccessLevel::FsWrite),
             user_message: Some("好，执行吧".into()),
@@ -1182,14 +1248,15 @@ mod initiative_confirmation_tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = calls.clone();
         let confirm: CanUseTool = Arc::new(move |name, args| {
-            assert_eq!(name, "run_command");
+            assert_eq!(name, "approval_probe");
             assert_eq!(args["command"], "Get-Date");
             observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             false
         });
-        let result = execute_tool_use("run_command", serde_json::json!({"command": "Get-Date"}),
+        let result = execute_tool_use("approval_probe", serde_json::json!({"command": "Get-Date"}),
             &system, &context, Some(confirm)).await;
         assert!(!result.success);
+        assert_eq!(effects.load(std::sync::atomic::Ordering::SeqCst),0);
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
@@ -1214,19 +1281,30 @@ mod initiative_confirmation_tests {
     }
 
     #[test]
+    fn credential_read_grants_are_scoped_to_resource_task_and_policy_revision() {
+        let ctx=ToolUseContext::default().with_session_id(uuid::Uuid::new_v4().to_string()).with_agent_kind("work");
+        let args=serde_json::json!({"path":"C:/private/.env"});
+        remember_confirmation("read_file",&args,ConfirmationResponse::AllowAlways,&ctx);
+        assert!(is_action_allowed("edit_file",&serde_json::json!({"path":"C:/private/.env","action":"view"}),&ctx));
+        assert!(!is_action_allowed("read_file",&serde_json::json!({"path":"C:/other/.env"}),&ctx));
+        assert!(!is_action_allowed("read_file",&args,&ToolUseContext{policy_epoch:ctx.policy_epoch+1,..ctx.clone()}));
+        assert!(!is_action_allowed("read_file",&args,&ctx.clone().with_session_id("different-task")));
+    }
+
+    #[test]
     fn single_approval_does_not_authorize_future_actions() {
         let tool = "initiative_test_single_approval";
         let ctx = ToolUseContext::default().with_char_id("approval-test").with_session_id("one");
         SESSION_ALLOWED_TOOLS.write().remove(&approval_key(tool, &ctx));
         remember_confirmation(tool, &serde_json::json!({"command": "Get-Date"}), ConfirmationResponse::AllowOnce, &ctx);
-        assert!(!is_session_allowed(tool, &ctx));
+        assert!(!is_action_allowed(tool, &serde_json::json!({}), &ctx));
         remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::Deny, &ctx);
-        assert!(!is_session_allowed(tool, &ctx));
+        assert!(!is_action_allowed(tool, &serde_json::json!({}), &ctx));
         remember_confirmation(tool, &serde_json::json!({}), ConfirmationResponse::AllowAlways, &ctx);
-        assert!(is_session_allowed(tool, &ctx));
+        assert!(is_action_allowed(tool, &serde_json::json!({}), &ctx));
         for other in [ctx.clone().with_char_id("other"), ctx.clone().with_agent_kind("work"),
             ctx.clone().with_session_id("two")] {
-            assert!(!is_session_allowed(tool, &other));
+            assert!(!is_action_allowed(tool, &serde_json::json!({}), &other));
         }
         SESSION_ALLOWED_TOOLS.write().remove(&approval_key(tool, &ctx));
     }

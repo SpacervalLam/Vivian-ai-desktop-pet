@@ -558,3 +558,39 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 }
+
+/// Single-flight only for read capability requests. Side-effect approvals are never
+/// shared implicitly: approving one mutation must not execute multiple mutations.
+pub(crate) async fn coalesced_read<F>(key:String, request:F)->Option<ConfirmationResponse>
+where F:std::future::Future<Output=Option<ConfirmationResponse>> {
+    type Cell=tokio::sync::OnceCell<Option<ConfirmationResponse>>;
+    static PENDING:std::sync::LazyLock<Mutex<HashMap<String,std::sync::Weak<Cell>>>>=std::sync::LazyLock::new(Default::default);
+    let cell={
+        let mut pending=PENDING.lock();
+        pending.retain(|_,v|v.strong_count()>0);
+        match pending.get(&key).and_then(std::sync::Weak::upgrade) {
+            Some(cell)=>cell,
+            None=>{let cell=Arc::new(Cell::new());pending.insert(key,Arc::downgrade(&cell));cell}
+        }
+    };
+    *cell.get_or_init(||request).await
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use super::*;
+    #[tokio::test]
+    async fn concurrent_read_requests_share_one_decision_but_not_future_approvals() {
+        let count=Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let key=uuid::Uuid::new_v4().to_string();
+        let request=||{let count=count.clone();async move {
+            count.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;Some(ConfirmationResponse::AllowOnce)
+        }};
+        let (a,b)=tokio::join!(coalesced_read(key.clone(),request()),coalesced_read(key.clone(),request()));
+        assert_eq!(a,Some(ConfirmationResponse::AllowOnce));assert_eq!(a,b);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst),1);
+        coalesced_read(key,request()).await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst),2);
+    }
+}

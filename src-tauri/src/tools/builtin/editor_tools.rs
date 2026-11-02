@@ -325,7 +325,7 @@ impl Tool for StrReplaceEditorTool {
             return ValidationResult::failure("path 不能为空", 2);
         }
         let resolved = resolve_path(path, ctx);
-        if !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
+        if ctx.access_level != Some(crate::tools::types::AgentAccessLevel::FullControl) && !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
         if action == "view" {
@@ -405,7 +405,7 @@ impl Tool for StrReplaceEditorTool {
                 let body = args.get("file_text").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     if !parent.exists() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
+                        if let Err(e) = crate::tools::access::create_dir_all(ctx, parent) {
                             return ToolResult::standard_error(
                                 &format!("创建父目录失败：{e}"),
                                 None,
@@ -414,7 +414,7 @@ impl Tool for StrReplaceEditorTool {
                         }
                     }
                 }
-                match std::fs::write(&path, body) {
+                match crate::tools::access::write_file(ctx, &path, body) {
                     Ok(()) => ToolResult::standard_success(
                         &format!("已创建 {path}（{} 字节）", body.len()),
                         Some(json!({"path": path, "bytes": body.len()})),
@@ -462,7 +462,7 @@ impl Tool for StrReplaceEditorTool {
                     original.replacen(old, new, 1)
                 };
                 push_undo(&ctx.session_id, &path, original.clone());
-                match std::fs::write(&path, &updated) {
+                match crate::tools::access::write_file(ctx, &path, &updated) {
                     Ok(()) => ToolResult::standard_success(
                         &format!("已替换 {path}（{} 处）。改坏了可以 undo。", if replace_all { count } else { 1 }),
                         Some(json!({"path": path, "replacements": if replace_all { count } else { 1 }})),
@@ -496,7 +496,7 @@ impl Tool for StrReplaceEditorTool {
                 }
                 let updated = lines.join("\n") + "\n";
                 push_undo(&ctx.session_id, &path, original);
-                match std::fs::write(&path, &updated) {
+                match crate::tools::access::write_file(ctx, &path, &updated) {
                     Ok(()) => ToolResult::standard_success(
                         &format!("已在 {path} 第 {line} 行之后插入内容。"),
                         Some(json!({"path": path, "inserted_after": line})),
@@ -514,7 +514,7 @@ impl Tool for StrReplaceEditorTool {
                         &format!("{path} 在本会话里没有可撤销的修改。"),
                         Some(json!({"path": path, "reverted": false})),
                     ),
-                    Some(content) => match std::fs::write(&path, &content) {
+                    Some(content) => match crate::tools::access::write_file(ctx, &path, &content) {
                         Ok(()) => ToolResult::standard_success(
                             &format!("已撤销 {path} 的最近一次修改。"),
                             Some(json!({"path": path, "reverted": true})),

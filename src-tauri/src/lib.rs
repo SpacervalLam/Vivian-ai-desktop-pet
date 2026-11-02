@@ -553,6 +553,7 @@ pub fn run() {
             commands::coding_agent::coding_remove_workspace,
             commands::coding_agent::coding_set_workspace_read_only,
             commands::coding_agent::coding_set_permission,
+            commands::coding_agent::coding_permission_status,
             commands::coding_agent::coding_set_model,
             commands::coding_agent::coding_set_reasoning_level,
             commands::coding_agent::coding_memory_snapshot,

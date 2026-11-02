@@ -118,6 +118,22 @@ pub fn proxy_authority() -> Option<String> {
         .map(|p| p.authority())
 }
 
+/// Report guarantees implemented by this backend, rather than inferring them
+/// from proxy settings or a "sandbox enabled" flag.
+pub fn capabilities(full_access: bool) -> serde_json::Value {
+    let network = config().network_mode;
+    serde_json::json!({
+        "backend": if full_access { "native_user" } else if cfg!(windows) { "windows_restricted_token" } else { "unavailable" },
+        "workspace_write_isolation": !full_access && cfg!(windows),
+        "nested_readonly_isolation": !full_access && cfg!(windows),
+        "process_tree_revocation": cfg!(windows),
+        "hard_network_isolation": false,
+        "network": if full_access || network == crate::utils::sandbox_policy::SandboxNetworkMode::Allow { "unrestricted" } else { "cooperative_proxy" },
+        "credential_read_isolation": false,
+        "credential_environment_filtered": true,
+    })
+}
+
 /// 按会话上下文装配执行请求
 ///
 /// 工作区只收**可写**的目录：只读挂载的附加目录没必要授予写权限，授权是落到
@@ -128,7 +144,6 @@ pub fn request_for(ctx: &ToolUseContext) -> SandboxRequest {
     let cfg = runtime.as_ref().map(|r| &r.cfg).unwrap_or(&default);
     let mut dirs: Vec<String> = Vec::new();
     if !ctx.is_work_agent()
-        || !cfg.grant_workspace_write
         || ctx.access_level == Some(crate::tools::types::AgentAccessLevel::ReadOnly)
     {
         // 不授权时留空：沙箱进程只写 scratch，工作区表现为只读
@@ -149,11 +164,13 @@ pub fn request_for(ctx: &ToolUseContext) -> SandboxRequest {
         }
     }
     SandboxRequest {
+        write_identity: crate::tools::access::write_identity(ctx),
         session_id: if cfg.per_session_scratch {
             format!("{}:{}:{}", ctx.agent_kind, ctx.char_id, ctx.session_id)
         } else {
             String::new()
         },
+        readonly_dirs: ctx.extra_working_directories.iter().filter(|d|d.is_read_only).map(|d|d.path.clone()).collect(),
         workspace_dirs: dirs,
         network_mode: cfg.network_mode,
         proxy_addr: runtime
@@ -168,6 +185,13 @@ pub fn request_for(ctx: &ToolUseContext) -> SandboxRequest {
 mod tests {
     use super::*;
     use crate::tools::types::AgentAccessLevel;
+    #[test]
+    fn capabilities_do_not_claim_unimplemented_isolation() {
+        assert_eq!(capabilities(false)["hard_network_isolation"],false);
+        assert_eq!(capabilities(false)["credential_read_isolation"],false);
+        assert_eq!(capabilities(true)["backend"],"native_user");
+        assert_eq!(capabilities(true)["workspace_write_isolation"],false);
+    }
     #[test]
     fn configuration_hot_reload_and_request_scopes_agree() {
         install(SandboxConfig::default());
@@ -192,6 +216,11 @@ mod tests {
         assert!(!enabled());
         assert!(require_isolation());
         assert!(request_for(&work).session_id.is_empty());
+        work.access_level=Some(AgentAccessLevel::FsWrite);
+        install(SandboxConfig {enabled:false,grant_workspace_write:false,sandbox_terminal:false,..Default::default()});
+        assert_eq!(request_for(&work).workspace_dirs,vec!["C:/audit/work"],"task profile is authoritative over legacy sandbox toggles");
+        work.access_level=Some(AgentAccessLevel::ReadOnly);
+        assert!(request_for(&work).workspace_dirs.is_empty());
         let cfg = SandboxConfig {
             network_mode: crate::utils::sandbox_policy::SandboxNetworkMode::Proxy,
             ..Default::default()

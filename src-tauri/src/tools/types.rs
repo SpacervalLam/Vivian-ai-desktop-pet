@@ -422,6 +422,9 @@ pub struct ToolUseContext {
     /// 编程智能体按会话权限设置，实现会话粒度的工具放行控制）
     #[serde(default)]
     pub access_level: Option<AgentAccessLevel>,
+    /// Host policy revision; stale approvals and process spawns cannot execute.
+    #[serde(default)]
+    pub policy_epoch: u64,
     /// 调用方智能体类型："chat"（陪伴对话）/ "work"（编程/工作智能体）
     ///
     /// 供场景敏感工具做差异化默认（如 web_search 的默认结果数：聊天 10 / 工作 15）。
@@ -465,6 +468,7 @@ impl Default for ToolUseContext {
             char_id: String::new(),
             user_message: None,
             access_level: None,
+            policy_epoch: 0,
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
             allowed_tools: None,
@@ -490,6 +494,7 @@ impl ToolUseContext {
             char_id: String::new(),
             user_message: None,
             access_level: None,
+            policy_epoch: 0,
             agent_kind: "chat".to_string(),
             subagent_depth: 0,
             allowed_tools: None,
@@ -568,7 +573,7 @@ impl ToolUseContext {
     pub fn is_path_authorized(&self, path: &str) -> bool {
         // Companion cwd is the application's launch directory, not a workspace
         // selected by the user. Its file operations still require permission.
-        if !self.is_work_agent() { return true; }
+        if !self.is_work_agent() || self.subagent_depth == 0 && self.access_level == Some(AgentAccessLevel::FullControl) { return true; }
         is_path_within_any(
             path,
             &self.working_directory,

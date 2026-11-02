@@ -110,49 +110,15 @@ async fn companion_side_defers_file_writes_and_commands_to_the_work_agent() {
 }
 
 #[tokio::test]
-async fn readonly_work_and_child_workflows_cannot_obtain_implicit_shell_approval() {
-    let system = ToolSystem::new();
-    system.register_tool(Arc::new(
-        crate::tools::builtin::coding_tools::RunCommandTool::new(),
-    ));
-    let directory = tempfile::tempdir().unwrap();
-    let mut ctx = ToolUseContext::default()
-        .with_working_directory(directory.path().to_string_lossy())
-        .with_agent_kind("work");
-    ctx.access_level = Some(AgentAccessLevel::ReadOnly);
-    let approved: CanUseTool = Arc::new(|_, _| true);
-    let result = execute_tool_use(
-        "run_command",
-        json!({"command":"Write-Output 'not-run'"}),
-        &system,
-        &ctx,
-        Some(approved),
-    )
-    .await;
-    assert_eq!(result.error.as_deref(), Some("PermissionDenied"));
-    ctx.access_level = Some(AgentAccessLevel::FsWrite);
-    ctx.subagent_depth = 1;
-    let result = execute_tool_use(
-        "run_command",
-        json!({"command":"Write-Output 'not-run'"}),
-        &system,
-        &ctx,
-        None,
-    )
-    .await;
-    assert_eq!(result.error.as_deref(), Some("ParentApprovalRequired"));
-    ctx.subagent_depth = 0;
-    ctx = ctx.with_extra_working_directory(directory.path().join("locked").to_string_lossy(), true);
-    let result = execute_tool_use(
-        "run_command",
-        json!({"command":"Write-Output 'not-run'"}),
-        &system,
-        &ctx,
-        None,
-    )
-    .await;
-    assert_eq!(result.error.as_deref(), Some("ReadOnlyWorkspaceIsolation"));
+async fn readonly_work_cannot_write_files_even_with_an_approval_callback() {
+    let system=ToolSystem::new();
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::WriteFileTool::new()));
+    let directory=tempfile::tempdir().unwrap();
+    let ctx=ToolUseContext {access_level:Some(AgentAccessLevel::ReadOnly),..ToolUseContext::default().with_working_directory(directory.path().to_string_lossy()).with_agent_kind("work")};
+    let result=execute_tool_use("write_file",json!({"path":"forbidden.txt","content":"bad"}),&system,&ctx,Some(Arc::new(|_,_|true))).await;
+    assert!(!result.success,"{result:?}");assert!(!directory.path().join("forbidden.txt").exists());
 }
+
 impl Probe {
     fn new() -> Self {
         Self {
@@ -676,15 +642,18 @@ async fn workspace_relative_file_paths_use_session_directory() {
     let result = execute_tool_use("read_file", json!({"path":".vivian/missing.md"}), &system, &ctx, None).await;
     assert!(!result.success);
     assert_eq!(result.data.as_ref().unwrap()["message"], "文件不存在");
-    // Full access permits external reads, including parent-relative paths, but not writes.
+    // Full access permits external reads and writes without another approval,
+    // independently of the legacy sandbox warning mode.
+    system.sandbox.set_protection_mode(crate::tools::sandbox::ProtectionMode::Permissive);
     let outside = directory.path().join("outside.md");
     std::fs::write(&outside, "private").unwrap();
     for path in [outside.to_string_lossy().into_owned(), "../outside.md".into()] {
         let result = execute_tool_use("read_file", json!({"path":path}), &system, &ctx, None).await;
         assert!(result.success, "{result:?}");
         assert_eq!(result.data.as_ref().unwrap()["data"]["content"], "private");
-        let result = execute_tool_use("write_file", json!({"path":path,"content":"blocked"}), &system, &ctx, None).await;
-        assert!(!result.success, "{result:?}");
+        let result = execute_tool_use("write_file", json!({"path":path,"content":"full access"}), &system, &ctx, Some(Arc::new(|_,_|false))).await;
+        assert!(result.success, "{result:?}");
+        std::fs::write(&outside, "private").unwrap();
     }
     assert_eq!(std::fs::read_to_string(&outside).unwrap(), "private");
     let locked = workspace.join("locked");
@@ -726,18 +695,20 @@ async fn external_file_reads_can_be_confirmed_without_granting_external_writes()
             let approve: CanUseTool = Arc::new(move |_, _| { calls.fetch_add(1, Ordering::SeqCst); true });
             let result = execute_tool_use(name, args.clone(), &system, &ctx, Some(approve)).await;
             assert!(result.success, "{level:?} {name}: {result:?}");
-            assert_eq!(requested.load(Ordering::SeqCst), usize::from(level != AgentAccessLevel::FullControl), "{level:?} {name}");
+            assert_eq!(requested.load(Ordering::SeqCst), 0, "{level:?} {name}");
             if level != AgentAccessLevel::FullControl {
                 let reject: CanUseTool = Arc::new(|_, _| false);
                 let result = execute_tool_use(name, args.clone(), &system, &ctx, Some(reject)).await;
-                assert!(!result.success, "{level:?} {name}: rejected read must not execute");
+                assert!(result.success, "{level:?} {name}: ordinary reads should not request approval");
             }
             let child = ToolUseContext { subagent_depth: 1, ..ctx.clone() };
             let result = execute_tool_use(name, args, &system, &child, None).await;
             assert!(!result.success, "{name}: child scope must remain bounded");
         }
-        let result = execute_tool_use("edit_file", json!({"path":external.join("outside.md"),"action":"create","file_text":"blocked"}), &system, &ctx, Some(Arc::new(|_, _| true))).await;
-        assert!(!result.success, "{level:?}: external writes remain bounded");
+        if level != AgentAccessLevel::FullControl {
+            let result = execute_tool_use("edit_file", json!({"path":external.join("outside.md"),"action":"create","file_text":"blocked"}), &system, &ctx, Some(Arc::new(|_, _| true))).await;
+            assert!(!result.success, "{level:?}: external writes remain bounded");
+        }
     }
     assert_eq!(std::fs::read_to_string(external.join("outside.md")).unwrap(), "external marker");
 }

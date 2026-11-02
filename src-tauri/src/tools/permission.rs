@@ -402,7 +402,7 @@ pub async fn check_tool_permission(
 
     // 1.5 权限网关矩阵：access_level × risk 决定 allow/ask/deny
     let access = permission_context.access_level;
-    let risk = if is_read_only_view_call(tool_name, args) { super::types::ToolRiskTier::FsRead } else { tool.risk() };
+    let risk = if context.is_work_agent() && (tool.is_custom() || super::access::process_tool(tool_name) || super::access::inspect_tool(tool_name, args)) { super::types::ToolRiskTier::FsRead } else if is_read_only_view_call(tool_name, args) { super::types::ToolRiskTier::FsRead } else { tool.risk() };
     let matrix_behavior = policy_for(access, risk);
     if matches!(
         matrix_behavior,
@@ -471,10 +471,23 @@ pub async fn check_tool_permission(
         ));
     }
 
-    // Full access authorizes reads outside the workspace as well. Explicit deny/ask,
-    // equivalence checks and Ask mode above still take precedence.
-    if file_operation_for_call(tool_name, args) == Some("read")
-        && context.allows_external_file_reads() && access == AgentAccessLevel::FullControl {
+    if sensitive_read(tool_name, args) && access != AgentAccessLevel::FullControl {
+        return PermissionResult::ask("该文件可能包含登录凭据或 API 密钥。是否允许本任务读取这个具体文件？");
+    }
+
+    // Ordinary local work is covered by the task profile. Backend enforcement, not
+    // another prompt per tool, constrains the effects of commands and their children.
+    if context.is_work_agent() && (tool.is_custom() || super::access::process_tool(tool_name) || super::access::inspect_tool(tool_name, args)) {
+        return tool.check_permissions(args, context).await;
+    }
+    if file_operation_for_call(tool_name, args) == Some("read") {
+        return tool.check_permissions(args, context).await;
+    }
+
+    // Full access also authorizes local file writes outside the workspace.
+    // Explicit denies, read-only mounts and user Ask rules above still apply.
+    if context.is_work_agent() && access == AgentAccessLevel::FullControl
+        && file_operation_for_call(tool_name, args).is_some() {
         return tool.check_permissions(args, context).await;
     }
 
@@ -614,14 +627,8 @@ pub fn check_file_permission(
     }
 
     // 路径不在任何工作目录中：写入/删除操作需要询问
-    if context.is_bypass_mode() {
+    if context.is_bypass_mode() || context.access_level == AgentAccessLevel::FullControl {
         return PermissionResult::allow();
-    }
-    if operation == "read" && context.access_level != AgentAccessLevel::FullControl {
-        return PermissionResult::ask(format!(
-            "读取工作区外的路径 '{}' 需要确认；允许后可读取，无需移动文件或添加可写工作区",
-            file_path
-        ));
     }
     if operation == "write" || operation == "delete" {
         return PermissionResult::ask(format!(
@@ -748,6 +755,7 @@ pub fn requires_permission(
     args: &Value,
     context: &PermissionContext,
 ) -> bool {
+    if sensitive_read(tool.name(), args) { return true; }
     // 显式拒绝优先级最高：置于 Bypass 判定之前，保证 always_deny 不被绕过。
     // 该分支已覆盖下方矩阵结果，故此处命中后无需再次匹配。
     if matches_tool_pattern(tool.name(), &context.always_deny) {
@@ -1500,4 +1508,14 @@ mod tests {
             ToolRiskTier::Safe
         }
     }
+}
+
+/// Normal application data stays readable; credential-bearing files get a precise grant.
+pub(crate) fn sensitive_read(name:&str,args:&Value)->bool {
+    if file_operation_for_call(name,args)!=Some("read") {return false;}
+    extract_file_paths(name,args).iter().any(|path| {
+        let path=path.replace('\\',"/").to_ascii_lowercase();
+        let name=path.rsplit('/').next().unwrap_or("");
+        matches!(name,"ai-config.json"|"credentials"|"cookies"|"login data"|"id_rsa"|"id_ed25519"|".env") || name.starts_with(".env.") || path.contains("/.ssh/")
+    })
 }

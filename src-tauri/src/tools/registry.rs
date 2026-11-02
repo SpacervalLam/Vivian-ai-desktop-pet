@@ -441,6 +441,18 @@ impl ToolSystem {
     ///
     /// 返回 `Some(ConfirmationResponse)` 表示用户的三态选择（Deny/AllowOnce/AllowAlways），
     /// `None` 表示无 AppHandle（未初始化）或用户未响应。
+    pub async fn request_confirmation_for_task(
+        &self, tool:&str, arguments:&Value, reason:String, risk_level:ConfirmationRisk,
+        char_id:&str, scope:&str, ctx:&super::types::ToolUseContext,
+    )->Option<ConfirmationResponse> {
+        let request=self.request_confirmation(tool,arguments,reason,risk_level,char_id,scope);
+        if super::permission::file_operation_for_call(tool,arguments)==Some("read") {
+            let path=arguments.get("path").or_else(||arguments.get("directory")).and_then(Value::as_str).unwrap_or("");
+            let key=format!("{}:{}:{}:{}:{}",ctx.user_id,ctx.char_id,ctx.session_id,ctx.policy_epoch,super::types::normalize_path(&ctx.resolve_path(path)));
+            super::confirmation::coalesced_read(key,request).await
+        } else {request.await}
+    }
+
     pub async fn request_confirmation(
         &self,
         tool: &str,

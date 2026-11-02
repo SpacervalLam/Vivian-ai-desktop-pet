@@ -90,6 +90,9 @@ impl Tool for WorkingDirectoryTool {
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let target = args.get("path").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
+        if target.is_some() && ctx.subagent_depth>0 {
+            return ToolResult::standard_error("子任务不能更改父会话的工作目录，请在命令中设置本地 cwd。",Some("ParentScopeRequired"),None);
+        }
         match target {
             None => ToolResult::standard_success(
                 &format!("当前工作目录：{}", ctx.working_directory),

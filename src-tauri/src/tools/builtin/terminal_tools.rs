@@ -34,6 +34,8 @@ enum TermProc {
     Plain {
         child: tokio::sync::Mutex<Child>,
         stdin: tokio::sync::Mutex<ChildStdin>,
+        #[cfg(windows)]
+        job: Arc<crate::utils::sandbox::ProcessJob>,
     },
     #[cfg(windows)]
     Sandboxed {
@@ -58,6 +60,8 @@ impl TermProc {
     fn start_kill(&self) {
         match self {
             Self::Plain { child, .. } => {
+                #[cfg(windows)]
+                if let Self::Plain { job, .. } = self { job.kill(); }
                 if let Ok(mut child) = child.try_lock() {
                     let _ = child.start_kill();
                 }
@@ -86,6 +90,7 @@ impl TermProc {
     async fn kill(&self) {
         match self {
             TermProc::Plain { child, .. } => {
+                self.start_kill();
                 let mut c = child.lock().await;
                 let _ = c.kill().await;
             }
@@ -97,6 +102,8 @@ impl TermProc {
 
 struct TermHandle {
     _slot: tokio::sync::OwnedSemaphorePermit,
+    registration: Mutex<Option<crate::tools::access::ProcessRegistration>>,
+    policy_epoch: u64,
     id: String,
     session_id: String,
     char_id: String,
@@ -180,6 +187,8 @@ async fn spawn_plain(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    for (key, _) in std::env::vars() { if crate::tools::access::secret_environment_key(&key) { cmd.env_remove(key); } }
+    cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("启动 PowerShell 失败：{e}"))?;
@@ -189,6 +198,8 @@ async fn spawn_plain(
     spawn_reader(stdout, Arc::clone(buffer), Arc::clone(alive), "");
     spawn_reader(stderr, Arc::clone(buffer), Arc::clone(alive), "[stderr] ");
     Ok(TermProc::Plain {
+        #[cfg(windows)]
+        job: Arc::new(crate::utils::sandbox::ProcessJob::attach(child.raw_handle().ok_or("没有进程句柄")? as usize)?),
         child: tokio::sync::Mutex::new(child),
         stdin: tokio::sync::Mutex::new(stdin),
     })
@@ -226,6 +237,7 @@ fn spawn_reader_blocking(
     });
 }
 async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle>, String> {
+    terms().lock().await.retain(|_,h|h.alive.load(Ordering::Acquire));
     static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let slot = Arc::clone(SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(64))))
         .try_acquire_owned()
@@ -233,10 +245,11 @@ async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle
     let sandbox_config = crate::tools::sandbox_env::config();
     // 非 Windows 上没有受限令牌可用；配置要求必须有隔离时就地拒绝，
     // 不开一个全权限的长活 shell 糊过去。
-    let isolated = cfg!(windows) && sandbox_config.enabled && sandbox_config.sandbox_terminal;
-    if sandbox_config.require_isolation && !isolated {
+    let full_access = ctx.subagent_depth == 0 && ctx.access_level == Some(crate::tools::types::AgentAccessLevel::FullControl);
+    let isolated = !full_access && cfg!(windows) && (ctx.is_work_agent() || sandbox_config.enabled && sandbox_config.sandbox_terminal);
+    if !full_access && (ctx.is_work_agent() || sandbox_config.require_isolation) && !isolated {
         return Err(
-            "当前环境没有可用的 OS 级沙箱，已按配置拒绝打开终端。若要使用请关闭「要求 OS 级隔离」。"
+            "当前环境没有可用的 OS 级沙箱，受限任务已停止。可选择 Full access 使用当前用户权限执行。"
                 .to_string(),
         );
     }
@@ -286,6 +299,8 @@ async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle
 
     let handle = Arc::new(TermHandle {
         _slot: slot,
+        registration: Mutex::new(None),
+        policy_epoch: ctx.policy_epoch,
         id: id.clone(),
         session_id: ctx.session_id.clone(),
         char_id: ctx.char_id.clone(),
@@ -303,10 +318,16 @@ async fn open_terminal(ctx: &ToolUseContext, cwd: &str) -> Result<Arc<TermHandle
         alive,
     });
 
+    let weak = Arc::downgrade(&handle);
+    let registration = crate::tools::access::register_process(ctx, Arc::new(move || {
+        if let Some(h) = weak.upgrade() { h.proc.start_kill(); h.alive.store(false, Ordering::Release); }
+    }))?;
+    *handle.registration.lock().unwrap_or_else(|e|e.into_inner()) = Some(registration);
+
     // 首条命令把编码切到 UTF-8（与 run_command 同一套理由）
     let _ = write_line(
         &handle,
-        "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding",
+        "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; $env:PYTHONUTF8='1'; $env:PYTHONIOENCODING='utf-8'",
     )
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -370,7 +391,7 @@ fn owns(h: &TermHandle, ctx: &ToolUseContext) -> bool {
 }
 
 fn check_terminal_scope(h: &TermHandle, ctx: &ToolUseContext) -> Result<(), String> {
-    if h.access_level != ctx.access_level
+    if h.policy_epoch != ctx.policy_epoch || h.access_level != ctx.access_level
         || h.workspaces != ctx.extra_working_directories
         || h.workspace_root != ctx.working_directory
         || h.sandbox_config != crate::tools::sandbox_env::config()
@@ -434,12 +455,12 @@ impl Tool for TerminalOpenTool {
         self.parameters_schema()
     }
 
-    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
         if let Some(cwd) = input.get("cwd").and_then(Value::as_str) {
             if !cwd.is_empty()
-                && (!std::path::Path::new(cwd).is_absolute() || !ctx.is_path_authorized(cwd))
+                && !std::path::Path::new(cwd).is_absolute()
             {
-                return ValidationResult::failure("终端 cwd 必须是授权工作区内的绝对路径", 2);
+                return ValidationResult::failure("终端 cwd 必须是绝对路径；切换目录不增加写入权限", 2);
             }
         }
         ValidationResult::success(None)
@@ -1141,7 +1162,7 @@ impl Tool for PwshPersistentTool {
             let existing = {
                 let map = terms().lock().await;
                 map.values()
-                    .filter(|h| owns(h, ctx) && h.alive.load(Ordering::Relaxed))
+                    .filter(|h| owns(h, ctx) && h.policy_epoch == ctx.policy_epoch && h.alive.load(Ordering::Relaxed))
                     .map(Arc::clone)
                     .next()
             };
@@ -1154,98 +1175,7 @@ impl Tool for PwshPersistentTool {
             }
         };
 
-        // 整个「清缓冲 → 写命令 → 等输出 → 读输出」是一个原子回合：
-        if let Err(e) = check_terminal_scope(&handle, ctx) {
-            return ToolResult::standard_error(&e, Some("TerminalPermissionChanged"), None);
-        }
-        // 同一终端上并发调用会排队，各自拿到属于自己的输出。
-        let _turn = handle.cmd_lock.lock().await;
-        // 先清掉历史输出，避免把上一次的残留当成这次的
-        handle
-            .buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .discard();
-        use base64::Engine;
-        let status = handle.proc.control_path();
-        struct RunningCommand<'a> {
-            process: &'a TermProc,
-            status: std::path::PathBuf,
-            finished: bool,
-        }
-        impl Drop for RunningCommand<'_> {
-            fn drop(&mut self) {
-                if !self.finished {
-                    self.process.start_kill();
-                }
-                let _ = std::fs::remove_file(&self.status);
-                let _ = std::fs::remove_file(self.status.with_extension("status.tmp"));
-            }
-        }
-        let mut running = RunningCommand {
-            process: &handle.proc,
-            status: status.clone(),
-            finished: false,
-        };
-        let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
-        let status_text = status.to_string_lossy().replace('\'', "''");
-        // Publish the exit code by atomic rename. It cannot be confused with tool
-        // output, and state from Invoke-Expression stays in this shell's scope.
-        let wrapped = format!("$global:LASTEXITCODE=0; $__vivian_code=0; try {{ Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))); $__vivian_ok=$?; if ($LASTEXITCODE) {{ $__vivian_code=[int]$LASTEXITCODE }} elseif (-not $__vivian_ok) {{ $__vivian_code=1 }} }} catch {{ $__vivian_code=1; [Console]::Error.WriteLine($_.ToString()) }} finally {{ [IO.File]::WriteAllText('{status_text}.tmp', [string]$__vivian_code); [IO.File]::Move('{status_text}.tmp','{status_text}') }}");
-        if let Err(e) = write_line(&handle, &wrapped).await {
-            return ToolResult::standard_error(&e, Some("TerminalError"), None);
-        }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        let mut out = String::new();
-        let mut remaining = 8_000;
-        let code = loop {
-            let page = drain_new(&handle, remaining);
-            remaining = remaining.saturating_sub(page.chars().count());
-            out.push_str(&page);
-            if let Ok(raw) = std::fs::read_to_string(&status) {
-                if let Ok(code) = raw.trim().parse::<i32>() {
-                    break code;
-                }
-            }
-            if !handle.proc.is_alive().await {
-                return ToolResult::standard_error(
-                    "终端在命令完成前退出。",
-                    Some("TerminalClosed"),
-                    Some(json!({"output":out})),
-                );
-            }
-            if std::time::Instant::now() >= deadline {
-                return ToolResult::standard_error(
-                    "持久终端命令执行超时（120 秒），已终止进程树。",
-                    Some("timeout"),
-                    Some(json!({"output":out})),
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
-        };
-        running.finished = true;
-        // Allow pipe readers to collect bytes written immediately before status.
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        out.push_str(&drain_new(&handle, remaining));
-        let alive = handle.proc.is_alive().await;
-        handle.alive.store(alive, Ordering::Relaxed);
-        let truncated = handle
-            .buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .has_unread();
-        let display = if out.trim().is_empty() {
-            format!("命令退出码 {code}（无输出）")
-        } else {
-            out.clone()
-        };
-        ToolResult::standard_success(
-            &display,
-            Some(json!({
-                "terminal_id": handle.id, "output": out, "process_alive": alive,
-                "command_completed": true, "exit_code": code, "success": code == 0, "truncated": truncated,
-            })),
-        )
+        run_command_in_handle(handle, ctx, command, settle, 120, None).await
     }
 
     fn execution_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
@@ -1270,12 +1200,12 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn terminal_cwd_is_checked_against_the_work_scope() {
+    async fn absolute_terminal_cwd_does_not_expand_write_scope() {
         let ctx = ToolUseContext::default()
             .with_agent_kind("work")
             .with_working_directory("C:/audit/work");
         assert!(
-            !TerminalOpenTool
+            TerminalOpenTool
                 .validate_input(&json!({"cwd":"C:/outside"}), &ctx)
                 .await
                 .result
@@ -1352,5 +1282,255 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(!handle.proc.is_alive().await);
         terms().lock().await.remove(&handle.id);
+    }
+}
+
+/// The process broker: one worker, policy lease, UTF-8 protocol and tree lifetime
+/// for foreground commands and background jobs. No tool-specific spawn bypass.
+pub(crate) type Progress = Arc<dyn Fn(&str) + Send + Sync>;
+async fn run_command_in_handle(handle: Arc<TermHandle>, ctx: &ToolUseContext, command: String, settle: u64, timeout: u64, progress: Option<Progress>) -> ToolResult {
+        // 整个「清缓冲 → 写命令 → 等输出 → 读输出」是一个原子回合：
+        if let Err(e) = check_terminal_scope(&handle, ctx) {
+            return ToolResult::standard_error(&e, Some("TerminalPermissionChanged"), None);
+        }
+        // 同一终端上并发调用会排队，各自拿到属于自己的输出。
+        let _turn = handle.cmd_lock.lock().await;
+        // 先清掉历史输出，避免把上一次的残留当成这次的
+        handle
+            .buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .discard();
+        use base64::Engine;
+        let status = handle.proc.control_path();
+        struct RunningCommand<'a> {
+            process: &'a TermProc,
+            status: std::path::PathBuf,
+            finished: bool,
+        }
+        impl Drop for RunningCommand<'_> {
+            fn drop(&mut self) {
+                if !self.finished {
+                    self.process.start_kill();
+                }
+                let _ = std::fs::remove_file(&self.status);
+                let _ = std::fs::remove_file(self.status.with_extension("status.tmp"));
+            }
+        }
+        let mut running = RunningCommand {
+            process: &handle.proc,
+            status: status.clone(),
+            finished: false,
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode(command.as_bytes());
+        let status_text = status.to_string_lossy().replace('\'', "''");
+        // Publish the exit code by atomic rename. It cannot be confused with tool
+        // output, and state from Invoke-Expression stays in this shell's scope.
+        let wrapped = format!("$global:LASTEXITCODE=0; $__vivian_code=0; try {{ Invoke-Expression ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))); $__vivian_ok=$?; if ($LASTEXITCODE) {{ $__vivian_code=[int]$LASTEXITCODE }} elseif (-not $__vivian_ok) {{ $__vivian_code=1 }} }} catch {{ $__vivian_code=1; [Console]::Error.WriteLine($_.ToString()) }} finally {{ [IO.File]::WriteAllText('{status_text}.tmp', [string]$__vivian_code); [IO.File]::Move('{status_text}.tmp','{status_text}') }}");
+        if let Err(e) = write_line(&handle, &wrapped).await {
+            return ToolResult::standard_error(&e, Some("TerminalError"), None);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+        let mut out = String::new();
+        let mut remaining = if progress.is_some() { 65_536 } else { 8_000 };
+        let code = loop {
+            let page = drain_new(&handle, remaining);
+            remaining = remaining.saturating_sub(page.chars().count());
+            out.push_str(&page);
+            if let Some(progress) = &progress { progress(&out); }
+            if !crate::tools::access::can_continue(ctx) { return ToolResult::standard_error("权限已切换，旧进程已停止", Some("PermissionChanged"), Some(json!({"output":out}))); }
+            if let Ok(raw) = std::fs::read_to_string(&status) {
+                if let Ok(code) = raw.trim().parse::<i32>() {
+                    break code;
+                }
+            }
+            if !handle.proc.is_alive().await {
+                return ToolResult::standard_error(
+                    "终端在命令完成前退出。",
+                    Some("TerminalClosed"),
+                    Some(json!({"output":out})),
+                );
+            }
+            if std::time::Instant::now() >= deadline {
+                return ToolResult::standard_error(
+                    &format!("命令执行超时（{timeout} 秒），已终止进程树。"),
+                    Some("timeout"),
+                    Some(json!({"output":out})),
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(settle)).await;
+        };
+        running.finished = true;
+        // Allow pipe readers to collect bytes written immediately before status.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        out.push_str(&drain_new(&handle, remaining));
+        let alive = handle.proc.is_alive().await;
+        handle.alive.store(alive, Ordering::Relaxed);
+        let (truncated, dropped_chars) = {
+            let buffer=handle.buffer.lock().unwrap_or_else(|e|e.into_inner());
+            (buffer.has_unread() || buffer.dropped_chars()>0, buffer.dropped_chars())
+        };
+        let display = if out.trim().is_empty() {
+            format!("命令退出码 {code}（无输出）")
+        } else {
+            out.clone()
+        };
+        ToolResult::standard_success(
+            &display,
+            Some(json!({
+                "terminal_id": handle.id, "output": out, "process_alive": alive,
+                "sandboxed": handle.proc.sandboxed(), "policy_epoch": ctx.policy_epoch,
+                "capabilities": crate::tools::sandbox_env::capabilities(!handle.proc.sandboxed()),
+                "command_completed": true, "exit_code": code, "success": code == 0, "truncated": truncated,
+                "dropped_chars": dropped_chars,
+            })),
+        )
+
+}
+
+pub(crate) async fn execute_process(ctx: &ToolUseContext, args: &Value, progress: Option<Progress>) -> ToolResult {
+    let command = args["command"].as_str().unwrap_or("").trim();
+    if command.is_empty() { return ToolResult::standard_error("command 不能为空", Some("InvalidInput"), None); }
+    let (ctx, _) = match crate::tools::access::process_snapshot(ctx) {
+        Ok(policy) => policy,
+        Err(e) => return ToolResult::standard_error(&e, Some("PermissionChanged"), None),
+    };
+    let handle = match open_terminal(&ctx, &ctx.working_directory).await {
+        Ok(h) => h,
+        Err(e) => return ToolResult::standard_error(&e, Some("ProcessBackendUnavailable"), None),
+    };
+    struct Worker(Arc<TermHandle>);
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            self.0.proc.start_kill();
+            self.0.alive.store(false, Ordering::Release);
+            if let Ok(mut map) = terms().try_lock() { map.remove(&self.0.id); }
+        }
+    }
+    let worker = Worker(handle.clone());
+    let timeout = args["timeout_secs"].as_u64().unwrap_or(120).clamp(1, 86400);
+    let mut result = run_command_in_handle(handle, &ctx, command.into(), 10, timeout, progress).await;
+    if let Some(data) = result.data.as_mut().and_then(|v|v.get_mut("data")).and_then(Value::as_object_mut) {
+        if data.get("truncated") == Some(&Value::Bool(true)) {
+            let mut retained = data.get("output").and_then(Value::as_str).unwrap_or("").to_string();
+            retained.push_str(&drain_new(&worker.0, usize::MAX));
+            if let Some(path) = crate::tools::executor::spill_result("process", &retained) {
+                data.insert("output_file".into(), json!(path));
+                data.insert("retained_output_chars".into(), json!(retained.chars().count()));
+            }
+        }
+        data.insert("stdout".into(), data.get("output").cloned().unwrap_or(json!("")));
+        data.insert("command".into(), json!(command));
+    }
+    drop(worker);
+    result
+}
+
+#[cfg(all(test,windows))]
+mod live_policy_tests {
+    use super::*;
+    use crate::tools::{ToolSystem,execute_tool_use,executor::CanUseTool};
+    use crate::tools::types::AgentAccessLevel;
+    fn fixture(path:&std::path::Path)->ToolUseContext {
+        ToolUseContext {access_level:Some(AgentAccessLevel::FsWrite),..ToolUseContext::default().with_agent_kind("work").with_char_id("policy-test").with_working_directory(path.to_string_lossy()).with_session_id(uuid::Uuid::new_v4().to_string())}
+    }
+    fn system()->Arc<ToolSystem> {
+        crate::tools::sandbox_env::install(Default::default());
+        let system=Arc::new(ToolSystem::new());
+        system.register_tool(Arc::new(crate::tools::builtin::coding_tools::RunCommandTool::new()));
+        system.register_tool(Arc::new(crate::tools::builtin::jobs_tools::RunJobTool));
+        system.register_tool(Arc::new(crate::tools::builtin::jobs_tools::ManageJobTool));system
+    }
+    async fn wait_for(path:&std::path::Path) {
+        tokio::time::timeout(std::time::Duration::from_secs(15),async {
+            while !path.exists() {tokio::time::sleep(std::time::Duration::from_millis(10)).await;}
+        }).await.unwrap();
+    }
+    #[tokio::test]
+    #[ignore="starts real Windows worker process trees"]
+    async fn downgrade_stops_live_command_tree_and_next_call_uses_readonly() {
+        let root=tempfile::tempdir().unwrap();let ctx=fixture(root.path());let system=system();
+        let sys=system.clone();let active=ctx.clone();
+        let call=tokio::spawn(async move {
+            execute_tool_use("run_command",json!({"command":"Set-Content -LiteralPath 'started' -Value 1; python -c \"import time,pathlib; time.sleep(3); pathlib.Path('escaped').write_text('bad')\"","timeout_secs":30}),&sys,&active,None).await
+        });
+        wait_for(&root.path().join("started")).await;
+        crate::tools::access::set_permission(&ctx.session_id,AgentAccessLevel::ReadOnly);
+        let result=tokio::time::timeout(std::time::Duration::from_secs(2),call).await.unwrap().unwrap();
+        assert_eq!(result.error.as_deref(),Some("PermissionChanged"),"{result:?}");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(!root.path().join("escaped").exists(),"grandchild must also be terminated");
+        let result=execute_tool_use("run_command",json!({"command":"$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath 'forbidden' -Value 1; 'BAD' } catch { 'DENIED' }"}),&system,&ctx,None).await;
+        assert!(result.success,"{result:?}");assert!(result.data.unwrap().to_string().contains("DENIED"));
+        assert!(!root.path().join("forbidden").exists());
+    }
+    #[tokio::test]
+    #[ignore="starts real Windows user and restricted workers"]
+    async fn full_access_is_real_and_hot_downgrade_revokes_external_writer() {
+        let root=tempfile::tempdir().unwrap();let work=root.path().join("work");std::fs::create_dir(&work).unwrap();
+        let mut ctx=fixture(&work);ctx.access_level=Some(AgentAccessLevel::FullControl);
+        let system=system();let sys=system.clone();let active=ctx.clone();
+        let call=tokio::spawn(async move {
+            execute_tool_use("run_command",json!({"command":"Set-Content -LiteralPath '../outside.txt' -Value 'allowed'; Set-Content -LiteralPath 'started' -Value 1; Start-Sleep -Seconds 3; Set-Content -LiteralPath '../late.txt' -Value 'bad'","timeout_secs":30}),&sys,&active,None).await
+        });
+        wait_for(&work.join("started")).await;
+        assert_eq!(std::fs::read_to_string(root.path().join("outside.txt")).unwrap().trim(),"allowed");
+        crate::tools::access::set_permission(&ctx.session_id,AgentAccessLevel::FsWrite);
+        let result=tokio::time::timeout(std::time::Duration::from_secs(2),call).await.unwrap().unwrap();assert_eq!(result.error.as_deref(),Some("PermissionChanged"));
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;assert!(!root.path().join("late.txt").exists());
+        let result=execute_tool_use("run_command",json!({"command":"$ErrorActionPreference='Stop'; try { Set-Content -LiteralPath '../outside.txt' -Value 'bad'; 'BAD' } catch { 'DENIED' }"}),&system,&ctx,None).await;
+        assert!(result.success,"{result:?}");assert!(result.data.unwrap().to_string().contains("DENIED"));
+        assert_eq!(std::fs::read_to_string(root.path().join("outside.txt")).unwrap().trim(),"allowed");
+    }
+
+    #[tokio::test]
+    #[ignore="starts real Windows background workers"]
+    async fn background_downgrade_revokes_workers_and_long_output_remains_readable() {
+        let root=tempfile::tempdir().unwrap();let ctx=fixture(root.path());let system=system();
+        let started=execute_tool_use("run_job",json!({"command":"Set-Content -LiteralPath 'started' -Value 1; Start-Sleep -Seconds 3; Set-Content -LiteralPath 'late' -Value 'bad'"}),&system,&ctx,None).await;
+        let id=started.data.unwrap()["data"]["job_id"].as_str().unwrap().to_string();
+        wait_for(&root.path().join("started")).await;
+        crate::tools::access::set_permission(&ctx.session_id,AgentAccessLevel::ReadOnly);
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(!root.path().join("late").exists());
+        let status=execute_tool_use("manage_job",json!({"action":"get","job_id":id}),&system,&ctx,None).await;
+        assert_eq!(status.data.unwrap()["data"]["status"],"killed");
+        crate::tools::access::set_permission(&ctx.session_id,AgentAccessLevel::FsWrite);
+        let result=execute_tool_use("run_command",json!({"command":"[Console]::Write(('甲' * 20000))"}),&system,&ctx,None).await;
+        assert!(result.success,"{result:?}");let data=result.data.unwrap()["data"].clone();
+        assert_eq!(data["truncated"],true);
+        let path=data["output_file"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap().chars().count(),20000);
+    }
+
+    #[tokio::test]
+    #[ignore="starts real Windows workers and Python SQLite"]
+    async fn background_sqlite_export_uses_task_cwd_without_prompts_and_preserves_source() {
+        let root=tempfile::tempdir().unwrap();let work=root.path().join("output");std::fs::create_dir(&work).unwrap();
+        let source=root.path().join("collection.sqlite");
+        let db=rusqlite::Connection::open(&source).unwrap();
+        db.execute_batch("CREATE TABLE entries(id INTEGER,name TEXT);INSERT INTO entries VALUES(1,'番剧甲'),(2,'番剧乙');").unwrap();drop(db);
+        let original=std::fs::read(&source).unwrap();
+        std::fs::write(work.join("export.py"),"import sqlite3,pathlib,json\np=pathlib.Path('../collection.sqlite').resolve()\nc=sqlite3.connect(p.as_uri()+'?mode=ro',uri=True)\nrows=c.execute('select * from entries').fetchall()\npathlib.Path('result.json').write_text(json.dumps(rows,ensure_ascii=False),encoding='utf-8')\nprint('导出完成')\n").unwrap();
+        let system=system();let ctx=fixture(&work);
+        let prompts=Arc::new(std::sync::atomic::AtomicUsize::new(0));let calls=prompts.clone();
+        let reject:CanUseTool=Arc::new(move|_,_|{calls.fetch_add(1,Ordering::SeqCst);false});
+        let started=execute_tool_use("run_job",json!({"command":"python export.py","timeout_secs":30}),&system,&ctx,Some(reject.clone())).await;
+        assert!(started.success,"{started:?}");let id=started.data.unwrap()["data"]["job_id"].as_str().unwrap().to_string();
+        let final_state=tokio::time::timeout(std::time::Duration::from_secs(15),async {
+            loop {
+                let result=execute_tool_use("manage_job",json!({"action":"get","job_id":id}),&system,&ctx,Some(reject.clone())).await;
+                assert!(result.success,"{result:?}");let data=result.data.unwrap()["data"].clone();
+                if data["status"]!="running" {break data;}
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(final_state["status"],"succeeded","{final_state}");
+        assert!(final_state["output"].as_str().unwrap().contains("导出完成"));
+        let result:Value=serde_json::from_slice(&std::fs::read(work.join("result.json")).unwrap()).unwrap();assert_eq!(result.as_array().unwrap().len(),2);
+        assert_eq!(std::fs::read(source).unwrap(),original);
+        let other=fixture(&work);
+        let denied=execute_tool_use("manage_job",json!({"action":"get","job_id":id}),&system,&other,None).await;assert!(!denied.success);
+        assert_eq!(prompts.load(Ordering::SeqCst),0);
     }
 }

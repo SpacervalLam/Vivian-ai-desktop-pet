@@ -338,7 +338,7 @@ const DRAFT_VIEW_KEY = '\u0000draft-session';
 
 const PERMISSIONS: Array<{ key: 'read_only' | 'workspace_write' | 'full_access'; label: string; icon: React.ReactNode; hint: string }> = [
   { key: 'read_only', label: 'Read Only', icon: <Lock size={14} />, hint: '只读权限' },
-  { key: 'workspace_write', label: 'Workspace Write', icon: <Shield size={14} />, hint: '工作区写入' },
+  { key: 'workspace_write', label: 'Auto', icon: <Shield size={14} />, hint: '普通读取与任务范围内的命令自动执行；运行中可切换' },
   { key: 'full_access', label: 'Full access', icon: <Sparkles size={14} />, hint: '完全访问' },
 ];
 
@@ -2495,10 +2495,25 @@ const WorkspaceFileTree: React.FC<{
 const PermissionDropdown: React.FC<{
   value: string;
   onChange: (permission: string) => void;
-}> = ({ value, onChange }) => {
+  sessionId: string | null;
+  workspace?: string;
+  workspaces: ExtraWorkspace[];
+  onAddWorkspace: (readOnly: boolean) => void;
+  onWorkspaceChange: (path: string, readOnly?: boolean) => void;
+}> = ({ value, onChange, sessionId, workspace, workspaces, onAddWorkspace, onWorkspaceChange }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  const [capabilities, setCapabilities] = useState<{ network: string; backend: string } | null>(null);
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    let cancelled = false;
+    setCapabilities(null);
+    void invoke<{ network: string; backend: string }>('coding_permission_status', { sessionId }).then(result => {
+      if (!cancelled) setCapabilities(result);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [open, sessionId, value]);
   const currentPerm = PERMISSIONS.find((p) => p.key === value) || PERMISSIONS[1];
   const permKey = (key: string): string => {
     const map: Record<string, string> = { read_only: 'code_perm_read_only', workspace_write: 'code_perm_workspace', full_access: 'code_perm_full' };
@@ -2521,7 +2536,7 @@ const PermissionDropdown: React.FC<{
         <ChevronDown size={11} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
       </button>
       {open && (
-        <div className="codex-dropdown-menu">
+        <div className="codex-dropdown-menu" style={{ maxWidth: 'min(520px, calc(100vw - 24px))', maxHeight: '70vh', overflowY: 'auto' }}>
           {PERMISSIONS.map((perm) => (
             <button
               key={perm.key}
@@ -2530,10 +2545,29 @@ const PermissionDropdown: React.FC<{
               className={`codex-dropdown-item ${perm.key === value ? 'selected' : ''}`}
             >
               <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}>{perm.icon}</span>
-              <span style={{ flex: 1 }}>{perm.label}</span>
-              <span className="codex-dropdown-hint">{t(`mind_inspector.${permKey(perm.key)}`, { defaultValue: perm.hint })}</span>
+              <span style={{ flex: 1 }}>{t(`mind_inspector.${permKey(perm.key)}`, { defaultValue: perm.label })}</span>
+              <span className="codex-dropdown-hint">{t(`mind_inspector.${permKey(perm.key)}_hint`, { defaultValue: perm.hint })}</span>
             </button>
           ))}
+          <div style={{ padding: '10px 12px', borderTop: '1px solid var(--codex-line)', fontSize: 12, lineHeight: 1.6 }}>
+            <div>{t('mind_inspector.code_perm_live')}</div>
+            <div style={{ color: 'var(--codex-ink-faint)' }}>{t(`mind_inspector.code_perm_${value === 'full_access' ? 'native' : value === 'read_only' ? 'inspect' : 'scope'}`)}</div>
+            {sessionId && <>
+              {workspace && <div title={workspace} style={{ overflowWrap: 'anywhere', marginTop: 8 }}>{workspace}</div>}
+              {workspaces.map(item => <div key={item.path} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
+                <span title={item.path} style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{item.path}</span>
+                <button type="button" onClick={() => onWorkspaceChange(item.path, !item.read_only)}>{t(`mind_inspector.code_perm_${item.read_only ? 'input' : 'output'}`)}</button>
+                <button type="button" aria-label={t('mind_inspector.code_perm_remove')} onClick={() => onWorkspaceChange(item.path)}><X size={12} /></button>
+              </div>)}
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button type="button" onClick={() => onAddWorkspace(true)}>{t('mind_inspector.code_perm_add_input')}</button>
+                <button type="button" onClick={() => onAddWorkspace(false)}>{t('mind_inspector.code_perm_add_output')}</button>
+              </div>
+            </>}
+            {value !== 'full_access' && <div style={{ color: 'var(--codex-ink-faint)', marginTop: 8 }}>{t('mind_inspector.code_perm_read_boundary')}</div>}
+            {capabilities?.network === 'cooperative_proxy' && <div style={{ color: 'var(--codex-ink-faint)' }}>{t('mind_inspector.code_perm_proxy_boundary')}</div>}
+            {capabilities?.backend === 'unavailable' && <div>{t('mind_inspector.code_perm_backend_unavailable')}</div>}
+          </div>
         </div>
       )}
     </div>
@@ -5091,6 +5125,13 @@ const CodeAgentPage: React.FC = () => {
       const isMine = (p: unknown) => guard(p) && p.session_id === activeIdRef.current;
       const append = (msg: CodingMessage) => setMessages((prev) => [...prev, msg]);
 
+      await add('coding:permission_changed', p => {
+        if (!guard(p)) return;
+        const event = p as { session_id: string; permission: string };
+        setSessions(prev => prev.map(s => s.session_id === event.session_id ? { ...s, permission: event.permission } : s));
+        if (isMine(p)) setPermission(event.permission);
+      });
+
       // 设置窗口保存后同步默认工作区，改完设置无需重启/重开工作页即可生效
       await add('config:saved', () => {
         void refreshDefaultWorkspace().then(setDefaultWorkspace);
@@ -5647,12 +5688,39 @@ const CodeAgentPage: React.FC = () => {
     setDraftRefs((prev) => prev.filter((r) => r.path !== path));
   }, []);
 
+  const permissionChangeSequence = useRef(0);
+  const permissionChangeQueue = useRef<Promise<unknown>>(Promise.resolve());
   const handlePermissionChange = useCallback((perm: string) => {
-    setPermission(perm);
-    if (activeId) {
-      void invoke('coding_set_permission', { sessionId: activeId, permission: perm }).catch(() => {});
-    }
-  }, [activeId]);
+    const sequence = ++permissionChangeSequence.current;
+    if (!activeId) { setPermission(perm); return; }
+    const change = permissionChangeQueue.current.catch(() => {}).then(() => invoke('coding_set_permission', { sessionId: activeId, permission: perm }));
+    permissionChangeQueue.current = change;
+    void change.then(() => {
+      setSessions(prev => prev.map(s => s.session_id === activeId ? { ...s, permission: perm } : s));
+      if (activeIdRef.current === activeId) {
+        setPermission(perm);
+      }
+    }).catch(error => { if (sequence === permissionChangeSequence.current && activeIdRef.current === activeId) notifyError(String(error)); });
+  }, [activeId, notifyError]);
+
+  const changeWorkspaceScope = useCallback((command: string, args: Record<string, unknown>) => {
+    if (!activeId) return;
+    const sessionId = activeId;
+    const change = permissionChangeQueue.current.catch(() => {}).then(() => invoke<ExtraWorkspace[]>(command, { sessionId, ...args }));
+    permissionChangeQueue.current = change;
+    void change.then(extra_workspaces => {
+      setSessions(prev => prev.map(session => session.session_id === sessionId ? { ...session, extra_workspaces } : session));
+    }).catch(error => notifyError(String(error)));
+  }, [activeId, notifyError]);
+  const addWorkspaceScope = useCallback((readOnly: boolean) => {
+    const sessionId = activeId;
+    void pickDirectory().then(path => {
+      if (path && sessionId === activeIdRef.current) changeWorkspaceScope('coding_add_workspace', { path, readOnly });
+    });
+  }, [activeId, pickDirectory, changeWorkspaceScope]);
+  const updateWorkspaceScope = useCallback((path: string, readOnly?: boolean) => {
+    changeWorkspaceScope(readOnly === undefined ? 'coding_remove_workspace' : 'coding_set_workspace_read_only', { path, ...(readOnly === undefined ? {} : { readOnly }) });
+  }, [changeWorkspaceScope]);
 
   const handleModelChange = useCallback((modelId: string) => {
     setModelName(modelId);
@@ -5782,7 +5850,7 @@ const CodeAgentPage: React.FC = () => {
             <Plus size={15} />
           </button>
           {activeSession && (
-            <PermissionDropdown value={permission} onChange={handlePermissionChange} />
+            <PermissionDropdown value={permission} onChange={handlePermissionChange} sessionId={activeId} workspace={activeSession?.working_directory} workspaces={activeSession?.extra_workspaces ?? []} onAddWorkspace={addWorkspaceScope} onWorkspaceChange={updateWorkspaceScope} />
           )}
         </div>
         <div className="codex-composer-right">

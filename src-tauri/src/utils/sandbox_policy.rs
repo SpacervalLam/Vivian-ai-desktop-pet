@@ -14,9 +14,9 @@
 pub enum SandboxNetworkMode {
     /// 放行：沙箱进程网络出口不受限（默认，与隔离层接入前的行为一致）
     Allow,
-    /// 代理：沙箱进程流量经本地代理，按域名白名单逐条放行
+    /// 代理：为遵循代理设置的程序配置域名白名单；不保证网络强隔离
     Proxy,
-    /// 阻断：不给沙箱进程任何网络出口
+    /// 阻断代理出口：忽略代理设置的程序仍可能联网
     Blocked,
 }
 
@@ -56,8 +56,11 @@ pub struct SandboxRequest {
     /// 会话 ID。非空时 scratch 落在会话子目录，避免不同会话的脚本与临时文件
     /// 互相可见；留空用共享 scratch。
     pub session_id: String,
+    /// Host-issued identity scoped to one live policy and writable root set.
+    pub write_identity: Option<String>,
     /// 需要授予写权限的工作区目录（主工作区 + 附加工作区）
     pub workspace_dirs: Vec<String>,
+    pub readonly_dirs: Vec<String>,
     /// 网络出口模式
     pub network_mode: SandboxNetworkMode,
     /// 本地代理地址 `host:port`。`network_mode` 为 `proxy` 时注入到子进程

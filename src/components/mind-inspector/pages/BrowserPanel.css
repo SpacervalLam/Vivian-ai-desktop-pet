@@ -82,7 +82,9 @@
 .embedded-browser-entry strong, .embedded-browser-entry small { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 .embedded-browser-entry small, .embedded-browser-download small { color: var(--browser-muted); font-size: 10px; }
 .embedded-browser-error, .embedded-browser-permission { flex: 0 0 auto; padding: 7px; border-radius: 7px; background: #e8b6601a; overflow-wrap: anywhere; line-height: 1.6; }
-.embedded-browser-error { color: #b34f46; }.embedded-browser-error button, .embedded-browser-permission button { margin: 0 4px; }.embedded-browser-permission p { margin: 0 0 5px; }
+.embedded-browser-controls .embedded-browser-error-indicator { color: #b34f46; }
+.embedded-browser-error-indicator span { display: grid; place-items: center; width: 16px; height: 16px; border: 1.5px solid currentColor; border-radius: 50%; font-weight: 600; }
+.embedded-browser-permission button { margin: 0 4px; }.embedded-browser-permission p { margin: 0 0 5px; }
 .embedded-browser-download { display: flex; flex-direction: column; gap: 4px; padding: 9px 0; border-bottom: 1px solid var(--browser-line); }.embedded-browser-download button { margin-right: 4px; }
 @container browser (max-width: 540px) { .embedded-browser-start-tools kbd { display: none; } .embedded-browser-start-sites { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @container browser (max-width: 380px) { .embedded-browser-controls { gap: 4px; } .embedded-browser-controls button { width: 26px; height: 30px; } .embedded-browser-controls > button { width: 29px; height: 34px; } .embedded-browser-nav-capsule, .embedded-browser-actions-capsule { padding-inline: 2px; } .embedded-browser-address input { padding-inline: 6px; font-size: 11px; } .embedded-browser-start-recent > button { padding-inline: 0; } }
