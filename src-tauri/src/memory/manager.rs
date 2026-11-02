@@ -2684,6 +2684,20 @@ impl MemoryManager {
         limit: usize, filter: &MemoryRetrievalFilter) -> VivianResult<Vec<MemoryItem>> {
         if limit == 0 { return Ok(Vec::new()); }
         let embedding = self.prepare_recall_embedding(query, strategy).await;
+        self.search_memories_filtered_prepared(query, strategy, limit, filter, embedding).await
+    }
+
+    /// Shared keyword + semantic lookup for search_memory and deep_recall.
+    /// Remote embedding has a tool-specific budget; failures preserve local recall.
+    pub async fn search_tool_memories(&self, query: &str, limit: usize,
+        filter: &MemoryRetrievalFilter) -> VivianResult<Vec<MemoryItem>> {
+        if limit == 0 || query.trim().is_empty() { return Ok(Vec::new()); }
+        let embedding = super::query_embedding::prepare_for_tool(self.embedding(), query.to_owned()).await;
+        self.search_memories_filtered_prepared(query, RetrievalStrategy::Auto, limit, filter, embedding).await
+    }
+
+    async fn search_memories_filtered_prepared(&self, query: &str, strategy: RetrievalStrategy,
+        limit: usize, filter: &MemoryRetrievalFilter, embedding: Option<Vec<f32>>) -> VivianResult<Vec<MemoryItem>> {
         let memory = self.clone();
         let query = query.to_owned();
         let filter = filter.clone();

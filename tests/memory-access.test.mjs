@@ -6,7 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dir = path.join(root, 'tmp/memory-access-tests');
+const toolRecall = process.argv.includes('--tool-recall');
+const dir = path.join(root, toolRecall ? 'tmp/memory-tool-recall-tests' : 'tmp/memory-access-tests');
 const rustPath = file => path.join(root, file).replaceAll('\\', '/');
 const readSource = async file => {
     if (!process.argv.includes('--baseline')) return readFile(path.join(root,file),'utf8');
@@ -35,6 +36,8 @@ rusqlite={version="0.32",features=["bundled","backup"]}
 lru="0.12"
 tempfile="3"
 tokio={version="1",features=["rt-multi-thread","macros","time","sync"]}
+futures="0.3"
+schemars="0.8"
 `);
 const retention = await readFile(path.join(root, 'src-tauri/src/memory/retention.rs'), 'utf8');
 const decay = retention.slice(retention.indexOf('pub struct MemoryRetentionPolicy'), retention.indexOf('/// 记忆保留守卫'));
@@ -48,18 +51,35 @@ const summarizedPart=manager.slice(manager.indexOf('pub fn is_summarized('),mana
 const summarized=summarizedPart.slice(0,summarizedPart.lastIndexOf('}')+1);
 const incremental=innerStruct.includes('changes:');
 const indexed=manager.includes('store.search_candidates(');
+const memoryTools = await readFile(path.join(root, 'src-tauri/src/tools/builtin/memory_tools.rs'), 'utf8');
 function rustItem(source, marker) {
     const start=source.indexOf(marker);if(start<0)throw new Error(`Missing Rust item: ${marker}`);
     const open=source.indexOf('{',start);let depth=1;let i=open+1;
     for(;i<source.length && depth;i++){if(source[i]==='{')depth++;else if(source[i]==='}')depth--;}
     return source.slice(start,i);
 }
+const toolRequestContracts = toolRecall ? `
+#[cfg(test)] mod tool_request_contracts {
+    use serde_json::{json,Value};
+    ${rustItem(memoryTools, 'fn requested_recall_limit(')}
+    ${['SearchMemoryTool', 'DeepRecallTool'].map(name => {
+        const start = memoryTools.indexOf('impl Tool for ' + name);
+        const end = memoryTools.indexOf('    async fn validate_input(', start);
+        const section = memoryTools.slice(start,end);
+        return `struct ${name}; impl ${name} { ${rustItem(section,'fn parameters_schema(')} ${rustItem(section,'fn parameters_schema_in(')} }`;
+    }).join('\n')}
+    ${rustItem(memoryTools,'mod recall_request_tests {')}
+}
+` : '';
 const indexedManager = indexed ? `
 ${rustItem(manager,'struct RecallSnapshot {')}
 ${rustItem(manager,'impl RecallSnapshot {')}
-pub struct IndexedHarness { inner:Arc<parking_lot::RwLock<MemoryManagerInner>>,knowledge_graph:Arc<super::graph_store::KnowledgeGraph>,char_id:String,_dir:tempfile::TempDir }
+#[derive(Clone)]
+pub struct IndexedHarness { inner:Arc<parking_lot::RwLock<MemoryManagerInner>>,knowledge_graph:Arc<super::graph_store::KnowledgeGraph>,char_id:String,_dir:Arc<tempfile::TempDir> }
 impl IndexedHarness {
     pub fn char_id(&self)->&str{&self.char_id}
+    pub fn embedding(&self)->Arc<dyn MemoryEmbeddingProvider>{self.inner.read().embedding.clone()}
+    ${manager.includes('pub async fn search_tool_memories(') ? rustItem(manager,'pub async fn search_tool_memories(') + '\n' + rustItem(manager,'async fn search_memories_filtered_prepared(') : ''}
     ${manager.includes('pub fn consolidation_summaries(') ? rustItem(manager,'pub fn consolidation_summaries(') : ''}
     ${manager.includes('pub fn count_diary_material(') ? rustItem(manager,'pub fn count_diary_material(') : ''}
     ${rustItem(manager,'fn recall_snapshot(')}
@@ -68,7 +88,7 @@ impl IndexedHarness {
         let dir=tempfile::tempdir().unwrap();
         let inner=MemoryManagerInner{data:MemoryStoreData::default(),id_index:HashMap::new(),capacities:HashMap::new(),entry_store:store,changes:Default::default(),revision:0,
             vector_store:Arc::new(MemoryVectorStore::new(dir.path().join("vectors.db"),256,"hashing").unwrap()),embedding:Arc::new(super::embedding::HashingMemoryEmbedding::default()),retrieval_weights:RetrievalWeights::default(),dirty:false,last_save_at:None};
-        Self{inner:Arc::new(parking_lot::RwLock::new(inner)),knowledge_graph:Arc::new(super::graph_store::KnowledgeGraph::new(dir.path().join("graph.db"))),char_id:owner.into(),_dir:dir}
+        Self{inner:Arc::new(parking_lot::RwLock::new(inner)),knowledge_graph:Arc::new(super::graph_store::KnowledgeGraph::new(dir.path().join("graph.db"))),char_id:owner.into(),_dir:Arc::new(dir)}
     }
     pub fn search(&self,query:&str,filter:Option<&MemoryRetrievalFilter>)->VivianResult<(Vec<MemoryItem>,usize,usize)>{
         let snapshot=self.recall_snapshot(query,RetrievalStrategy::Auto,filter,24,None)?;
@@ -165,12 +185,18 @@ await writeFile(path.join(dir, 'src/retriever.rs'), retriever.replace('fn bm25_s
 await writeFile(path.join(dir, 'src/strategy.rs'), await readSource('src-tauri/src/memory/strategy.rs'));
 await writeFile(path.join(dir, 'src/lib.rs'), String.raw`
 #![allow(dead_code, unused_mut)]
-pub use vivian_storage_contracts::{error,utils};
+pub use vivian_storage_contracts::error;
+pub mod utils {
+    pub use vivian_storage_contracts::utils::*;
+    pub fn truncate_chars(text:&str,limit:usize)->String{text.chars().take(limit).collect()}
+}
 pub mod config { pub mod manager {
     pub struct RetrievalWeightsConfig { pub recency:f64,pub relevance:f64,pub importance:f64,pub hook_boost:f64,pub need_sim:f64,pub recency_tau_hours:f64,pub min_score:f64 }
 } }
+__TOOL_REQUEST_CONTRACTS__
 pub mod memory {
     pub use vivian_storage_contracts::{types,entry_store,search_index,provenance,recall_policy};
+    __TOOL_RECALL_MODULES__
     pub mod session_summary { __SUMMARY_HELPERS__ }
     pub use embedding::MemoryEmbeddingProvider;
     __MODULES__
@@ -178,16 +204,18 @@ pub mod memory {
     pub mod retention { use super::types::MemoryItem; use std::collections::HashSet; __DECAY__ }
     pub mod manager {
         use super::{types::{MemoryItem,MemoryStoreData,Granularity,RetrievalStrategy,MemoryRetrievalFilter},vector_search::MemoryVectorStore,embedding::MemoryEmbeddingProvider,retriever::RetrievalWeights,graph_store::KnowledgeGraph,strategy::{create_strategy,QueryEmbedding,RetrievalContext}};
-        use crate::error::VivianResult;
+        use crate::error::{VivianResult, VivianError};
         use std::{collections::HashMap,sync::Arc,str::FromStr};
         const MAX_RESIDENT_ENTRIES:usize=20_000;
         const RESIDENT_EVICT_TARGET:usize=18_000;
         __DEDUP__
+        __OBSERVER_PENALTY__
         __SUMMARIZED__
         __INNER_STRUCT__
         __INNER_IMPL__
         __ACCESS_TESTS__
         __INDEXED_MANAGER__
+        __TOOL_RECALL_TESTS__
         pub fn benchmark_save(n:usize)->u128 {
             let dir=tempfile::tempdir().unwrap();
             let store=super::entry_store::MemoryEntryStore::open(dir.path().join("entries.db")).unwrap();
@@ -238,6 +266,10 @@ pub mod memory {
     }
 }
 `.replace('__MODULES__', ['age','evidence','tokenize','entity_extract','graph_store','relational_recall','kinds','query_embedding'].map(name => `#[path="${rustPath(`src-tauri/src/memory/${name}.rs`)}"] pub mod ${name};`).join('\n') + `\n#[path="${path.join(dir,'src/strategy.rs').replaceAll('\\','/')}"] pub mod strategy;`)
+  .replace('__TOOL_REQUEST_CONTRACTS__', toolRequestContracts)
+  .replace('__TOOL_RECALL_MODULES__', toolRecall ? `pub use types::{MemoryItem,MemoryRetrievalFilter}; pub use manager::IndexedHarness as MemoryManager; #[path="${rustPath('src-tauri/src/memory/agentic_recall.rs')}"] pub mod agentic_recall;` : '')
+  .replace('__TOOL_RECALL_TESTS__', toolRecall ? `#[cfg(test)] #[path="${rustPath('tests/fixtures/memory-tool-recall.rs')}"] mod tool_recall_tests;` : '')
+  .replace('__OBSERVER_PENALTY__', rustItem(manager,'pub fn is_observer_perspective(') + '\n' + rustItem(manager,'fn apply_observer_penalty('))
   .replace('__SUMMARY_HELPERS__', rustItem(summaries,'pub fn summary_id(')+'\n'+rustItem(summaries,'pub fn is_active_summary('))
   .replace('__DECAY__', decay).replace('__HASHING__', hashing.slice(0,hashing.lastIndexOf('}')+1)).replace('__DEDUP__', dedup)
   .replace('__SUMMARIZED__',summarized+'\n'+(manager.includes('fn stamp_legacy_diary_record(')?rustItem(manager,'fn stamp_legacy_diary_record('):'')).replace('__INNER_STRUCT__',innerStruct).replace('__INNER_IMPL__',innerImpl)

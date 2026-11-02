@@ -317,7 +317,7 @@ pub fn score_lexical_candidates(entries: &[MemoryItem], focus: &str, context: &s
         for (id,score) in &mut primary {
             if let Some(support) = previous.get(id) { *score += 0.2 * support.min(*score); }
         }
-        primary.sort_by(|a,b|b.1.total_cmp(&a.1));
+        primary.sort_by(|a,b|b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     }
     primary
 }
@@ -386,7 +386,9 @@ fn bm25_search_cached(entries: &[MemoryItem], query: &str, k: usize,
         .filter(|(_, s)| *s > 0.0)
         .collect();
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // RRF consumes ordinal ranks, so ties must not inherit the candidate load
+    // order (seed order and persistent-index order can differ).
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     scored.truncate(k);
     scored
 }
@@ -461,7 +463,7 @@ fn entity_arm_search(entries: &[MemoryItem], query: &str, k: usize) -> Vec<(Stri
             scored.push((e.id.clone(), hits as f64));
         }
     }
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     scored.truncate(k);
     scored
 }
@@ -1346,6 +1348,26 @@ mod tests {
         ];
         let hits = entity_arm_search(&entries, "上海", 5);
         assert_eq!(hits.first().map(|hit| hit.0.as_str()), Some("m1"));
+    }
+
+    #[test]
+    fn tied_lexical_and_entity_arms_ignore_candidate_load_order() {
+        let entries = vec![
+            make_item("b", "AlenTinn 的名字", 0.5),
+            make_item("a", "AlenTinn 的名字", 0.5),
+            make_item("c", "AlenTinn 说以后还会来这里聊天", 0.5),
+        ];
+        let reversed: Vec<_> = entries.iter().rev().cloned().collect();
+        let query = "认识 AlenTinn 吗";
+        // Equal-score candidates must have the same ranks before RRF, including
+        // at the top-k boundary, regardless of SQLite/index loading order.
+        assert_eq!(bm25_search(&entries, query, 1), bm25_search(&reversed, query, 1));
+        assert_eq!(entity_arm_search(&entries, query, 2), entity_arm_search(&reversed, query, 2));
+        let scores = |items: &[MemoryItem]| {
+            hybrid_search(items, query, None, None, None, 12, 12)
+                .into_iter().map(|hit| (hit.item.id, hit.fused_score)).collect::<Vec<_>>()
+        };
+        assert_eq!(scores(&entries), scores(&reversed));
     }
 
     #[test]

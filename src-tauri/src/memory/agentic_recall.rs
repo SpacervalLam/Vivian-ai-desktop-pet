@@ -1,4 +1,4 @@
-//! Agentic recall —— 由 LLM 自己给关键词、并行跨渠道检索记忆。
+//! Agentic recall —— 由 LLM 提供关键词或语义描述，并行跨渠道检索记忆。
 //!
 //! 首轮提示词里的召回依赖「用户消息 + 历史对话」的 embedding，容易漏掉
 //! 字面不相似但实际有用的旧信息（日记、笔记、会话摘要、事实等）。
@@ -8,16 +8,15 @@
 //!
 //! 设计约束：
 //! - 只读、无副作用；调用方（工具层）负责决定何时检索。
-//! - 检索走 `RetrievalStrategy::Hybrid`（关键词 + 时效），不生成 query embedding，
-//!   与「LLM 提供关键词」的语义一致。
+//! - 关键词与语义向量走统一融合检索；嵌入失败或超时时保留本地召回。
 //! - 多查询结果按 id / 内容去重，并过滤不可见与种子人设内容。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{
-    kinds, provenance, MemoryItem, MemoryManager, MemoryRetrievalFilter, RetrievalStrategy,
+    kinds, provenance, MemoryItem, MemoryManager, MemoryRetrievalFilter,
 };
 use crate::utils::truncate_chars;
 
@@ -25,7 +24,7 @@ use crate::utils::truncate_chars;
 pub const MAX_RECALL_QUERIES: usize = 3;
 
 /// 单个检索词的最大字符数，防止模型把整段对话塞进 one query。
-const MAX_KEYWORDS_CHARS: usize = 80;
+const MAX_KEYWORDS_CHARS: usize = 240;
 
 /// 检索渠道。模型只负责选择渠道，具体 filter 由本地映射，避免提示词泄漏 SQL 语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -174,9 +173,8 @@ pub async fn recall_in_parallel(
             let filter = query.scope.filter();
             async move {
                 memory
-                    .search_memories_filtered(
+                    .search_tool_memories(
                         &keywords,
-                        RetrievalStrategy::Hybrid,
                         per_query_limit,
                         &filter,
                     )
@@ -201,21 +199,13 @@ pub async fn recall_in_parallel(
 
 /// 合并多批检索结果：按 id / 内容去重，过滤不可见、种子人设与不可召回记录。
 fn merge_and_filter(batches: Vec<Vec<MemoryItem>>, char_id: &str) -> Vec<MemoryItem> {
-    let mut seen_ids = HashSet::new();
-    let mut seen_contents = HashSet::new();
-    let mut merged = Vec::new();
-
+    let mut candidates: HashMap<String, (MemoryItem, f64, usize)> = HashMap::new();
+    let mut order = 0;
     for batch in batches {
-        for item in batch {
-            if !seen_ids.insert(item.id.clone()) {
-                continue;
-            }
+        let mut batch_ids = HashSet::new();
+        for (rank, item) in batch.into_iter().enumerate() {
             let content = item.content.trim();
             if content.is_empty() {
-                continue;
-            }
-            let content_key = content.to_lowercase();
-            if !seen_contents.insert(content_key) {
                 continue;
             }
             if !kinds::recallable(&item) || !provenance::visible_to(&item.metadata, char_id) {
@@ -228,10 +218,18 @@ fn merge_and_filter(batches: Vec<Vec<MemoryItem>>, char_id: &str) -> Vec<MemoryI
             {
                 continue;
             }
-            merged.push(item);
+            if !batch_ids.insert(item.id.clone()) { continue; }
+            let score = 1.0 / (60.0 + rank as f64 + 1.0);
+            if let Some((_, total, _)) = candidates.get_mut(&item.id) { *total += score; }
+            else { candidates.insert(item.id.clone(), (item, score, order)); order += 1; }
         }
     }
-    merged
+    let mut ranked: Vec<_> = candidates.into_values().collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)));
+    let mut seen_contents = HashSet::new();
+    ranked.into_iter().filter_map(|(item, _, _)| {
+        seen_contents.insert(item.content.trim().to_lowercase()).then_some(item)
+    }).collect()
 }
 
 #[cfg(test)]
@@ -304,6 +302,28 @@ mod tests {
         duplicate.id = "duplicate".into();
 
         let merged = merge_and_filter(vec![vec![visible.clone()], vec![hidden, seed, duplicate]], "nana");
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, visible.id);
+    }
+
+    #[test]
+    fn multi_query_fusion_ranks_shared_hits_before_first_query_only_hits() {
+        let mut first = MemoryItem::new("关键词命中的旧项目".into(), Granularity::Turn, 0.8);
+        first.metadata = serde_json::json!({"record_kind":"fact"});
+        let mut shared = MemoryItem::new("多个侧面都相关的经历".into(), Granularity::Turn, 0.8);
+        shared.metadata = serde_json::json!({"record_kind":"fact"});
+        let merged = merge_and_filter(vec![vec![first, shared.clone()], vec![shared.clone()]], "nana");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, shared.id);
+    }
+
+    #[test]
+    fn invisible_duplicates_do_not_suppress_visible_evidence() {
+        let mut hidden = MemoryItem::new("相同正文".into(), Granularity::Turn, 0.8);
+        hidden.metadata = serde_json::json!({"known_by":["vivian"],"record_kind":"fact"});
+        let mut visible = MemoryItem::new("相同正文".into(), Granularity::Turn, 0.8);
+        visible.metadata = serde_json::json!({"record_kind":"fact"});
+        let merged = merge_and_filter(vec![vec![hidden, visible.clone()]], "nana");
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].id, visible.id);
     }

@@ -790,13 +790,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let baseline = example_library::factory_examples("vivian");
-        let mut sample = baseline
-            .iter()
-            .find(|e| e.scope == "comfort")
-            .unwrap()
-            .clone();
+        // Factory corpus categories can change; the learned comfort example
+        // belongs to this backup fixture rather than to a factory category.
+        let mut sample = baseline.first().expect("factory corpus must not be empty").clone();
+        sample.scope = "comfort".into();
         sample.id = "grown-backup-voice".into();
         sample.response["text"] = "先歇会儿，想说了我再听。".into();
+        sample.source = Some(example_library::fixture_source(sample.response["text"].as_str().unwrap()));
         let understanding = "先尊重沉默，不把陪伴变成追问";
         let update = ExampleOverride {
             scope: "comfort".into(),

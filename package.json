@@ -1,6 +1,6 @@
 {
   "name": "vivian",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Vivian AI Desktop Pet - Rust + Tauri + React",
   "type": "module",
   "scripts": {

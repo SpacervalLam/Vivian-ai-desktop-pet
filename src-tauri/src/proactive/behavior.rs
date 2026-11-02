@@ -981,7 +981,7 @@ mod structured_context_tests {
             ProactiveTrigger::Spontaneous, &ctx, "zh", "nana").unwrap();
         assert!(directive.contains("[TIMING — 数据]"), "{directive}");
         assert!(directive.contains("最近用户消息：2 分钟前"), "{directive}");
-        assert!(directive.contains("你上次发言：16 秒前"), "{directive}");
+        assert!(directive.contains("你上次发言：刚刚"), "{directive}");
         assert!(!directive.contains("1970-01-01"), "{directive}");
         assert!(directive.contains("16 秒前刚说过"), "{directive}");
     }

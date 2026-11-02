@@ -9,7 +9,7 @@ use crate::diary;
 use crate::memory::agentic_recall::{
     recall_in_parallel, sanitize_queries, RecallQuery, RecallScope,
 };
-use crate::memory::{MemoryItem, MemoryManager, MemoryType, RetrievalStrategy};
+use crate::memory::{MemoryItem, MemoryManager, MemoryType};
 use crate::tools::services::MemoryService;
 use crate::tools::types::{
     PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
@@ -39,6 +39,13 @@ fn parse_memory_type(category: &str) -> MemoryType {
         "short_term" => MemoryType::ShortTerm,
         _ => MemoryType::General,
     }
+}
+
+fn requested_recall_limit(args: &Value) -> Result<usize, &'static str> {
+    let Some(limit) = args.get("limit") else { return Ok(10); };
+    limit.as_u64()
+        .and_then(|limit| usize::try_from(limit).ok()).filter(|limit| *limit > 0)
+        .ok_or("limit 必须为正整数；省略时默认为 10")
 }
 
 /// 单条检索与深查共用的结果整理：可见性过滤、类别过滤、截断、序列化与快速笔记。
@@ -373,13 +380,13 @@ impl Tool for SearchMemoryTool {
     }
 
     fn description(&self) -> &str {
-        "Deep keyword recall over one unified index covering dialogues, session summaries, user facts, notes/knowledge, and diary entries. Call it only when your own evidence feels thin: the user refers to something you cannot place, a detail is fuzzy, or you are about to guess. Not needed when the answer is already in recent conversation. Give concrete keywords (names, places, dates, objects, events), not sentences or questions. You may pass up to 3 different keyword/scope pairs in one call; they are searched in parallel."
+        "Search dialogues, summaries, user facts, notes/knowledge and diary entries with combined keyword and semantic retrieval. Use it when evidence is missing or a reference is unclear; skip it when recent conversation already answers the question. Supply concrete keywords or a brief natural-language description of what you want to remember. Exact names, dates and identifiers help precision; paraphrases can match by meaning. If semantic embeddings are unavailable, keyword retrieval still works. For several query/scope pairs, use deep_recall."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "在统一记忆索引中按关键词深入回忆，覆盖对话原文、会话摘要、用户事实、笔记/采集资料和日记。只在你自己的证据不够时才调用：用户提到你想不起来的事、细节模糊、或你正要靠猜的时候；答案已经在最近对话里就不必搜索。查询词由你自己决定，用人名、地点、日期、物品、事件等具体关键词，不要照抄整句或写成问句。一次最多给 3 组关键词/渠道，它们会并行检索。不要用它保存新信息（那是 save_memory 的职责）。",
-            "ja" => "会話原文・セッション要約・ユーザー事実・ノート/収集資料・日記を横断する統一インデックスをキーワードで深く検索する。自分の根拠が薄いときだけ呼ぶ：ユーザーが思い出せない話をした、細部が曖昧、当て推量になりそうなとき。答えが最近の会話にすでにある場合は検索不要。検索語は自分で決め、人名・場所・日付・物・出来事などの具体的なキーワードを使う（文章丸ごとや疑問文は使わない）。1 回で最大 3 組のキーワード/スコープを渡せ、並列で検索される。新しい情報の保存には使わないこと（それは save_memory の役割）。",
+            "zh" => "使用关键词与语义融合检索对话原文、会话摘要、用户事实、笔记/采集资料和日记。在证据不足、指代不清或细节模糊时调用；最近对话已能回答时不必搜索。query 可用具体关键词，也可用简短自然语言描述要回忆的内容；人名、日期、标识符有助于精确匹配，换一种说法也可按含义匹配。语义嵌入不可用时仍保留关键词检索。多组查询/渠道使用 deep_recall，保存新信息使用 save_memory。",
+            "ja" => "キーワードと意味ベクトルを組み合わせ、会話原文・要約・ユーザー事実・ノート/収集資料・日記を検索する。根拠が足りない、指示対象や細部が曖昧なときに使い、最近の会話で答えられるなら検索不要。query には具体的なキーワード、または思い出したい内容の短い自然言語の説明を渡せる。名前・日付・識別子は精密な一致に役立ち、言い換えも意味で検索できる。意味埋め込みが使えない場合もキーワード検索は続ける。複数の検索/スコープには deep_recall、新情報の保存には save_memory を使う。",
             _ => self.description(),
         }
     }
@@ -398,7 +405,7 @@ impl Tool for SearchMemoryTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Single search: concrete keywords"
+                    "description": "Search keywords or a brief natural-language description"
                 },
                 "scope": {
                     "type": "string",
@@ -411,11 +418,12 @@ impl Tool for SearchMemoryTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results, default 10",
+                    "description": "Maximum result count for this lookup; optional, default 10",
+                    "default": 10,
                     "minimum": 1
                 }
             },
-            "required": []
+            "required": ["query"]
         })
     }
 
@@ -426,7 +434,7 @@ impl Tool for SearchMemoryTool {
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "单条检索：具体关键词"
+                        "description": "检索关键词或简短自然语言描述"
                     },
                     "scope": {
                         "type": "string",
@@ -439,18 +447,19 @@ impl Tool for SearchMemoryTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "返回结果的最大数量，默认 10",
-                        "minimum": 1
+                        "description": "按本次任务需要指定最大返回条数；可选，默认 10",
+                        "default": 10,
+                    "minimum": 1
                     }
                 },
-                "required": []
+                "required": ["query"]
             }),
             "ja" => json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "単一検索：具体的なキーワード"
+                        "description": "検索キーワードまたは短い自然言語の説明"
                     },
                     "scope": {
                         "type": "string",
@@ -463,11 +472,12 @@ impl Tool for SearchMemoryTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "結果の最大数、デフォルト 10",
-                        "minimum": 1
+                        "description": "今回必要な最大件数。省略可能、デフォルトは10",
+                        "default": 10,
+                    "minimum": 1
                     }
                 },
-                "required": []
+                "required": ["query"]
             }),
             _ => self.parameters_schema(),
         }
@@ -478,11 +488,10 @@ impl Tool for SearchMemoryTool {
         if query.trim().is_empty() {
             return ValidationResult::failure("query 是必填项且不能为空", 2);
         }
-        let mut data = input.clone();
-        if data.get("limit").is_none() {
-            data["limit"] = json!(10);
+        if let Err(error) = requested_recall_limit(input) {
+            return ValidationResult::failure(error, 2);
         }
-        ValidationResult::success(Some(data))
+        ValidationResult::success(Some(input.clone()))
     }
 
     async fn check_permissions(
@@ -506,32 +515,19 @@ impl Tool for SearchMemoryTool {
             .and_then(|v| v.as_str())
             .and_then(RecallScope::parse);
         let category = args.get("category").and_then(|v| v.as_str());
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10) as usize;
+        let limit = match requested_recall_limit(&args) {
+            Ok(limit) => limit,
+            Err(error) => return ToolResult::standard_error(error, None, None),
+        };
 
         let Some(mgr) = get_manager_for_context(context) else {
             return ToolResult::standard_error("记忆系统未初始化", None, None);
         };
 
         // Fetch extra results so category filtering doesn't starve the result set
-        let fetch_limit = if category.is_some() { limit * 3 + 20 } else { limit };
-        let recalled = match scope {
-            Some(scope) => {
-                mgr.search_memories_filtered(
-                    &query,
-                    RetrievalStrategy::Auto,
-                    fetch_limit,
-                    &scope.filter(),
-                )
-                .await
-            }
-            None => {
-                mgr.search_memories(&query, RetrievalStrategy::Auto, fetch_limit)
-                    .await
-            }
-        };
+        let fetch_limit = if category.is_some() { limit.saturating_mul(3).saturating_add(20) } else { limit };
+        let filter = scope.unwrap_or_default().filter();
+        let recalled = mgr.search_tool_memories(&query, fetch_limit, &filter).await;
         let items = match recalled {
             Ok(items) => items,
             Err(error) => {
@@ -580,7 +576,7 @@ impl Tool for SearchMemoryTool {
     }
 }
 
-/// deep_recall 工具 —— 一次并行查多组关键词/渠道（比 search_memory 更彻底）。
+/// deep_recall 工具 —— 并行融合检索多组关键词或语义描述/渠道。
 pub struct DeepRecallTool;
 
 impl DeepRecallTool {
@@ -602,13 +598,13 @@ impl Tool for DeepRecallTool {
     }
 
     fn description(&self) -> &str {
-        "Deep recall across diary, notes, summaries, facts and original dialogue in one call. Use ONLY when a single search_memory query or the recent conversation is not enough: the reference is fuzzy, several angles may matter, or you are about to guess. Provide 1-3 concrete keyword/scope pairs; they are searched in parallel. Prefer search_memory for a single straightforward lookup."
+        "Deep recall across diary, notes, summaries, facts and original dialogue in one call. Use ONLY when a single search_memory query or the recent conversation is not enough: the reference is fuzzy, several angles may matter, or you are about to guess. Provide 1-3 query/scope pairs using concrete keywords or brief natural-language descriptions; each uses combined keyword and semantic retrieval, searched in parallel. Prefer search_memory for a single straightforward lookup."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "一次并行深查日记、笔记、会话摘要、事实与对话原文。只在你已经查过一次、最近对话不够、指代模糊、需要多个侧面，或正要靠猜时使用。给 1-3 组具体关键词/渠道，它们会并行检索；单条简单查询优先用 search_memory。",
-            "ja" => "日記・ノート・セッション要約・事実・会話原文を一度に並列で深く検索する。単発の search_memory や最近の会話では足りないとき（指代が曖昧、複数の側面が必要、当て推量になりそうなとき）だけ使う。1〜3 組の具体的なキーワード/スコープを渡すと並列検索される。単純な一回の検索には search_memory を使うこと。",
+            "zh" => "一次并行深查日记、笔记、会话摘要、事实与对话原文。只在你已经查过一次、最近对话不够、指代模糊、需要多个侧面，或正要靠猜时使用。给 1-3 组关键词或简短语义描述/渠道，每组并行进行关键词与语义融合检索；单条简单查询优先用 search_memory。",
+            "ja" => "日記・ノート・セッション要約・事実・会話原文を一度に並列で深く検索する。単発の search_memory や最近の会話では足りないとき（指代が曖昧、複数の側面が必要、当て推量になりそうなとき）だけ使う。具体的なキーワードまたは短い自然言語の説明/スコープを1〜3組渡すと、キーワードと意味を組み合わせて並列検索する。単純な一回の検索には search_memory を使うこと。",
             _ => self.description(),
         }
     }
@@ -630,11 +626,11 @@ impl Tool for DeepRecallTool {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": 3,
-                    "description": "Up to 3 keyword/scope pairs searched in parallel",
+                    "description": "Up to 3 keyword or natural-language query/scope pairs, searched in parallel",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "keywords": {"type": "string"},
+                            "keywords": {"type": "string", "description": "Keywords or a brief natural-language description; field name retained for compatibility"},
                             "scope": {
                                 "type": "string",
                                 "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
@@ -645,7 +641,8 @@ impl Tool for DeepRecallTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of merged results, default 10",
+                    "description": "Maximum total merged result count; optional, default 10, no per-query quota",
+                    "default": 10,
                     "minimum": 1
                 }
             },
@@ -662,11 +659,11 @@ impl Tool for DeepRecallTool {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 3,
-                        "description": "最多 3 组关键词/渠道，并行检索",
+                        "description": "最多 3 组关键词或自然语言描述/渠道，并行融合检索",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "keywords": {"type": "string"},
+                                "keywords": {"type": "string", "description": "关键词或简短自然语言描述；保留字段名以兼容旧调用"},
                                 "scope": {
                                     "type": "string",
                                     "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
@@ -677,8 +674,9 @@ impl Tool for DeepRecallTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "合并后的最大结果数，默认 10",
-                        "minimum": 1
+                        "description": "融合后的最大返回条数；可选，默认 10，不固定分配各查询名额",
+                        "default": 10,
+                    "minimum": 1
                     }
                 },
                 "required": ["queries"]
@@ -690,11 +688,11 @@ impl Tool for DeepRecallTool {
                         "type": "array",
                         "minItems": 1,
                         "maxItems": 3,
-                        "description": "最大 3 組のキーワード/スコープを並列検索",
+                        "description": "キーワードまたは自然言語の説明/スコープを最大3組並列検索",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "keywords": {"type": "string"},
+                                "keywords": {"type": "string", "description": "キーワードまたは短い自然言語の説明。互換性のためフィールド名を維持"},
                                 "scope": {
                                     "type": "string",
                                     "enum": ["all", "diary", "note", "summary", "fact", "dialogue"]
@@ -705,8 +703,9 @@ impl Tool for DeepRecallTool {
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "統合後の最大件数、デフォルト 10",
-                        "minimum": 1
+                        "description": "統合後の最大件数。省略可能、デフォルトは10。検索ごとの固定配分はない",
+                        "default": 10,
+                    "minimum": 1
                     }
                 },
                 "required": ["queries"]
@@ -728,13 +727,12 @@ impl Tool for DeepRecallTool {
                 })
             });
         if !has_keywords {
-            return ValidationResult::failure("queries 至少提供一个非空关键词", 2);
+            return ValidationResult::failure("queries 至少提供一个非空查询", 2);
         }
-        let mut data = input.clone();
-        if data.get("limit").is_none() {
-            data["limit"] = json!(10);
+        if let Err(error) = requested_recall_limit(input) {
+            return ValidationResult::failure(error, 2);
         }
-        ValidationResult::success(Some(data))
+        ValidationResult::success(Some(input.clone()))
     }
 
     async fn check_permissions(
@@ -772,12 +770,12 @@ impl Tool for DeepRecallTool {
             .unwrap_or_default();
         let queries = sanitize_queries(queries);
         if queries.is_empty() {
-            return ToolResult::standard_error("queries 至少提供一个非空关键词", None, None);
+            return ToolResult::standard_error("queries 至少提供一个非空查询", None, None);
         }
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(10) as usize;
+        let limit = match requested_recall_limit(&args) {
+            Ok(limit) => limit,
+            Err(error) => return ToolResult::standard_error(error, None, None),
+        };
         let Some(mgr) = get_manager_for_context(context) else {
             return ToolResult::standard_error("记忆系统未初始化", None, None);
         };
@@ -2082,6 +2080,29 @@ fn weekday_to_chinese(weekday: &str) -> String {
         "Saturday" => "星期六".to_string(),
         "Sunday" => "星期日".to_string(),
         _ => weekday.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod recall_request_tests {
+    use super::*;
+
+    #[test]
+    fn result_limit_defaults_to_ten_and_preserves_explicit_choices() {
+        for limit in [1, 7, 50, 1000] {
+            assert_eq!(requested_recall_limit(&json!({"limit":limit})), Ok(limit as usize));
+        }
+        assert_eq!(requested_recall_limit(&json!({})), Ok(10));
+        for invalid in [json!({"limit":null}), json!({"limit":0}), json!({"limit":-1}), json!({"limit":1.5}), json!({"limit":"10"})] {
+            assert!(requested_recall_limit(&invalid).is_err());
+        }
+        for lang in ["zh", "en", "ja"] {
+            for schema in [SearchMemoryTool.parameters_schema_in(lang), DeepRecallTool.parameters_schema_in(lang)] {
+                assert!(!schema["required"].as_array().unwrap().contains(&json!("limit")));
+                assert_eq!(schema["properties"]["limit"]["default"], json!(10));
+                assert!(schema["properties"]["limit"].get("maximum").is_none());
+            }
+        }
     }
 }
 
