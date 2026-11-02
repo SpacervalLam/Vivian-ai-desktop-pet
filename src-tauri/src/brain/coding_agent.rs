@@ -4884,7 +4884,7 @@ impl CodingAgentService {
                 "# 工作环境\n\
                  - 操作系统：Windows（命令用 PowerShell 语法）\n\
                  - 主工作目录：{wd}\n\
-                 - 所有文件路径操作仅限主工作目录与上述附加工作区内（沙箱强制）\n\
+                 - 文件写入仅限主工作目录与上述附加工作区内；读取工作区外文件可请求用户确认，Full access 下可直接读取\n\
                  {extras}\
                  - 相对路径一律以主工作目录为基准",
                 wd = working_directory,

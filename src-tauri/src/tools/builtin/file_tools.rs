@@ -1,9 +1,8 @@
 //! 文件系统工具 - 智能体读取本地文本类文件
 //!
 //! 当前工具：
-//! - `read_file`：按绝对路径读取本地文本/代码/HTML 文件内容。
-//!   所有路径操作都经过沙箱校验（`sandbox::is_path_safe` 防路径穿越 +
-//!   `ToolUseContext::is_path_authorized` 工作区归属约束），只读、无副作用。
+//! - `read_file`：按绝对路径或工作区相对路径读取本地文本/代码/HTML 文件内容。
+//!   主工作会话可经权限确认读取工作区外文件；子任务仍受工作区约束，只读、无副作用。
 //!
 //! 用途：用户给出本地文件路径（如"读一下 C:\xxx\note.html"）时，智能体可读取
 //! 文件内容后配合 `create_html_note` 等工具将其转化为笔记。
@@ -118,7 +117,7 @@ impl Tool for ReadSpilledResultTool {
 /// 读取本地文件内容（只读，受沙箱路径校验约束）
 ///
 /// 用户给出本地文件路径时调用。返回文件内容（带编码检测，兼容 UTF-8 / GBK /
-/// Shift-JIS 等）。仅允许读取工作目录内的文件，且路径不得包含穿越序列。
+/// Shift-JIS 等）。主工作会话可确认读取外部文件，Full access 下免确认；子任务保持目录边界。
 pub struct ReadFileTool;
 
 #[cfg(test)]
@@ -220,13 +219,13 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a local text/code/HTML file by absolute path. Encoding is auto-detected. Only authorized workspace files are allowed. offset and max_chars count Unicode characters; use next_offset to continue when truncated=true. Keep the same path across pages."
+        "Read a local text/code/HTML file by absolute or workspace-relative path. Encoding is auto-detected. Main work sessions can read outside the workspace with confirmation, or directly with Full access; child tasks retain their workspace scope. offset and max_chars count Unicode characters; use next_offset to continue when truncated=true. Keep the same path across pages."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "按绝对路径读取已授权工作区内的文本、代码或 HTML，自动检测编码。offset 与 max_chars 均按 Unicode 字符计数；truncated=true 时使用返回的 next_offset 和同一路径继续读取，不能把预览当作全文。",
-            "ja" => "絶対パスでローカルのテキスト/コード/HTMLファイルを読み、内容を返す。ユーザーがファイルパスを提示したときに使う（例: ノートに変換する.htmlファイル、確認したいコード/設定ファイル）。エンコーディングは自動検出（UTF-8/GBK/Shift-JIS）。作業ディレクトリ内のファイルのみ読み取り可能で、パストラバーサルは拒否される。内容（大きすぎる場合は切り詰め）、ファイル名、文字数を返す。HTMLを読み取ってノートに保存する場合は create_html_note と組み合わせて使う。",
+            "zh" => "按绝对路径或工作区相对路径读取文本、代码或 HTML，自动检测编码。主工作会话读取工作区外文件需确认，Full access 下可直接读取；子任务保持工作区范围。offset 与 max_chars 均按 Unicode 字符计数；truncated=true 时使用返回的 next_offset 和同一路径继续读取，不能把预览当作全文。",
+            "ja" => "絶対パスでローカルのテキスト/コード/HTMLファイルを読み、内容を返す。ユーザーがファイルパスを提示したときに使う（例: ノートに変換する.htmlファイル、確認したいコード/設定ファイル）。エンコーディングは自動検出（UTF-8/GBK/Shift-JIS）。メイン作業セッションは確認後に作業ディレクトリ外も読み取り可能。Full access では確認不要。子タスクは指定範囲内に制限される。内容（大きすぎる場合は切り詰め）、ファイル名、文字数を返す。HTMLを読み取ってノートに保存する場合は create_html_note と組み合わせて使う。",
             _ => self.description(),
         }
     }
@@ -246,7 +245,7 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "要读取的文件绝对路径（如 C:\\Users\\xx\\note.html）"
+                    "description": "要读取的文件路径（支持工作区相对路径或绝对路径，如 C:\\Users\\xx\\note.html）"
                 },
                 "max_chars": {
                     "type": "integer",
@@ -273,10 +272,10 @@ impl Tool for ReadFileTool {
         if path.is_empty() {
             return ValidationResult::failure("path 不能为空", 2);
         }
-        if !is_path_safe(path) {
+        if !ctx.allows_external_file_reads() && !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(path) {
+        if !ctx.allows_external_file_reads() && !ctx.is_path_authorized(&ctx.resolve_path(path)) {
             return ValidationResult::failure(
                 &format!("路径不在任何已授权工作区内，已拒绝读取: {}", path),
                 2,
@@ -292,8 +291,8 @@ impl Tool for ReadFileTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let path = ctx.resolve_path(args.get("path").and_then(|v| v.as_str()).unwrap_or(""));
         let (offset, requested_chars) = match page_arguments(&args) {
             Ok(page) => page,
             Err(message) => return ToolResult::standard_error(message, Some("InvalidInput"), None),
@@ -366,7 +365,7 @@ impl Tool for ReadFileTool {
 
     fn anti_use_cases(&self) -> &[&str] {
         &[
-            "Calling it with a path outside your working directory — the sandbox will reject it; ask the user to move the file into the workspace first",
+            "Reading outside the workspace without authorization — request confirmation or use Full access",
             "Reading binary files (images, audio, archives) — use the dedicated image/OCR tools instead",
         ]
     }

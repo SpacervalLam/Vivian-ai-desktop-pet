@@ -599,7 +599,20 @@ async fn execute_tool_use_inner(
     tool_system.record_tool_call();
 
     // 1.5 参数名归一化（LLM 经常用错参数名，如 app_path → application）
-    let arguments = normalize_arguments(tool.as_ref(), arguments);
+    let mut arguments = normalize_arguments(tool.as_ref(), arguments);
+    // Resolve built-in file arguments before validation, sandbox, hooks and permissions
+    // so every stage (including read-only mounts) checks the same path that is used.
+    let path_key = match tool_name {
+        "read_file" | "write_file" | "edit_file" | "read_image" => Some("path"),
+        "list_dir" | "grep_search" | "glob" => Some("directory"),
+        _ => None,
+    };
+    if let Some(key) = path_key {
+        if let Some(raw) = arguments.get(key).and_then(Value::as_str) {
+            let resolved = context.resolve_path(raw);
+            arguments[key] = Value::String(resolved);
+        }
+    }
 
     trace.phase = "validation";
     let validation = tool.validate_input(&arguments, context).await;

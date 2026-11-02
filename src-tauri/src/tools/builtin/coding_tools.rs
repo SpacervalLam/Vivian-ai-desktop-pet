@@ -139,7 +139,7 @@ impl Tool for WriteFileTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "目标文件绝对路径（工作目录内）" },
+                "path": { "type": "string", "description": "目标文件路径（相对路径以工作目录为基准）" },
                 "content": { "type": "string", "description": "完整文件内容" }
             },
             "required": ["path", "content"]
@@ -158,7 +158,7 @@ impl Tool for WriteFileTool {
         if !is_path_safe(path) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(path) {
+        if !ctx.is_path_authorized(&ctx.resolve_path(path)) {
             return ValidationResult::failure(
                 &format!("路径不在任何已授权工作区内，已拒绝写入: {}", path),
                 2,
@@ -174,8 +174,8 @@ impl Tool for WriteFileTool {
         PermissionResult::allow()
     }
 
-    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
-        let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let path = ctx.resolve_path(args.get("path").and_then(|v| v.as_str()).unwrap_or(""));
         let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         let p = std::path::Path::new(&path);
@@ -610,10 +610,10 @@ impl Tool for EditFileTool {
             return ValidationResult::failure("path 不能为空", 2);
         }
         let resolved = resolve_path(path, ctx);
-        if !is_path_safe(&resolved) {
+        if !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(&resolved) {
+        if !(action == "view" && ctx.allows_external_file_reads()) && !ctx.is_path_authorized(&resolved) {
             return ValidationResult::failure(
                 &format!("路径不在任何已授权工作区内，已拒绝编辑: {}", resolved),
                 2,
@@ -1069,10 +1069,10 @@ impl Tool for GrepSearchTool {
         if let Some(dir) = input.get("directory").and_then(|v| v.as_str()) {
             let dir = dir.trim();
             if !dir.is_empty() {
-                if !is_path_safe(dir) {
+                if !ctx.allows_external_file_reads() && !is_path_safe(dir) {
                     return ValidationResult::failure("目录路径包含穿越序列，已被沙箱拦截", 2);
                 }
-                if !ctx.is_path_authorized(dir) {
+                if !ctx.allows_external_file_reads() && !ctx.is_path_authorized(&ctx.resolve_path(dir)) {
                     return ValidationResult::failure("目录不在任何已授权工作区内，已拒绝", 2);
                 }
             }
@@ -1090,8 +1090,8 @@ impl Tool for GrepSearchTool {
         let dir = args
             .get("directory")
             .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| ctx.resolve_path(s))
             .unwrap_or_else(|| ctx.working_directory.clone());
 
         if dir.is_empty() {
@@ -1257,10 +1257,10 @@ impl Tool for ListDirTool {
         if let Some(dir) = input.get("directory").and_then(|v| v.as_str()) {
             let dir = dir.trim();
             if !dir.is_empty() {
-                if !is_path_safe(dir) {
+                if !ctx.allows_external_file_reads() && !is_path_safe(dir) {
                     return ValidationResult::failure("目录路径包含穿越序列，已被沙箱拦截", 2);
                 }
-                if !ctx.is_path_authorized(dir) {
+                if !ctx.allows_external_file_reads() && !ctx.is_path_authorized(&ctx.resolve_path(dir)) {
                     return ValidationResult::failure("目录不在任何已授权工作区内，已拒绝", 2);
                 }
             }
@@ -1277,8 +1277,8 @@ impl Tool for ListDirTool {
         let dir = args
             .get("directory")
             .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| ctx.resolve_path(s))
             .unwrap_or_else(|| ctx.working_directory.clone());
         if dir.is_empty() {
             return ToolResult::standard_error("未指定目录且工作目录为空", None, None);
@@ -1454,13 +1454,13 @@ impl Tool for GlobTool {
         self.parameters_schema()
     }
 
-    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("").trim();
         if pattern.is_empty() {
             return ValidationResult::failure("pattern 不能为空", 2);
         }
         if let Some(dir) = input.get("directory").and_then(|v| v.as_str()) {
-            if !is_path_safe(dir) {
+            if !ctx.allows_external_file_reads() && !is_path_safe(dir) {
                 return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
             }
         }
@@ -1476,7 +1476,8 @@ impl Tool for GlobTool {
         let base = args
             .get("directory")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| ctx.resolve_path(s))
             .unwrap_or_else(|| ctx.working_directory.clone());
         let limit = args
             .get("limit")

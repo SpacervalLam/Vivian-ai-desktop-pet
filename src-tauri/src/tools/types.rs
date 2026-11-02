@@ -544,6 +544,23 @@ impl ToolUseContext {
         self
     }
 
+    /// 相对路径以会话工作目录为基准，供权限检查和实际文件操作共用。
+    /// 不使用进程 cwd，也不在此折叠 `..`，保留沙箱的穿越检查。
+    pub fn resolve_path(&self, path: &str) -> String {
+        let path = path.trim();
+        let p = std::path::Path::new(path);
+        if path.is_empty() || p.is_absolute() || self.working_directory.trim().is_empty() {
+            path.to_string()
+        } else {
+            std::path::Path::new(&self.working_directory).join(p).to_string_lossy().into_owned()
+        }
+    }
+
+    /// 主工作会话的越界读取交给权限确认；子任务仍受上层工作区范围约束。
+    pub fn allows_external_file_reads(&self) -> bool {
+        self.is_work_agent() && self.subagent_depth == 0
+    }
+
     /// 路径是否落在任一授权工作区内（主工作区 + 附加目录）。
     ///
     /// 与沙箱硬闸门、各工具 `validate_input` 共用 [`is_path_within_any`]，
@@ -754,7 +771,7 @@ impl ToolRiskTier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentAccessLevel {
-    /// 只读：仅允许 Safe 工具（无副作用查询）
+    /// 只读：允许 Safe 与 FsRead 工具（无副作用查询、文件读取）
     ReadOnly,
     /// 文件读取：+ FsRead
     FsRead,
@@ -795,6 +812,10 @@ pub fn policy_for(access: AgentAccessLevel, risk: ToolRiskTier) -> PermissionBeh
     use PermissionBehavior::*;
     // Safe 永远允许
     if risk == ToolRiskTier::Safe {
+        return Allow;
+    }
+    // 只读级别也能读取文件；写入、命令及联网仍按原矩阵限制。
+    if access == AgentAccessLevel::ReadOnly && risk == ToolRiskTier::FsRead {
         return Allow;
     }
     // FullControl 永远允许（除 InputControl 询问以保留兜底）

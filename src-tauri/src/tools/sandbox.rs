@@ -293,9 +293,11 @@ impl ToolSandbox {
         }
 
         // 2. 路径穿越检查（search_files 豁免工作目录约束：其语义就是跨目录查找）
-        let enforce_working_dir = tool_name != "search_files";
+        let external_read = super::permission::file_operation_for_call(tool_name, args) == Some("read")
+            && context.is_some_and(ToolUseContext::allows_external_file_reads);
+        let enforce_working_dir = tool_name != "search_files" && !external_read;
         for path in extract_paths(args) {
-            if !is_path_safe(&path) {
+            if !external_read && !is_path_safe(&path) {
                 return SafetyResult::denied(format!(
                     "路径包含穿越序列被沙箱拦截: {}",
                     path
@@ -337,7 +339,15 @@ impl ToolSandbox {
         // 只对**工作会话**生效：陪伴侧没有"声明过的工作区"（其 working_directory 只是
         // 进程 cwd），拿它当边界属于凭空收紧，会误伤用户正常的跨目录操作。
         if let (Some(cmd), Some(c)) = (&command, context) {
-            if c.is_work_agent() && !c.working_directory.is_empty() {
+            // The Windows restricted-token backend permits reads using the user's
+            // existing rights while limiting writes to granted workspace/scratch dirs.
+            // Full access can use it to inspect external data (e.g. SQLite via Python).
+            // Other command backends retain the literal-path guard.
+            let isolated_full_access = cfg!(windows) && tool_name == "run_command"
+                && crate::tools::sandbox_env::enabled()
+                && c.allows_external_file_reads()
+                && c.access_level == Some(super::types::AgentAccessLevel::FullControl);
+            if c.is_work_agent() && !c.working_directory.is_empty() && !isolated_full_access {
                 for path in extract_literal_absolute_paths(cmd) {
                     if !c.is_path_authorized(&path) {
                         return SafetyResult::denied(format!(
@@ -760,6 +770,22 @@ mod tests {
         );
         assert!(!r.allowed, "工作区外的绝对路径必须被拒");
         assert!(r.message.contains("D:\\other\\secret.txt"), "{}", r.message);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn full_access_isolated_commands_can_reference_external_data() {
+        let sandbox = ToolSandbox::new(ProtectionMode::Permissive, 600);
+        let mut ctx = work_ctx("G:/work");
+        ctx.access_level = Some(super::super::types::AgentAccessLevel::FullControl);
+        let args = json!({"command":"Get-Content -LiteralPath 'D:/other/data.txt'"});
+        let result = sandbox.check_tool_safety("run_command", &args, Some(&ctx));
+        assert_eq!(result.allowed, crate::tools::sandbox_env::enabled(), "{result:?}");
+        // Persistent terminals may not use this backend, so retain their guard.
+        let result = sandbox.check_tool_safety("terminal_send", &json!({"text":"Get-Content -LiteralPath 'D:/other/data.txt'"}), Some(&ctx));
+        assert!(!result.allowed);
+        ctx.subagent_depth = 1;
+        assert!(!sandbox.check_tool_safety("run_command", &args, Some(&ctx)).allowed);
     }
 
     #[test]

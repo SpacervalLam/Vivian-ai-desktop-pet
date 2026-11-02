@@ -24,15 +24,7 @@ use crate::tools::types::{
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) fn resolve_path(raw: &str, ctx: &ToolUseContext) -> String {
-    let p = std::path::Path::new(raw);
-    if p.is_absolute() || ctx.working_directory.trim().is_empty() {
-        raw.to_string()
-    } else {
-        std::path::Path::new(&ctx.working_directory)
-            .join(p)
-            .to_string_lossy()
-            .to_string()
-    }
+    ctx.resolve_path(raw)
 }
 
 fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -124,10 +116,10 @@ impl Tool for ReadImageTool {
             return ValidationResult::failure("path 不能为空", 2);
         }
         let resolved = resolve_path(path, ctx);
-        if !is_path_safe(&resolved) {
+        if !ctx.allows_external_file_reads() && !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(&resolved) { return ValidationResult::failure("路径不在授权工作区内", 2); }
+        if !ctx.allows_external_file_reads() && !ctx.is_path_authorized(&resolved) { return ValidationResult::failure("路径不在授权工作区内", 2); }
         let mut normalized = input.clone();
         normalized["path"] = json!(resolved);
         ValidationResult::success(Some(normalized))
@@ -333,10 +325,14 @@ impl Tool for StrReplaceEditorTool {
             return ValidationResult::failure("path 不能为空", 2);
         }
         let resolved = resolve_path(path, ctx);
-        if !is_path_safe(&resolved) {
+        if !(action == "view" && ctx.allows_external_file_reads()) && !is_path_safe(&resolved) {
             return ValidationResult::failure("路径包含穿越序列（..），已被沙箱拦截", 2);
         }
-        if !ctx.is_path_authorized(&resolved) || (action != "view" && !ctx.is_path_writable(&resolved)) {
+        if action == "view" {
+            if !ctx.allows_external_file_reads() && !ctx.is_path_authorized(&resolved) {
+                return ValidationResult::failure("路径超出授权范围", 2);
+            }
+        } else if !ctx.is_path_writable(&resolved) {
             return ValidationResult::failure("路径超出授权范围或属于只读工作区", 2);
         }
         if action == "str_replace" {

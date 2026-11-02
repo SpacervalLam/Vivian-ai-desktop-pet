@@ -1406,6 +1406,7 @@ mod tests {
 Set-Content -LiteralPath 'result.txt' -Value '42'
 Set-Content -LiteralPath (Join-Path $env:TEMP 'host-created.txt') -Value 'scratch-ok'
 try { Set-Content -LiteralPath '..\outside.txt' -Value 'bad'; Write-Output 'WROTE-OUTSIDE' } catch { Write-Output 'DENIED-OUTSIDE' }
+Write-Output (Get-Content -LiteralPath '..\outside.txt')
 Write-Output (Get-Location).Path
 Write-Output (Get-Content -LiteralPath (Join-Path $env:TEMP 'host-created.txt'))
 & $env:ComSpec /d /c 'exit 7'"#,
@@ -1416,6 +1417,7 @@ Write-Output (Get-Content -LiteralPath (Join-Path $env:TEMP 'host-created.txt'))
         assert!(!out.timed_out);
         assert!(out.stdout.contains("工作区 with spaces"), "{out:?}");
         assert!(out.stdout.contains("scratch-ok"), "{out:?}");
+        assert!(out.stdout.contains("unchanged"), "external reads should succeed: {out:?}");
         assert!(out.stdout.contains("DENIED-OUTSIDE"), "{out:?}");
         assert!(!out.stdout.contains("WROTE-OUTSIDE"), "{out:?}");
         assert_eq!(

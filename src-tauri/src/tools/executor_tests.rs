@@ -381,7 +381,7 @@ async fn non_serializable_context_modifiers_are_never_cached() {
 async fn validated_targets_are_checked_by_the_sandbox() {
     let system = ToolSystem::new();
     let mut probe = Probe::new();
-    probe.name = "read_file";
+    probe.name = "write_file";
     probe.replacement = Some(json!({"path":"C:/outside/private.txt"}));
     let calls = probe.calls.clone();
     system.register_tool(Arc::new(probe));
@@ -389,7 +389,7 @@ async fn validated_targets_are_checked_by_the_sandbox() {
         .with_working_directory("C:/workspace")
         .with_agent_kind("work");
     let result = execute_tool_use(
-        "read_file",
+        "write_file",
         json!({"path":"C:/workspace/safe.txt"}),
         &system,
         &ctx,
@@ -401,7 +401,7 @@ async fn validated_targets_are_checked_by_the_sandbox() {
     assert_eq!(
         system
             .observability
-            .get_recent_records("read_file", 1, false)[0]
+            .get_recent_records("write_file", 1, false)[0]
             .phase,
         "sandbox"
     );
@@ -636,4 +636,108 @@ async fn chain_step_timeout_cancels_execution_and_retains_a_failure_receipt() {
             .as_deref(),
         Some("ToolCancelled")
     );
+}
+
+#[tokio::test]
+async fn workspace_relative_file_paths_use_session_directory() {
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool::default()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::WriteFileTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::ListDirTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::GrepSearchTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::GlobTool::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir_all(workspace.join(".vivian")).unwrap();
+    let ctx = ToolUseContext {
+        access_level: Some(AgentAccessLevel::FullControl),
+        ..ToolUseContext::default()
+            .with_working_directory(workspace.to_string_lossy())
+            .with_agent_kind("work")
+    };
+    let relative = ".vivian/memory.md";
+    let result = execute_tool_use("write_file", json!({"path":relative,"content":"session memory marker"}), &system, &ctx, None).await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(std::fs::read_to_string(workspace.join(relative)).unwrap(), "session memory marker");
+    let result = execute_tool_use("read_file", json!({"path":relative}), &system, &ctx, None).await;
+    assert!(result.success, "{result:?}");
+    assert_eq!(result.data.as_ref().unwrap()["data"]["content"], "session memory marker");
+    for (name, args) in [
+        ("list_dir", json!({"directory":".vivian"})),
+        ("grep_search", json!({"directory":".vivian","query":"session memory marker"})),
+        ("glob", json!({"directory":".vivian","pattern":"*.md"})),
+    ] {
+        let result = execute_tool_use(name, args, &system, &ctx, None).await;
+        assert!(result.success, "{name}: {result:?}");
+        assert!(result.data.as_ref().unwrap().to_string().contains("memory.md"), "{name}: {result:?}");
+    }
+    let result = execute_tool_use("read_file", json!({"path":workspace.join(relative)}), &system, &ctx, None).await;
+    assert!(result.success, "absolute paths must still work: {result:?}");
+    let result = execute_tool_use("read_file", json!({"path":".vivian/missing.md"}), &system, &ctx, None).await;
+    assert!(!result.success);
+    assert_eq!(result.data.as_ref().unwrap()["message"], "文件不存在");
+    // Full access permits external reads, including parent-relative paths, but not writes.
+    let outside = directory.path().join("outside.md");
+    std::fs::write(&outside, "private").unwrap();
+    for path in [outside.to_string_lossy().into_owned(), "../outside.md".into()] {
+        let result = execute_tool_use("read_file", json!({"path":path}), &system, &ctx, None).await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.data.as_ref().unwrap()["data"]["content"], "private");
+        let result = execute_tool_use("write_file", json!({"path":path,"content":"blocked"}), &system, &ctx, None).await;
+        assert!(!result.success, "{result:?}");
+    }
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "private");
+    let locked = workspace.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let ctx = ctx.with_extra_working_directory(locked.to_string_lossy(), true);
+    let result = execute_tool_use("write_file", json!({"path":"locked/new.md","content":"blocked"}), &system, &ctx, None).await;
+    assert!(!result.success, "{result:?}");
+    assert!(!locked.join("new.md").exists());
+}
+
+#[tokio::test]
+async fn external_file_reads_can_be_confirmed_without_granting_external_writes() {
+    let system = ToolSystem::new();
+    system.register_tool(Arc::new(crate::tools::builtin::file_tools::ReadFileTool::default()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::EditFileTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::ListDirTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::GrepSearchTool::new()));
+    system.register_tool(Arc::new(crate::tools::builtin::coding_tools::GlobTool::new()));
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    let external = directory.path().join("external");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("outside.md"), "external marker").unwrap();
+    for level in [AgentAccessLevel::ReadOnly, AgentAccessLevel::FsWrite, AgentAccessLevel::FullControl] {
+        let ctx = ToolUseContext {
+            access_level: Some(level),
+            ..ToolUseContext::default().with_working_directory(workspace.to_string_lossy()).with_agent_kind("work")
+        };
+        for (name, args) in [
+            ("read_file", json!({"path":"../external/outside.md"})),
+            ("edit_file", json!({"path":"../external/outside.md","action":"view"})),
+            ("list_dir", json!({"directory":"../external"})),
+            ("grep_search", json!({"directory":"../external","query":"external marker"})),
+            ("glob", json!({"directory":"../external","pattern":"*.md"})),
+        ] {
+            let requested = Arc::new(AtomicUsize::new(0));
+            let calls = requested.clone();
+            let approve: CanUseTool = Arc::new(move |_, _| { calls.fetch_add(1, Ordering::SeqCst); true });
+            let result = execute_tool_use(name, args.clone(), &system, &ctx, Some(approve)).await;
+            assert!(result.success, "{level:?} {name}: {result:?}");
+            assert_eq!(requested.load(Ordering::SeqCst), usize::from(level != AgentAccessLevel::FullControl), "{level:?} {name}");
+            if level != AgentAccessLevel::FullControl {
+                let reject: CanUseTool = Arc::new(|_, _| false);
+                let result = execute_tool_use(name, args.clone(), &system, &ctx, Some(reject)).await;
+                assert!(!result.success, "{level:?} {name}: rejected read must not execute");
+            }
+            let child = ToolUseContext { subagent_depth: 1, ..ctx.clone() };
+            let result = execute_tool_use(name, args, &system, &child, None).await;
+            assert!(!result.success, "{name}: child scope must remain bounded");
+        }
+        let result = execute_tool_use("edit_file", json!({"path":external.join("outside.md"),"action":"create","file_text":"blocked"}), &system, &ctx, Some(Arc::new(|_, _| true))).await;
+        assert!(!result.success, "{level:?}: external writes remain bounded");
+    }
+    assert_eq!(std::fs::read_to_string(external.join("outside.md")).unwrap(), "external marker");
 }

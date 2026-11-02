@@ -33,6 +33,24 @@ pub fn resolve_workspace(explicit: &str, configured: Option<&str>) -> Result<Str
     prepare_workspace(&path, is_default)
 }
 
+/// New delegated tasks get an independent workspace under the configured default.
+/// An explicitly selected existing workspace is used as-is; continuations bypass this helper.
+pub fn resolve_delegated_workspace(explicit: &str, configured: Option<&str>) -> Result<String, String> {
+    if !explicit.trim().is_empty() {
+        return resolve_workspace(explicit, configured);
+    }
+    let root = resolve_workspace("", configured)?;
+    let directory = Path::new(&root).join(format!(
+        "task-{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        uuid::Uuid::new_v4().simple(),
+    ));
+    // Create atomically: never reuse or overwrite another task's workspace.
+    std::fs::create_dir(&directory)
+        .map_err(|error| format!("无法创建委托任务工作区 {}：{error}", directory.display()))?;
+    Ok(directory.to_string_lossy().into_owned())
+}
+
 fn prepare_workspace(path: &Path, create: bool) -> Result<String, String> {
     if !path.is_absolute() { return Err(format!("工作目录必须是绝对路径：{}", path.display())); }
     if create {
@@ -66,6 +84,45 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep");
         std::fs::remove_file(file).unwrap();
     }
+    #[test]
+    fn delegated_tasks_get_distinct_roots_under_the_default_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let default = root.path().join("默认工作区 with spaces");
+        let first = PathBuf::from(resolve_delegated_workspace("", default.to_str()).unwrap());
+        std::fs::write(first.join("report.txt"), "first task").unwrap();
+        let second = PathBuf::from(resolve_delegated_workspace("  ", default.to_str()).unwrap());
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(default.as_path()));
+        assert_eq!(second.parent(), Some(default.as_path()));
+        assert!(first.is_dir() && second.is_dir());
+        assert_eq!(std::fs::read_to_string(first.join("report.txt")).unwrap(), "first task");
+        assert_eq!(std::fs::read_dir(second).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn explicit_delegated_workspace_is_reused_without_creating_default_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let explicit = root.path().join("existing-project");
+        let default = root.path().join("unused-default");
+        std::fs::create_dir(&explicit).unwrap();
+        let actual = resolve_delegated_workspace(explicit.to_str().unwrap(), default.to_str()).unwrap();
+        assert_eq!(PathBuf::from(actual), explicit);
+        assert!(!default.exists());
+        assert_eq!(std::fs::read_dir(&explicit).unwrap().count(), 0);
+        assert!(resolve_delegated_workspace(root.path().join("missing").to_str().unwrap(), default.to_str()).is_err());
+        assert!(!default.exists());
+    }
+
+    #[test]
+    fn delegated_workspace_creation_reports_invalid_defaults_without_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("not-a-directory");
+        std::fs::write(&file, "keep").unwrap();
+        assert!(resolve_delegated_workspace("", file.to_str()).is_err());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "keep");
+        assert!(resolve_delegated_workspace("", Some("relative/default")).is_err());
+    }
+
     #[test]
     fn blank_setting_uses_documents_vivian() {
         let default = default_workspace(None).unwrap();

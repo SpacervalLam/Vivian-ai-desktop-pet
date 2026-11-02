@@ -101,12 +101,12 @@ impl Tool for DelegateToWorkAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Proactively delegate user-requested work requiring sustained research, multiple execution steps, coding, commands, file processing or deliverables such as PPTs, documents, spreadsheets and reports. The user need not name this tool; their work request authorizes delegation within its scope. Answer ordinary explanations and casual conversation yourself. Resolve follow-ups using the preceding task and write a self-contained prompt preserving objective, constraints, known context, deliverable and verification criteria without inventing authority. Runs in a background session; claim it started only after a successful session_id receipt. get_work_status returns progress and the final summary. Provide an existing session_id to forward the user’s follow-up to that task; running tasks read it at their next decision, idle tasks resume in the same session. Omit mode and working_directory when continuing. Do not duplicate delegated execution."
+        "Proactively delegate user-requested work requiring sustained research, multiple execution steps, coding, commands, file processing or deliverables such as PPTs, documents, spreadsheets and reports. The user need not name this tool; their work request authorizes delegation within its scope. Answer ordinary explanations and casual conversation yourself. Resolve follow-ups using the preceding task and write a self-contained prompt preserving objective, constraints, known context, deliverable and verification criteria without inventing authority. Runs in a background session; claim it started only after a successful session_id receipt. get_work_status returns progress and the final summary. Provide an existing session_id to forward the user’s follow-up to that task; running tasks read it at their next decision, idle tasks resume in the same session. Omit mode and working_directory when continuing. New tasks without an explicitly selected directory get a fresh workspace under the default workspace. Continuations reuse their original workspace. Do not duplicate delegated execution."
     }
 
     fn description_in(&self, lang: &str) -> &str {
         match lang {
-            "zh" => "用户要求完成持续研究、多步骤执行、编程、命令、文件处理或制作 PPT、文档、表格、报告时，主动委派工作智能体；无需用户点名工具，原任务请求就是范围内的委派授权。普通解释和闲聊自己回答。结合前文解析‘交给工作侧’等追问，以用户身份写自包含任务，保留目标、约束、已知上下文、交付物和验证标准，不虚构授权或路径。任务后台执行；只有成功回执含 session_id 才能说已开始。get_work_status 可读取进度和最终总结。用户补充原任务要求时传 session_id：运行中排入下一次决策，空闲时在原会话继续；续接时不传 mode 或 working_directory，不另建重复任务。",
+            "zh" => "用户要求完成持续研究、多步骤执行、编程、命令、文件处理或制作 PPT、文档、表格、报告时，主动委派工作智能体；无需用户点名工具，原任务请求就是范围内的委派授权。普通解释和闲聊自己回答。结合前文解析‘交给工作侧’等追问，以用户身份写自包含任务，保留目标、约束、已知上下文、交付物和验证标准，不虚构授权或路径。任务后台执行；只有成功回执含 session_id 才能说已开始。get_work_status 可读取进度和最终总结。用户补充原任务要求时传 session_id：运行中排入下一次决策，空闲时在原会话继续；续接时不传 mode 或 working_directory，不另建重复任务。新任务未明确指定已有目录时省略 working_directory，系统会在默认工作区下新建独立任务目录。",
             "ja" => "ユーザーが継続的な調査、多段階実行、コード、コマンド、ファイル処理、PPT・文書・表・レポート作成を依頼したら、作業エージェントに自ら委任する。ツール名の指定は不要で、依頼の範囲内で委任できる。通常の説明や雑談は自分で答える。前の会話も踏まえ、目的・制約・既知の背景・成果物・検証基準を含む完全な指示を作り、権限やパスを捏造しない。バックグラウンド実行は成功した session_id の受領後にのみ開始済みと伝える。get_work_status で進捗と最終要約を確認し、委任した作業を重複実行しない。",
             _ => self.description(),
         }
@@ -127,7 +127,7 @@ impl Tool for DelegateToWorkAgentTool {
             "properties": {
                 "session_id": {"type":"string", "description":"Existing session from get_work_status: forward user instructions to that task instead of creating a duplicate. Only this companion’s sessions are allowed; omit mode and working_directory."},
                 "task": {"type": "string", "description": "New task or user follow-up instructions for an existing session_id. Written on the user's behalf. Include objective, constraints, relevant context, expected deliverable, and verification criteria; do not invent authorization."},
-                "working_directory": {"type": "string", "description": "Optional working directory for the task. Omit to use the user's default workspace (Documents/Vivian when not customized)."},
+                "working_directory": {"type": "string", "description": "Optional existing working directory explicitly selected for the task. Omit to create a new, independent task workspace under the user's default workspace (Documents/Vivian when not customized). Do not pass the default workspace itself merely to select the default."},
                 "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "Work agent mode (default standard)"}
             },
             "required": ["task"]
@@ -141,7 +141,7 @@ impl Tool for DelegateToWorkAgentTool {
                 "properties": {
                     "session_id": {"type":"string", "description":"已有工作会话编号（可先用 get_work_status 获取）。提供时给原任务追加用户要求，不另建任务；仅能操作当前角色的会话，此时不传 mode 或 working_directory。"},
                     "task": {"type": "string", "description": "新任务的完整提示词，或针对 session_id 原任务的用户补充要求：包含目标、约束、相关上下文、预期交付物和验证标准，不得虚构授权。"},
-                    "working_directory": {"type": "string", "description": "可选的工作目录。省略则使用用户默认工作区，未自定义时为系统文档目录下的 Vivian。"},
+                    "working_directory": {"type": "string", "description": "可选的已有工作目录，仅在任务明确指定目录时传入。省略时会在用户默认工作区下自动新建独立任务目录，未自定义时位于系统文档目录下的 Vivian 中；不要为了使用默认位置而传入默认工作区本身。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "工作智能体模式（默认 standard）"}
                 },
                 "required": ["task"]
@@ -151,7 +151,7 @@ impl Tool for DelegateToWorkAgentTool {
                 "properties": {
                     "session_id": {"type":"string", "description":"既存の作業セッションID。同じキャラクターのタスクに指示を追加し、新規タスクは作成しない。"},
                     "task": {"type": "string", "description": "作業エージェントへの完全なタスク指示（ユーザー口調で記述）"},
-                    "working_directory": {"type": "string", "description": "任意の作業ディレクトリ。省略時は既定のワークスペースを使用（未設定ならドキュメント内の Vivian）。"},
+                    "working_directory": {"type": "string", "description": "明示的に指定された既存の作業ディレクトリ。省略時は既定のワークスペース（未設定ならドキュメント内の Vivian）の下に独立したタスク用フォルダーを新規作成する。既定の場所を使うだけなら指定しない。"},
                     "mode": {"type": "string", "enum": ["standard", "code", "minimal"], "description": "作業エージェントのモード（デフォルト standard）"}
                 },
                 "required": ["task"]
@@ -232,8 +232,10 @@ impl Tool for DelegateToWorkAgentTool {
         }
 
         let configured = state.config.read().get_all().default_workspace;
-        let working_directory = match crate::utils::workspace::resolve_workspace(
-            args.get("working_directory").and_then(Value::as_str).unwrap_or(""), configured.as_deref()) {
+        let requested_directory = args.get("working_directory").and_then(Value::as_str).unwrap_or("");
+        let created_workspace = requested_directory.trim().is_empty();
+        let working_directory = match crate::utils::workspace::resolve_delegated_workspace(
+            requested_directory, configured.as_deref()) {
             Ok(directory) => directory,
             Err(error) => return ToolResult::standard_error(&error, Some("WorkspaceUnavailable"), None),
         };
@@ -243,6 +245,7 @@ impl Tool for DelegateToWorkAgentTool {
         let session_id = session.session_id.clone();
         if let Err(e) = CODING_AGENT.mark_delegated_by_companion(&session_id) {
             CODING_AGENT.delete_session(&session_id);
+            if created_workspace { let _ = std::fs::remove_dir(&working_directory); }
             return ToolResult::standard_error(
                 &format!("派发失败：无法标记任务来源：{e}"),
                 Some("DelegateSourceFailed"),
@@ -280,8 +283,9 @@ impl Tool for DelegateToWorkAgentTool {
                 )
             }
             Err(e) => {
-                // 首条消息都没能启动时不留下一个看似可继续的空会话。
+                // 首条消息未启动时清理空会话与自动创建的空目录；不递归删除任何文件。
                 CODING_AGENT.delete_session(&session_id);
+                if created_workspace { let _ = std::fs::remove_dir(&working_directory); }
                 ToolResult::standard_error(
                     &format!("派发失败：{e}"),
                     Some("DelegateFailed"),

@@ -312,7 +312,7 @@ fn is_read_only_view_call(tool_name: &str, args: &Value) -> bool {
 }
 
 /// 按调用参数细化文件操作类型：`edit_file` 的 view 是读，其余写盘工具仍是写。
-fn file_operation_for_call(tool_name: &str, args: &Value) -> Option<&'static str> {
+pub(crate) fn file_operation_for_call(tool_name: &str, args: &Value) -> Option<&'static str> {
     if is_read_only_view_call(tool_name, args) {
         Some("read")
     } else {
@@ -402,7 +402,7 @@ pub async fn check_tool_permission(
 
     // 1.5 权限网关矩阵：access_level × risk 决定 allow/ask/deny
     let access = permission_context.access_level;
-    let risk = tool.risk();
+    let risk = if is_read_only_view_call(tool_name, args) { super::types::ToolRiskTier::FsRead } else { tool.risk() };
     let matrix_behavior = policy_for(access, risk);
     if matches!(
         matrix_behavior,
@@ -469,6 +469,13 @@ pub async fn check_tool_permission(
             "工具 '{}' 在 Ask 模式下需要确认",
             tool_name
         ));
+    }
+
+    // Full access authorizes reads outside the workspace as well. Explicit deny/ask,
+    // equivalence checks and Ask mode above still take precedence.
+    if file_operation_for_call(tool_name, args) == Some("read")
+        && context.allows_external_file_reads() && access == AgentAccessLevel::FullControl {
+        return tool.check_permissions(args, context).await;
     }
 
     // Selected workspaces are already authorized. Keep explicit Ask/Deny and read-only
@@ -610,6 +617,12 @@ pub fn check_file_permission(
     if context.is_bypass_mode() {
         return PermissionResult::allow();
     }
+    if operation == "read" && context.access_level != AgentAccessLevel::FullControl {
+        return PermissionResult::ask(format!(
+            "读取工作区外的路径 '{}' 需要确认；允许后可读取，无需移动文件或添加可写工作区",
+            file_path
+        ));
+    }
     if operation == "write" || operation == "delete" {
         return PermissionResult::ask(format!(
             "路径 '{}' 不在已授权的工作目录中，需要确认",
@@ -745,8 +758,10 @@ pub fn requires_permission(
         return true;
     }
     if let Some(operation) = file_operation_for_call(tool.name(), args) {
-        if extract_file_paths(tool.name(), args).iter().any(|path|
-            check_file_permission(path, operation, context).is_denied()) {
+        if extract_file_paths(tool.name(), args).iter().any(|path| {
+            let result = check_file_permission(path, operation, context);
+            result.is_denied() || (operation == "read" && result.requires_confirmation())
+        }) {
             return true;
         }
     }
@@ -762,7 +777,7 @@ pub fn requires_permission(
     }
 
     // 权限网关矩阵：Deny / Ask 都需要进入权限检查流程
-    let behavior = policy_for(context.access_level, tool.risk());
+    let behavior = policy_for(context.access_level, if is_read_only_view_call(tool.name(), args) { super::types::ToolRiskTier::FsRead } else { tool.risk() });
     if matches!(
         behavior,
         super::types::PermissionBehavior::Deny | super::types::PermissionBehavior::Ask
@@ -837,6 +852,25 @@ mod tests {
         let read_only = PermissionContextBuilder::new(PermissionMode::Default)
             .with_access_level(AgentAccessLevel::ReadOnly).with_working_directory("C:/work", true).build();
         assert!(check_tool_permission(&tool, &json!({"path": "C:/work/report.txt"}), &context, &read_only).await.is_denied());
+    }
+
+    #[tokio::test]
+    async fn full_access_external_reads_still_honor_explicit_rules() {
+        let tool = crate::tools::builtin::file_tools::ReadFileTool::default();
+        let context = ToolUseContext::default().with_working_directory("C:/work").with_agent_kind("work");
+        let args = json!({"path":"C:/outside/data.txt"});
+        let permissions = PermissionContextBuilder::new(PermissionMode::Default)
+            .with_access_level(AgentAccessLevel::FullControl).with_working_directory("C:/work", false).build();
+        assert!(check_tool_permission(&tool, &args, &context, &permissions).await.is_allowed());
+        let mut explicit = permissions.clone();
+        explicit.always_deny.push("read_file".into());
+        assert!(check_tool_permission(&tool, &args, &context, &explicit).await.is_denied());
+        explicit.always_deny.clear();
+        explicit.always_ask.push("read_file".into());
+        assert!(check_tool_permission(&tool, &args, &context, &explicit).await.requires_confirmation());
+        let ask = PermissionContextBuilder::new(PermissionMode::Ask)
+            .with_access_level(AgentAccessLevel::FullControl).build();
+        assert!(check_tool_permission(&tool, &args, &context, &ask).await.requires_confirmation());
     }
 
     struct TestTool;
