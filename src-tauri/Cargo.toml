@@ -219,6 +219,11 @@ codegen-units = 16
 overflow-checks = false
 strip = "symbols"
 
+# Bound LLVM memory for the large desktop crate; dependencies retain size optimization.
+[profile.release.package.vivian]
+opt-level = 1
+codegen-units = 64
+
 [profile.dev]
 # opt-level=0：O1 会驱动 LLVM 完整优化管线，叠加本 crate 的重度泛型
 # （tauri/axum/tokio/schemars），非增量编译峰值内存 ~7GB 在 16GB 机器上
