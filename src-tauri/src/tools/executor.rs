@@ -476,7 +476,6 @@ pub async fn execute_tool_use(
         record: Some(tool_system.observability.start_call(&name, arguments.clone())),
         trace: ExecutionTrace { phase: "lookup", cache_hit: false, executing: Arc::new(std::sync::atomic::AtomicBool::new(false)) },
     };
-    let recommendation = (name == "install_plugin").then(||arguments["recommendationId"].as_str().map(str::to_string)).flatten();
     let executing = observed.trace.executing.clone();
     let outcome = tokio::select! {
         biased;
@@ -496,15 +495,6 @@ pub async fn execute_tool_use(
             &crate::tools::registry::tool_scope_key(&context.agent_kind, &context.char_id),
             &name,
         );
-    }
-    if result.error.as_deref() == Some("UserDenied") {
-        if let Some(id) = recommendation { let _ = crate::plugin_advisor::dismiss(&context.char_id,&id); }
-    }
-    if context.is_work_agent() && result.error.as_deref() == Some("ToolNotFound") {
-        crate::plugin_advisor::observe_missing_tool(&context.char_id,&context.session_id,&name);
-    }
-    if crate::brain::work_contract::execution_succeeded(result.success,result.data.as_ref()) {
-        crate::plugin_advisor::observe_success(&context.char_id,&name,tool_system);
     }
     result
 }

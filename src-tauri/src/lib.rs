@@ -612,8 +612,6 @@ pub fn run() {
             commands::plugins::set_plugin_enabled,
             commands::plugins::inspect_plugin_package,
             commands::plugins::install_plugin_package,
-            commands::plugin_advisor::plugin_advisor_state,
-            commands::plugin_advisor::plugin_advisor_action,
             commands::plugins::delete_plugin,
             commands::git::git_repo_status,
             commands::git::git_changed_files,

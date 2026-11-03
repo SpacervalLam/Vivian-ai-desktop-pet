@@ -4685,7 +4685,6 @@ impl CodingAgentService {
         if mode != crate::provider_preset_updates::MODE {
             system.push_str("\n# 可复用能力缺口\n遇到真实、可复用的能力缺口，可通过 tool_search 发现 plugin_advisor，记录通用能力描述并核验候选；工具搜索只覆盖已注册工具。不要把模型调用失败、凭据缺失、用户拒绝当成安装插件的理由。先说明收益、来源、依赖和未验证项，让用户决定是否增加能力。创建/安装分别用 create_plugin/install_plugin 的具体预览，不能借终端或写文件绕过拒绝。\n");
         }
-        if mode != crate::provider_preset_updates::MODE { system.push_str(&crate::plugin_advisor::context(char_id)); }
         if session.delegated_by_companion {
             system.push_str(
                 "\n\n# 请求来源：陪伴侧代用户派发\n\

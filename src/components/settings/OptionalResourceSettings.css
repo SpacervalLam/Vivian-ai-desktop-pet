@@ -1,0 +1,54 @@
+.optional-resources--published .optional-resource-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  background: var(--panel-surface);
+  box-shadow: var(--panel-shadow-subtle);
+}
+
+.optional-resource-card > :first-child { grid-column: 1; grid-row: 1; align-self: center; }
+.optional-resource-card > .optional-resource-actions { grid-column: 2; grid-row: 1; margin-top: 0 !important; justify-content: flex-end; }
+.optional-resource-card > .optional-resource-description,
+.optional-resource-card > .optional-resource-progress,
+.optional-resource-card > .optional-resource-meter { grid-column: 1 / -1; }
+.optional-resource-card .optional-resource-actions button { font-size: 11px; padding: 3px 10px; }
+
+.optional-resource-card + .optional-resource-card { margin-top: 10px; }
+.optional-resource-version { font-size: 11px; color: var(--panel-text-tertiary); }
+.optional-resource-kind { font-size: 11px; color: var(--panel-accent); }
+.optional-resource-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  line-height: 1.6;
+}
+.optional-resource-badge.is-installed {
+  color: var(--panel-text) !important;
+  border-color: var(--panel-border-strong);
+}
+.optional-resource-description { color: var(--panel-text-secondary); line-height: 1.7; }
+.optional-resource-actions button {
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--panel-surface);
+  color: var(--panel-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.optional-resource-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.optional-resource-progress { color: var(--panel-text-secondary); }
+.optional-resource-meter { display: block; width: 100%; height: 5px; margin-top: 8px; accent-color: var(--panel-accent); }
+.optional-resource-error { padding: 10px 12px; border: 1px solid currentColor; border-radius: 8px; overflow-wrap: anywhere; line-height: 1.6; }
+
+@media (max-width: 540px) {
+  .optional-resources--published .optional-resource-card { grid-template-columns: minmax(0, 1fr); }
+  .optional-resource-card > .optional-resource-actions { grid-column: 1; grid-row: 3; margin-top: 8px !important; }
+  .optional-resource-actions { flex-direction: column; }
+  .optional-resource-actions button { width: 100%; }
+}

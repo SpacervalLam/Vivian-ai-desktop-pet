@@ -1700,9 +1700,6 @@ impl ProactiveOrchestrator {
             }
         }
 
-        if let Some(tools) = self.tool_system.read().as_ref() {
-            crate::plugin_advisor::maybe_discover(&self.char_id,tools);
-        }
 
         // 5. 计算 BehaviorDrive（一次计算，复用于心理状态更新和能力规划）
         //    psychology 未注入时为 None，由 CapabilityPlanner 回退到静态优先级

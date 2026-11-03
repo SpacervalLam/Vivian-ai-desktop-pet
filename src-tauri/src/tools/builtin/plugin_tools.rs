@@ -631,7 +631,7 @@ impl Tool for CreatePluginTool {
         PermissionResult::ask("创建插件需要用户授权：预览卡片将展示全部 MCP 命令行与工具脚本")
     }
 
-    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult {
+    async fn call(&self, args: Value, _context: &ToolUseContext) -> ToolResult {
         let name = args
             .get("name")
             .and_then(|v| v.as_str())
@@ -686,7 +686,6 @@ impl Tool for CreatePluginTool {
             Err(error) => return ToolResult::standard_error(&error, None, None),
         };
 
-        crate::plugin_advisor::created(&context.char_id,&context.session_id,&draft.name);
         ToolResult::standard_success(
             &format!(
                 "插件「{}」v{} 已创建并装载（{}）：{} 条技能、{} 个工具、{} 个 MCP server、{} 条 LLM 预设、{} 条嵌入预设。\

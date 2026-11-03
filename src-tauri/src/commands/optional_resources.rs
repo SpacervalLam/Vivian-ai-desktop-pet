@@ -293,9 +293,9 @@ fn expand_payloads(directory: &Path) -> Result<(), String> {
             .ok_or("资源包解压后过大")?;
         let target = payload.with_extension("");
         let mut input =
-            BufReader::new(std::fs::File::open(&payload).map_err(|e| e.to_string())?);
+            BufReader::new(std::fs::File::open(&payload).map_err(|e| format!("读取压缩文件 {} 失败: {e}", payload.display()))?);
         let mut output = Bounded {
-            inner: BufWriter::new(std::fs::File::create(&target).map_err(|e| e.to_string())?),
+            inner: BufWriter::new(std::fs::File::create(&target).map_err(|e| format!("创建运行时文件 {} 失败: {e}", target.display()))?),
             written: 0,
             limit: remaining,
         };
@@ -306,7 +306,7 @@ fn expand_payloads(directory: &Path) -> Result<(), String> {
             .checked_add(output.written)
             .ok_or("资源包解压后过大")?;
         drop(output);
-        std::fs::remove_file(&payload).map_err(|e| e.to_string())?;
+        std::fs::remove_file(&payload).map_err(|e| format!("删除压缩文件 {} 失败: {e}", payload.display()))?;
     }
     Ok(())
 }
@@ -354,18 +354,18 @@ fn verify_pack_tree(directory: &Path, spec: &PackSpec) -> Result<(), String> {
 }
 
 fn install_archive(source: &Path, root: &Path, spec: &PackSpec) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(root).map_err(|e| format!("创建资源目录 {} 失败: {e}", root.display()))?;
     let staging = root
         .join(".staging")
         .join(uuid::Uuid::new_v4().to_string());
     let unpacked = staging.join("unpacked");
-    std::fs::create_dir_all(&unpacked).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&unpacked).map_err(|e| format!("创建暂存目录 {} 失败: {e}", unpacked.display()))?;
     let cleanup = || {
         let _ = std::fs::remove_dir_all(&staging);
     };
     if let Err(error) = crate::plugins::package::extract_zip(source, &unpacked) {
         cleanup();
-        return Err(error);
+        return Err(format!("解压 ZIP {} 到 {} 失败: {error}", source.display(), unpacked.display()));
     }
     if let Err(error) = expand_payloads(&unpacked).and_then(|()| verify_pack_tree(&unpacked, spec))
     {
@@ -401,6 +401,20 @@ static INSTALL_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
 /// Install a published pack from its download or from a ZIP the user picked.
 #[tauri::command]
 pub async fn install_optional_resource(
+    app: tauri::AppHandle,
+    id: String,
+    source: Option<String>,
+) -> Result<PackStatus, String> {
+    tracing::info!(pack = %id, source = ?source, "开始安装可选资源包");
+    let result = install_optional_resource_inner(app, id.clone(), source).await;
+    match &result {
+        Ok(_) => tracing::info!(pack = %id, "可选资源包安装完成"),
+        Err(error) => tracing::error!(pack = %id, error = %error, "可选资源包安装失败"),
+    }
+    result
+}
+
+async fn install_optional_resource_inner(
     app: tauri::AppHandle,
     id: String,
     source: Option<String>,

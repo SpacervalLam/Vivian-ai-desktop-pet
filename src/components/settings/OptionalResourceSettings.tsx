@@ -1,3 +1,4 @@
+import './OptionalResourceSettings.css';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
@@ -70,24 +71,23 @@ export default function OptionalResourceSettings({ scope = 'bundled' }: { scope?
     ? Math.min(100, Math.round(progress.downloaded * 100 / progress.total)) : null;
   const megs = progress?.phase === 'downloading' ? progress.downloaded / 1048576 : 0;
   const published = scope === 'published';
-  return <section aria-label={heading} style={{ padding: published ? 0 : '12px 0' }}>
+  return <section className={published ? "optional-resources optional-resources--published" : "optional-resources"} aria-label={heading} style={{ padding: published ? 0 : '12px 0' }}>
     {!published && <strong>{heading}</strong>}
-    {rows.map(pack => <div key={pack.id} style={published
-      ? { paddingBottom: 8 }
+    {rows.map(pack => <div key={pack.id} className={published ? "optional-resource-card" : undefined} style={published
+      ? undefined
       : { padding: '8px 0', borderTop: '1px solid rgba(128,128,128,.25)', marginTop: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, justifyContent: published ? 'space-between' : 'flex-start' }}>
-        <div style={published ? { fontSize: 14, fontWeight: 700, color: 'var(--panel-text)' } : undefined}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, justifyContent: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={published ? { fontSize: 13, fontWeight: 600, color: 'var(--panel-text)' } : undefined}>
           {published ? label(pack) : `${label(pack)}：`}
         </div>
-        <div style={published ? { fontSize: 12, color: 'var(--panel-text-secondary, #B4B2A9)' } : undefined}>
+        {published && <span className="optional-resource-version">v{pack.version}</span>}
+        {published && <span className="optional-resource-kind">{zh ? '运行环境' : 'Runtime'}</span>}
+        <div className={published ? `optional-resource-badge${installed(pack.id) ? ' is-installed' : ''}` : undefined} style={published ? { fontSize: 11, color: 'var(--panel-text-secondary, #B4B2A9)' } : undefined}>
           {installed(pack.id) ? (zh ? '已安装' : 'Installed') : (zh ? '未安装' : 'Not installed')}
         </div>
       </div>
-      {pack.download && <>
-        <p style={{ opacity: .7, fontSize: 12, margin: '6px 0' }}>{zh
-          ? `为浏览器自动化（browser_execute）提供 Playwright 执行环境，按需下载约 ${pack.download.approx_mb} MB。未安装时该能力不可用，浏览器其余操作与其它功能不受影响。`
-          : `Provides the Playwright execution environment behind browser_execute (~${pack.download.approx_mb} MB on demand). That capability stays unavailable until installed; the rest of browsing and everything else keep working.`}</p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+      {pack.download && (
+        <div className="optional-resource-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
           <button type="button" disabled={busy !== null} onClick={() => void install(pack.id)}>
             {installed(pack.id) ? (zh ? '重新下载安装' : 'Reinstall from download') : (zh ? '下载并安装' : 'Download and install')}
           </button>
@@ -95,19 +95,25 @@ export default function OptionalResourceSettings({ scope = 'bundled' }: { scope?
             {zh ? '从本地 ZIP 安装…' : 'Install from local ZIP…'}
           </button>
         </div>
-        {busy === pack.id && <p style={{ fontSize: 12, margin: '6px 0' }}>
+      )}
+      {pack.download && <>
+        <p className="optional-resource-description" style={{ fontSize: 12, margin: '6px 0' }}>{zh
+          ? `为浏览器自动化提供 Playwright 运行环境，支持执行网页任务与自动操作。按需下载约 ${pack.download.approx_mb} MB。`
+          : `Playwright runtime for automated browser tasks and web interactions. Download size: about ${pack.download.approx_mb} MB.`}</p>
+        {busy === pack.id && <p role="status" aria-live="polite" className="optional-resource-progress" style={{ fontSize: 12, margin: '10px 0 0' }}>
           {progress?.phase === 'verifying' ? (zh ? '校验并安装…' : 'Verifying and installing…')
             : progress?.phase === 'downloading'
               ? (zh ? `下载中 ${percent !== null ? `${percent}%` : `${megs.toFixed(1)} MB`}`
                 : `Downloading ${percent !== null ? `${percent}%` : `${megs.toFixed(1)} MB`}`)
               : (zh ? '准备下载…' : 'Preparing…')}
         </p>}
+        {busy === pack.id && percent !== null && <progress className="optional-resource-meter" max={100} value={percent} aria-label={zh ? '下载进度' : 'Download progress'} />}
       </>}
       {!pack.download && !installed(pack.id) && <p style={{ opacity: .7, fontSize: 12, margin: '6px 0' }}>{zh
         ? '可通过安装程序添加。'
         : 'Can be added through Setup.'}</p>}
     </div>)}
-    {error && <p role="alert" style={{ color: '#b3261e', fontSize: 12, margin: '6px 0' }}>{error}</p>}
+    {error && <p className="optional-resource-error" role="alert" style={{ color: '#b3261e', fontSize: 12, margin: '6px 0' }}>{error}</p>}
     {!published && <p style={{ opacity: .7, fontSize: 12 }}>{zh
       ? '字体和贴纸 ZIP 可放在安装程序旁并在安装时勾选。安装后无需重启。'
       : 'Font and sticker ZIPs can sit beside Setup and be selected during installation. No restart is needed.'}</p>}

@@ -1,0 +1,57 @@
+.plugins-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--panel-text);
+}
+
+.plugins-page > p {
+  margin: -6px 0 0;
+  line-height: 1.7;
+}
+
+.plugins-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plugins-page .plugins-section-title {
+  margin-top: 12px !important;
+}
+
+.plugins-page .plugins-package-card,
+.plugins-page .plugins-diagnostics {
+  padding: 14px 16px !important;
+  border-radius: 12px !important;
+  line-height: 1.65;
+}
+
+.plugins-page button {
+  min-height: 30px;
+  padding: 5px 12px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: var(--panel-surface);
+  color: var(--panel-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.plugins-page button:enabled:hover {
+  background: var(--panel-bg, var(--panel-surface)) !important;
+  border-color: var(--panel-border-strong) !important;
+}
+
+.plugins-page button:focus-visible,
+.optional-resources button:focus-visible {
+  outline: 2px solid var(--panel-accent, #84704e);
+  outline-offset: 3px;
+}
+
+.plugins-page button:disabled {
+  opacity: .45;
+  cursor: not-allowed !important;
+}

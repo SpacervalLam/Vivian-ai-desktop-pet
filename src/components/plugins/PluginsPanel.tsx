@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
+import './PluginsPanel.css';
 import PluginInstallPanel from './PluginInstallPanel';
-import PluginSuggestionsPanel from './PluginSuggestionsPanel';
 import OptionalResourceSettings from '../settings/OptionalResourceSettings';
 import SkillsManager, { type SkillEntry } from './SkillsManager';
 
@@ -48,7 +48,7 @@ const sectionTitle: React.CSSProperties = {
   fontSize: 14,
   fontWeight: 700,
   color: 'var(--panel-text)',
-  margin: '0 0 12px',
+  margin: '0',
 };
 
 /** 内联确认状态 */
@@ -183,8 +183,7 @@ const PluginsPanel: React.FC = () => {
   }[status] ?? status);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-      <PluginInstallPanel onInstalled={refresh} />
+    <div className="plugins-page">
       {/* 内联确认栏 */}
       {confirm && (
         <div
@@ -235,10 +234,9 @@ const PluginsPanel: React.FC = () => {
         </div>
       )}
 
-      <PluginSuggestionsPanel onInstalled={refresh} />
-      <OptionalResourceSettings scope="published" />
-      <div style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
       {error && <div role="alert" style={{ fontSize: 13, color: '#E53935' }}>{error}</div>}
+      <div className="plugins-list">
       {plugins === null ? (
         <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
       ) : (
@@ -254,6 +252,7 @@ const PluginsPanel: React.FC = () => {
           {plugins.map((p) => (
             <div
               key={p.key}
+              className="plugins-package-card"
               title={p.dir}
               style={{
                 border: '1px solid var(--panel-border)',
@@ -363,7 +362,8 @@ const PluginsPanel: React.FC = () => {
                     color: 'var(--panel-text-secondary)',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
+                    whiteSpace: 'normal',
+                    lineHeight: 1.65,
                   }}
                 >
                   {p.description}
@@ -383,8 +383,13 @@ const PluginsPanel: React.FC = () => {
         </div>
       )}
 
-      <div style={sectionTitle}>{t('config.plugins.section_diag')}</div>
+      <OptionalResourceSettings scope="published" />
+      </div>
+      <PluginInstallPanel onInstalled={refresh} />
+
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_diag')}</div>
       <div
+        className="plugins-diagnostics"
         style={{
           border: '1px solid var(--panel-border)',
           borderRadius: 8,
@@ -440,7 +445,7 @@ const PluginsPanel: React.FC = () => {
         </div>
       </div>
 
-      <div style={sectionTitle}>{t('config.plugins.section_skills')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.workflow_help')}</p>
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_skills')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.workflow_help')}</p>
       {error ? null : (
         <SkillsManager skills={skills} skillsDir={paths?.skills_dir} onChanged={refresh} />
       )}

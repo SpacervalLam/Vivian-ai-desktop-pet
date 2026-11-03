@@ -177,7 +177,6 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(show_widget_tool::ShowWidgetTool::new()),
         // 技能读侧统一入口（use 激活正文 / search 自然语言召回 / validate 形态校验；后两者旧名保留为别名）
         Arc::new(skill_tools::UseSkillTool::new()),
-        Arc::new(plugin_advisor_tools::PluginAdvisorTool),
         // 技能创建（智能体自主沉淀可复用技能，写入即注册，自进化闭环）
         Arc::new(skill_tools::CreateSkillTool::new()),
         // 代码审查输入（只读解析审查目标：未提交/基准分支/提交，附变更文件与规约文件）
