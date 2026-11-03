@@ -146,6 +146,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn past_end_offset_is_an_error_instead_of_empty_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.txt");
+        std::fs::write(&path, "甲🙂乙").unwrap();
+        let result = ReadFileTool.call(json!({"path":path,"offset":20000}), &ToolUseContext::default()).await;
+        assert!(!result.success);
+        assert_eq!(result.data.unwrap()["data"]["char_count"], 3);
+    }
+
+    #[tokio::test]
     async fn real_file_can_be_read_in_small_unicode_pages() {
         let file = std::env::temp_dir().join(format!("vivian-read-{}.txt",uuid::Uuid::new_v4()));
         let raw = "甲🙂乙".repeat(90);
@@ -316,6 +326,12 @@ impl Tool for ReadFileTool {
             }
         };
         let char_count = raw.chars().count();
+        if offset > char_count {
+            return ToolResult::standard_error(
+                "offset 超过文件字符数；请使用上一页返回的 next_offset，不能按请求的 max_chars 跳页。",
+                Some("OffsetOutOfRange"), Some(json!({"offset":offset,"char_count":char_count})),
+            );
+        }
         let page = text_page(&raw, offset, max_chars);
 
         let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
@@ -331,6 +347,7 @@ impl Tool for ReadFileTool {
                 "returned_chars": page.returned_chars,
                 "next_offset": page.next_offset,
                 "max_chars": max_chars,
+                "continuation_hint": "truncated=true 时使用 next_offset 续读；max_chars 是上限，不能用来计算下一页。",
             })),
         )
     }

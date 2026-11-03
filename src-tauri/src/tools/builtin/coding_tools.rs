@@ -1016,6 +1016,20 @@ impl Default for ListDirTool {
     }
 }
 
+fn list_directory_argument(args: &Value) -> Result<Option<&str>, &'static str> {
+    for key in ["directory", "path"] {
+        if args.get(key).is_some_and(|value| !value.is_string()) {
+            return Err("directory/path 必须为字符串");
+        }
+    }
+    let directory = args.get("directory").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let path = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    if directory.is_some() && path.is_some() && directory != path {
+        return Err("directory 和 path 指向不同目录，请只提供一个目录");
+    }
+    Ok(directory.or(path))
+}
+
 #[async_trait]
 impl Tool for ListDirTool {
     fn name(&self) -> &str {
@@ -1047,6 +1061,7 @@ impl Tool for ListDirTool {
         json!({
             "type": "object",
             "properties": {
+                "path": { "type": "string", "description": "directory 的兼容别名；同时传入时必须一致" },
                 "directory": { "type": "string", "description": "要列出的目录（默认工作目录）" },
                 "depth": { "type": "integer", "description": "遍历深度（默认 2，上限 4）", "minimum": 1 }
             },
@@ -1059,7 +1074,11 @@ impl Tool for ListDirTool {
     }
 
     async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
-        if let Some(dir) = input.get("directory").and_then(|v| v.as_str()) {
+        let directory = match list_directory_argument(input) {
+            Ok(directory) => directory,
+            Err(error) => return ValidationResult::failure(error, 2),
+        };
+        if let Some(dir) = directory {
             let dir = dir.trim();
             if !dir.is_empty() {
                 if !ctx.allows_external_file_reads() && !is_path_safe(dir) {
@@ -1079,9 +1098,11 @@ impl Tool for ListDirTool {
 
     async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
         let depth = args.get("depth").and_then(|v| v.as_u64()).map(|v| v.clamp(1, 4) as usize).unwrap_or(2);
-        let dir = args
-            .get("directory")
-            .and_then(|v| v.as_str())
+        let directory = match list_directory_argument(&args) {
+            Ok(directory) => directory,
+            Err(error) => return ToolResult::standard_error(error, Some("InvalidInput"), None),
+        };
+        let dir = directory
             .filter(|s| !s.trim().is_empty())
             .map(|s| ctx.resolve_path(s))
             .unwrap_or_else(|| ctx.working_directory.clone());
@@ -1495,5 +1516,26 @@ mod edit_action_tests {
         assert!(EDIT_ACTIONS.contains(&"insert"));
         assert!(EDIT_ACTIONS.contains(&"undo"));
         assert!(!EDIT_ACTIONS.contains(&"activate"));
+    }
+}
+
+#[cfg(test)]
+mod directory_alias_tests {
+    use super::*;
+    #[tokio::test]
+    async fn path_alias_lists_requested_directory_and_rejects_ambiguity() {
+        let root = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(target.path().join("target-only.txt"), "ok").unwrap();
+        let ctx = ToolUseContext { working_directory: root.path().to_string_lossy().into(), ..Default::default() };
+        let tool = ListDirTool;
+        let args = json!({"path":target.path()});
+        let result = tool.call(args, &ctx).await;
+        assert!(result.success);
+        assert!(result.data.unwrap()["data"]["tree"].as_str().unwrap().contains("target-only.txt"));
+        let conflict = json!({"path":target.path(),"directory":root.path()});
+        assert!(!tool.validate_input(&conflict, &ctx).await.result);
+        assert!(!tool.call(conflict, &ctx).await.success);
+        assert!(list_directory_argument(&json!({"path":123})).is_err());
     }
 }

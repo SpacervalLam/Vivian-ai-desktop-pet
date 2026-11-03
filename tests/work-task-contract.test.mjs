@@ -52,12 +52,16 @@ const types = ['PendingInput', 'CodingImage', 'CodingWidget', 'CodingFileRef', '
   .map(name => item(source, `pub struct ${name} {`, true)).join('\n');
 const requestView = item(source, 'struct WorkRequestView {');
 const enums = ['CodingRole', 'CodingStatus'].map(name => item(source, `pub enum ${name} {`, true)).join('\n');
-const tests = ['work_task_scope_survives_compaction_and_user_interjections',
+const tests = ['continuation_keeps_original_task_and_receipt_boundary', 'work_task_scope_survives_compaction_and_user_interjections',
   'model_receipt_preview_is_bounded_without_discarding_host_evidence',
   'work_context_changes_preserve_the_actual_system_prefix',
   'task_results_distinguish_text_returns_cancellation_and_restart',
   'rendered_snapshot_is_included_in_compaction_pressure']
   .map(name => `#[test]\n${fn(name)}`).join('\n');
+const directoryTools = await readFile('src-tauri/src/tools/builtin/coding_tools.rs', 'utf8');
+const fileTools = await readFile('src-tauri/src/tools/builtin/file_tools.rs', 'utf8');
+const listImpl = item(directoryTools, 'impl Tool for ListDirTool {');
+const fileImpl = item(fileTools, 'impl Tool for ReadFileTool {');
 const tokenSource = await readFile('src-tauri/src/utils/token_estimate.rs', 'utf8');
 const directory = await mkdtemp(path.join(tmpdir(), 'vivian-work-task-contract-'));
 try {
@@ -137,6 +141,59 @@ try {
     }
   }
 }
+#[cfg(test)] mod recovery_tools {
+  use serde_json::{json,Value};
+  struct ToolUseContext {working_directory:String}
+  impl ToolUseContext { fn resolve_path(&self,path:&str)->String {
+    let p=std::path::Path::new(path);if p.is_absolute(){path.into()}else{std::path::Path::new(&self.working_directory).join(p).to_string_lossy().into()}
+  }}
+  struct ToolResult {success:bool,data:Option<Value>}
+  impl ToolResult {
+    fn standard_success(message:&str,data:Option<Value>)->Self {Self{success:true,data:Some(json!({"message":message,"data":data}))}}
+    fn standard_error(message:&str,_:Option<&str>,data:Option<Value>)->Self {Self{success:false,data:Some(json!({"message":message,"data":data}))}}
+  }
+  mod directory {
+    use super::*;
+    ${directoryTools.match(/const SKIP_DIRS:[^;]+;/)[0]}
+    ${item(directoryTools, 'fn list_directory_argument(')}
+    ${item(directoryTools, 'fn walk_tree(')}
+    struct ListDirTool;
+    impl ListDirTool {${item(listImpl, 'async fn call(')}}
+    #[tokio::test] async fn directory_alias_reads_requested_root() {
+      let root=tempfile::tempdir().unwrap();let target=tempfile::tempdir().unwrap();
+      std::fs::write(target.path().join("target-only.txt"),"ok").unwrap();
+      let ctx=ToolUseContext{working_directory:root.path().to_string_lossy().into()};
+      let result=ListDirTool.call(json!({"path":target.path()}),&ctx).await;
+      assert!(result.success);assert!(result.data.unwrap()["data"]["tree"].as_str().unwrap().contains("target-only.txt"));
+      assert!(!ListDirTool.call(json!({"path":target.path(),"directory":root.path()}),&ctx).await.success);
+      assert!(list_directory_argument(&json!({"path":123})).is_err());
+    }
+  }
+  mod file {
+    use super::*;
+    const DEFAULT_MAX_CHARS:usize=20000;const MAX_ALLOWED_CHARS:usize=400000;
+    ${item(fileTools, 'fn page_arguments(')}
+    ${item(fileTools, 'struct TextPage {')}
+    ${item(fileTools, 'fn text_page(')}
+    fn read_text_with_encoding_detection(path:&std::path::Path)->Result<String,std::io::Error> {std::fs::read_to_string(path)}
+    struct ReadFileTool;
+    impl ReadFileTool {${item(fileImpl, 'async fn call(')}}
+    #[tokio::test] async fn budgeted_pages_roundtrip_and_bad_offset_fails() {
+      let root=tempfile::tempdir().unwrap();let path=root.path().join("output.txt");
+      let raw="甲🙂乙".repeat(1500);std::fs::write(&path,&raw).unwrap();
+      let ctx=ToolUseContext{working_directory:root.path().to_string_lossy().into()};
+      let mut offset=0;let mut text=String::new();
+      loop {
+        let result=ReadFileTool.call(json!({"path":path,"offset":offset,"max_chars":20000}),&ctx).await;
+        assert!(result.success);let data=result.data.unwrap();let page=&data["data"];
+        text.push_str(page["content"].as_str().unwrap());
+        match page["next_offset"].as_u64(){Some(next)=>{assert!(next>offset);offset=next},None=>break}
+      }
+      assert_eq!(text,raw);
+      assert!(!ReadFileTool.call(json!({"path":path,"offset":20000}),&ctx).await.success);
+    }
+  }
+}
 // This fixture isolates work settlement; the advisor's persisted context is tested in the desktop crate.
 pub mod plugin_advisor { pub fn context(_:&str)->String {String::new()} }
 pub mod types { pub mod response {
@@ -182,6 +239,7 @@ pub mod tools {
   pub struct ToolSystem {pub outcomes:std::collections::HashMap<String,types::ToolResult>,pub started:Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>}
   impl ToolSystem { pub fn can_parallelize_read(&self,name:&str)->bool {crate::brain::work_harness::parallel_read(name)} }
   pub mod executor {
+    pub fn text_page_budget(requested:usize)->usize {requested.min(1800)}
     pub async fn execute_tool_use(name:&str,_:serde_json::Value,tools:&super::ToolSystem,_:&super::types::ToolUseContext,_:Option<()>)->super::types::ToolResult {
       if let Some(started)=&tools.started {started.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}
       let result=tools.outcomes.get(name).expect("fixture outcome").clone();
@@ -246,7 +304,7 @@ pub mod brain {
     ${['default_context_window_tokens', 'default_mode', 'default_permission', 'default_reasoning_level', 'default_history_loaded', 'default_work_todo_status'].map(fn).join('\n')}
     ${item(source, 'impl WorkTodo {')}
     ${fn('normalize_session')}\n${fn('restored_session')}
-    ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}\n${fn('should_pause_input_queue')}
+    ${fn('begin_message_task')}\n    ${fn('task_receipts')}\n${fn('unfinished_todos')}\n${fn('task_artifacts')}\n${fn('should_pause_input_queue')}
     ${fn('web_capability_section')}
     ${['FILE_REF_MAX_COUNT','TOOL_RESULT_MAX_CHARS','PLAN_MODE_POLICY','WORK_TODO_STATUSES'].map(constant).join('\n')}
     static MEMORY_TEST_DATA: once_cell::sync::Lazy<tempfile::TempDir> = once_cell::sync::Lazy::new(||tempfile::tempdir().unwrap());
@@ -279,6 +337,24 @@ pub mod brain {
       ${fn('settle_unvalidated_task')}
     }
     #[cfg(test)] mod tests {use super::*; ${fn('message')} ${fn('test_session')} ${tests}
+      #[test] fn executed_program_steps_reach_next_model_with_paired_intents() {
+        let mut session=test_session("program-history","",0);
+        session.task=Some(WorkTask::new("Build and verify HTML".into(),0));
+        let mut card=message(CodingRole::ToolUse,"program plan");
+        card.tool_name=Some("compose_program".into());card.tool_arguments=Some(serde_json::json!({"steps":[]}));
+        session.messages.push(card);
+        let mut intent=message(CodingRole::ToolUse,"");
+        intent.tool_arguments=Some(serde_json::json!([{"id":"program-unique-step-0","name":"read_file","arguments":{"path":"input.txt"}}]));
+        session.messages.push(intent);
+        let mut receipt=message(CodingRole::ToolResult,"observed data");
+        receipt.tool_call_id=Some("program-unique-step-0".into());receipt.tool_name=Some("read_file".into());receipt.tool_success=Some(true);
+        session.messages.push(receipt);
+        let service=CodingAgentService{active_runs:Default::default(),sessions:RwLock::new(BTreeMap::from([("program-history".into(),session)]))};
+        let messages=service.build_llm_messages("program-history","vivian","standard");
+        assert!(!messages.iter().any(|m|m.content=="program plan"));
+        assert!(messages.iter().any(|m|m.tool_calls.as_ref().is_some_and(|calls|calls[0].id=="program-unique-step-0")));
+        assert!(messages.iter().any(|m|m.role=="tool"&&m.content=="observed data"));
+      }
       #[test] fn queue_pauses_for_interruptions_and_open_work_without_changing_task_verdicts() {
         let mut session=test_session("pause-policy","",0);
         session.task=Some(WorkTask::new("goal".into(),0));

@@ -1,6 +1,6 @@
 [package]
 name = "vivian"
-version = "1.0.16"
+version = "1.0.17"
 description = "Vivian AI Desktop Pet"
 authors = ["Vivian"]
 edition = "2021"
