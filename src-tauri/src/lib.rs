@@ -571,6 +571,8 @@ pub fn run() {
             commands::coding_agent::coding_input_queue,
             commands::coding_agent::coding_resume_session,
             commands::coding_agent::coding_list_dir_tree,
+            commands::workspace_watch::coding_watch_directories,
+            commands::workspace_watch::coding_unwatch_directories,
             commands::coding_agent::coding_read_file,
             commands::coding_agent::coding_read_file_lines,
             commands::coding_agent::coding_write_file,
@@ -1584,6 +1586,7 @@ pub fn run() {
             // 触发停止的时机：任一角色窗口 CloseRequested 后检查是否还有其他
             // 在线角色窗口；若全部关闭才停线程。
             move |window, event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) { commands::workspace_watch::window_destroyed(window.label()); }
                 if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) { embedded_browser::window_destroyed(window.label()); }
                 commands::inspector::enforce_inspector_fullscreen(window, event);
                 // 公寓窗口关闭：兜底退出房间模式，把角色窗口和心智观察器放回来。

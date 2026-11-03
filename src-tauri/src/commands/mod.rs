@@ -50,3 +50,5 @@ pub mod apartment_host;
 pub mod desktop_assistant;
 
 pub mod media;
+
+pub mod workspace_watch;

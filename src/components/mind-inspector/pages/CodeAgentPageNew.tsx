@@ -13,7 +13,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
-import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { saveSharedFile } from '../../../utils/sharedFiles';
@@ -2382,53 +2382,112 @@ const WorkspaceFileTree: React.FC<{
   /** 单层懒加载目录缓存：key=目录路径 → 子节点列表（随组件实例隔离，切换工作区自动重建） */
   const depthCache = useRef<Record<string, FileNode[]>>({}).current;
 
-  // 根目录变化（切换会话/工作区）→ 清空缓存并重新加载
+  // 切换工作区时重置 UI；旧请求由下面 effect 的清理函数隔离。
   useEffect(() => {
-    let cancelled = false;
     setError('');
     setRoots(null);
     setExpanded(new Set([root]));
+    setLoading(new Set());
     for (const k of Object.keys(depthCache)) delete depthCache[k];
-    if (!root) return;
-    void (async () => {
-      try {
-        const res = await invoke<FileNode[]>('coding_list_dir_tree', { directory: root, maxDepth: 1 });
-        if (!cancelled) setRoots(res || []);
-      } catch (e) {
-        if (!cancelled) setError(String(e));
-      }
-    })();
-    return () => { cancelled = true; };
   }, [root, depthCache]);
 
-  /** 目录点击：展开/收起；首次展开时懒加载子节点。 */
-  const toggleDir = useCallback(async (path: string) => {
+  useEffect(() => {
+    if (!root) return;
+    let cancelled = false;
+    let refreshing = false;
+    let timer: number | undefined;
+    let watchId: string | undefined;
+    const directories = [root, ...Array.from(expanded).filter((path) => path !== root)];
+    const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '');
+    const pending = new Set<string>(directories);
+    const isHidden = () => document.visibilityState === 'hidden';
+    const refresh = async () => {
+      if (cancelled || refreshing || isHidden() || !pending.size) return;
+      refreshing = true;
+      const changed = Array.from(pending);
+      pending.clear();
+      setLoading(new Set(changed.filter((path) => path !== root && depthCache[path] === undefined)));
+      try {
+        const results = await Promise.allSettled(changed.map((directory) =>
+          invoke<FileNode[]>('coding_list_dir_tree', { directory, maxDepth: 1 })));
+        if (cancelled) return;
+        for (const path of Object.keys(depthCache)) {
+          if (!expanded.has(path)) delete depthCache[path];
+        }
+        results.forEach((result, index) => {
+          const path = changed[index];
+          if (result.status === 'fulfilled') {
+            const children = new Set(result.value.filter((node) => node.is_dir).map((node) => normalize(node.path)));
+            setExpanded((previous) => {
+              const removed = Array.from(previous).filter((entry) => {
+                const normalized = normalize(entry);
+                return normalized.slice(0, normalized.lastIndexOf('/')) === normalize(path) && !children.has(normalized);
+              });
+              if (!removed.length) return previous;
+              return new Set(Array.from(previous).filter((entry) => !removed.some((removedPath) =>
+                entry === removedPath || normalize(entry).startsWith(normalize(removedPath) + '/'))));
+            });
+          }
+          if (path === root) {
+            if (result.status === 'fulfilled') {
+              setRoots(result.value || []);
+              setError('');
+            } else setError(String(result.reason));
+          } else depthCache[path] = result.status === 'fulfilled' ? result.value || [] : [];
+        });
+        setLoading(new Set());
+      } finally {
+        refreshing = false;
+        if (!cancelled && pending.size && !isHidden()) schedule();
+      }
+    };
+    const schedule = () => {
+      // 合并连续创建/删除/重命名事件；持续变更时也不会无限推迟刷新。
+      if (cancelled || timer !== undefined) return;
+      timer = window.setTimeout(() => { timer = undefined; void refresh(); }, 100);
+    };
+    const onVisible = () => { if (pending.size) schedule(); };
+    const channel = new Channel<string>();
+    channel.onmessage = (directory) => {
+      if (cancelled) return;
+      for (const path of directories) {
+        if (!directory || normalize(path) === normalize(directory)) pending.add(path);
+      }
+      if (pending.size) schedule();
+    };
+    // 先建立监听，再读取快照，避免初始读取与注册监听之间漏掉变更。
+    void invoke<string>('coding_watch_directories', { directories, onChange: channel }).then((id) => {
+      if (cancelled) {
+        void invoke('coding_unwatch_directories', { id }).catch(console.error);
+      } else {
+        watchId = id;
+        void refresh();
+      }
+    }).catch((error) => {
+      if (!cancelled) {
+        setError(String(error));
+        console.error('Workspace filesystem watch failed', error);
+      }
+    });
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (watchId) void invoke('coding_unwatch_directories', { id: watchId }).catch(console.error);
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [root, expanded, depthCache]);
+
+  const toggleDir = useCallback((path: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-        return next;
-      }
-      next.add(path);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
       return next;
     });
-    // 尚未缓存子节点 → 懒加载
-    if (depthCache[path] === undefined) {
-      setLoading((prev) => new Set(prev).add(path));
-      try {
-        const res = await invoke<FileNode[]>('coding_list_dir_tree', { directory: path, maxDepth: 1 });
-        depthCache[path] = res || [];
-      } catch {
-        depthCache[path] = [];
-      } finally {
-        setLoading((prev) => {
-          const next = new Set(prev);
-          next.delete(path);
-          return next;
-        });
-      }
-    }
-  }, [depthCache]);
+  }, []);
 
   const renderNode = useCallback((node: FileNode, depth: number): React.ReactNode => {
     const isExpanded = expanded.has(node.path);
