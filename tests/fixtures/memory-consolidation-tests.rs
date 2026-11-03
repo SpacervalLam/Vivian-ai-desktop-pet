@@ -36,6 +36,22 @@ fn backlog() -> Vec<HistoryEntry> {
 }
 
 #[tokio::test]
+async fn graph_backfill_progresses_during_summary_cooldown_without_extra_model_calls() {
+    let history = Arc::new(DialogueManager::new(backlog()));
+    let router = Arc::new(ModelRouter::default());
+    let memory = MemoryManager::default();
+    let pipeline = pipeline(history, router.clone());
+    pipeline.run(&memory).await.unwrap();
+    let calls = router.prompts.lock().len();
+    let reads = memory.summary_reads.load(Ordering::Relaxed);
+    pipeline.run(&memory).await.unwrap();
+    assert_eq!(memory.association_checks.load(Ordering::Relaxed), 2);
+    assert_eq!(router.prompts.lock().len(), calls);
+    assert_eq!(memory.summary_reads.load(Ordering::Relaxed), reads);
+    assert_eq!(memory.full_reads.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn automatic_budget_drains_oldest_backlog_first() {
     let history = Arc::new(DialogueManager::new(backlog()));
     let sessions = build_conversations(&history.entries.read(), "vivian");

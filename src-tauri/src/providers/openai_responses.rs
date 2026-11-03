@@ -273,8 +273,7 @@ impl OpenAiResponsesProvider {
     async fn send_request(&self, body: Value) -> VivianResult<Value> {
         let started = Instant::now();
         let client = self.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
@@ -466,8 +465,7 @@ impl BaseProvider for OpenAiResponsesProvider {
 
         let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let client = self.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))
@@ -683,8 +681,7 @@ impl BaseProvider for OpenAiResponsesProvider {
         }
 
         let client = self.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .header("OpenAI-Beta", "responses=1")
             .json(&self.base.finalize_body(body.clone()))

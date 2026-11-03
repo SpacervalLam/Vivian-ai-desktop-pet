@@ -16,6 +16,9 @@ use rusqlite::Connection;
 use super::types::{MemoryItem, MemoryRetrievalFilter};
 use crate::error::{VivianError, VivianResult};
 
+#[path = "associations.rs"]
+pub mod associations;
+
 pub struct MemoryEntryStore {
     conn: Mutex<Connection>,
     /// 明文镜像目录（与数据库同级的 plain/ 子目录）
@@ -79,6 +82,8 @@ impl MemoryEntryStore {
             .map_err(|e| VivianError::Memory(format!("记忆元数据表结构无效: {e}")))?;
         super::search_index::initialize(&conn)
             .map_err(|e| VivianError::Memory(format!("初始化记忆检索索引失败: {e}")))?;
+        associations::initialize(&conn)
+            .map_err(|e| VivianError::Memory(format!("初始化记忆关联索引失败: {e}")))?;
 
         let plain_dir = db_path
             .parent()
@@ -175,6 +180,8 @@ impl MemoryEntryStore {
                         .map_err(|e| VivianError::Memory(format!("写入记忆行失败: {e}")))?;
                     super::search_index::upsert(&tx, item)
                         .map_err(|e| VivianError::Memory(format!("更新记忆检索索引失败: {e}")))?;
+                    associations::upsert(&tx, item)
+                        .map_err(|e| VivianError::Memory(format!("更新记忆关联索引失败: {e}")))?;
                 }
             }
             {
@@ -256,6 +263,17 @@ impl MemoryEntryStore {
         if limit == 0 || hits.is_empty() {return Ok(Vec::new());}
         super::search_index::neighbors(&self.conn.lock(),hits,owner,limit)
             .map_err(|error| VivianError::Memory(format!("读取记忆上下文失败: {error}")))
+    }
+
+    pub fn organize_associations(&self, batch_size: usize) -> VivianResult<associations::OrganizationReport> {
+        associations::organize(&self.conn.lock(), batch_size)
+            .map_err(|error| VivianError::Memory(format!("后台整理记忆关联失败: {error}")))
+    }
+
+    pub fn expand_associations(&self, hits: &[MemoryItem], query: &str, owner: &str,
+        filter: &MemoryRetrievalFilter, limit: usize) -> VivianResult<Vec<MemoryItem>> {
+        associations::expand(&self.conn.lock(), hits, query, owner, filter, limit)
+            .map_err(|error| VivianError::Memory(format!("召回关联记忆失败: {error}")))
     }
 }
 

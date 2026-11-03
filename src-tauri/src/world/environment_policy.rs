@@ -32,6 +32,7 @@ pub enum Stimulus {
     CharacterState,
     UserDialogue,
     CharacterEvent,
+    PrivateActivity,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -76,6 +77,27 @@ pub struct PlanningDecision {
     pub topic: Option<super::topic_window::TopicAssessment>,
     #[serde(default, deserialize_with = "optional_private_activity")]
     pub private_activity: Option<PrivateActivitySelection>,
+    #[serde(default)]
+    pub private_learning: Option<LearningSelection>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct LearningCandidate {
+    pub id: String,
+    pub character_id: String,
+    pub source_count: usize,
+}
+#[derive(Clone, Debug, Deserialize)]
+pub struct LearningSelection {
+    pub candidate_id: String,
+    pub character_id: String,
+    pub confidence: f64,
+}
+impl LearningSelection {
+    pub fn matches(&self, candidate: &LearningCandidate) -> bool {
+        candidate.source_count>0 && self.candidate_id==candidate.id && self.character_id==candidate.character_id
+            && self.confidence.is_finite() && (0.8..=1.0).contains(&self.confidence)
+    }
 }
 
 fn optional_topic<'de, D: serde::Deserializer<'de>>(deserializer: D)
@@ -401,6 +423,7 @@ impl ScenePolicy {
         else {
             return false;
         };
+        if event.stimulus == Stimulus::PrivateActivity { return false; }
         if event.owner.as_ref().is_some_and(|id| id != &speaker.id) {
             return false;
         }
@@ -896,4 +919,15 @@ mod tests {
         p.observe(SceneEvent{id:"rain".into(),stimulus:Stimulus::WorldChanged,fact:"same rain".into(),owner:None,at:10000.0});
         assert!(!p.begin_plan(10000.0,&roles()));
     }
+    #[test] fn learning_requires_the_exact_owned_candidate_and_is_not_a_speech_event() {
+        let candidate=LearningCandidate{id:"learn-native".into(),character_id:"vivian".into(),source_count:2};
+        let selection=LearningSelection{candidate_id:"learn-native".into(),character_id:"vivian".into(),confidence:0.9};
+        assert!(selection.matches(&candidate));
+        assert!(!LearningSelection{character_id:"nana".into(),..selection}.matches(&candidate));
+        let mut policy=ScenePolicy::default();policy.observe(SceneEvent{id:"rain".into(),stimulus:Stimulus::PrivateActivity,
+            fact:"存在私人阅读机会".into(),owner:Some("vivian".into()),at:1000.0});
+        assert!(policy.begin_plan(1000.0,&roles()));
+        assert!(!policy.accept(super::tests::selection("vivian","user"),&roles(),true,false,1000.0));
+    }
+
 }

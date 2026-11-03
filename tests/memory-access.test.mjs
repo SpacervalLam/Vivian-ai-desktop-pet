@@ -98,6 +98,34 @@ impl IndexedHarness {
 }
 #[cfg(test)] mod indexed_integration {
     use super::*;
+    #[test] fn indexed_recall_follows_event_evidence_to_cold_progress_without_lexical_overlap() {
+        let dir=tempfile::tempdir().unwrap();let store=Arc::new(super::super::entry_store::MemoryEntryStore::open(dir.path().join("entries.db")).unwrap());
+        let make=|id:&str,text:&str,phase:&str| {
+            let mut row=MemoryItem::new(text.into(),Granularity::Summary,0.8);row.id=id.into();row.memory_type="session_summary".into();
+            row.metadata=serde_json::json!({"record_kind":"session_summary","source":"session_consolidation","known_by":["vivian"],
+                "source_message_ids":[format!("msg:{id}")],"event_schema_version":1,"summary_parts":[{"events":[{
+                    "id":"event:aurora-trip","source_message_id":format!("msg:{id}"),"source_quote":text,"phase":phase,"recorded_at":row.timestamp}]}]});row
+        };
+        let plan=make("planned","约好一起去看极光","planned");let progress=make("completed","已经平安回家，旅程结束了","completed");
+        let mut hidden=make("hidden","只和 Nana 说的细节","progressed");hidden.metadata["known_by"]=serde_json::json!(["nana"]);
+        store.write_rows(vec![(plan.id.clone(),plan),(progress.id.clone(),progress),(hidden.id.clone(),hidden)],&[]).unwrap();
+        let manager=IndexedHarness::new(store.clone(),"vivian");
+        let (results,candidates,_)=manager.search("极光",None).unwrap();
+        assert_eq!(candidates,1,"only the direct hit should need query candidate loading");
+        assert_eq!(results.iter().map(|m|m.id.as_str()).collect::<Vec<_>>(),vec!["planned","completed"]);
+        assert_eq!(results[1].metadata["recall_association"]["relation"],"same_event");
+        assert_eq!(manager.inner.read().data.entries.len(),0,"graph recall must not refill the resident cache");
+        let mut revoked=store.load_by_ids(&["completed".into()],None,&Default::default()).unwrap().remove(0);
+        revoked.metadata["known_by"]=serde_json::json!(["nana"]);
+        {let mut inner=manager.inner.write();inner.data.entries.push(revoked);inner.rebuild_index();}
+        assert_eq!(manager.search("极光",None).unwrap().0.len(),1,"pending resident visibility edits apply to graph targets too");
+        {let mut inner=manager.inner.write();inner.data.entries.clear();inner.rebuild_index();}
+        let filter=MemoryRetrievalFilter{memory_types:Some(vec!["user".into()]),..Default::default()};
+        assert!(manager.search("极光",Some(&filter)).unwrap().0.is_empty());
+        store.write_rows(vec![],&["completed".into()]).unwrap();
+        assert_eq!(manager.search("极光",None).unwrap().0.len(),1);
+        assert!(manager.search("量子纠缠",None).unwrap().0.is_empty());
+    }
     ${manager.includes('pub fn count_diary_material(') ? `
     #[test] fn diary_material_counter_is_scoped_deduplicated_and_capped() {
         let dir=tempfile::tempdir().unwrap();let store=Arc::new(super::super::entry_store::MemoryEntryStore::open(dir.path().join("entries.db")).unwrap());
@@ -206,6 +234,7 @@ pub mod memory {
         use super::{types::{MemoryItem,MemoryStoreData,Granularity,RetrievalStrategy,MemoryRetrievalFilter},vector_search::MemoryVectorStore,embedding::MemoryEmbeddingProvider,retriever::RetrievalWeights,graph_store::KnowledgeGraph,strategy::{create_strategy,QueryEmbedding,RetrievalContext}};
         use crate::error::{VivianResult, VivianError};
         use std::{collections::HashMap,sync::Arc,str::FromStr};
+        use parking_lot::RwLock;
         const MAX_RESIDENT_ENTRIES:usize=20_000;
         const RESIDENT_EVICT_TARGET:usize=18_000;
         __DEDUP__

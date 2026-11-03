@@ -11,7 +11,7 @@
 输出：
 {"proposals":[{"scope":"comfort|care|praise|humor|daily|disagreement","kind":"personality|tone","understanding":"适用情境及自己的新观察、判断、表达选择，最多180字","reason":"经历为什么带来这种自我理解，最多240字","source_quote":"今天用户实际说过的话中的逐字片段","revises":"同场景同kind候选的reference，没有则留空","examples":[]}],"example_updates":[]}
 
-最多2条人格提案。普通成长需至少两个不同日期的真实证据，不会因为写了日记就立即生效。source_quote 必须是今天真实用户发言中的连续原文（6–500字），不能引用日记、自己的回复、设定、其他角色或旧总结。已有候选表达同一倾向时填写其 reference；方向改变或出现反例时新建候选，不继承旧证据。
+最多2条人格提案。普通成长需至少两个不同日期的真实证据，不会因为写了日记就立即生效。source_quote 必须是今天真实用户发言中的连续原文（6–500字），不能引用日记、自己的回复、设定、其他角色或旧总结。为已有候选补充证据时填写其 reference，并逐字保留其 understanding（仅允许空白归一化）。reference 只标识原假设，不授权改写或证明新假设有效。任何措辞变化，包括看似同义的润色，都须清空 revises，作为新候选独立积累证据；不能借旧候选的支持天数晋升。方向改变或出现反例时，也不能继承旧证据。
 
 停用格式：
 {"id":"现有原句ID","reference":"该原句的当前reference","reason":"为什么不再适用，最多240字","example":null}

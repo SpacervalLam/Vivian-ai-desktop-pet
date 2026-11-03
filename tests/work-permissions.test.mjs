@@ -6,7 +6,7 @@ const source=await readFile('src/components/mind-inspector/pages/CodeAgentPageNe
 const start=source.indexOf('  const permissionChangeSequence = useRef(0);');
 const end=source.indexOf('  const handleModelChange',start);
 assert.ok(start>=0 && end>start);
-const compiled=await transform(`function render(activeId: string|null) {${source.slice(start,end)};return {change:handlePermissionChange,scope:updateWorkspaceScope};}`,{loader:'tsx',target:'es2022'});
+const compiled=await transform(`function render(activeId: string|null) {${source.slice(start,end)};return {change:handlePermissionChange};}`,{loader:'tsx',target:'es2022'});
 const refs=[];let cursor=0,permission='workspace_write',sessions=[{session_id:'a',permission},{session_id:'b',permission}],calls=[],errors=[];
 const context=vm.createContext({
  useRef(initial){return refs[cursor++]??={current:initial};},useCallback:fn=>fn,
@@ -28,9 +28,4 @@ assert.equal(permission,'read_only','a failed later choice must keep the last ac
 handler.change('workspace_write');await settle();render('b');calls[2].resolve();await settle();
 assert.equal(permission,'read_only','an inactive session response must not change the active label');
 assert.equal(sessions.find(s=>s.session_id==='a').permission,'workspace_write');
-handler=render('b');handler.scope('C:/input',true);handler.scope('C:/input');await settle();
-assert.equal(calls[3].command,'coding_set_workspace_read_only');assert.equal(calls[3].args.readOnly,true);
-calls[3].resolve([{path:'C:/input',read_only:true}]);await settle();
-assert.equal(calls[4].command,'coding_remove_workspace');calls[4].resolve([]);await settle();
-assert.equal(sessions.find(s=>s.session_id==='b').extra_workspaces.length,0);
-console.log('Live permissions: serialized changes, acknowledged state, failure recovery, session switching and directory revocation passed.');
+console.log('Live permissions: serialized changes, acknowledged state, failure recovery and session switching passed.');

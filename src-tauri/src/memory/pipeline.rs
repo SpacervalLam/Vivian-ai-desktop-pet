@@ -213,6 +213,11 @@ impl ConsolidationPipeline {
 
     async fn run_locked(&self, memory: &MemoryManager, diary_range: Option<(f64, f64)>) -> VivianResult<ConsolidationReport> {
         let for_diary = diary_range.is_some();
+        // Graph backfill has its own bounded budget and needs no model call.
+        // It must progress even when dialogue summarization is cooling down.
+        if let Err(error) = memory.organize_memory_associations().await {
+            tracing::warn!("[Consolidation] 记忆关联整理稍后重试: {error:?}");
+        }
         let now = current_timestamp();
         if !for_diary && now - (self.last_attempt_at.load(Ordering::Relaxed) as f64) < RETRY_BACKOFF_SECONDS {
             return Ok(ConsolidationReport::default());

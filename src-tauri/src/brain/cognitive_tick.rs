@@ -346,7 +346,6 @@ impl CognitiveTickRunner {
         {
             if brain.config.world.enable_inner_monologue {
                 let can_think = !context.is_user_chatting
-                    && !matches!(context.character_presence, crate::presence::PresenceState::Rest | crate::presence::PresenceState::Offline)
                     && !brain.mind.thought_refresh_in_flight.load(std::sync::atomic::Ordering::SeqCst);
                 if can_think { brain.mind.claim_due_continuation(now as i64); }
                 let refresh_requested = brain.mind.thought_refresh_requested();

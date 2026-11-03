@@ -272,8 +272,7 @@ impl AnthropicProvider {
 
     async fn send_request(&self, body: &Value) -> VivianResult<Value> {
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
@@ -568,8 +567,7 @@ impl BaseProvider for AnthropicProvider {
             body["tools"] = tools_field;
         }
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")
@@ -788,8 +786,7 @@ impl BaseProvider for AnthropicProvider {
         }
 
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .header("x-api-key", &self.base.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("content-type", "application/json")

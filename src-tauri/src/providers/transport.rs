@@ -6,6 +6,15 @@ use crate::providers::base::ProviderBase;
 use crate::resilience::{classify_error, ErrorCategory};
 use futures::StreamExt;
 
+/// A work step owns the whole request deadline, including a streamed body.
+/// Capture task-local policy before providers move body readers into spawned tasks.
+pub fn budgeted_request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match super::base::ProviderCallOptions::current().request_budget {
+        Some(budget) => request.timeout(budget.deadline().saturating_duration_since(tokio::time::Instant::now()).max(std::time::Duration::from_millis(1))),
+        None => request,
+    }
+}
+
 /// Exactly one circuit admission and health outcome per logical request.
 /// Drop releases a half-open probe on cancellation or a caller/configuration error.
 pub struct RequestGuard {
@@ -313,6 +322,36 @@ fn caller_error(error: &VivianError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn work_deadline_overrides_short_client_timeout_through_streamed_body() {
+        use super::super::base::{scope_provider_call,ProviderCallOptions,RequestBudget};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let app=axum::Router::new().route("/",axum::routing::post(|| async {
+            axum::body::Body::from_stream(futures::stream::once(async {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                Ok::<_,std::convert::Infallible>("data: completed\n\n")
+            }))
+        }));
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap();});
+        let client=reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_millis(80)).build().unwrap();
+        let url=format!("http://{address}/");
+        let request=scope_provider_call(ProviderCallOptions {
+            request_budget:Some(std::sync::Arc::new(RequestBudget::new(std::time::Duration::from_secs(2),1))),..Default::default()
+        },async {budgeted_request(client.post(&url))}).await;
+        // The task-local scope ends before the spawned body reader, as in SSE providers.
+        let text=tokio::spawn(async move {request.send().await.unwrap().text().await.unwrap()}).await.unwrap();
+        assert_eq!(text,"data: completed\n\n");
+        let ordinary=budgeted_request(client.post(&url)).send().await.unwrap().text().await.unwrap_err();
+        assert!(ordinary.is_timeout());
+        let long_client=reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(2)).build().unwrap();
+        let request=scope_provider_call(ProviderCallOptions {
+            request_budget:Some(std::sync::Arc::new(RequestBudget::new(std::time::Duration::from_millis(80),1))),..Default::default()
+        },async {budgeted_request(long_client.post(&url))}).await;
+        let short=request.send().await.unwrap().text().await.unwrap_err();assert!(short.is_timeout());
+        server.abort();
+    }
 
     #[test]
     fn full_urls_and_gateway_prefixes_preserve_query_parameters() {

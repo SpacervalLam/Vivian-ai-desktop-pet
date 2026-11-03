@@ -78,12 +78,7 @@ pub fn participants(state: &AppState) -> Vec<Participant> {
             Participant {
                 id: c.id.clone(),
                 available: *c.online.read()
-                    && c.brain.proactive.autonomous_contact_allowed()
-                    && !snapshot.should_lay_low()
-                    && matches!(
-                        c.brain.presence.current(),
-                        crate::presence::PresenceState::Online
-                    ),
+                    && c.brain.proactive.autonomous_contact_allowed(),
                 can_address_user: !crate::conversation::CONVERSATION_MANAGER
                     .is_user_session_closed(&c.id),
                 loneliness: c.brain.psychology.emotion().loneliness as f64,
@@ -117,8 +112,6 @@ pub fn allows_interjection(state: &AppState, id: &str) -> bool {
     let online = *character.online.read();
     online
         && character.brain.proactive.autonomous_contact_allowed()
-        && !character.brain.self_state.snapshot().should_lay_low()
-        && character.brain.presence.current() == crate::presence::PresenceState::Online
         && crate::utils::get_system_idle_seconds().is_some_and(|idle| {
             idle <= character.brain.config.proactive.away_threshold_seconds as f64
         })
@@ -141,8 +134,6 @@ pub fn allows_peer_contact(state: &AppState, source_id: &str, target_id: &str) -
         characters.get(*id).is_some_and(|c| {
             *c.online.read()
                 && c.brain.proactive.autonomous_contact_allowed()
-                && !c.brain.self_state.snapshot().should_lay_low()
-                && c.brain.presence.current() == crate::presence::PresenceState::Online
         })
     })
 }
@@ -425,8 +416,13 @@ impl EnvironmentAgent {
         let Some(focus_id) = focus_id else { return; };
         let focus = state.characters.read().get(&focus_id).cloned();
         let Some(focus) = focus else { return; };
-        let evidence: Vec<_> = scene_evidence(&focus_id,Some(&focus.brain.memory),now)
-            .into_iter().filter(|source| source.shareable).collect();
+        let learning_candidate = (!focus.brain.presence.is_task_in_progress()
+            && !focus.brain.proactive.is_knowledge_acquisition_in_cooldown()
+            && !crate::commands::coding_agent::CODING_AGENT.has_running_work_for(&focus_id))
+            .then(|| crate::discovery::learning_context::candidate(&focus_id,&focus.brain.memory)).flatten();
+        // The planner sees only this character's private evidence. Its sharing
+        // permission is checked separately, never used to erase self-awareness.
+        let evidence = scene_evidence(&focus_id,Some(&focus.brain.memory),now);
         // Reserve before consuming the observation signature. Lock contention is deferral,
         // not a terminal evaluation of an event that was never sent to a model.
         let (events, user_turns, current_intent, epoch, input_revision) = {
@@ -442,8 +438,13 @@ impl EnvironmentAgent {
             for change in self.perception.changes(now as i64) {
                 obs.policy.observe(SceneEvent { id:change.id,stimulus:Stimulus::WorldChanged,fact:change.fact,owner:change.owner,at:change.at as f64 });
             }
+            if let Some(candidate) = &learning_candidate {
+                obs.policy.observe(SceneEvent {id:candidate.id.clone(),stimulus:Stimulus::PrivateActivity,
+                    fact:"有尚未评估的私人阅读素材；仍需角色自己判断有没有真想查的问题，不是发言理由".into(),
+                    owner:Some(focus_id.clone()),at:now});
+            }
             for source in &evidence {
-                if source.kind != "dialogue" && now - source.at < 1800.0 {
+                if !matches!(source.kind.as_str(),"dialogue"|"user_message"|"agent_message") && now - source.at < 1800.0 {
                     obs.policy.observe(SceneEvent { id:source.id.clone(),stimulus:Stimulus::CharacterEvent,
                         fact:source.text.clone(),owner:Some(focus_id.clone()),at:source.at });
                 }
@@ -489,6 +490,9 @@ impl EnvironmentAgent {
         world_observations["owned_tasks"]=json!({"owner":focus_id,"running_work":crate::commands::coding_agent::CODING_AGENT.has_running_work_for(&focus_id),
             "upcoming_reminders":owned_reminders,"pending_work_notice":crate::brain::work_notices::global().has_report_for(&focus_id)
                 || crate::brain::work_notices::global().next_alert_for(&focus_id).is_some()});
+        world_observations["character_attention"]=json!({"legacy_mode":focus.brain.presence.current().as_str(),
+            "background_activity_in_progress":focus.brain.presence.is_task_in_progress(),"fatigue":focus.brain.self_state.snapshot().fatigue,
+            "mode_semantics":"descriptive context, not a capability ban or an obligation to speak"});
         let activity = focus.brain.proactive.activity_journal().to_brief();
         let topic_window = self.topics.snapshot(&focus_id, None, now);
         let language = focus.brain.config.base.language.clone();
@@ -507,8 +511,12 @@ impl EnvironmentAgent {
                     "focus_character_id":focus_id,"language":language,"evidence":evidence,"user_available":user_available,
                     "user_chatting":chatting,"participants":planning_roles,"events":events,
                     "recent_user_turns":user_turns,"current_intent":current_intent,"topic_window":topic_window});
-            let (system, observed) = super::environment_policy::planning_prompt(
+            let (mut system, mut observed) = super::environment_policy::planning_prompt(
                 include_str!("../../prompts/framework/environment_agent.en.md"), observed, diary_candidate.as_ref());
+            if let Some(candidate)=&learning_candidate {
+                observed["private_learning_candidate"]=json!(candidate);
+                system.push_str("\nYou may also return private_learning={candidate_id,character_id,confidence} or null. Use only the exact supplied candidate with confidence 0.8..1.0. It offers private reading, not an assigned topic or user service. The character may still decline after considering its own sources. Choose at most one private activity (diary or learning). Never use a learning-opportunity ID for speech or infer that learning already happened. Legacy online/offline/busy/rest are descriptive hints; actual visibility, user quiet, active dialogue and running work remain real gates. Fatigue is context, not an order to change modes.");
+            }
             let messages = vec![ChatMessage::system(system), ChatMessage::user(observed.to_string())];
             let request = LLMRequest::new("environment_judge", messages)
                 .without_framework_instructions()
@@ -545,6 +553,7 @@ impl EnvironmentAgent {
                 && !state.is_rebuild_in_progress();
             let mut obs = agent.observations.lock();
             let mut selected_cycle = None;
+            let mut selected_learning = None;
             if let Some(decision) = decision.filter(|_| {
                 permitted && obs.epoch == epoch && agent.input.revision() == input_revision
             }) {
@@ -554,11 +563,16 @@ impl EnvironmentAgent {
                 }
                 selected_cycle = decision.private_activity.and_then(|selection| diary_candidate.as_ref()
                     .filter(|candidate| selection.matches(candidate)).cloned());
+                if selected_cycle.is_none() {
+                    selected_learning=decision.private_learning.and_then(|selection|learning_candidate.as_ref()
+                        .filter(|candidate|selection.matches(candidate)).cloned());
+                }
                 if let Some(intent) = decision.user_intent {
                     obs.policy
                         .apply_intent(intent, chrono::Local::now().timestamp() as f64);
                 }
-                let accepted = decision.opportunity.filter(|selection| selection.speaker_id == focus_id).is_some_and(|selection| {
+                let accepted = decision.opportunity.filter(|selection| selection.speaker_id == focus_id
+                    && learning_candidate.as_ref().is_none_or(|candidate|selection.event_id!=candidate.id)).is_some_and(|selection| {
                     obs.policy.accept(
                         selection,
                         &current_roles,
@@ -588,6 +602,23 @@ impl EnvironmentAgent {
             obs.policy
                 .finish_evaluation(&events.iter().map(|e| e.id.clone()).collect::<Vec<_>>());
             drop(obs);
+            if let Some(candidate)=selected_learning {
+                if priority.is_idle() && priority.revision()==plan_revision
+                    && !state.session_coordinator.any_user_turn_active()
+                    && !state.is_factory_reset_in_progress() && !state.is_rebuild_in_progress()
+                    && crate::companion_runtime::quiet_reason(&state).is_none()
+                    && !crate::commands::coding_agent::CODING_AGENT.has_running_work_for(&candidate.character_id)
+                    && state.config.read().get_all().proactive.enabled
+                    && state.config.read().get_all().web_search.enable_background_knowledge_fetch {
+                    if let Some(character)=state.characters.read().get(&candidate.character_id).cloned()
+                        .filter(|c|*c.online.read()) {
+                        if crate::discovery::learning_context::candidate(&candidate.character_id,&character.brain.memory)
+                            .is_some_and(|fresh|fresh.id==candidate.id) {
+                            character.brain.presence.start_private_learning();
+                        }
+                    }
+                }
+            }
             if let Some(candidate) = selected_cycle {
                 let character = state.characters.read().get(&candidate.character_id).cloned();
                 if let Some(character) = character.filter(|character| *character.online.read()) {
@@ -720,15 +751,16 @@ pub(crate) fn scene_evidence(character: &str, memory: Option<&crate::memory::Mem
             && !event.context_tags.iter().any(|tag| matches!(tag.as_str(),"quiet_control"|"system_seed")))
         .map(|event| Evidence{id:event.id,at:event.timestamp,character_id:character.into(),kind:event.event_type.clone(),
             text:format!("[所属角色：{}] {} → {}: {}",event.associated_char_id.as_deref().unwrap_or("共享场景"),
-                event.sender,event.receiver,event.content_preview),
+                event.sender,event.receiver,format!("{} [{}]",event.content_preview,event.timeline.context(event.timestamp,now))),
             shareable:event.visibility == EventVisibility::Public || event.event_type == "tool_result"
                 || event.context_tags.iter().any(|tag| tag == "shareable_activity")}).collect();
     if let Some(memory) = memory {
         for item in memory.recent_by_type(crate::memory::MemoryType::Knowledge,4) {
-            if now - item.timestamp >= 7200.0 || item.metadata["source"] == "system_seed"
+            if !item.timestamp.is_finite() || item.timestamp > now + 1.0
+                || now - item.timestamp >= 7200.0 || item.metadata["source"] == "system_seed"
                 || item.metadata["fictional_backstory"] == true { continue; }
             let id = format!("knowledge:{}",item.id);
-            evidence.retain(|old| old.id != id);
+            if evidence.iter().any(|old|old.id==id) {continue;}
             evidence.push(Evidence {id,at:item.timestamp,character_id:character.into(),kind:"knowledge_acquired".into(),
                 text:format!("{} 保存的采集资料（不代表已分享或读完全部原文）：{}",character,
                     item.content.chars().take(600).collect::<String>()),

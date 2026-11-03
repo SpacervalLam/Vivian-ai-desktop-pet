@@ -65,7 +65,7 @@ fn compaction_batch(events: &[UnifiedEvent]) -> Vec<UnifiedEvent> {
 pub struct UnifiedEvent {
     /// 唯一事件 ID
     pub id: String,
-    /// 创建时间戳（秒）
+    /// 实际发生时间（秒）；延迟入账与回放不改写此时间。
     pub timestamp: f64,
     /// 发起方：`"user"` / `"vivian"` / `"nana"` / `"system"`
     pub sender: String,
@@ -83,6 +83,8 @@ pub struct UnifiedEvent {
     /// 关联角色 ID（用于系统事件标记所属角色，如 mood_shift / idle_timeout 等）
     #[serde(default)]
     pub associated_char_id: Option<String>,
+    #[serde(default)]
+    pub timeline: super::event_time::EventTimeline,
 }
 
 /// 事件可见性
@@ -445,7 +447,7 @@ impl UnifiedEventLedger {
     }
 
     fn load(&mut self) -> VivianResult<()> {
-        let now = chrono::Utc::now().timestamp() as f64;
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let mut inner = LedgerInner::default();
         let removed;
         {
@@ -547,7 +549,12 @@ impl UnifiedEventLedger {
     /// 追加一条事件
     ///
     /// 事件按可见性与关联角色路由到对应桶。各桶独立计数，超过上限时触发 LLM 压缩。
-    pub fn append(self: &Arc<Self>, event: UnifiedEvent) -> VivianResult<()> {
+    pub fn append(self: &Arc<Self>, mut event: UnifiedEvent) -> VivianResult<()> {
+        let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        if !event.timeline.valid(event.timestamp, now) {
+            return Err(VivianError::Memory("事件时间无效，不能把未来或错序数据当作已发生事件".into()));
+        }
+        event.timeline.recorded_at.get_or_insert(now.max(event.timestamp));
         {
             let mut inner = self.inner.write();
             inner.purge_expired(chrono::Utc::now().timestamp() as f64);
@@ -564,6 +571,7 @@ impl UnifiedEventLedger {
                 None => {
                     let bucket = &mut inner.public_events;
                     bucket.push(event);
+                    chronological(bucket);
                     // 临时 FIFO 保护（compaction 完成前的安全网）
                     if bucket.len() > MAX_PUBLIC_EVENTS + COMPACT_BATCH {
                         let drop_n = bucket.len() - MAX_PUBLIC_EVENTS;
@@ -573,6 +581,7 @@ impl UnifiedEventLedger {
                 Some(char_id) => {
                     let bucket = inner.character_events.entry(char_id).or_default();
                     bucket.push(event);
+                    chronological(bucket);
                     if bucket.len() > MAX_CHARACTER_EVENTS + COMPACT_BATCH {
                         let drop_n = bucket.len() - MAX_CHARACTER_EVENTS;
                         bucket.drain(0..drop_n);
@@ -715,6 +724,13 @@ impl UnifiedEventLedger {
         };
 
         let summary_event = UnifiedEvent {
+            timeline: super::event_time::EventTimeline {
+                recorded_at: Some((chrono::Utc::now().timestamp_millis() as f64 / 1000.0).max(ts_end)),
+                started_at: batch.first().map(|e| e.timeline.started_at.unwrap_or(e.timestamp)),
+                ended_at: Some(ts_end),
+                phase: Some("compacted_history".into()),
+                ..Default::default()
+            },
             id: format!("evt-compact-{}-{}", bucket_label, ts_end as u64),
             timestamp: ts_end,
             sender: "system".to_string(),
@@ -729,7 +745,7 @@ impl UnifiedEventLedger {
                 format!("bucket:{}", bucket_label),
                 format!("{}events", batch.len()),
             ],
-            visibility: EventVisibility::Public,
+            visibility: match &bucket { BucketKind::Character(id) => EventVisibility::Private(id.clone()), _ => EventVisibility::Public },
             associated_char_id: match &bucket {
                 BucketKind::Character(cid) => Some(cid.clone()),
                 _ => None,
@@ -776,62 +792,30 @@ impl UnifiedEventLedger {
 
     /// 查询某角色可见的最近 N 条事件（按时间倒序）
     ///
-    /// 合并共享桶与该角色独立桶，按 (importance, recency) 联合排序。
-    pub fn recent_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
+    fn ranked_visible_events(&self, char_id: &str, now: f64) -> Vec<UnifiedEvent> {
         self.purge_expired();
         let inner = self.inner.read();
-        let pool_size = (n * 3).max(n);
-        let mut candidates: Vec<UnifiedEvent> = Vec::with_capacity(pool_size);
-
-        // 共享桶：Public 事件所有角色可见
-        for e in inner.public_events.iter().rev() {
-            if candidates.len() >= pool_size {
-                break;
-            }
-            candidates.push(e.clone());
-        }
-        // 角色独立桶：仅取该角色相关事件
-        if let Some(bucket) = inner.character_events.get(char_id) {
-            for e in bucket.iter().rev() {
-                if candidates.len() >= pool_size {
-                    break;
-                }
-                if self.is_visible(e, char_id) {
-                    candidates.push(e.clone());
-                }
-            }
-        }
-
-        let now = chrono::Local::now().timestamp() as f64;
-        candidates.sort_by(|a, b| {
-            let ia = event_importance(&a.event_type, now - a.timestamp);
-            let ib = event_importance(&b.event_type, now - b.timestamp);
-            ib.partial_cmp(&ia)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    b.timestamp
-                        .partial_cmp(&a.timestamp)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        let mut result: Vec<UnifiedEvent> = candidates.into_iter().take(n).collect();
-        result.reverse();
-        result
+        let events = inner.public_events.iter()
+            .chain(inner.character_events.get(char_id).into_iter().flatten())
+            .filter(|e| self.is_visible(e,char_id)).cloned().collect();
+        rank_events(events, char_id, now)
     }
 
-    /// Bounded chronological scene input; private recent actions cannot be crowded out by public dialogue.
-    pub fn recent_scene_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
-        self.purge_expired();
-        let inner = self.inner.read();
-        let limit = n.min(32);
-        let mut events: Vec<_> = inner.public_events.iter().rev().take(limit)
-            .chain(inner.character_events.get(char_id).into_iter().flatten().rev().take(limit))
-            .filter(|event| self.is_visible(event, char_id)).cloned().collect();
-        events.sort_by(|a,b| b.timestamp.total_cmp(&a.timestamp).then_with(|| a.id.cmp(&b.id)));
-        events.dedup_by(|a,b| a.id == b.id);
-        events.truncate(limit);
-        events.reverse();
+    /// Recall is weighted, but its presentation is always occurrence order.
+    pub fn recent_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
+        let mut events: Vec<_> = self.ranked_visible_events(char_id,chrono::Utc::now().timestamp() as f64)
+            .into_iter().take(n).collect();
+        chronological(&mut events);
         events
+    }
+
+    /// One current stage per activity, without losing its start/end/cause.
+    pub fn recent_scene_events_visible_to(&self, char_id: &str, n: usize) -> Vec<UnifiedEvent> {
+        let now=chrono::Utc::now().timestamp() as f64;
+        let visible=self.ranked_visible_events(char_id,now).into_iter()
+            .filter(|event| now-event.timestamp < 7200.0).collect();
+        let mut events=rank_events(collapse_episodes(visible),char_id,now);
+        events.truncate(n.min(32));chronological(&mut events);events
     }
 
     pub fn events_on_date(
@@ -975,8 +959,7 @@ impl UnifiedEventLedger {
 
     /// 生成可注入 prompt 的近期环境事件段落
     ///
-    /// `n` 是条数预算。选取走 [`Self::select_events_for_prompt`]，会为高情感浓度的
-    /// 事件保底配额，避免它们被同期的对话事件（`dialogue` 0.9）整片挤掉。
+    /// `n` 是条数预算；选择综合个人意义、渐进衰减、重复抑制与类型多样性。
     pub fn build_prompt_section(&self, char_id: &str, n: usize, lang: &str) -> Option<String> {
         // Pet observations have their own bounded capsule; do not duplicate raw events.
         let events: Vec<_> = self.select_events_for_prompt(char_id, n).into_iter()
@@ -1005,49 +988,33 @@ impl UnifiedEventLedger {
                 format!(" [{}]", e.context_tags.join(", "))
             };
             lines.push(format!(
-                "- [{}] {}{}: {}",
+                "- [{}] {}{}: {} [{}]",
                 format_timestamp(e.timestamp),
                 direction,
                 tags,
-                e.content_preview
+                e.content_preview,
+                e.timeline.context(e.timestamp, chrono::Utc::now().timestamp() as f64)
             ));
         }
         Some(lines.join("\n"))
     }
 
-    /// 为 prompt 挑选事件：在重要性排序之上，给高情感浓度事件保底配额。
-    ///
-    /// 纯按 importance 取 top-N 时，一次「被甩飞」「被冷落」很容易被同期的
-    /// 对话事件挤出预算。这里给前者留出 `budget / 2` 的保底名额
-    /// （不足则用其余事件补满）。
-    ///
-    /// 返回按**时间正序**（早 → 晚）排列，便于 prompt 里读成一条时间线。
+    /// Salience and repetition choose what is recalled; no fixed quota for neglect,
+    /// mood or touch. Preserve different event kinds and present them in time order.
     fn select_events_for_prompt(&self, char_id: &str, budget: usize) -> Vec<UnifiedEvent> {
-        if budget == 0 {
-            return Vec::new();
+        if budget==0 {return vec![];}
+        let now=chrono::Utc::now().timestamp() as f64;
+        let ranked=rank_events(collapse_episodes(self.ranked_visible_events(char_id,now)),char_id,now);
+        let mut counts=HashMap::new();let mut selected=Vec::new();let mut deferred=Vec::new();
+        for event in ranked {
+            let key=(event.event_type.clone(),event.sender.clone());
+            let count=counts.entry(key).or_insert(0usize);
+            if *count < (budget/2).max(1) && selected.len()<budget {
+                *count+=1;selected.push(event);
+            } else {deferred.push(event);}
         }
-        let pool = self.recent_events_visible_to(char_id, budget.saturating_mul(3).max(budget));
-        let quota = (budget / 2).max(1);
-        // `recent_events_visible_to` 返回的是「重要性升序」（先按重要性倒序取前 N，再 reverse），
-        // 因此从末尾往前遍历 = 按重要性从高到低挑选，保底名额会落在最重要的那些上。
-        let mut priority: Vec<UnifiedEvent> = Vec::new();
-        let mut rest: Vec<UnifiedEvent> = Vec::new();
-        for event in pool.into_iter().rev() {
-            if priority.len() < quota && is_prompt_priority_event(&event.event_type) {
-                priority.push(event);
-            } else {
-                rest.push(event);
-            }
-        }
-        let mut picked = priority;
-        let need = budget.saturating_sub(picked.len());
-        picked.extend(rest.into_iter().take(need));
-        picked.sort_by(|a, b| {
-            a.timestamp
-                .partial_cmp(&b.timestamp)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        picked
+        let remaining=budget.saturating_sub(selected.len());selected.extend(deferred.into_iter().take(remaining));
+        chronological(&mut selected);selected
     }
 
     /// 清空全部事件
@@ -1132,70 +1099,37 @@ struct PendingCompaction {
     count: usize,
 }
 
-/// 是否为「高情感浓度」事件——prompt 选取时享受保底配额。
-///
-/// 判据是情感浓度，不是重要性数值：`dialogue`(0.9) / `compacted_summary`(0.85) /
-/// `action`(0.7) 本来就排在最前，无需保底；而这里列出的类型基础权重只有
-/// 0.5~0.6，一旦同期对话密集（对话事件数量远超其他），它们就会被挤出预算——
-/// 而这些恰恰是日记 / 内心独白 / 主动对话最该取材的东西
-/// （"用户今天把桌宠甩到墙上好几次" 比 "今天聊了很多" 更能写进内心 OS）。
-fn is_prompt_priority_event(event_type: &str) -> bool {
-    matches!(
-        event_type,
-        // 用户亲手对角色做的动作（摸头 / 双击 / 长按 / 甩飞撞边……）
-        "user_pet_action"
-            // 被冷落
-            | "user_ignored"
-            | "ignored_message"
-            // 情绪/心境转变
-            | "mood_shift"
-            | "mood_event"
-            // 用户的关键操作（切歌 / 切换应用）
-            | "user_media_changed"
-            | "user_app_switched"
-            // 旁听到的片段
-            | "observer_note"
-    )
+/// Presentation order is occurrence order, independent of recall ranking.
+fn chronological(events: &mut [UnifiedEvent]) {
+    events.sort_by(|a,b|a.timestamp.total_cmp(&b.timestamp).then_with(||a.id.cmp(&b.id)));
 }
 
-/// 事件重要性权重（按 event_type 推断）
-fn event_base_importance(event_type: &str) -> f64 {
-    match event_type {
-        "dialogue" => 0.9,
-        "action" => 0.7,
-        // 被冷落过程事件：与 mood_shift 同级，日记/独白/recap 均可感知
-        "user_ignored" | "ignored_message" | "mood_shift" | "mood_event" => 0.6,
-        // 用户对桌宠的物理动作（摸头/双击/长按/甩飞撞边）：与 mood_shift 同级——
-        // 用户亲手对角色做的事情感浓度高，日记/独白/recap 都应能取材
-        "user_pet_action" => 0.6,
-        // 用户关键操作（切歌/切换应用）：中等级别，供日记与独白素材
-        "user_media_changed" | "user_app_switched" => 0.5,
-        "observer_note" => 0.5,
-        "compacted_summary" => 0.85,
-        "presence_log" | "long_idle" | "quiet_mode" => 0.3,
-        "system" | _ => 0.4,
+fn collapse_episodes(events: Vec<UnifiedEvent>) -> Vec<UnifiedEvent> {
+    let mut stages: HashMap<(String,String,String),UnifiedEvent>=HashMap::new();let mut single=Vec::new();
+    for event in events {
+        if let Some(episode)=event.timeline.episode_id.as_ref() {
+            let key=(event.sender.clone(),event.receiver.clone(),episode.clone());
+            let replace=stages.get(&key).is_none_or(|old| event.timestamp>old.timestamp
+                || (event.timestamp==old.timestamp && (event.timeline.ended_at.is_some(), event.timeline.sequence, &event.id)
+                    > (old.timeline.ended_at.is_some(), old.timeline.sequence, &old.id)));
+            if replace {stages.insert(key,event);}
+        } else {single.push(event);}
     }
+    single.extend(stages.into_values());single
 }
 
-/// 时间衰减因子（年龄越大，因子越小）
-fn time_decay_factor(age_secs: f64) -> f64 {
-    let days = age_secs / 86400.0;
-    if days < 1.0 {
-        0.95
-    } else if days < 3.0 {
-        0.70
-    } else if days < 7.0 {
-        0.40
-    } else if days < 30.0 {
-        0.15
-    } else {
-        0.05
-    }
-}
-
-/// 事件重要性（带时间衰减）
-fn event_importance(event_type: &str, age_secs: f64) -> f64 {
-    event_base_importance(event_type) * time_decay_factor(age_secs)
+fn rank_events(mut events: Vec<UnifiedEvent>, char_id: &str, now: f64) -> Vec<UnifiedEvent> {
+    events.retain(|e|e.timestamp.is_finite() && e.timestamp<=now+1.0);
+    let mut frequency=HashMap::new();
+    let key=|e:&UnifiedEvent|format!("{}:{}:{}:{}",e.event_type,e.sender,e.receiver,
+        e.content_preview.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase());
+    for e in &events {if now-e.timestamp<3600.0 {*frequency.entry(key(e)).or_insert(0usize)+=1;}}
+    let scores:HashMap<_,_>=events.iter().map(|e|(e.id.clone(),super::event_time::recall_weight(
+        &e.event_type,e.timestamp,now,&e.timeline,e.sender==char_id || e.receiver==char_id,
+        frequency.get(&key(e)).copied().unwrap_or(1)))).collect();
+    events.sort_by(|a,b|scores[&b.id].total_cmp(&scores[&a.id])
+        .then_with(||b.timestamp.total_cmp(&a.timestamp)).then_with(||a.id.cmp(&b.id)));
+    events
 }
 
 /// 格式化时间戳为简短的可读时间（如 "07-16 14:30"）
@@ -1204,7 +1138,7 @@ fn format_timestamp(ts: f64) -> String {
         chrono::DateTime::<chrono::Utc>::from_timestamp(ts as i64, 0)
             .map(|dt| dt.with_timezone(&chrono::Local))
             .unwrap_or_else(|| chrono::Utc::now().with_timezone(&chrono::Local));
-    dt.format("%m-%d %H:%M").to_string()
+    dt.format("%Y-%m-%d %H:%M:%S %:z").to_string()
 }
 
 /// 构建 LLM 摘要压缩 prompt
@@ -1305,6 +1239,7 @@ pub fn register_world_event(
 ) {
     let ledger = unified_event_ledger();
     let event = UnifiedEvent {
+            timeline: Default::default(),
         id: format!("evt-{}-{}", timestamp as u64, rand::random::<u32>()),
         timestamp,
         sender: "system".to_string(),
@@ -1323,8 +1258,14 @@ pub fn register_world_event(
 /// Completed character activity remains private until that character elects to share it.
 pub fn register_character_activity(char_id: &str, id: String, event_type: &str,
     content: &str, timestamp: f64, tags: Vec<String>) {
+    register_character_episode(char_id,id,event_type,content,timestamp,tags,Default::default());
+}
+
+pub fn register_character_episode(char_id: &str, id: String, event_type: &str,
+    content: &str, timestamp: f64, tags: Vec<String>, timeline: super::event_time::EventTimeline) {
     if char_id.is_empty() { return; }
-    register_event(UnifiedEvent { id, timestamp, sender:char_id.into(), receiver:char_id.into(),
+    register_event(UnifiedEvent {
+            timeline, id, timestamp, sender:char_id.into(), receiver:char_id.into(),
         event_type:event_type.into(),content_preview:content.chars().take(CONTENT_PREVIEW_MAX_CHARS).collect(),
         context_tags:tags,visibility:EventVisibility::Private(char_id.into()),associated_char_id:Some(char_id.into()) });
 }
@@ -1405,6 +1346,7 @@ pub fn register_event_from_dialogue(
     }
 
     let event = UnifiedEvent {
+            timeline: Default::default(),
         id: format!("evt-{}-{}", timestamp as u64, rand::random::<u32>()),
         timestamp,
         sender: speaker,
@@ -1432,6 +1374,7 @@ mod tests {
         ts: f64,
     ) -> UnifiedEvent {
         UnifiedEvent {
+            timeline: Default::default(),
             id: format!("evt-{ts}"),
             timestamp: ts,
             sender: sender.to_string(),
@@ -1451,6 +1394,7 @@ mod tests {
         ts: f64,
     ) -> UnifiedEvent {
         UnifiedEvent {
+            timeline: Default::default(),
             event_type: event_type.to_string(),
             ..make_event(sender, receiver, EventVisibility::Participants, ts)
         }
@@ -1693,10 +1637,10 @@ mod tests {
     }
 
     #[test]
-    fn test_select_events_reserves_quota_for_salient_events() {
+    fn test_select_events_balances_repeated_dialogue_and_recent_actions() {
         let now = chrono::Local::now().timestamp() as f64;
         let mut bucket: Vec<UnifiedEvent> = Vec::new();
-        // 12 条对话事件（importance 0.9）：纯按重要性取 top-6 时会把预算全吃掉
+        // 重复的常规对话不应独占所有上下文预算
         for i in 0..12 {
             bucket.push(make_typed_event("user", "vivian", "dialogue", now - i as f64 * 60.0));
         }
@@ -1719,7 +1663,7 @@ mod tests {
             .iter()
             .filter(|e| e.event_type == "user_pet_action")
             .count();
-        assert_eq!(salient, 3, "3 条高情感浓度事件应全部保底入选");
+        assert_eq!(salient, 3, "重复对话之外仍应保留近期活动的上下文");
         // 返回按时间正序，便于 prompt 里读成一条时间线
         assert!(
             picked.windows(2).all(|w| w[0].timestamp <= w[1].timestamp),
@@ -1804,4 +1748,43 @@ mod tests {
         assert_eq!(inner.character_events.get("vivian").map(|b| b.len()).unwrap_or(0), 1);
         assert_eq!(inner.character_events.get("nana").map(|b| b.len()).unwrap_or(0), 1);
     }
+    #[test]
+    fn delayed_ingestion_is_presented_by_occurrence_time() {
+        let ledger=Arc::new(make_ledger(LedgerInner::default()));
+        let now=chrono::Utc::now().timestamp() as f64;
+        let recent=make_event("user","vivian",EventVisibility::Participants,now-60.0);
+        let old=make_event("user","vivian",EventVisibility::Participants,now-6000.0);
+        ledger.append(recent).unwrap();ledger.append(old).unwrap();
+        let events=ledger.recent_events_visible_to("vivian",10);
+        assert!(events.windows(2).all(|w|w[0].timestamp<=w[1].timestamp));
+        assert!(events[0].timeline.recorded_at.unwrap()>events[0].timestamp+5000.0);
+    }
+    #[test]
+    fn an_episode_finishing_in_the_same_second_does_not_stay_started() {
+        let mut start=make_event("vivian","vivian",EventVisibility::Private("vivian".into()),10.0);
+        start.id="z-start".into();start.timeline.episode_id=Some("episode".into());
+        let mut end=start.clone();end.id="a-end".into();end.timeline.ended_at=Some(10.0);
+        let events=collapse_episodes(vec![end,start]);assert_eq!(events.len(),1);
+        assert_eq!(events[0].id,"a-end");
+    }
+    #[test]
+    fn public_routine_traffic_cannot_starve_private_meaningful_recall() {
+        let now=chrono::Utc::now().timestamp() as f64;
+        let mut inner=LedgerInner::default();
+        inner.public_events=(0..80).map(|i|make_typed_event("system","all","presence_log",now-i as f64)).collect();
+        let mut learning=make_typed_event("vivian","vivian","knowledge_acquired",now-86400.0);
+        learning.visibility=EventVisibility::Private("vivian".into());
+        let id=learning.id.clone();inner.character_events.insert("vivian".into(),vec![learning]);
+        let ledger=make_ledger(inner);
+        assert_eq!(ledger.recent_events_visible_to("vivian",1)[0].id,id);
+        assert!(!ledger.recent_events_visible_to("nana",100).iter().any(|e|e.id==id));
+    }
+    #[test]
+    fn legacy_events_without_timeline_metadata_remain_readable() {
+        let event=make_event("user","vivian",EventVisibility::Participants,10.0);
+        let mut value=serde_json::to_value(&event).unwrap();value.as_object_mut().unwrap().remove("timeline");
+        let restored:UnifiedEvent=serde_json::from_value(value).unwrap();
+        assert_eq!(restored.timestamp,10.0);assert!(restored.timeline.recorded_at.is_none());
+    }
+
 }

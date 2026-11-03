@@ -30,6 +30,14 @@ impl SelfProfileStore {
         next.observe(kind, name, reason, evidence) && self.commit(&mut guard, next)
     }
     pub fn render(&self, now: f64) -> String { self.inner.read().render(now) }
+    pub fn learning_interests(&self, now: f64) -> Vec<(String, String, bool)> {
+        let profile = self.inner.read();
+        let mut interests: Vec<_> = profile.entries.iter().filter(|e|
+            e.kind == SelfAspect::Interest && e.strength(now) >= 0.05).collect();
+        interests.sort_by(|a,b| b.strength(now).total_cmp(&a.strength(now))
+            .then_with(|| b.last_seen().total_cmp(&a.last_seen())));
+        interests.into_iter().take(6).map(|e| (e.name.clone(), e.reason.clone(), e.established())).collect()
+    }
     pub fn flush_for_backup(&self) -> Result<(), String> {
         if self.path.as_os_str().is_empty() {
             return Err("私人画像处于内存模式，无法生成完整备份".into());
@@ -72,6 +80,7 @@ mod tests {
             quote:"相机可以记录星空中的细节".into(), observed_at:86400.0,
         }));
         let reloaded = SelfProfileStore::new(path);
+        assert_eq!(reloaded.learning_interests(86400.0), vec![("星空摄影".into(), "读后产生好奇".into(), false)]);
         reloaded.flush_for_backup().unwrap();
         assert!(reloaded.render(86400.0).contains("星空摄影"));
         assert!(!reloaded.reserve_web_reflection(86460.0));

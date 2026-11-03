@@ -95,9 +95,11 @@ pub mod memory {
     pub mod manager {
         use super::types::{MemoryItem,Granularity};
         #[derive(Default)] pub struct MemoryManager { pub items:parking_lot::RwLock<Vec<MemoryItem>>, pub full_reads:std::sync::atomic::AtomicUsize,
-            pub summary_reads:std::sync::atomic::AtomicUsize, pub index_checks:std::sync::atomic::AtomicUsize }
+            pub summary_reads:std::sync::atomic::AtomicUsize, pub index_checks:std::sync::atomic::AtomicUsize,
+            pub association_checks:std::sync::atomic::AtomicUsize }
         impl MemoryManager {
             pub fn char_id(&self)->&str{"vivian"}
+            pub async fn organize_memory_associations(&self)->crate::error::VivianResult<()>{self.association_checks.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Ok(())}
             pub fn reconcile_conversation_projection(&self,_:&[super::conversations::ConversationRecord])->crate::error::VivianResult<()>{Ok(())}
             pub fn check_index_drift_and_rebuild(&self)->Option<usize>{self.index_checks.fetch_add(1,std::sync::atomic::Ordering::Relaxed);None}
             pub async fn get_all_memories(&self)->crate::error::VivianResult<Vec<MemoryItem>>{self.full_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Ok(self.items.read().clone())}

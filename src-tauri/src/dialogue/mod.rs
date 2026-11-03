@@ -270,6 +270,8 @@ impl DialogueManager {
         // 对话消息天然是 Event，不仅限于带 metadata 的版本。
         // 根据 role 映射为 sender/receiver，让双角色都能感知到对话发生。
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        let occurred_at = msg_with_channel.timestamp.as_ref().map(|at|
+            at.timestamp() as f64 + at.timestamp_subsec_nanos() as f64 / 1_000_000_000.0).unwrap_or(now);
         let (sender, receiver) = match msg_with_channel.role.as_str() {
             "user" => ("user".to_string(), self.char_id.clone()),
             "assistant" => (self.char_id.clone(), "user".to_string()),
@@ -282,8 +284,9 @@ impl DialogueManager {
         };
         crate::memory::unified_event_ledger::register_event(
             crate::memory::unified_event_ledger::UnifiedEvent {
+            timeline: crate::memory::event_time::EventTimeline {recorded_at:Some(now.max(occurred_at)),..Default::default()},
                 id: format!("evt-{}-{}", now as u64, rand::random::<u32>()),
-                timestamp: now,
+                timestamp: occurred_at,
                 sender,
                 receiver,
                 event_type: event_type.to_string(),
@@ -374,11 +377,13 @@ impl DialogueManager {
         // 对话消息在写入对话管理器时即成为"事件"，不依赖 MemoryManager 写入。
         // 仅当 metadata 包含 speaker/listener/perspective 时注册。
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+        let occurred_at = msg_with_channel.timestamp.as_ref().map(|at|
+            at.timestamp() as f64 + at.timestamp_subsec_nanos() as f64 / 1_000_000_000.0).unwrap_or(now);
         crate::memory::unified_event_ledger::register_event_from_dialogue(
             &self.char_id,
             &msg_with_channel.content,
             &metadata,
-            now,
+            occurred_at,
         );
     }
 

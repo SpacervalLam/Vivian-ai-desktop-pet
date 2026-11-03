@@ -1384,12 +1384,14 @@ type ActivityProcessItem =
 const ToolActivity: React.FC<{
   msgs: CodingMessage[];
   settled: boolean;
+  completed: boolean;
   sessionRunning: boolean;
   cwd: string;
-}> = ({ msgs, settled, sessionRunning, cwd }) => {
+}> = ({ msgs, settled, completed, sessionRunning, cwd }) => {
   const { t } = useTranslation();
-  // 展开状态只由用户操作决定，失败和结束都不改变它。
+  // Finish once into a drawer; users can reopen it without subsequent renders closing it.
   const [expanded, setExpanded] = useState(false);
+  useLayoutEffect(() => { if (completed) setExpanded(false); }, [completed]);
 
   // 组统计：总耗时 / 未返回步骤；类别计数交给 workActivitySummary，避免重复计算。
   const stats = useMemo(() => {
@@ -1469,8 +1471,8 @@ const ToolActivity: React.FC<{
 
   const renderProcessMessage = (msg: CodingMessage, i: number): React.ReactNode => {
     if (msg.role === 'thinking') return <ThinkingNote content={msg.content} />;
-    if (msg.role === 'commentary') {
-      return <div className="codex-msg-assistant">
+    if (msg.role === 'commentary' || msg.role === 'notice') {
+      return <div className="codex-msg-assistant" role={msg.role === 'notice' ? 'status' : undefined}>
         <MarkdownText text={msg.content} keyPrefix={`process-${i}`} />
       </div>;
     }
@@ -2495,25 +2497,10 @@ const WorkspaceFileTree: React.FC<{
 const PermissionDropdown: React.FC<{
   value: string;
   onChange: (permission: string) => void;
-  sessionId: string | null;
-  workspace?: string;
-  workspaces: ExtraWorkspace[];
-  onAddWorkspace: (readOnly: boolean) => void;
-  onWorkspaceChange: (path: string, readOnly?: boolean) => void;
-}> = ({ value, onChange, sessionId, workspace, workspaces, onAddWorkspace, onWorkspaceChange }) => {
+}> = ({ value, onChange }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
-  const [capabilities, setCapabilities] = useState<{ network: string; backend: string } | null>(null);
-  useEffect(() => {
-    if (!open || !sessionId) return;
-    let cancelled = false;
-    setCapabilities(null);
-    void invoke<{ network: string; backend: string }>('coding_permission_status', { sessionId }).then(result => {
-      if (!cancelled) setCapabilities(result);
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [open, sessionId, value]);
   const currentPerm = PERMISSIONS.find((p) => p.key === value) || PERMISSIONS[1];
   const permKey = (key: string): string => {
     const map: Record<string, string> = { read_only: 'code_perm_read_only', workspace_write: 'code_perm_workspace', full_access: 'code_perm_full' };
@@ -2536,7 +2523,7 @@ const PermissionDropdown: React.FC<{
         <ChevronDown size={11} style={{ color: 'var(--codex-ink-faint)', flexShrink: 0 }} />
       </button>
       {open && (
-        <div className="codex-dropdown-menu" style={{ maxWidth: 'min(520px, calc(100vw - 24px))', maxHeight: '70vh', overflowY: 'auto' }}>
+        <div className="codex-dropdown-menu">
           {PERMISSIONS.map((perm) => (
             <button
               key={perm.key}
@@ -2546,28 +2533,9 @@ const PermissionDropdown: React.FC<{
             >
               <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)' }}>{perm.icon}</span>
               <span style={{ flex: 1 }}>{t(`mind_inspector.${permKey(perm.key)}`, { defaultValue: perm.label })}</span>
-              <span className="codex-dropdown-hint">{t(`mind_inspector.${permKey(perm.key)}_hint`, { defaultValue: perm.hint })}</span>
             </button>
           ))}
-          <div style={{ padding: '10px 12px', borderTop: '1px solid var(--codex-line)', fontSize: 12, lineHeight: 1.6 }}>
-            <div>{t('mind_inspector.code_perm_live')}</div>
-            <div style={{ color: 'var(--codex-ink-faint)' }}>{t(`mind_inspector.code_perm_${value === 'full_access' ? 'native' : value === 'read_only' ? 'inspect' : 'scope'}`)}</div>
-            {sessionId && <>
-              {workspace && <div title={workspace} style={{ overflowWrap: 'anywhere', marginTop: 8 }}>{workspace}</div>}
-              {workspaces.map(item => <div key={item.path} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 6 }}>
-                <span title={item.path} style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>{item.path}</span>
-                <button type="button" onClick={() => onWorkspaceChange(item.path, !item.read_only)}>{t(`mind_inspector.code_perm_${item.read_only ? 'input' : 'output'}`)}</button>
-                <button type="button" aria-label={t('mind_inspector.code_perm_remove')} onClick={() => onWorkspaceChange(item.path)}><X size={12} /></button>
-              </div>)}
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <button type="button" onClick={() => onAddWorkspace(true)}>{t('mind_inspector.code_perm_add_input')}</button>
-                <button type="button" onClick={() => onAddWorkspace(false)}>{t('mind_inspector.code_perm_add_output')}</button>
-              </div>
-            </>}
-            {value !== 'full_access' && <div style={{ color: 'var(--codex-ink-faint)', marginTop: 8 }}>{t('mind_inspector.code_perm_read_boundary')}</div>}
-            {capabilities?.network === 'cooperative_proxy' && <div style={{ color: 'var(--codex-ink-faint)' }}>{t('mind_inspector.code_perm_proxy_boundary')}</div>}
-            {capabilities?.backend === 'unavailable' && <div>{t('mind_inspector.code_perm_backend_unavailable')}</div>}
-          </div>
+
         </div>
       )}
     </div>
@@ -5703,25 +5671,6 @@ const CodeAgentPage: React.FC = () => {
     }).catch(error => { if (sequence === permissionChangeSequence.current && activeIdRef.current === activeId) notifyError(String(error)); });
   }, [activeId, notifyError]);
 
-  const changeWorkspaceScope = useCallback((command: string, args: Record<string, unknown>) => {
-    if (!activeId) return;
-    const sessionId = activeId;
-    const change = permissionChangeQueue.current.catch(() => {}).then(() => invoke<ExtraWorkspace[]>(command, { sessionId, ...args }));
-    permissionChangeQueue.current = change;
-    void change.then(extra_workspaces => {
-      setSessions(prev => prev.map(session => session.session_id === sessionId ? { ...session, extra_workspaces } : session));
-    }).catch(error => notifyError(String(error)));
-  }, [activeId, notifyError]);
-  const addWorkspaceScope = useCallback((readOnly: boolean) => {
-    const sessionId = activeId;
-    void pickDirectory().then(path => {
-      if (path && sessionId === activeIdRef.current) changeWorkspaceScope('coding_add_workspace', { path, readOnly });
-    });
-  }, [activeId, pickDirectory, changeWorkspaceScope]);
-  const updateWorkspaceScope = useCallback((path: string, readOnly?: boolean) => {
-    changeWorkspaceScope(readOnly === undefined ? 'coding_remove_workspace' : 'coding_set_workspace_read_only', { path, ...(readOnly === undefined ? {} : { readOnly }) });
-  }, [changeWorkspaceScope]);
-
   const handleModelChange = useCallback((modelId: string) => {
     setModelName(modelId);
     setModelHighlight(false);
@@ -5850,7 +5799,7 @@ const CodeAgentPage: React.FC = () => {
             <Plus size={15} />
           </button>
           {activeSession && (
-            <PermissionDropdown value={permission} onChange={handlePermissionChange} sessionId={activeId} workspace={activeSession?.working_directory} workspaces={activeSession?.extra_workspaces ?? []} onAddWorkspace={addWorkspaceScope} onWorkspaceChange={updateWorkspaceScope} />
+            <PermissionDropdown value={permission} onChange={handlePermissionChange} />
           )}
         </div>
         <div className="codex-composer-right">
@@ -6214,6 +6163,7 @@ const CodeAgentPage: React.FC = () => {
                               key={`grp-${it.index}`}
                               msgs={it.msgs}
                               settled={it.settled}
+                              completed={it.completed}
                               sessionRunning={running && !summarizing}
                               cwd={activeSession?.working_directory ?? ''}
                             />

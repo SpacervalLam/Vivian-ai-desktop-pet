@@ -5048,7 +5048,7 @@ impl ProactiveOrchestrator {
                 // 连续未回应轮次：用于要求模型保持安静且不做情绪化解读
                 let ignored_rounds = self.state.read().ignored_count;
                 // Select the medium before writing: an alive topic always retains its channel.
-                llm_ctx.channel = if recipient.0 == "user" && ctx.character_presence != crate::presence::PresenceState::Online {
+                llm_ctx.channel = if recipient.0 == "user" && ctx.character_presence.message_channel("direct") == "wechat" {
                     "wechat".into()
                 } else if recipient.0 != "user" {
                     "direct".into()

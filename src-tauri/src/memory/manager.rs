@@ -133,6 +133,9 @@ struct RecallSnapshot {
     revision: u64,
     arms: super::retriever::RecallArms,
     entry_store: Arc<super::entry_store::MemoryEntryStore>,
+    owner: String,
+    filter: MemoryRetrievalFilter,
+    resident: Arc<RwLock<MemoryManagerInner>>,
 }
 
 #[cfg(test)]
@@ -148,8 +151,33 @@ impl RecallSnapshot {
             query_embedding: QueryEmbedding::Prepared(query_embedding),
             prepared_arms: Some(&self.arms),
         };
-        super::recall_policy::filter_for_query(
-            create_strategy(&strategy).search(&context, query, limit), query)
+        let direct = super::recall_policy::filter_for_query(
+            create_strategy(&strategy).search(&context, query, limit), query);
+        let mut results = if matches!(strategy, RetrievalStrategy::Auto | RetrievalStrategy::Hybrid | RetrievalStrategy::Graph) {
+            match self.entry_store.expand_associations(&direct, query, &self.owner, &self.filter, limit) {
+                Ok(items) => items,
+                Err(error) => { tracing::warn!("关联召回失败，保留直接命中: {error}"); direct },
+            }
+        } else { direct };
+        // Graph targets are loaded after the initial snapshot. Apply the same
+        // resident visibility/correction guard as ordinary indexed candidates,
+        // including an edit that has not successfully reached disk yet.
+        let inner = self.resident.read();
+        let visible = |id: &str| inner.id_index.get(id).and_then(|&i|inner.data.entries.get(i))
+            .is_none_or(|current|super::kinds::recallable(current)
+                && super::provenance::visible_to(&current.metadata,&self.owner));
+        results.retain(|item| visible(&item.id) && inner.id_index.get(&item.id)
+            .and_then(|&i|inner.data.entries.get(i))
+            .is_none_or(|current|current.content == item.content && self.filter.matches(current)));
+        let direct_ids: std::collections::HashSet<_> = results.iter()
+            .filter(|item|item.metadata["recall_association"].is_null()).map(|item|item.id.clone()).collect();
+        results.retain(|item| {
+            let path = &item.metadata["recall_association"];
+            path.is_null() || (path["seed_memory_id"].as_str().is_some_and(|id|direct_ids.contains(id))
+                && path["evidence"].as_array().is_some_and(|links|links.iter().all(|link|
+                    link["kind"] != "memory" || link["anchor"].as_str().is_some_and(&visible))))
+        });
+        results
     }
 }
 
@@ -993,6 +1021,20 @@ impl MemoryManager {
         Ok(summaries)
     }
 
+    /// Migrate old memory links without copying the full corpus or blocking UI tasks.
+    /// New/changed rows are already maintained in the canonical write transaction.
+    pub async fn organize_memory_associations(&self) -> VivianResult<()> {
+        let store = self.inner.read().entry_store.clone();
+        let report = tokio::task::spawn_blocking(move || store.organize_associations(128)).await
+            .map_err(|error| VivianError::Memory(format!("记忆关联整理任务失败: {error}")))??;
+        if report.indexed > 0 {
+            self.search_cache.lock().clear();
+            tracing::debug!(character_id=%self.char_id, indexed=report.indexed, pending=report.pending,
+                "后台记忆关联索引已更新");
+        }
+        Ok(())
+    }
+
     /// 按 ID 列表批量返回记忆（保留传入顺序，去重）。
     ///
     /// 供图谱概念路等"已知 ID 取内容"的场景使用，避免构造查询字符串再检索。
@@ -1480,7 +1522,8 @@ impl MemoryManager {
         }
 
         if item.memory_type == "knowledge" && item.metadata["source"] != "system_seed"
-            && item.metadata["fictional_backstory"] != true {
+            && item.metadata["fictional_backstory"] != true
+            && !item.tags.iter().any(|tag|tag=="private_learning") {
             let mut activity_tags = vec!["knowledge_acquired".into(),item.id.clone()];
             if item.metadata["source"] == "web" && item.metadata["private"] != true {
                 activity_tags.push("shareable_activity".into());
@@ -2628,7 +2671,8 @@ impl MemoryManager {
         vector.retain(|(id,_)|valid.contains(id.as_str()));
         tracing::debug!(candidates=entries.len(),elapsed_ms=start.elapsed().as_millis(),"记忆索引候选已按需读取");
         Ok(RecallSnapshot {entries,vector_store:vectors,embedding,weights,revision,
-            arms:super::retriever::RecallArms {lexical,vector},entry_store:store})
+            arms:super::retriever::RecallArms {lexical,vector},entry_store:store,
+            owner:self.char_id.clone(),filter:filter.clone(),resident:self.inner.clone()})
     }
 
     fn search_cache_key(&self, query: &str, strategy: RetrievalStrategy, limit: usize) -> String {

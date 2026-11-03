@@ -314,8 +314,7 @@ impl GeminiProvider {
 
     async fn send_request(&self, body: serde_json::Value) -> VivianResult<serde_json::Value> {
         let client = self.base.get_client();
-        let response = client
-            .post(&self.generate_endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.generate_endpoint()))
             .header("x-goog-api-key", &self.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
@@ -565,8 +564,7 @@ impl BaseProvider for GeminiProvider {
             self.build_body_with_search(contents, self.base.is_enable_search(), &json_schema);
 
         let client = self.base.get_client();
-        let response = client
-            .post(&self.stream_endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.stream_endpoint()))
             .header("x-goog-api-key", &self.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
@@ -757,8 +755,7 @@ impl BaseProvider for GeminiProvider {
         let endpoint = self.stream_endpoint();
 
         let client = self.base.get_client();
-        let response = client
-            .post(&endpoint)
+        let response = crate::providers::transport::budgeted_request(client.post(&endpoint))
             .header("x-goog-api-key", &self.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()

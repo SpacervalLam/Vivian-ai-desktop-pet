@@ -1,15 +1,15 @@
 //! 在场状态系统（Presence System）
 //!
-//! 四态状态机管理桌宠的"在场/不在场"语义：
+//! 旧四态保留为手动声明与显示兼容；实际注意力和自主活动由环境与任务统筹：
 //! - `Online`：在线，可面对面对话（direct）+ 能听见他人对话 + 能微信
-//! - `Busy`：忙碌，在场但不主动说话，用户可发起但不一定立即回
+//! - `Busy`：忙碌声明，不强制禁止正常对话或常驻思考
 //! - `Rest`：休息，不可面对面但能收微信（类似午睡轻度可唤醒）
 //! - `Offline`：离线，窗口隐藏但仍保留主动上线能力
-//!   （离线满一定时长且孤独感累积达标时，主动回归 Online ——「想念用户」）
+//!   实际隐藏/安静由明确控制管理，不由孤独感或被忽略次数强制决定。
 //!
 //! 触发方式：
 //! - LLM 通过 `set_presence_state` 工具主动调用
-//! - 程序端自主触发（心情驱动 / 被忽略次数 / 两角色协调 / 想念用户）
+//! - 环境智能体按真实事件与活动安排自主机会，不用四态标签制造义务。
 //!
 //! 持久化：`characters/<char_id>/presence/state.json`（按角色隔离）
 //! 记忆写入：状态切换时写入 ShortTerm 记忆（行为日志），含 from→to 与原因
@@ -90,9 +90,9 @@ impl PresenceState {
         matches!(self, PresenceState::Online | PresenceState::Busy | PresenceState::Rest)
     }
 
-    /// 非在线状态的面对面消息统一通过私聊投递。
+    /// Busy 不改变消息渠道；Rest/Offline 仅保留旧版私聊路由兼容。
     pub fn message_channel<'a>(&self, channel: &'a str) -> &'a str {
-        if channel == "direct" && *self != Self::Online { "wechat" } else { channel }
+        if channel == "direct" && matches!(self, Self::Rest | Self::Offline) { "wechat" } else { channel }
     }
 
     /// 是否允许微信（wechat 渠道）
@@ -404,6 +404,20 @@ impl PresenceManager {
     /// 角色 ID
     pub fn char_id(&self) -> &str {
         &self.char_id
+    }
+
+    /// Real background work may start without changing a legacy mode or hiding
+    /// the character. Environment admission and the task's own budget still apply.
+    pub fn start_private_learning(&self) -> bool {
+        let spawner = {
+            let _gate = self.transition_gate.lock();
+            if self.is_task_in_progress() { return false; }
+            let Some(spawner) = self.busy_task_spawner.read().clone() else { return false; };
+            self.begin_task_inner();
+            spawner
+        };
+        spawner();
+        true
     }
 
     pub fn recent_history(&self, n: usize) -> Vec<PresenceEvent> {
@@ -726,49 +740,10 @@ impl PresenceManager {
             return Some((PresenceState::Online, PresenceChangeReason::TaskCompleted));
         }
 
-        // 1. 心情驱动
-        // 疲劳度高 → Rest
-        if fatigue >= config.fatigue_threshold && current == PresenceState::Online {
-            return Some((PresenceState::Rest, PresenceChangeReason::MoodDriven));
-        }
-        // 孤独感持续高 + 被忽略 → Offline
-        if loneliness >= config.loneliness_threshold
-            && ignored_count >= config.ignored_threshold
-            && current == PresenceState::Online
-        {
-            return Some((PresenceState::Offline, PresenceChangeReason::MoodDriven));
-        }
-
-        // 3. 被忽略次数：连续被忽略 → Offline
-        if ignored_count >= config.ignored_threshold && current == PresenceState::Online {
-            return Some((PresenceState::Offline, PresenceChangeReason::Ignored));
-        }
-
-        // 4. 在线空闲：用户长时间未互动 → Busy（去做知识采集）
-        //    优先于协调 Rest：用户不在时主动找事做比单纯休息更有意义，
-        //    且 both_online_duration 不随用户互动重置，若排在前面会永远抢先。
-        if user_idle_seconds >= config.online_idle_to_busy_threshold
-            && current == PresenceState::Online
-        {
-            return Some((PresenceState::Busy, PresenceChangeReason::UserLeft));
-        }
-
-        // 5. 两角色协调：都在线超过阈值 → Rest
-        if other_in_presence
-            && both_online_duration >= config.coordination_threshold
-            && current == PresenceState::Online
-        {
-            return Some((PresenceState::Rest, PresenceChangeReason::Coordination));
-        }
-
-        // 6. 想念用户：离线满一定时长且孤独感累积达标 → 主动回归 Online
-        //    保留智能体在 Offline 状态下的「主动上线」能力，避免完全失联。
-        if current == PresenceState::Offline
-            && elapsed >= config.offline_min_duration_before_recover
-            && loneliness >= config.offline_recover_loneliness_threshold
-        {
-            return Some((PresenceState::Online, PresenceChangeReason::MissedUser));
-        }
+        // Fatigue, loneliness, silence and co-presence are observations for the
+        // environment agent, not automatic commands to leave, study or sleep.
+        let _ = (fatigue, loneliness, ignored_count, other_in_presence,
+            both_online_duration, user_idle_seconds);
 
         // 7. 休息够了：Rest 持续满阈值后自动醒来
         //    给记忆沉淀后台任务留足时间（任务进行中 transition 会被延迟，不会打断）。
@@ -866,13 +841,31 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
+mod soft_activity_tests {
+    use super::*;
+    #[test] fn private_learning_does_not_require_a_busy_mode_or_hide_the_character() {
+        let manager=PresenceManager::new_with_temp_dir("soft-learning").unwrap();
+        assert!(!manager.start_private_learning());
+        let count=Arc::new(std::sync::atomic::AtomicUsize::new(0));let observed=count.clone();
+        manager.set_busy_task_spawner(Arc::new(move||{observed.fetch_add(1,std::sync::atomic::Ordering::SeqCst);}));
+        assert!(manager.start_private_learning());assert_eq!(manager.current(),PresenceState::Online);
+        assert!(!manager.start_private_learning());assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst),1);
+        assert!(manager.finish_task(&PresenceConfig::default()).is_none());assert_eq!(manager.current(),PresenceState::Online);
+    }
+    #[test] fn loneliness_silence_fatigue_and_co_presence_do_not_command_mode_changes() {
+        let manager=PresenceManager::new_with_temp_dir("soft-mode").unwrap();manager.state.write().since-=10000.0;
+        assert!(manager.check_auto_triggers(&PresenceConfig::default(),1.0,1.0,100,true,10000.0,10000.0).is_none());
+    }
+}
+
+#[cfg(test)]
 mod message_channel_tests {
     use super::PresenceState;
 
     #[test]
     fn non_online_direct_messages_use_wechat() {
         for state in [PresenceState::Online, PresenceState::Busy, PresenceState::Rest, PresenceState::Offline] {
-            assert_eq!(state.message_channel("direct"), if state == PresenceState::Online { "direct" } else { "wechat" });
+            assert_eq!(state.message_channel("direct"), if matches!(state,PresenceState::Online|PresenceState::Busy) { "direct" } else { "wechat" });
             for channel in ["wechat", "wechat_group", "broadcast", "cross_character"] {
                 assert_eq!(state.message_channel(channel), channel);
             }

@@ -29,7 +29,7 @@ assert.equal(reconcileToolMessages([intent, { ...outcome, tool_name: null }])[0]
 assert.deepEqual(reconcileToolMessages([intent, { ...intent, tool_call_id: 'b' }, outcome, { ...outcome, tool_call_id: 'b' }]).map(row => row.tool_call_id), ['a', 'b'], 'parallel completion preserves invocation order');
 console.log(`Workbench: ${cases} width/panel combinations and tool reconciliation checks passed.`);
 
-// Public progress remains visible, including after reload and final delivery.
+// Live progress stays visible; completed work becomes one drawer before its final reply.
 const thought = { role: 'thinking', content: '检查工作目录与错误原因' };
 const commentary = { role: 'commentary', content: '已定位配置问题，接下来验证修复。' };
 const user = { role: 'user', content: '修复项目' };
@@ -44,11 +44,11 @@ assert.equal(groupWorkMessages([intent, commentary, final], true)[0].settled, tr
 for (const running of [true, false]) {
   const history = [user, thought, intent, commentary, outcome, { role: 'notice', content: '历史消息已达 63 条，已自动把 23 条早期历史压缩为摘要。' }, final];
   const restored = groupWorkMessages(JSON.parse(JSON.stringify(history)), running);
-  assert.equal(restored.length, 4);
-  assert.deepEqual(restored[1].msgs, [thought, { ...intent, ...outcome }]);
+  assert.equal(restored.length, 3);
+  assert.deepEqual(restored[1].msgs, [thought, { ...intent, ...outcome }, commentary]);
   assert.equal(restored[1].settled, true);
-  assert.deepEqual(restored[2].msg, commentary);
-  assert.deepEqual(restored[3].msg, final);
+  assert.equal(restored[1].completed, true);
+  assert.deepEqual(restored[2].msg, final);
 }
 assert.equal(groupWorkMessages([intent], false)[0].settled, true, 'stopped pending tools remain stopped');
 const repeated = reconcileToolMessages([user, intent, outcome, user, intent, { ...outcome, content: 'new source' }]);
@@ -72,3 +72,21 @@ assert.equal(stripToolCallAnnotations('发现编码问题。\n\n调用工具：r
 assert.equal(stripToolCallAnnotations('调用工具失败，需要检查权限。'), '调用工具失败，需要检查权限。');
 assert.equal(stripToolCallAnnotations('调用工具：这次需要先检查编码。'), '调用工具：这次需要先检查编码。');
 assert.equal(groupWorkMessages([{ role: 'user', content: '调用工具：write_file' }], false)[0].msg.content, '调用工具：write_file', 'user requests remain verbatim');
+
+const manyPhases=[user,commentary,thought,intent,outcome,{...commentary,content:'第二步'}, {...intent,tool_call_id:'b'}, {...outcome,tool_call_id:'b'},final];
+for(const running of [true,false]) {
+ const items=groupWorkMessages(manyPhases,running);
+ assert.deepEqual(items.map(x=>x.kind),['msg','group','msg']);
+ assert.equal(items[1].msgs.filter(x=>x.role==='commentary').length,2);
+ assert.equal(items[1].completed,true);
+}
+const resumed=groupWorkMessages([...manyPhases,{...user,content:'继续'},commentary,{...intent,tool_call_id:'next'}],true);
+assert.equal(resumed[1].completed,true,'earlier completed drawer stays complete during the next turn');
+assert.equal(resumed.at(-1).completed,false,'new work is not completed by an earlier final reply');
+assert.equal(groupWorkMessages([user,commentary,intent],false)[1].completed,true,'interrupted work also folds without losing commentary');
+console.log('Completed process drawers: phases, history restore, resumed and interrupted turns passed.');
+
+const withNotice=groupWorkMessages([user,commentary,intent,outcome,{role:'notice',content:'连接已恢复'},thought,final],false);
+assert.deepEqual(withNotice.map(x=>x.kind),['msg','group','msg']);
+assert.equal(withNotice[1].msgs.some(x=>x.role==='notice'),true,'host notices remain available inside completed process');
+assert.equal(groupWorkMessages([user,{role:'notice',content:'正在重试'},intent],true)[1].kind,'msg','live notices remain visible');

@@ -217,8 +217,7 @@ impl DoubaoProvider {
     /// HTTP 发送 + 状态码检查
     async fn send_request(&self, body: Value) -> VivianResult<Value> {
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
@@ -395,8 +394,7 @@ impl BaseProvider for DoubaoProvider {
 
         let guard = crate::providers::transport::RequestGuard::begin(&self.base)?;
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()
@@ -606,8 +604,7 @@ impl BaseProvider for DoubaoProvider {
         }
 
         let client = self.base.get_client();
-        let response = client
-            .post(&self.endpoint())
+        let response = crate::providers::transport::budgeted_request(client.post(&self.endpoint()))
             .bearer_auth(&self.base.api_key)
             .json(&self.base.finalize_body(body.clone()))
             .send()

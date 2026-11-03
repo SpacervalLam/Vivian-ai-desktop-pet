@@ -57,6 +57,7 @@ pub mod strategy;
 pub mod takes_fence;
 pub mod time_anchor;
 pub mod unified_event_ledger;
+pub mod event_time;
 pub mod time_stamped;
 pub mod tokenize;
 pub mod topic_merger;

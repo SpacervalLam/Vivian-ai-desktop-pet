@@ -3417,8 +3417,13 @@ const ConfigWindow: React.FC = () => {
               const prefix = `routing_matrix.${task.taskType}`;
               const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
               return (
+                <details className="settings-routing-group" key={task.taskType}>
+                  <summary>
+                    <span>{t(task.labelKey)}</span>
+                    <span className="settings-routing-group-count">1</span>
+                  </summary>
+                  <div className="settings-routing-group-body">
                 <CollapsibleSection
-                  key={task.taskType}
                   title={t(task.labelKey)}
                   subtitle={t(task.helpKey)}
                   defaultOpen={false}
@@ -3426,6 +3431,8 @@ const ConfigWindow: React.FC = () => {
                 >
                   {routeFields(prefix)}
                 </CollapsibleSection>
+                  </div>
+                </details>
               );
             })}
 

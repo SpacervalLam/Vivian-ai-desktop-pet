@@ -73,6 +73,17 @@ pub fn recall_label(meta: &Value) -> &'static str {
 
 pub fn attribution(meta: &Value) -> String {
     let mut parts = Vec::new();
+    if let Some(relation) = field(&meta["recall_association"], "relation") {
+        let label = match relation {
+            "same_event" => "同一事件的其他阶段",
+            "same_episode" => "同一段经历的其他记录",
+            "shared_evidence" => "有共同原文来源的补充背景",
+            "memory_reference" => "被引用记忆或由它延伸的阅读",
+            "related_topics" => "多个主题线索交会的背景",
+            _ => "关联背景",
+        };
+        parts.push(format!("{label}；关联不代表因果、认同或最新事实"));
+    }
     if field(meta, "speaker").is_some() || field(meta, "listener").is_some() {
         parts.push(format!(
             "{} → {}",

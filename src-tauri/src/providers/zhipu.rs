@@ -161,7 +161,7 @@ impl ZhipuProvider {
         let client = self.base.get_client();
         let started = Instant::now();
         let req = self
-            .apply_auth(client.post(&self.endpoint()))
+            .apply_auth(crate::providers::transport::budgeted_request(client.post(&self.endpoint())))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
         let response = match req.send().await {
@@ -363,7 +363,7 @@ impl BaseProvider for ZhipuProvider {
 
         let client = self.base.get_client();
         let req = self
-            .apply_auth(client.post(&self.endpoint()))
+            .apply_auth(crate::providers::transport::budgeted_request(client.post(&self.endpoint())))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
         let response = req.send().await;
@@ -575,7 +575,7 @@ impl BaseProvider for ZhipuProvider {
 
         let client = self.base.get_client();
         let req = self
-            .apply_auth(client.post(&self.endpoint()))
+            .apply_auth(crate::providers::transport::budgeted_request(client.post(&self.endpoint())))
             .header("Content-Type", "application/json")
             .json(&self.base.finalize_body(body.clone()));
         let response = req.send().await;

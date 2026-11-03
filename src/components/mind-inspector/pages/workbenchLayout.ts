@@ -68,32 +68,39 @@ export function reconcileToolMessages<T extends WorkMessage>(messages: T[]): T[]
 
 export type WorkChatRenderItem<T> =
   | { kind: 'msg'; msg: T; index: number }
-  | { kind: 'group'; msgs: T[]; index: number; settled: boolean };
+  | { kind: 'group'; msgs: T[]; index: number; settled: boolean; completed: boolean };
 
 function isProcessMessage(msg: WorkMessage): boolean {
   return msg.role === 'tool_use' || msg.role === 'tool_result' || msg.role === 'thinking';
 }
 
-/** Public progress stays visible; only tool details and reasoning collapse. */
+/** Keep live commentary visible; collect it with tool details once a turn ends. */
 export function groupWorkMessages<T extends WorkMessage>(messages: T[], running: boolean): WorkChatRenderItem<T>[] {
   const rows = reconcileRows(messages).filter(({ message }) => !(message.role === 'notice'
     && /^(?:历史消息已达|上下文占用已达窗口的).*已自动把.*早期历史压缩为摘要/.test(message.content ?? '')));
   const items: WorkChatRenderItem<T>[] = [];
+  const ended: boolean[] = new Array(rows.length + 1).fill(false);
+  for (let k = rows.length - 1; k >= 0; k--) {
+    const msg = rows[k].message;
+    ended[k] = ended[k + 1] || msg.role === 'assistant'
+      || (msg.role === 'user' && !msg.interjected && !msg.guided);
+  }
   let i = 0;
   while (i < rows.length) {
     const row = rows[i];
-    if (!isProcessMessage(row.message)) {
+    const completed = !running || ended[i + 1];
+    const inProcess = (msg: WorkMessage) => isProcessMessage(msg)
+      || (completed && (msg.role === 'commentary' || msg.role === 'notice'));
+    if (!inProcess(row.message)) {
       items.push({ kind: 'msg', msg: row.message, index: row.index });
       i++;
       continue;
     }
     let j = i;
     const group: T[] = [];
-    while (j < rows.length && isProcessMessage(rows[j].message)) group.push(rows[j++].message);
-    const turnEnded = rows.slice(j).some(({ message }) => message.role === 'assistant'
-      || (message.role === 'user' && !message.interjected && !message.guided));
-    items.push({ kind: 'group', msgs: group, index: row.index,
-      settled: !running || !group.some(message => message.role === 'tool_use') || turnEnded });
+    while (j < rows.length && inProcess(rows[j].message)) group.push(rows[j++].message);
+    items.push({ kind: 'group', msgs: group, index: row.index, completed,
+      settled: completed || !group.some(message => message.role === 'tool_use') });
     i = j;
   }
   return items;

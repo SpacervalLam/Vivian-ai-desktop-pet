@@ -88,7 +88,7 @@ fn user_digest(records: &[InteractionRecord]) -> String {
     out
 }
 
-/// 已生效理解与待验证候选：让模型优先改写而不是重复新增。
+/// 已生效理解与待验证候选：同一假设补证，改写后的假设独立验证。
 fn learned_context(evolution: &PersonaEvolution) -> String {
     let active: Vec<Value> = evolution.entries.iter()
         .filter(|entry| entry.active())
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn parsing_accepts_fences_and_rejects_incomplete_reviews() {
-        let fenced = "```json\n{\"proposals\":[{\"scope\":\"comfort\",\"kind\":\"tone\",\"understanding\":\"先听完再说\",\"source_quote\":\"不想讲经过了\"}]}\n```";
+        let fenced = "```json\n{\"proposals\":[{\"scope\":\"comfort\",\"kind\":\"tone\",\"understanding\":\"先听完再说\",\"source_quote\":\"不想讲经过了\"}],\"example_updates\":[]}\n```";
         assert_eq!(parse_growth_review(fenced).unwrap().proposals.len(), 1);
 
         let bare = "[{\"scope\":\"daily\",\"kind\":\"tone\",\"understanding\":\"短一点\",\"source_quote\":\"上班去了\"}]";

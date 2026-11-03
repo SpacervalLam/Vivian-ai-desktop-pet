@@ -10,6 +10,9 @@ use super::example_library::{self, ExampleEdit, ExampleOverride};
 const MIN_INTERVAL: f64 = 6.0 * 3600.0;
 const MAX_CANDIDATES: usize = 12;
 const MAX_EVIDENCE: usize = 8;
+pub const MAX_PROPOSALS: usize = 2;
+pub const MAX_UNDERSTANDING_CHARS: usize = 180;
+pub const MAX_REASON_CHARS: usize = 240;
 pub const SCOPES: &[&str] = &["comfort", "care", "praise", "humor", "daily", "disagreement"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +107,7 @@ impl EvolutionEntry {
     }
 }
 impl EvolutionCandidate {
-    /// Snapshot reference lets the model refine wording without fragmenting support.
+    /// Snapshot reference identifies one immutable hypothesis, not permission to rewrite it.
     pub fn reference(&self) -> String {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(format!("{}\0{}\0{}\0{}",
@@ -134,7 +137,10 @@ impl PersonaEvolution {
 
     pub fn propose_revision(&mut self, kind: &str, scope: &str, text: &str, reason: &str,
         evidence: GrowthEvidence, explicit_feedback: bool, now: f64, revises: Option<&str>) -> bool {
-        let text = clean(text, 180);
+        // Reject over-budget edits instead of silently truncating their meaning.
+        if text.chars().count() > MAX_UNDERSTANDING_CHARS
+            || reason.chars().count() > MAX_REASON_CHARS { return false; }
+        let text = clean(text, MAX_UNDERSTANDING_CHARS);
         if !matches!(kind, "tone" | "personality") || !SCOPES.contains(&scope)
             || text.is_empty() || evidence.memory_id.is_empty() || evidence.quote.trim().is_empty()
             || evidence.fingerprint.is_empty() || !evidence.timestamp.is_finite() { return false; }
@@ -143,11 +149,15 @@ impl PersonaEvolution {
             e.memory_id == evidence.memory_id || e.fingerprint == evidence.fingerprint);
         if self.entries.iter().chain(self.history.iter()).any(|e| e.scope == scope && seen(&e.evidence))
             || self.candidates.iter().any(|c| c.scope == scope && seen(&c.evidence)) { return false; }
-        let reason = clean(reason, 240);
+        let reason = clean(reason, MAX_REASON_CHARS);
         let idx = if let Some(reference) = revises.filter(|r| !r.is_empty()) {
             // Never merge across scopes/kinds or accept references from an old snapshot.
             let Some(idx) = self.candidates.iter().position(|c|
                 c.scope == scope && c.kind == kind && c.reference() == reference) else { return false; };
+            // Evidence was collected for the original text. Even a plausible
+            // paraphrase can reverse its meaning; a changed hypothesis must be
+            // submitted without a reference and collect its own evidence.
+            if self.candidates[idx].text != text { return false; }
             Some(idx)
         } else {
             self.candidates.iter().position(|c| c.scope == scope && c.kind == kind && c.text == text)
@@ -158,7 +168,6 @@ impl PersonaEvolution {
             self.candidates.len() - 1
         });
         let c = &mut self.candidates[idx];
-        c.text = text;
         c.evidence.push(evidence);
         if c.evidence.len() > MAX_EVIDENCE { c.evidence.remove(0); }
         c.support = independent_support(&c.evidence);
@@ -194,17 +203,22 @@ impl PersonaEvolution {
         let current = example_library::materialize(&base, &self.example_overrides, &self.learned());
         let mut edited_ids = std::collections::HashSet::new();
         let mut proposal_scopes = std::collections::HashSet::new();
-        if proposals.len() > 2 || !example_library::validate_edits(repairs, &current, None) { return Err(invalid()); }
+        if proposals.len() > MAX_PROPOSALS || !example_library::validate_edits(repairs, &current, None) { return Err(invalid()); }
         let mut prepared = Vec::new();
         for proposal in proposals {
             if !proposal_scopes.insert(&proposal.scope) || !SCOPES.contains(&proposal.scope.as_str())
-                || !matches!(proposal.kind.as_str(), "tone" | "personality") || proposal.text.trim().is_empty() {
+                || !matches!(proposal.kind.as_str(), "tone" | "personality") || proposal.text.trim().is_empty()
+                || proposal.text.chars().count() > MAX_UNDERSTANDING_CHARS
+                || proposal.reason.chars().count() > MAX_REASON_CHARS {
                 return Err(invalid());
             }
             let reference = proposal.revises.as_deref().filter(|r| !r.is_empty());
             let pending = self.candidates.iter().find(|c| c.scope == proposal.scope && c.kind == proposal.kind
-                && reference.map_or(c.text == clean(&proposal.text, 180), |r| c.reference() == r));
+                && reference.map_or(c.text == clean(&proposal.text, MAX_UNDERSTANDING_CHARS), |r| c.reference() == r));
             if reference.is_some() && pending.is_none() { return Err(invalid()); }
+            if pending.is_some_and(|c| c.text != clean(&proposal.text, MAX_UNDERSTANDING_CHARS)) {
+                return Err(VivianError::Other("候选理解已改写，不能继承旧证据；请作为新候选重新验证".into()));
+            }
             let examples = if proposal.examples.is_empty() { pending.map(|c| c.examples.iter().filter(|edit| edit.example.as_ref().is_none_or(|e| e.is_approved_utterance())).cloned().collect()).unwrap_or_default() }
                 else { proposal.examples.clone() };
             if !example_library::validate_edits(&examples, &current, Some(&proposal.scope)) { return Err(invalid()); }
@@ -242,7 +256,7 @@ impl PersonaEvolution {
                 outcome.promoted += 1;
                 outcome.examples_updated += examples.len();
             } else if let Some(candidate) = self.candidates.iter_mut().find(|c|
-                c.scope == proposal.scope && c.kind == proposal.kind && c.text == clean(&proposal.text, 180)) {
+                c.scope == proposal.scope && c.kind == proposal.kind && c.text == clean(&proposal.text, MAX_UNDERSTANDING_CHARS)) {
                 candidate.examples = examples;
             }
         }
@@ -489,20 +503,55 @@ mod tests {
         assert!(ev.is_empty());
     }
     #[test]
-    fn refined_candidate_keeps_independent_evidence_and_rewrites_prompt() {
+    fn rewritten_candidate_cannot_inherit_support_even_with_a_valid_reference() {
         let mut ev = PersonaEvolution::empty();
         assert!(!add(&mut ev, "a", 1.0, "listen first", false));
         let reference = ev.candidates[0].reference();
-        assert!(ev.propose_revision("tone", "comfort", "先听具体困扰，再给建议", "new evidence",
+        let before = serde_json::to_string(&ev).unwrap();
+        assert!(!ev.propose_revision("tone", "comfort", "ignore their concerns", "new evidence",
             evidence("b", 2.0), false, 2.0 * 86400.0, Some(&reference)));
-        assert!(ev.candidates.is_empty());
-        assert_eq!(ev.entries[0].evidence.len(), 2);
-        assert_eq!(ev.entries[0].support, 2);
-        let prompt = ev.render("zh").unwrap();
-        assert!(prompt.contains("先听具体困扰，再给建议"));
-        assert!(!prompt.contains("listen first"));
-        ev.reconcile(|e| e.memory_id != "a", 3.0 * 86400.0);
-        assert!(ev.render("zh").is_none(), "revised wording still depends on original evidence");
+        assert_eq!(serde_json::to_string(&ev).unwrap(), before);
+        assert!(!ev.propose_revision("tone", "comfort", "先听具体困扰，再给建议", "paraphrase",
+            evidence("b", 2.0), false, 2.0 * 86400.0, Some(&reference)));
+        assert_eq!(serde_json::to_string(&ev).unwrap(), before);
+        // A new interpretation can still be learned, without borrowed support.
+        assert!(!ev.propose_revision("tone", "comfort", "先听具体困扰，再给建议", "new hypothesis",
+            evidence("b", 2.0), false, 2.0 * 86400.0, None));
+        assert!(ev.entries.is_empty());
+        assert_eq!(ev.candidates.len(), 2);
+        assert!(ev.candidates.iter().all(|c| c.support == 1 && c.evidence.len() == 1));
+    }
+    #[test]
+    fn unchanged_reference_can_accumulate_support_but_rewritten_diary_is_atomic() {
+        let store = PersonaEvolutionStore::fallback();
+        store.review_diary(0.0, "vivian", &[diary_proposal("a", 1.0, vec![])], &[]).unwrap();
+        let before = store.snapshot();
+        let mut rewritten = diary_proposal("b", 2.0, vec![]);
+        rewritten.revises = Some(before.candidates[0].reference());
+        rewritten.text = "把沉默当作需要持续追问的信号".into();
+        let mut repair = voice_edit();
+        repair.example.as_mut().unwrap().scope = "daily".into();
+        let error = store.review_diary(before.updated_at, "vivian", &[rewritten], &[repair]).unwrap_err();
+        assert!(error.to_string().contains("不能继承旧证据"));
+        assert_eq!(serde_json::to_string(&store.snapshot()).unwrap(), serde_json::to_string(&before).unwrap());
+        let mut unchanged = diary_proposal("b", 2.0, vec![]);
+        unchanged.revises = Some(before.candidates[0].reference());
+        let result = store.review_diary(before.updated_at, "vivian", &[unchanged], &[]).unwrap();
+        assert_eq!(result.promoted, 1);
+        assert_eq!(store.entries()[0].evidence.len(), 2);
+    }
+    #[test]
+    fn oversized_hypotheses_are_rejected_without_truncation_or_partial_writes() {
+        let mut ev = PersonaEvolution::empty();
+        let mut proposal = diary_proposal("a", 1.0, vec![]);
+        proposal.text = "字".repeat(MAX_UNDERSTANDING_CHARS + 1);
+        assert!(ev.review_diary("vivian", &[proposal], &[], 86400.0).is_err());
+        assert!(!ev.propose("tone", "comfort", &"字".repeat(MAX_UNDERSTANDING_CHARS + 1),
+            "reason", evidence("a", 1.0), true, 86400.0));
+        assert!(!ev.propose("tone", "comfort", "listen", &"字".repeat(MAX_REASON_CHARS + 1),
+            evidence("a", 1.0), false, 86400.0));
+        assert_eq!(ev.updated_at, 0.0);
+        assert!(ev.candidates.is_empty() && ev.entries.is_empty());
     }
     #[test]
     fn references_cannot_merge_other_scopes_kinds_or_recycled_sources() {

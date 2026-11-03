@@ -3,15 +3,9 @@
 //! 多平台源（sources/）：bilibili（匿名 WBI）、bangumi（匿名 v0 API）、v2ex（官方 API）
 //! + browser_signals（登录态被动采集：桥接用户已登录页面同源 fetch 读取观看历史）。
 //!
-//! 不设独立后台循环，四个聚合点：
-//! 1. **Busy 知识采集**（presence/background_tasks.rs）Share 路径接入
-//!    `acquire_delight_candidates`：多平台候选与网页搜索合并竞争，最高分者经
-//!    微信面板分享（复用 knowledge_share 30 分钟冷却）。
-//! 2. **知识采集周期**顺带 `maintenance_pass`：探针 tick + 低库存跨平台补货 +
-//!    登录态历史被动采集（6 小时冷却）。
-//! 3. **内心独白兴趣搜索**与 **LLM 采集主题决定**消费 `interest_search_hints`
-//!    （画像顶层兴趣 + 活跃探针域动态查询词）。
-//! 4. **Bangumi 公开收藏导入**（`bootstrap_from_bangumi`）：公开用户名初始化画像。
+//! 私人学习经 learning_context 按真实记忆、近期话题和自我品味选题；
+//! 推荐画像、兴趣探针与库存维护仍属推荐系统，不自动代表桌宠自己的兴趣。
+//! 私人采集不顺带补货或推送；需要分享时另走正常对话与频道门控。
 //!
 //! 数据按角色隔离：`characters/<char_id>/discovery/`（interest_profile.json /
 //! content_store.json / speculative_state.json），全部原子写。
@@ -21,6 +15,9 @@ pub mod danmaku;
 pub mod duty;
 pub mod engine;
 pub mod learning_policy;
+pub(crate) mod learning_interest;
+pub(crate) mod learning_context;
+pub(crate) mod learning_events;
 pub mod profile;
 pub mod recommend;
 pub mod sources;

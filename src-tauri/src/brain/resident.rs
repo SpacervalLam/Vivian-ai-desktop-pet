@@ -148,7 +148,6 @@ async fn run(
                     is_speaking_leader: false,
                     lay_low: quiet
                         || active_user
-                        || presence != PresenceState::Online
                         || !brain.proactive.is_running()
                         || !brain.config.proactive.enabled,
                     active_window: state

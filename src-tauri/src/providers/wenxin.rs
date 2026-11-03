@@ -200,8 +200,7 @@ impl WenxinProvider {
         let token = self.get_access_token().await?;
         let url = self.chat_endpoint(&token);
         let client = self.base.get_client();
-        let response = client
-            .post(&url)
+        let response = crate::providers::transport::budgeted_request(client.post(&url))
             .header("content-type", "application/json")
             .json(&self.base.finalize_body(body.clone()))
             .send()
@@ -317,8 +316,7 @@ impl BaseProvider for WenxinProvider {
         body["stream"] = json!(true);
 
         let client = self.base.get_client();
-        let response = client
-            .post(&url)
+        let response = crate::providers::transport::budgeted_request(client.post(&url))
             .header("content-type", "application/json")
             .json(&self.base.finalize_body(body.clone()))
             .send()

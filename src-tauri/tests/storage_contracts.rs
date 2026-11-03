@@ -64,11 +64,16 @@ pub mod utils {
         pub fn assign_process(_: isize) -> bool { false }
     }
     pub mod path {
+        std::thread_local! {
+            // Tests of APIs that resolve character paths still use disposable
+            // storage; the real application profile is never reachable.
+            static CHARACTER_ROOT: tempfile::TempDir = tempfile::tempdir().unwrap();
+        }
         pub fn get_user_data_dir() -> std::path::PathBuf {
             panic!("explicit isolated paths required")
         }
-        pub fn get_character_data_dir(_: &str) -> std::path::PathBuf {
-            panic!("explicit isolated paths required")
+        pub fn get_character_data_dir(character: &str) -> std::path::PathBuf {
+            CHARACTER_ROOT.with(|root| root.path().join("characters").join(character))
         }
         pub fn get_companion_data_dir(_: &str) -> std::path::PathBuf {
             panic!("explicit isolated paths required")
