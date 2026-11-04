@@ -161,6 +161,18 @@ impl MemoryRetrievalStep {
     ///
     /// 优先使用 FastSemantic 产出的话题标签（语义分类，最贴近"用户此刻在聊什么"），
     /// 不足时回退到对用户输入做轻量分词。返回的小写词用于在 UserModel 中匹配特征/项目。
+    fn inject_agreement_context(&self, state: &mut PipelineState) {
+        if state.current_channel == "cross_character" { return; }
+        let agreements=self.memory.ongoing_task_memories();
+        if agreements.is_empty() { return; }
+        let query=Self::build_retrieval_query(state);
+        let mut context=crate::memory::ongoing_tasks::turn_context(&agreements,query.effective_text());
+        let ids=context["agreements"].as_array().into_iter().flatten().filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
+        context["linked_todos"]=json!(crate::tools::builtin::todo_tools::agreement_todo_context(self.memory.char_id(),&ids));
+        state.memory_text.push_str(&format!("\n[Standing agreements — scope and status, not a request to discuss every item]\n{context}"));
+        state.metadata["agreement_context"]=context;
+    }
+
     fn collect_query_terms(state: &PipelineState) -> Vec<String> {
         let mut terms: Vec<String> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -249,6 +261,7 @@ impl MemoryRetrievalStep {
 
     pub(super) async fn finish_recall(&self, mut state: PipelineState, base: Option<PrefetchedMemory>) -> VivianResult<Value> {
         let Some(PrefetchedMemory { query: retrieval_query, items, mut budget, ready_at }) = base else {
+            self.inject_agreement_context(&mut state);
             return Ok(state.to_json());
         };
         state.metadata["memory_query_components"] = json!(retrieval_query);
@@ -667,6 +680,7 @@ impl MemoryRetrievalStep {
         state.memory_vars["_memory_search_query"] = json!(retrieval_query);
         state.memory_vars["_memory_search_strategy"] = json!(strategy_name);
         state.memory_vars["_memory_retrieval_results"] = json!(memory_details);
+        self.inject_agreement_context(&mut state);
         state.metadata["memory_count"] = json!(state.memories.len());
         state.metadata["memory_filter_enabled"] = json!(self.memory_filter.is_some());
         state.metadata["memory_filter_session_id"] = json!(session_id);
@@ -1323,5 +1337,27 @@ mod tests {
         state.text = "最终回复".to_string();
         let resp = MemorySavingRunnable::collect_ai_responses(&state);
         assert_eq!(resp, vec!["最终回复".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn agreement_scope_is_available_before_reply_even_when_fact_retrieval_is_skipped() {
+        let owner=format!("agreement-context-{}",uuid::Uuid::new_v4());
+        let memory=Arc::new(MemoryManager::new(&crate::config::AppConfig::default(),&owner).unwrap());
+        let id=memory.create_agreement("番剧清单","维护看番记录","用户聊到新进展时更新").unwrap().unwrap();
+        let step=MemoryRetrievalStep::new(memory.clone());
+        let mut state=PipelineState::default();state.user_input="刚看完一部新作品".into();state.current_channel="direct".into();
+        let state=PipelineState::from_json(step.finish_recall(state,None).await.unwrap());
+        assert!(state.memory_text.contains(&id));assert!(state.memories.is_empty());
+        assert_eq!(state.metadata["agreement_context"]["agreements"][0]["status"],"active");
+        let mut peer=PipelineState::default();peer.current_channel="cross_character".into();
+        let peer=PipelineState::from_json(step.finish_recall(peer,None).await.unwrap());
+        assert!(peer.metadata["agreement_context"].is_null());
+        // Knowledge sharing does not transfer ownership of the standing authorization.
+        memory.patch_memory_metadata(&id,json!({"memory_owner":"someone-else","known_by":[owner]})).unwrap();
+        assert!(memory.ongoing_task_memories().is_empty());
+        let mut shared=PipelineState::default();shared.current_channel="direct".into();
+        let shared=PipelineState::from_json(step.finish_recall(shared,None).await.unwrap());
+        assert!(shared.metadata["agreement_context"].is_null());
+        assert!(!shared.memory_text.contains(&id));
     }
 }

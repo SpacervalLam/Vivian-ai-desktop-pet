@@ -85,6 +85,12 @@ async fn render_recall_results(
                 "record_type": crate::memory::provenance::recall_label(&item.metadata),
                 "attribution": crate::memory::provenance::attribution(&item.metadata),
                 "source_time": item.metadata["source_timestamp"].as_f64().filter(|t| t.is_finite() && *t > 0.0).map(crate::utils::prompt_time::format_prompt_time),
+                "source_quote": item.metadata["source_quote"],
+                "source_message_ids": item.metadata["source_message_ids"],
+                "ongoing_task": crate::memory::ongoing_tasks::task(&item).map(|task| json!({
+                    "title":task.title,"goal":task.goal,"status":task.status,"mode":task.mode,
+                    "trigger":task.trigger,"entries":task.entries,"evidence":task.evidence,
+                })),
             })
         })
         .collect();

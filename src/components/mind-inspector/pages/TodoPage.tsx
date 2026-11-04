@@ -25,6 +25,10 @@ import {
   Trash2,
 } from 'lucide-react';
 import LoadingSpinner from '../../LoadingSpinner';
+import { useNavigation } from '../NavigationContext';
+import { agreementHrefParams, agreementWords, type AgreementRef } from './agreementPresentation';
+import { useAgreements } from './useAgreements';
+import './AgreementsPage.css';
 import './RecordTheme.css';
 
 interface TodoItem {
@@ -37,6 +41,7 @@ interface TodoItem {
   completed_at?: number | null;
   due_date?: string | null;
   reminder_id?: string | null;
+  agreement?: AgreementRef | null;
 }
 
 type Tab = 'pending' | 'completed' | 'all';
@@ -75,9 +80,15 @@ function formatDueDate(dueDate: string | null | undefined): string {
 }
 
 const TodoPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const nav = useNavigation();
+  const { records: agreements } = useAgreements();
+  const agreementId = String(nav?.pageParams.agreementId ?? '');
+  const agreementOwner = String(nav?.pageParams.agreementOwner ?? '');
+  const say = (zh: string, en: string, ja?: string) => agreementWords(i18n.resolvedLanguage ?? i18n.language, zh, en, ja);
   const [items, setItems] = useState<TodoItem[]>([]);
   const [tab, setTab] = useState<Tab>('pending');
+  useEffect(() => { if (agreementId) setTab('all'); }, [agreementId, agreementOwner]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<TodoItem | null>(null);
@@ -88,6 +99,7 @@ const TodoPage: React.FC = () => {
   const [formPriority, setFormPriority] = useState(1);
   const [formDueDate, setFormDueDate] = useState('');
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
 
   const loadTodos = useCallback(async () => {
     try {
@@ -126,22 +138,24 @@ const TodoPage: React.FC = () => {
     };
   }, [loadTodos]);
 
+  const scopedItems = useMemo(() => items.filter(item => !agreementId || item.agreement?.id === agreementId
+    && item.agreement.character_id === agreementOwner), [items, agreementId, agreementOwner]);
   const filtered = useMemo(() => {
-    return items.filter((it) => {
+    return scopedItems.filter((it) => {
       if (tab === 'pending') return !it.completed;
       if (tab === 'completed') return it.completed;
       return true;
     });
-  }, [items, tab]);
+  }, [scopedItems, tab]);
 
   // 各分段的条目数，供筛选行上的计数使用
   const counts = useMemo(
     () => ({
-      pending: items.filter((it) => !it.completed).length,
-      completed: items.filter((it) => it.completed).length,
-      all: items.length,
+      pending: scopedItems.filter((it) => !it.completed).length,
+      completed: scopedItems.filter((it) => it.completed).length,
+      all: scopedItems.length,
     }),
-    [items],
+    [scopedItems],
   );
 
   const openForm = useCallback((item?: TodoItem) => {
@@ -180,15 +194,18 @@ const TodoPage: React.FC = () => {
           description: formDescription,
           priority: formPriority,
           dueDate: formDueDate || null,
+          agreement: agreementId ? { character_id: agreementOwner, id: agreementId, title: '' } : null,
         });
       }
       setShowForm(false);
+      setError('');
     } catch (e) {
+      setError(String(e));
       console.error('保存待办失败:', e);
     } finally {
       setSaving(false);
     }
-  }, [editing, formTitle, formDescription, formPriority, formDueDate, saving]);
+  }, [editing, formTitle, formDescription, formPriority, formDueDate, saving, agreementId, agreementOwner]);
 
   const handleComplete = useCallback(async (id: string) => {
     try {
@@ -218,6 +235,8 @@ const TodoPage: React.FC = () => {
 
   return (
     <div className="record-plan">
+      {agreementId && <div className="agreement-actions"><span>{say('当前只显示关联待办', 'Showing linked todos', '関連ToDoのみ表示')}</span><button type="button" className="rec-btn" onClick={() => nav?.navigateTo('planner', { sub: 'todo' })}>{say('查看全部待办', 'Show all todos', 'すべてのToDo')}</button></div>}
+      {error && <p className="agreement-error" role="alert">{error}</p>}
       <div className="record-plan-bar">
         <div className="rec-seg">
           {TABS.map((tb) => (
@@ -264,6 +283,11 @@ const TodoPage: React.FC = () => {
                 <div className="record-plan-row-main">
                   <span className="record-plan-title">{it.title}</span>
                   {it.description && <span className="record-plan-desc">{it.description}</span>}
+                  {it.agreement && <button type="button" className="agreement-link" onClick={() => nav?.navigateTo('planner', agreementHrefParams(it.agreement!))}>
+                    {say('来自约定：', 'Agreement: ', '関連する約束：')}{agreements.find(view => view.id === it.agreement?.id && view.owner === it.agreement?.character_id)?.task.title ?? it.agreement.title}
+                    {(() => { const parent = agreements.find(view => view.id === it.agreement?.id && view.owner === it.agreement?.character_id);
+                      return parent?.task.status !== 'active' ? ` · ${say('维护已停止或暂停', 'Maintenance inactive', '管理は停止中')}` : ''; })()}
+                  </button>}
                 </div>
                 <div className="record-plan-actions">
                   {!it.completed && (

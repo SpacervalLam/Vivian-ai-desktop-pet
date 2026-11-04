@@ -151,3 +151,22 @@ const titleSearch = render(['recent', 'Nana与Vivian', [], [petRecord('vivian')]
   new Set(), '', '', '', false, '', new Set()]);
 assert.match(titleSearch, /Nana与Vivian的对话/);
 console.log('merged pet history: initiator title, unique turns, summary aliases, evidence links and title search passed');
+
+const taskItem = { ...base, id: 'vivian:ongoing', content: '摘要只保留近期项目', memory_type: 'project',
+  metadata: { record_kind: 'ongoing_task', ongoing_task: {
+    title: '番剧清单', goal: '维护看番记录', trigger: '追番进展', status: 'candidate', mode: 'continuous', updated_at: 2000,
+    entries: [{key: 'frieren', label: '葬送的芙莉莲<script>', state: 'planned', detail: '以后想看',
+      evidence: {source_id: 'user-original', quote: '想看芙莉莲', timestamp: 1000}}],
+  } } };
+for (const language of ['zh-CN','en','ja']) {
+  globalThis.__memoryLanguage = language;
+  const html = render(['facts', '芙莉莲', [taskItem], records, [], new Set(), '', '', '', false, '', new Set()]);
+  assert.match(html, /葬送的/);
+  assert.match(html, /&lt;script&gt;/);
+  assert.equal(html.includes('<script>'), false);
+  assert.match(html, /<details/);
+  assert.match(html, /想看/);
+  assert.match(html, new RegExp(language === 'en' ? 'Possible interest' : language === 'ja' ? '関心の候補' : '候选关注'));
+}
+globalThis.__memoryLanguage = 'zh-CN';
+console.log('ongoing collection: candidate status, full-entry search, localization and safe rendering passed');

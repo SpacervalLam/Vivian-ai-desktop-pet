@@ -24,8 +24,9 @@ pub fn add_todo_item(
     priority: Option<u32>,
     due_date: Option<String>,
     event_time: Option<String>,
+    agreement: Option<crate::memory::ongoing_tasks::AgreementRef>,
 ) -> Result<Value, String> {
-    let item = todo_tools::add_todo_item(
+    let item = todo_tools::add_todo_item_with_agreement(
         &title,
         description.as_deref().unwrap_or(""),
         priority.unwrap_or(1),
@@ -33,7 +34,8 @@ pub fn add_todo_item(
         event_time.as_deref(),
         // UI 窗口手动操作无角色归属，不弹 toast
         "",
-    );
+        agreement,
+    )?;
     Ok(json!({ "item": item }))
 }
 

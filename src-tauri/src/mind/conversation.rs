@@ -180,6 +180,16 @@ impl ConversationOpportunities {
         true
     }
     pub fn events(&self) -> &[ConversationEvent] { &self.events }
+    /// Stable host receipts share the existing opportunity lifecycle. Pausing withdraws them.
+    pub fn replace_committed_event(&mut self, kind: &str, event: Option<ConversationEvent>) -> bool {
+        if self.events.iter().any(|old|old.kind==kind && event.as_ref().is_some_and(|new|new.id==old.id)) { return false; }
+        let previous: Vec<_> = self.events.iter().filter(|old|old.kind==kind).map(|old|old.id.clone()).collect();
+        self.events.retain(|old|old.kind!=kind);
+        if self.pending.as_ref().is_some_and(|pending|previous.contains(&pending.event_id)) { self.pending=None; }
+        let changed = !previous.is_empty() || event.is_some();
+        if let Some(event)=event { self.events.push(event); if self.events.len()>8 { self.events.remove(0); } }
+        changed
+    }
     pub fn record_peer_event(&mut self, event: ConversationEvent) {
         if self.events.iter().any(|previous| previous.id == event.id) { return; }
         self.events.push(event);
@@ -330,5 +340,16 @@ mod tests {
         let mut newer=failed.clone();newer.meaning_key="new_material_point".into();
         state.replace(Some(newer));state.restore_after_failure(failed);
         assert_eq!(state.fresh(1003.0).unwrap().meaning_key,"new_material_point");
+    }
+    #[test] fn agreement_committed_receipts_are_stable_and_pause_withdraws_a_pending_share() {
+        let mut state=ConversationOpportunities::default();
+        let event=ConversationEvent{id:"agreement:a:2".into(),kind:"agreement:a".into(),fact:"已更新番单".into(),at:1000.0};
+        assert!(state.replace_committed_event("agreement:a",Some(event.clone())));
+        assert!(!state.replace_committed_event("agreement:a",Some(event.clone())));
+        let mut proposal=output("share","scene_event","已更新番单");proposal.conversation_event_id=event.id;
+        state.replace(proposal.validated_opportunity(&[],&[],state.events(),true,1001.0));
+        assert!(state.fresh(1002.0).is_some());
+        assert!(state.replace_committed_event("agreement:a",None));
+        assert!(state.fresh(1003.0).is_none());assert!(state.events().is_empty());
     }
 }

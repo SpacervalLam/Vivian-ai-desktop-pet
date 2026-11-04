@@ -146,6 +146,10 @@
 .memory-topic-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .memory-topic-tags span { padding: 2px 7px; border: 1px solid var(--memory-line); border-radius: 6px; color: var(--memory-muted); font-size: 11px; }
 .memory-entry-evidence summary { cursor: pointer; }
+.memory-ongoing-collection ul { margin: 10px 0 0; padding-left: 18px; }
+.memory-ongoing-collection li + li { margin-top: 14px; }
+.memory-ongoing-collection strong { color: var(--memory-ink); }
+.memory-ongoing-collection p { margin: 5px 0 0; }
 .memory-evidence-link { margin-left: 8px; padding: 0; border: 0; background: transparent; color: var(--codex-accent-deep, #596d7d); font-size: inherit; }
 
 .memory-event-list { display: flex; flex-direction: column; gap: 16px; }

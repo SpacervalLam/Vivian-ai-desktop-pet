@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { conversationThreads, unifiedConversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, isVisibleMemoryFact } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
+import { conversationThreads, unifiedConversationThreads, sharedEventTimeline, isMemoryFact, isMemorySummary, isVisibleMemoryFact,
+  ongoingTaskOf, isVisibleOngoingTask, ongoingLabel, ongoingSearchText } from '../src/components/mind-inspector/pages/memoryPresentation.ts';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 const mobile = runInNewContext(readFileSync(new URL('../src-tauri/src/remote/frontend/memory-presentation.js', import.meta.url), 'utf8') + '; MemoryPresentation;');
@@ -9,6 +10,19 @@ assert.equal(isMemorySummary(base), false);
 assert.equal(isMemoryFact({ ...base, metadata: { record_kind: 'fact' } }), true);
 assert.equal(isMemorySummary({ ...base, metadata: { record_kind: 'session_summary' } }), true);
 assert.equal(isMemoryFact({ ...base, metadata: { record_kind: 'subjective' } }), false);
+const ongoing = { ...base, metadata: { record_kind: 'ongoing_task', ongoing_task: {
+  title: '番剧清单', goal: '维护看番记录', trigger: '追番进展', status: 'active', mode: 'continuous', updated_at: 10,
+  entries: [{ key: 'frieren', label: '葬送的芙莉莲', state: 'planned', detail: '以后想看', evidence: { source_id: 'user-1', quote: '想看芙莉莲', timestamp: 9 } }],
+} } };
+assert.equal(isMemoryFact(ongoing), false, 'continuing interests do not become user facts');
+assert.equal(isVisibleOngoingTask(ongoing), true);
+assert.equal(isVisibleOngoingTask({ ...ongoing, consolidated: true }), false);
+assert.equal(ongoingTaskOf({ ...base, metadata: { record_kind: 'ongoing_task' } }), undefined);
+assert.match(ongoingSearchText(ongoing), /葬送的芙莉莲/);
+assert.equal(ongoingLabel('planned'), '计划中');
+assert.equal(ongoingLabel('candidate', 'en'), 'Possible interest');
+assert.equal(mobile.isVisibleOngoingTask(ongoing), true);
+assert.equal(mobile.ongoingSearchText(ongoing), ongoingSearchText(ongoing));
 const threads = conversationThreads([{ id: 'session', title: '与你的对话', started_at: 1, ended_at: 2, participants: ['user','vivian'], channels: ['direct'], turns: [
   { id: 'a', speaker: 'user', listener: 'vivian', text: '你好（挥手）', timestamp: 1, channel: 'direct' },
   { id: 'b', speaker: 'user', listener: 'vivian', text: '你好（挥手）', timestamp: 2, channel: 'direct' },

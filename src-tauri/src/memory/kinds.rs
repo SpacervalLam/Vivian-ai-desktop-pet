@@ -25,6 +25,8 @@ pub enum RecordKind {
     /// 因此不参与冲突仲裁、事实合并与共享世界路由；但它必须可被检索召回，
     /// 否则"她还记得上周那件事"就无从谈起。
     Diary,
+    /// 持续事项有自己的目标、授权和状态，不参与用户事实合并。
+    OngoingTask,
     Internal,
 }
 
@@ -86,7 +88,7 @@ pub fn initialize_record(item: &mut MemoryItem) {
             RecordKind::SelfState => "ephemeral",
             // 采集资料按自身 TTL/expires_at 过期，不因类别被提前淘汰。
             RecordKind::Reference | RecordKind::Fact | RecordKind::SessionSummary
-            | RecordKind::Diary => "durable",
+            | RecordKind::Diary | RecordKind::OngoingTask => "durable",
         })
     });
     let evidence = if record_kind == RecordKind::Subjective {
@@ -149,6 +151,7 @@ pub fn recallable(item: &MemoryItem) -> bool {
                 | RecordKind::SelfState
                 // 日记同样可召回：她要能想起自己写过的那一天。
                 | RecordKind::Diary
+                | RecordKind::OngoingTask
         )
 }
 

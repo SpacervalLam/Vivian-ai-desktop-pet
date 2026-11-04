@@ -544,6 +544,30 @@ async fn summarize_memory_conversation(
     Ok(Json(serde_json::to_value(item).map_err(err_status)?))
 }
 
+async fn list_agreements(State(state): State<RemoteAppState>,Path(character): Path<String>)
+    -> Result<Json<serde_json::Value>,(StatusCode,String)> {
+    let memory=state.app_state.get_character(Some(&character)).map_err(|e|(StatusCode::NOT_FOUND,e))?.brain.memory.clone();
+    Ok(Json(serde_json::json!({"agreements":memory.ongoing_task_memories().into_iter().map(|item|
+        serde_json::json!({"id":item.id,"task":item.metadata["ongoing_task"]})).collect::<Vec<_>>()})))
+}
+#[derive(Deserialize)]
+struct AgreementCreateRequest {title:String,goal:String,trigger:String}
+async fn create_agreement(State(state): State<RemoteAppState>,Path(character): Path<String>,Json(req):Json<AgreementCreateRequest>)
+    -> Result<Json<serde_json::Value>,(StatusCode,String)> {
+    let memory=state.app_state.get_character(Some(&character)).map_err(|e|(StatusCode::NOT_FOUND,e))?.brain.memory.clone();
+    let id=tokio::task::spawn_blocking(move ||memory.create_agreement(&req.title,&req.goal,&req.trigger)).await.map_err(err_status)?.map_err(err_status)?
+        .ok_or((StatusCode::CONFLICT,"约定未保存，请刷新后重试".into()))?;
+    Ok(Json(serde_json::json!({"id":id})))
+}
+#[derive(Deserialize)]
+struct AgreementStateRequest {revision:u64,status:crate::memory::ongoing_tasks::Status}
+async fn set_agreement_state(State(state): State<RemoteAppState>,Path((character,id)): Path<(String,String)>,Json(req):Json<AgreementStateRequest>)
+    -> Result<Json<serde_json::Value>,(StatusCode,String)> {
+    let memory=state.app_state.get_character(Some(&character)).map_err(|e|(StatusCode::NOT_FOUND,e))?.brain.memory.clone();
+    let changed=tokio::task::spawn_blocking(move ||memory.set_agreement_state(&id,req.revision,req.status)).await.map_err(err_status)?.map_err(err_status)?;
+    Ok(Json(serde_json::json!({"changed":changed})))
+}
+
 async fn get_discovery_profile(
     State(state): State<RemoteAppState>,
     Path(char_id): Path<String>,
@@ -1408,6 +1432,8 @@ async fn delete_note(
 /// 待办写入请求
 #[derive(Deserialize)]
 pub struct TodoWriteRequest {
+    #[serde(default)]
+    pub agreement: Option<crate::memory::ongoing_tasks::AgreementRef>,
     pub title: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -1439,14 +1465,15 @@ async fn add_todo(
     State(_state): State<RemoteAppState>,
     Json(req): Json<TodoWriteRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let item = crate::tools::builtin::todo_tools::add_todo_item(
+    let item = crate::tools::builtin::todo_tools::add_todo_item_with_agreement(
         &req.title,
         req.description.as_deref().unwrap_or(""),
         req.priority.unwrap_or(1),
         req.due_date.as_deref(),
         req.event_time.as_deref(),
         REMOTE_NO_CHAR,
-    );
+        req.agreement,
+    ).map_err(err_status)?;
     Ok(Json(serde_json::json!({ "item": item })))
 }
 
@@ -2081,6 +2108,8 @@ pub async fn start_server(app_state: Arc<AppState>, port: u16) {
         .route("/api/characters/:id/history", get(get_history))
         .route("/api/characters/:id/memories", get(get_memories))
         .route("/api/characters/:id/memory", get(get_memory_view))
+        .route("/api/characters/:id/agreements", get(list_agreements).post(create_agreement))
+        .route("/api/characters/:id/agreements/:agreement_id/state", post(set_agreement_state))
         .route("/api/characters/:id/memory/conversations/:conversation_id/summarize", post(summarize_memory_conversation))
         .route("/api/characters/:id/profile/discovery", get(get_discovery_profile).post(update_discovery_profile))
         .route("/api/characters/:id/stickers/:sticker_id/:version", get(get_memory_sticker))

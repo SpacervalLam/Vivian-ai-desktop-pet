@@ -7,7 +7,9 @@ import { BookOpen, Clock3, Heart, Image as ImageIcon, MessageCircle, RefreshCw, 
 import UserProfilePage from './UserProfilePage';
 import StickerImage from '../../stickers/StickerImage';
 import ImageViewer from '../../ImageViewer';
-import { unifiedConversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
+import { unifiedConversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary,
+  isVisibleOngoingTask, ongoingTaskOf, ongoingLabel, ongoingSearchText,
+  type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
 import './MemoryPage.css';
 import './ClaudeTheme.css';
 import { ComicChapterHeading, ComicChapterInset } from './ComicChapter';
@@ -40,7 +42,7 @@ const TABS = [
 ] as const;
 
 const layerOf = (item: MemoryRecord): Layer | null => {
-  return isVisibleMemoryFact(item) ? 'facts' : null;
+  return isVisibleMemoryFact(item) || isVisibleOngoingTask(item) ? 'facts' : null;
 };
 
 /* 事实层是「两个角色合并后的一张列表」（见 load() 的 flatMap），且群发消息会被
@@ -190,10 +192,12 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
 
   const visible = useMemo(() => items
     .filter((item) => layerOf(item) === layer && [item.content,
+      ongoingSearchText(item),
       item.metadata?.title ?? '', item.metadata?.source_quote ?? '',
       ...(Array.isArray(item.metadata?.topics) ? item.metadata.topics : []),
       ...(item.open_hooks ?? []).map((hook) => hook.condition)].join(' ').toLowerCase().includes(query.trim().toLowerCase()))
-    .sort((a, b) => Number(b.metadata?.ended_at ?? b.created_at) - Number(a.metadata?.ended_at ?? a.created_at)), [items, layer, query, character]);
+    .sort((a, b) => Number(ongoingTaskOf(b)?.updated_at ?? b.metadata?.ended_at ?? b.created_at)
+      - Number(ongoingTaskOf(a)?.updated_at ?? a.metadata?.ended_at ?? a.created_at)), [items, layer, query, character]);
   const visibleThreads = useMemo(() => recentThreads.filter((thread) => thread.searchText.toLowerCase().includes(query.trim().toLowerCase())), [recentThreads, query]);
   const visibleEvents = useMemo(() => events.filter((event) => event.searchText.toLowerCase().includes(query.trim().toLowerCase())), [events, query]);
 
@@ -269,10 +273,12 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
     </div> : <div className="memory-entry-grid">
       {visible.map((item, index) => {
         const owner = ownerOf(item);
+        const ongoing = ongoingTaskOf(item);
+        const taskLabel = (value: string) => ongoingLabel(value, i18n.resolvedLanguage ?? i18n.language);
         const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
         const quote = rawQuote;
         const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
-        const body = item.content;
+        const body = ongoing?.goal ?? item.content;
         const conversationId = String(item.metadata?.conversation_id ?? '');
         const hasOriginal = recentThreads.some((thread) => thread.sourceIds.includes(conversationId) && thread.canonical);
         const topics = Array.isArray(item.metadata?.topics) ? item.metadata.topics.filter((topic): topic is string => typeof topic === 'string').slice(0, 5) : [];
@@ -282,9 +288,21 @@ const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; latestOnl
           {index === 0 && !embedded && <ComicChapterInset image={character === 'vivian' ? 'vivian-seat-selected-v24' : 'nana-nai-face-adjusted-v19'}
             caption={t('comic.memoryKept')} position={character === 'vivian' ? '50% 30%' : '50% 35%'} />}
           <div className="memory-narration-body">
-          <div className="memory-entry-top"><span className="memory-entry-kind">{localize(categoryName(item))}</span><span className={`memory-entry-owner is-${owner}`}>{ownerName(owner)}</span><time>{dateText(typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at)}</time></div>
+          <div className="memory-entry-top"><span className="memory-entry-kind">{ongoing ? `${taskLabel('ongoing')} · ${taskLabel(ongoing.status)}` : localize(categoryName(item))}</span><span className={`memory-entry-owner is-${owner}`}>{ownerName(owner)}</span><time>{dateText(ongoing?.updated_at ?? (typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at))}</time></div>
+          {ongoing && <h3 className="memory-session-title"><SearchHighlightedText text={ongoing.title} query={query} /></h3>}
           {typeof item.metadata?.title === 'string' && <h3 className="memory-session-title">{item.metadata.title}</h3>}
           <p className="memory-entry-content"><SearchHighlightedText text={body} query={query} /></p>
+          {ongoing && ongoing.entries.length > 0 && <details className="memory-entry-evidence memory-ongoing-collection" open={!!query.trim()}>
+            <summary>{taskLabel('collection')} · {ongoing.entries.length}</summary>
+            <ul>{ongoing.entries.map(entry => {
+              const source = recentThreads.find(thread => thread.owner === owner && thread.turns.some(turn => turn.id === entry.evidence.source_id));
+              return <li key={entry.key}><strong><SearchHighlightedText text={entry.label} query={query} /></strong> · {taskLabel(entry.state)}
+                {entry.detail && <p><SearchHighlightedText text={entry.detail} query={query} /></p>}
+                <p>「<SearchHighlightedText text={entry.evidence.quote} query={query} />」
+                  {source && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.id)}>{t('comic.memoryView')}</button>}</p>
+              </li>;
+            })}</ul>
+          </details>}
           {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic) === topic ? topic : localize(topicName(topic))}</span>)}</div>}
           {quote && quote !== body && <div className="memory-entry-evidence"><span>{t('comic.memoryQuote')}</span>「<SearchHighlightedText text={quote} query={query} />」</div>}
           {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>{t('comic.memoryFollowUp')}</span><SearchHighlightedText text={hook.condition} query={query} /></div>)}

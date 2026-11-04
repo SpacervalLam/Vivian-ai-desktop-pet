@@ -105,6 +105,8 @@ const NEVER_CONFIRM_TOOLS: &[&str] = &[
     // 保存记忆：写入角色自己的记忆库（SQLite），内容来自本会话对话，
     // 属于陪伴流程内的隐性期望动作，用户不希望对每次保存弹窗确认。
     "save_memory",
+    // Bounded, evidence-backed maintenance of the character's own memory collection.
+    "maintain_agreement",
 ];
 
 /// 敏感域主机标记：agent 一律不许在这些站点执行脚本，必须交回用户。
@@ -1055,6 +1057,17 @@ mod tests {
     }
 
     #[test]
+    fn agreement_maintenance_stays_internal_and_respects_explicit_denial() {
+        let tool = crate::tools::builtin::agreement_tools::MaintainAgreement;
+        let ask = PermissionContextBuilder::new(PermissionMode::Ask)
+            .with_access_level(AgentAccessLevel::ReadOnly).build();
+        assert!(!requires_permission(&tool, &json!({"action":"update"}), &ask));
+        let denied = PermissionContextBuilder::new(PermissionMode::Ask)
+            .deny("maintain_agreement").build();
+        assert!(requires_permission(&tool, &json!({"action":"update"}), &denied));
+    }
+
+    #[test]
     fn sibling_directory_does_not_inherit_workspace_permission() {
         let permissions = PermissionContextBuilder::new(PermissionMode::Default)
             .with_working_directory("C:/work", false)
@@ -1171,6 +1184,7 @@ mod tests {
             "grep_search",
             "run_command",
             "save_memory",
+            "maintain_agreement",
             "open_application",
             "close_application",
             "take_screenshot",

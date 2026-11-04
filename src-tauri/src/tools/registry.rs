@@ -85,6 +85,7 @@ pub const SCHEMA_FLOOR_TOOLS: &[&str] = &[
     "tool_search",
     "search_memory",
     "save_memory",
+    "maintain_agreement",
     "personal_companion",
     "inspect_personal_companion",
     "talk_to_character",

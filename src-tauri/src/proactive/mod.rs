@@ -1143,6 +1143,8 @@ impl ProactiveOrchestrator {
             "private_continuation": self.mind.read().as_ref().map(|mind| mind.conversation_opportunities.read().threads.continuation.status()),
             "personal_continuity": self.mind.read().as_ref().map(|mind|mind.personal.context(now as i64)),
             "personal_next_steps": self.mind.read().as_ref().map(|mind|mind.personal.plan(now as i64)),
+            "standing_agreements": self.memory.read().as_ref().map(|memory|crate::memory::ongoing_tasks::turn_context(
+                &memory.ongoing_task_memories(),&recent.iter().filter_map(|row|row["text"].as_str()).collect::<Vec<_>>().join(" "))),
             "environment_observations": self.world_provider.read().as_ref().map(|world|world.environment.perception.context(now as i64,Some(&self.char_id),false)),
             "already_evaluated_meanings": evaluated_meanings}).to_string()
     }
@@ -4527,7 +4529,9 @@ impl ProactiveOrchestrator {
                 } else { None },
                 "meaning_key": candidate.meaning_key, "event_id": candidate.event_id,
                 "seconds_since_proposal": (ctx.now-candidate.generated_at).max(0.0)}).to_string();
+            if !self.agreement_receipt_current(&candidate.event_id) { return None; }
             let result = self.try_llm_content(trigger, ctx, hour, &router, Some(&hint));
+            if !self.agreement_receipt_current(&candidate.event_id) { return None; }
             if let Some(content) = &result {
                 mind.record_opportunity_generated(candidate, &content.text, chrono::Utc::now().timestamp() as f64);
             } else if self.generation_retry.lock().retry_pending(&generation_retry::scope_key(trigger.as_str(),Some(&hint))) {
@@ -4536,6 +4540,13 @@ impl ProactiveOrchestrator {
             return result;
         }
         self.try_llm_content(trigger, ctx, hour, &router, None)
+    }
+
+    fn agreement_receipt_current(&self,event_id:&str) -> bool {
+        let Some(rest)=event_id.strip_prefix("agreement:") else {return true;};
+        let Some((id,_))=rest.rsplit_once(':') else {return false;};
+        self.memory.read().as_ref().and_then(|memory|memory.get_memories_by_ids(&[id.to_string()]).pop())
+            .is_some_and(|item|crate::memory::ongoing_tasks::current_receipt(&item,event_id))
     }
 
     /// 流式调用 LLM 并解析 JSON，实时推送 text 增量到前端

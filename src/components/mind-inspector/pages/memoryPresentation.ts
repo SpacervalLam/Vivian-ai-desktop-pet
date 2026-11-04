@@ -44,6 +44,36 @@ const speakerName = (value: string, character: Character) => {
 
 export const isMemoryFact = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'fact';
 export const isMemorySummary = (item: MemoryRecord): boolean => item.metadata?.record_kind === 'session_summary';
+export type OngoingTask = {
+  title: string; goal: string; trigger: string; mode: 'once' | 'continuous';
+  status: 'candidate' | 'active' | 'paused' | 'completed' | 'cancelled'; updated_at: number;
+  entries: Array<{ key: string; label: string; state: string; detail: string;
+    evidence: { source_id: string; quote: string; timestamp: number } }>;
+};
+export const ongoingTaskOf = (item: MemoryRecord): OngoingTask | undefined => {
+  const value = item.metadata?.ongoing_task as OngoingTask | undefined;
+  return item.metadata?.record_kind === 'ongoing_task' && value && Array.isArray(value.entries)
+    && typeof value.title === 'string' && typeof value.goal === 'string'
+    && ['candidate', 'active', 'paused', 'completed', 'cancelled'].includes(value.status) ? value : undefined;
+};
+export const isVisibleOngoingTask = (item: MemoryRecord): boolean => !!ongoingTaskOf(item)
+  && !item.consolidated && !['system_seed', 'environment_preset'].includes(String(item.metadata?.source ?? ''));
+export const ongoingLabel = (value: string, language = 'zh'): string => {
+  const labels: Record<string, [string, string, string]> = {
+    ongoing: ['关注与约定', 'Interest & agreement', '関心と約束'],
+    candidate: ['候选关注', 'Possible interest', '関心の候補'], active: ['维护中', 'Active', '継続中'],
+    paused: ['已暂停', 'Paused', '一時停止'], completed: ['已完成', 'Completed', '完了'],
+    cancelled: ['已取消', 'Cancelled', '取り消し'], planned: ['计划中', 'Planned', '予定'],
+    in_progress: ['进行中', 'In progress', '進行中'], dropped: ['已放下', 'Dropped', '中止'],
+    recorded: ['已记录', 'Recorded', '記録済み'], collection: ['完整清单', 'Full collection', '全リスト'],
+  };
+  return labels[value]?.[language.startsWith('en') ? 1 : language.startsWith('ja') ? 2 : 0] ?? value;
+};
+export const ongoingSearchText = (item: MemoryRecord): string => {
+  const task = ongoingTaskOf(item);
+  return task ? [task.title, task.goal, task.trigger,
+    ...task.entries.flatMap(entry => [entry.label, entry.detail, entry.evidence.quote])].join(' ') : '';
+};
 /** 识图结果是「对这一张图的观察」，不是关于用户的事实：无论落在哪层都不进事实卡。 */
 const isImageObservation = (item: MemoryRecord): boolean => item.metadata?.kind === 'image';
 export const isVisibleMemoryFact = (item: MemoryRecord): boolean =>

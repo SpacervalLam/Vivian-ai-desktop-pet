@@ -45,6 +45,8 @@ pub struct TodoItem {
     /// 关联的定时提醒任务 ID（Scheduler 联动）
     #[serde(default)]
     pub reminder_id: Option<String>,
+    #[serde(default)]
+    pub agreement: Option<crate::memory::ongoing_tasks::AgreementRef>,
 }
 
 fn default_priority() -> u32 {
@@ -262,7 +264,32 @@ pub fn add_todo_item(
     due_date: Option<&str>,
     event_time: Option<&str>,
     character_id: &str,
-) -> TodoItem {
+) -> Result<TodoItem, String> {
+    add_todo_item_with_agreement(title,description,priority,due_date,event_time,character_id,None)
+}
+
+pub fn resolve_agreement_ref(character: &str, id: &str) -> Result<crate::memory::ongoing_tasks::AgreementRef,String> {
+    let memory = crate::character_registry::get_memory_manager(character).ok_or("约定所属角色不可用")?;
+    let item = memory.get_memories_by_ids(&[id.to_string()]).pop().ok_or("约定已不存在")?;
+    let task = crate::memory::ongoing_tasks::task(&item).ok_or("这条记录不是关注与约定")?;
+    if item.metadata["memory_owner"] != character || task.status != crate::memory::ongoing_tasks::Status::Active {
+        return Err("约定尚未启用或已经暂停、停止".into());
+    }
+    Ok(crate::memory::ongoing_tasks::AgreementRef{character_id:character.into(),id:id.into(),title:task.title})
+}
+
+pub fn add_todo_item_with_agreement(title: &str, description: &str, priority: u32,
+    due_date: Option<&str>, event_time: Option<&str>, character_id: &str,
+    agreement: Option<crate::memory::ongoing_tasks::AgreementRef>) -> Result<TodoItem,String> {
+    if title.trim().is_empty() { return Err("具体待办标题不能为空".into()); }
+    let agreement = agreement.map(|link|resolve_agreement_ref(&link.character_id,&link.id)).transpose()?;
+    if let Some(link) = &agreement {
+        if let Some(existing) = TODO_LIST.read().items.iter().find(|item|
+            !item.completed && item.agreement.as_ref().is_some_and(|old|old.id==link.id && old.character_id==link.character_id)
+                && item.title.trim()==title.trim()).cloned() {
+            return Ok(existing);
+        }
+    }
     let mut reminder_id = None;
     if let Some(dd) = due_date {
         if !dd.is_empty() {
@@ -281,16 +308,28 @@ pub fn add_todo_item(
         due_date: due_date.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         event_time: event_time.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         reminder_id,
+        agreement,
     };
 
     {
         let mut list = TODO_LIST.write();
-        list.items.push(item.clone());
-        list.saved_at = chrono::Local::now().timestamp_millis() as f64;
+        if let Some(link)=&item.agreement {
+            if let Some(existing)=list.items.iter().find(|old|!old.completed && old.title.trim()==title.trim()
+                && old.agreement.as_ref().is_some_and(|origin|origin.id==link.id && origin.character_id==link.character_id)).cloned() {
+                cancel_reminder(&item.reminder_id); return Ok(existing);
+            }
+        }
+        let mut next = list.clone();
+        next.items.push(item.clone());
+        next.saved_at = chrono::Local::now().timestamp_millis() as f64;
+        if let Err(error) = crate::utils::fs::write_atomic(&todo_file_path(),&serde_json::to_string_pretty(&next).map_err(|e|e.to_string())?) {
+            cancel_reminder(&item.reminder_id);
+            return Err(error.to_string());
+        }
+        *list = next;
     }
-    save_todo_list();
     emit_todo_changed("added", &item, character_id);
-    item
+    Ok(item)
 }
 
 /// 更新待办（含 Scheduler 联动）
@@ -353,16 +392,20 @@ pub fn update_todo_item(
 /// 标记待办完成（取消关联的 reminder）
 pub fn complete_todo_item(id: &str, character_id: &str) -> Result<TodoItem, String> {
     let mut list = TODO_LIST.write();
-    let found = list.items.iter_mut().find(|it| it.id == id);
+    let mut next = list.clone();
+    let found = next.items.iter_mut().find(|it| it.id == id);
     match found {
         Some(it) => {
             it.completed = true;
             it.completed_at = Some(now_ts());
-            cancel_reminder(&it.reminder_id);
-            it.reminder_id = None;
+            let reminder = it.reminder_id.take();
             let updated = it.clone();
+            next.saved_at=chrono::Local::now().timestamp_millis() as f64;
+            crate::utils::fs::write_atomic(&todo_file_path(),&serde_json::to_string_pretty(&next).map_err(|e|e.to_string())?)
+                .map_err(|e|e.to_string())?;
+            *list=next;
             drop(list);
-            save_todo_list();
+            cancel_reminder(&reminder);
             emit_todo_changed("completed", &updated, character_id);
             Ok(updated)
         }
@@ -415,6 +458,12 @@ pub fn list_todo_items(include_completed: bool, priority_filter: Option<u32>) ->
         .collect()
 }
 
+pub fn agreement_todo_context(character:&str, agreements:&std::collections::HashSet<String>) -> Vec<Value> {
+    TODO_LIST.read().items.iter().filter(|item|item.agreement.as_ref().is_some_and(|link|
+        link.character_id==character && agreements.contains(&link.id)))
+        .take(16).map(|item|json!({"id":item.id,"title":item.title,"completed":item.completed,"agreement_id":item.agreement.as_ref().map(|link|&link.id)})).collect()
+}
+
 /// 整表替换待办（全量替换语义）。
 ///
 /// `items` 为新的待办列表（保留传入的 id 若存在，否则生成新 id）。
@@ -439,6 +488,9 @@ pub fn replace_todo_items(items: Vec<TodoItem>, character_id: &str) -> Vec<TodoI
     let normalized: Vec<TodoItem> = items
         .into_iter()
         .map(|mut it| {
+            if it.agreement.is_none() {
+                it.agreement = list.items.iter().find(|old|old.id==it.id).and_then(|old|old.agreement.clone());
+            }
             if it.id.is_empty() {
                 it.id = gen_id();
             }
@@ -691,14 +743,20 @@ impl Tool for AddTodoTool {
         let due_date = args.get("due_date").and_then(|v| v.as_str()).map(|s| s.to_string());
         let event_time = args.get("event_time").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-        let item = add_todo_item(
+        let agreement = match args.get("agreement_id").and_then(Value::as_str).filter(|s|!s.is_empty()) {
+            Some(id) => match resolve_agreement_ref(&ctx.char_id,id) {
+                Ok(link)=>Some(link), Err(error)=>return ToolResult::standard_error(&error,None,None),
+            }, None=>None,
+        };
+        let item = match add_todo_item_with_agreement(
             &title,
             &description,
             priority,
             due_date.as_deref(),
             event_time.as_deref(),
             &ctx.char_id,
-        );
+            agreement,
+        ) { Ok(item)=>item,Err(error)=>return ToolResult::standard_error("待办保存失败",Some(&error),None) };
 
         // due_date 已提供但 reminder_id 为 None：说明指定时间已过，提醒被跳过
         let message = if due_date.as_deref().is_some_and(|s| !s.is_empty())
@@ -1030,7 +1088,7 @@ impl Tool for ManageTodoTool {
     fn description(&self) -> &str {
         "Create, complete, update, delete, or replace todo items.\
          Actions: add (title required), complete (id), update (id + fields), delete (id), \
-         replace (items). Use list_todo to read the current list."
+         replace (items). Use list_todo to read the current list. agreement_id links an add action to an active standing agreement; only concrete finite actions belong here. Ordinary collection progress uses maintain_agreement."
     }
 
     fn description_in(&self, lang: &str) -> &str {
@@ -1060,6 +1118,7 @@ impl Tool for ManageTodoTool {
             "properties": {
                 "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "Action to perform"},
                 "id": {"type": "string", "description": "Todo id (complete / update / delete)"},
+                "agreement_id": {"type":"string", "description":"Optional active standing-agreement ID for a concrete add action; completing the todo leaves its agreement active"},
                 "title": {"type": "string", "description": "Title (add required; update optional)"},
                 "description": {"type": "string", "description": "Description (add / update)"},
                 "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Priority 1-3 (add / update)"},
@@ -1093,6 +1152,7 @@ impl Tool for ManageTodoTool {
                 "properties": {
                     "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "要执行的操作"},
                     "id": {"type": "string", "description": "待办 ID（complete / update / delete）"},
+                    "agreement_id": {"type":"string", "description":"add 可选：所属的活跃关注与约定 ID。只记录具体行动，完成待办不结束约定"},
                     "title": {"type": "string", "description": "标题（add 必填；update 可选）"},
                     "description": {"type": "string", "description": "描述（add / update）"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "优先级 1-3（add / update）"},
@@ -1122,6 +1182,7 @@ impl Tool for ManageTodoTool {
                 "properties": {
                     "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "実行するアクション"},
                     "id": {"type": "string", "description": "ToDo ID（complete / update / delete）"},
+                    "agreement_id": {"type":"string", "description":"add の任意項目：有効な約束の ID。具体的な作業のみ。ToDo 完了後も約束は継続"},
                     "title": {"type": "string", "description": "タイトル（add では必須、update では任意）"},
                     "description": {"type": "string", "description": "説明（add / update）"},
                     "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "優先度 1-3（add / update）"},
@@ -1427,6 +1488,7 @@ impl Tool for UpdateTodoTool {
                     due_date,
                     event_time,
                     reminder_id,
+                    agreement: None,
                 }
             })
             .collect();
@@ -1468,6 +1530,34 @@ impl Tool for UpdateTodoTool {
 
 pub(crate) fn publish_scheduler_changed(character_id: &str) {
     emit_event("scheduler:changed", &json!({"action":"execution_settled", "character_id":character_id}));
+}
+
+#[cfg(test)]
+mod agreement_link_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires an explicitly isolated VIVIAN_TEST_DATA_DIR; uses the process todo list"]
+    fn agreement_link_completion_persists_without_ending_parent_and_context_stays_owned() {
+        let root=std::path::PathBuf::from(std::env::var_os("VIVIAN_TEST_DATA_DIR").expect("run with isolated test data"));
+        assert!(root.starts_with(std::env::temp_dir()),"test storage must be in the OS temporary directory");
+        let owner=format!("agreement-linked-{}",uuid::Uuid::new_v4());
+        let memory=crate::memory::MemoryManager::new(&crate::config::AppConfig::default(),&owner).unwrap();
+        let id=memory.create_agreement("番剧清单","维护看番记录","用户提到追番进展").unwrap().unwrap();
+        let item:TodoItem=serde_json::from_value(json!({"id":"linked-action","title":"补齐旧记录","created_at":1,
+            "agreement":{"character_id":owner,"id":id,"title":"番剧清单"}})).unwrap();
+        let foreign:TodoItem=serde_json::from_value(json!({"id":"foreign-action","title":"另一个角色的行动","created_at":1,
+            "agreement":{"character_id":"other","id":id,"title":"别人的约定"}})).unwrap();
+        replace_todo_items(vec![item,foreign],"");
+        let completed=complete_todo_item("linked-action","").unwrap();
+        assert!(completed.completed);assert_eq!(completed.agreement.as_ref().unwrap().id,id);
+        load_todo_list();assert!(list_todo_items(true,None).iter().any(|item|item.id=="linked-action"&&item.completed));
+        let parent=memory.get_memories_by_ids(&[id.clone()]).pop().unwrap();
+        assert_eq!(crate::memory::ongoing_tasks::task(&parent).unwrap().status,crate::memory::ongoing_tasks::Status::Active);
+        let context=agreement_todo_context(&owner,&[id].into_iter().collect());
+        assert_eq!(context.len(),1);assert_eq!(context[0]["id"],"linked-action");
+        let legacy:TodoItem=serde_json::from_value(json!({"id":"legacy","title":"旧待办","created_at":1})).unwrap();
+        assert!(legacy.agreement.is_none());
+    }
 }
 
 #[cfg(test)]

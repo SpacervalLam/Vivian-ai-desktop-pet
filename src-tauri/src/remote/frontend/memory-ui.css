@@ -41,6 +41,24 @@
 .memory-evidence { font-size: 12px; line-height: 1.8; background: #F8F7FC; border-radius: 12px; padding: 10px 12px; margin-top: 12px; white-space: pre-wrap; color: var(--text2); }
 .memory-evidence summary { cursor: pointer; min-height: 24px; color: #827399; }
 .memory-evidence p { margin-top: 8px; }
+.mobile-agreements { margin-bottom:24px; border:1px solid var(--border, #8a809655); border-radius:16px; padding:14px; }
+.mobile-agreements > summary { cursor:pointer; font-size:14px; font-weight:600; min-height:28px; }
+.mobile-agreement-list { display:grid; gap:12px; margin:14px 0; }
+.mobile-agreement-list .card { padding:14px; margin:0; }
+.mobile-agreement-list p { line-height:1.7; overflow-wrap:anywhere; white-space:pre-wrap; }
+.mobile-agreement-list details { margin-top:12px; font-size:12px; }
+.mobile-agreement-list ul { padding-left:18px; }
+.mobile-agreement-list blockquote { margin:6px 0; color:var(--text2); }
+.mobile-agreement-todos > div { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; font-size:12px; }
+.mobile-agreement-form { display:grid; gap:12px; margin-top:14px; }
+.mobile-agreement-form label { display:grid; gap:5px; font-size:12px; }
+.mobile-agreement-form input,.mobile-agreement-form textarea,.mobile-agreement-form select { width:100%; min-width:0; box-sizing:border-box; padding:10px; border-radius:10px; border:1px solid var(--border,#8a809655); background:var(--bg); color:var(--text); font:inherit; }
+.memory-evidence.memory-ongoing-collection { background: var(--bg); color: var(--text); white-space: normal; }
+.memory-ongoing-collection summary { color: var(--text2); }
+.memory-ongoing-collection ul { margin: 8px 0 0; padding-left: 18px; }
+.memory-ongoing-collection li + li { margin-top: 14px; }
+.memory-ongoing-collection p { color: var(--text2); }
+.memory-ongoing-collection .memory-highlight { color: #403249; }
 .memory-hook { padding: 10px 12px; border-radius: 12px; margin-top: 10px; background: #FAF4E9; color: #96774A; font-size: 12px; line-height: 1.8; }
 .memory-actions { display: flex; gap: 6px 10px; flex-wrap: wrap; margin-top: 10px; }
 .memory-actions button { border: 0; background: transparent; color: #7A6BB0; padding: 8px 0; font-size: 12px; min-height: 44px; text-align: left; }

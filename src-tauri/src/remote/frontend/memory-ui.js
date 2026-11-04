@@ -1,6 +1,7 @@
 /* global MemoryPresentation, api, memActiveChar, memCharList, currentCharId, charName, showModal, hideModal */
 (() => {
-  const { conversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, splitActionText } = MemoryPresentation;
+  const { conversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary, splitActionText,
+    isVisibleOngoingTask, ongoingTaskOf, ongoingLabel, ongoingSearchText } = MemoryPresentation;
   const tabs = [
     ['facts', '长期记忆', '事实、偏好和约定', 'M20 4c-3-3-6-1-8 1-2-2-5-4-8-1-4 4 2 10 8 15 6-5 12-11 8-15Z'],
     ['episodes', '共同经历', '跨会话的事件与进展', 'M12 6c-3-3-7-3-9-2v15c3-1 6-1 9 2 3-3 6-3 9-2V4c-2-1-6-1-9 2Zm0 0v15'],
@@ -39,7 +40,8 @@
   let projectionCache;
   function derived() {
     if (projectionCache?.owner===state.owner && projectionCache.items===state.items && projectionCache.records===state.records) return projectionCache.value;
-    const facts = state.items.filter(isVisibleMemoryFact).sort((a,b) => Number(b.metadata?.ended_at ?? b.created_at) - Number(a.metadata?.ended_at ?? a.created_at));
+    const facts = state.items.filter(item => isVisibleMemoryFact(item) || isVisibleOngoingTask(item))
+      .sort((a,b) => Number(ongoingTaskOf(b)?.updated_at ?? b.metadata?.ended_at ?? b.created_at) - Number(ongoingTaskOf(a)?.updated_at ?? a.metadata?.ended_at ?? a.created_at));
     const threads = conversationThreads(state.records, state.owner);
     const events = sharedEventTimeline(state.items, state.records);
     const summaries = new Map(state.items.filter(item => isMemorySummary(item) && !item.consolidated && item.metadata?.index_active !== false).map(item => [String(item.metadata?.conversation_id ?? ''), item]));
@@ -60,12 +62,14 @@
   }
   function factCard(item, threads) {
     const meta = item.metadata || {}, hooks = (item.open_hooks || []).filter(h => h.closed_at == null);
-    const category = hooks.length ? '约定与待办' : item.tags.includes('preference') ? '偏好' : item.tags.includes('relationship') ? '关系' : item.tags.includes('user_profile') ? '关于你' : item.tags.includes('project_context') ? '共同话题' : '事实与资料';
+    const task = ongoingTaskOf(item);
+    const category = task ? ongoingLabel('ongoing')+' · '+ongoingLabel(task.status) : hooks.length ? '约定与待办' : item.tags.includes('preference') ? '偏好' : item.tags.includes('relationship') ? '关系' : item.tags.includes('user_profile') ? '关于你' : item.tags.includes('project_context') ? '共同话题' : '事实与资料';
     const quote = typeof meta.source_quote === 'string' ? meta.source_quote : '';
     const original = threads.some(t => t.id === meta.conversation_id);
     const sources = Array.isArray(meta.evidence_sources) ? meta.evidence_sources.filter(s => s && typeof s.quote === 'string' && s.quote !== quote) : [];
-    return `<article class="memory-entry"><div class="memory-entry-top"><span class="memory-kind">${category}</span><time>${date(meta.started_at ?? item.created_at)}</time></div>
-      ${typeof meta.title==='string'?`<h4>${highlighted(meta.title)}</h4>`:''}<p class="memory-copy">${highlighted(item.content)}</p>
+    return `<article class="memory-entry"><div class="memory-entry-top"><span class="memory-kind">${e(category)}</span><time>${date(task?.updated_at ?? meta.started_at ?? item.created_at)}</time></div>
+      ${task?`<h4>${highlighted(task.title)}</h4>`:typeof meta.title==='string'?`<h4>${highlighted(meta.title)}</h4>`:''}<p class="memory-copy">${highlighted(task?.goal ?? item.content)}</p>
+      ${task?.entries.length?`<details class="memory-evidence memory-ongoing-collection"${state.query.trim()?' open':''}><summary>${ongoingLabel('collection')} · ${task.entries.length}</summary><ul>${task.entries.map(entry=>`<li><strong>${highlighted(entry.label)}</strong> · ${e(ongoingLabel(entry.state))}<p>${highlighted(entry.detail)}</p><p>「${highlighted(entry.evidence.quote)}」</p></li>`).join('')}</ul></details>`:''}
       ${Array.isArray(meta.topics)?`<div class="memory-tags">${meta.topics.filter(t=>typeof t==='string').slice(0,5).map(t=>`<span>${e(topicNames[t]||t)}</span>`).join('')}</div>`:''}
       ${quote && quote!==item.content?`<div class="memory-evidence">来自原话<br>「${highlighted(quote)}」</div>`:''}
       ${hooks.map(h=>`<div class="memory-hook">待跟进 · ${highlighted(h.condition)}</div>`).join('')}
@@ -132,7 +136,7 @@
     if (state.loading) { $('memoryList').innerHTML = empty('正在读取记忆…',''); return; }
     if (state.layer!=='profile' && state.error && !state.items.length && !state.records.length) { $('memoryList').innerHTML = empty('暂时无法读取记忆','请检查电脑端连接后点击刷新重试。'); return; }
     if (state.layer==='profile') { $('memoryList').innerHTML = profileView(); return; }
-    const visible = state.layer==='facts'?facts.filter(item=>matches([item.content,item.metadata?.title,item.metadata?.source_quote,...(Array.isArray(item.metadata?.topics)?item.metadata.topics:[]),...(item.open_hooks||[]).map(h=>h.condition)].join(' '))):state.layer==='episodes'?events.filter(event=>matches(event.searchText)):threads.filter(thread=>matches(thread.searchText));
+    const visible = state.layer==='facts'?facts.filter(item=>matches([item.content,ongoingSearchText(item),item.metadata?.title,item.metadata?.source_quote,...(Array.isArray(item.metadata?.topics)?item.metadata.topics:[]),...(item.open_hooks||[]).map(h=>h.condition)].join(' '))):state.layer==='episodes'?events.filter(event=>matches(event.searchText)):threads.filter(thread=>matches(thread.searchText));
     $('memoryList').innerHTML = visible.length?visible.map(item=>state.layer==='facts'?factCard(item,threads):state.layer==='episodes'?eventCard(item):threadCard(item,summaries)).join(''):empty(state.query?'没有找到匹配的记忆':`还没有${tab[1]}的记录`,state.query?'试试其他关键词':state.layer==='episodes'?'整理对话后，有原话依据的事件会出现在这里。':'有新的交流时，这里会慢慢丰富起来。');
   }
   window.loadMemories = async () => {

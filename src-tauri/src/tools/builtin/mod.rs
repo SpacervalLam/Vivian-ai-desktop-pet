@@ -18,6 +18,7 @@ pub mod jobs_tools;
 pub mod lsp_tools;
 pub mod media_tools;
 pub mod memory_tools;
+pub mod agreement_tools;
 pub mod personal_companion;
 pub mod music_tools;
 pub mod notebook_tools;
@@ -94,6 +95,7 @@ pub fn register_builtin_tools(tool_system: &Arc<ToolSystem>) {
         Arc::new(provider_preset_tools::ManageProviderPresetTool::new()),
         // 记忆工具
         Arc::new(memory_tools::SaveMemoryTool::new()),
+        Arc::new(agreement_tools::MaintainAgreement),
         Arc::new(personal_companion::PersonalCompanion),
         Arc::new(personal_companion::InspectPersonalCompanion),
         Arc::new(memory_tools::SearchMemoryTool::new()),

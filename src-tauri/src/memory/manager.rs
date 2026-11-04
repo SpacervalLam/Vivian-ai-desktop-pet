@@ -2268,6 +2268,100 @@ impl MemoryManager {
         Ok(item)
     }
 
+    /// Continuing tasks share canonical memory persistence, search and manual deletion.
+    pub fn ongoing_task_memories(&self) -> Vec<MemoryItem> {
+        let inner = self.inner.read();
+        let mut items: Vec<_> = inner.data.entries.iter()
+            .filter(|m| super::ongoing_tasks::task(m).is_some()
+                && m.metadata["memory_owner"] == self.char_id()
+                && super::provenance::visible_to(&m.metadata, self.char_id()))
+            .cloned().collect();
+        items.sort_by(|a, b| b.metadata["ongoing_task"]["updated_at"].as_f64().unwrap_or(0.0)
+            .total_cmp(&a.metadata["ongoing_task"]["updated_at"].as_f64().unwrap_or(0.0)));
+        items.truncate(64);
+        items
+    }
+
+    pub fn apply_ongoing_patch(&self, patch: &super::ongoing_tasks::TaskPatch,
+        sources: &[super::ongoing_tasks::Source], receipt: &str) -> VivianResult<Option<String>> {
+        let id = if patch.task_id.is_empty() { super::ongoing_tasks::stable_id(self.char_id(), &patch.key) }
+            else { patch.task_id.clone() };
+        let previous = self.get_memories_by_ids(&[id.clone()]).pop();
+        let Some(item) = super::ongoing_tasks::apply(previous.as_ref(), patch, sources, self.char_id(), receipt) else { return Ok(None); };
+        if item.id != id { return Ok(None); }
+        self.commit_agreement(previous, item)
+    }
+
+    pub fn set_agreement_state(&self, id: &str, revision: u64, state: super::ongoing_tasks::Status) -> VivianResult<bool> {
+        let previous = self.get_memories_by_ids(&[id.to_string()]).pop()
+            .ok_or_else(|| VivianError::Memory("关注与约定已不存在".into()))?;
+        let item = super::ongoing_tasks::set_state(&previous, revision, state, self.char_id(), current_timestamp())
+            .ok_or_else(|| VivianError::Memory("约定已变化，或不支持该状态；请刷新后再试".into()))?;
+        Ok(self.commit_agreement(Some(previous), item)?.is_some())
+    }
+
+    pub fn create_agreement(&self, title: &str, goal: &str, trigger: &str) -> VivianResult<Option<String>> {
+        if self.ongoing_task_memories().iter().filter_map(super::ongoing_tasks::task).any(|task|task.title.trim().eq_ignore_ascii_case(title.trim())) {
+            return Err(VivianError::Memory("已有同名的关注与约定，请打开原记录维护".into()));
+        }
+        let item=super::ongoing_tasks::create_from_ui(title,goal,trigger,self.char_id(),current_timestamp())
+            .ok_or_else(||VivianError::Memory("请填写标题、维护范围和更新线索".into()))?;
+        self.commit_agreement(None,item)
+    }
+
+    fn commit_agreement(&self, previous: Option<MemoryItem>, item: MemoryItem) -> VivianResult<Option<String>> {
+        let id = item.id.clone();
+        let next_task = super::ongoing_tasks::task(&item);
+        let previous_task = previous.as_ref().and_then(super::ongoing_tasks::task);
+        // Do not persist secrets through titles, quotes, entry details or metadata.
+        if redact_content(&serde_json::to_string(&item)?).2 != RedactStatus::Clean { return Ok(None); }
+        let embedding = self.embedding().embed(&item.content).ok();
+        let mut inner = self.inner.write();
+        let existing = inner.id_index.get(&id).copied();
+        let live = existing.map(|idx| &inner.data.entries[idx]);
+        if live.map(|m| (&m.content, &m.metadata)) != previous.as_ref().map(|m| (&m.content, &m.metadata)) {
+            return Ok(None);
+        }
+        if let Some(idx) = existing { *inner.entry_mut(idx).unwrap() = item.clone(); }
+        else { inner.data.entries.push(item.clone()); inner.rebuild_index(); }
+        inner.mark_changed(&id);
+        if let Err(error) = inner.save_to_disk() {
+            if let (Some(idx), Some(previous)) = (existing, previous) { *inner.entry_mut(idx).unwrap() = previous; }
+            else { inner.data.entries.retain(|entry| entry.id != id); inner.mark_removed(&id); inner.rebuild_index(); }
+            return Err(error);
+        }
+        inner.vector_store.delete_by_memory_id(&id);
+        if let Some(embedding) = embedding {
+            if let Err(error) = inner.vector_store.add(MemoryVector {
+                doc_id: id.clone(), memory_id: id.clone(), content: item.content, embedding,
+                importance: item.importance, memory_type: item.memory_type, timestamp: item.timestamp,
+            }) { tracing::warn!("[OngoingTasks] 已保存，向量索引更新失败: {error}"); }
+        }
+        if let Err(error) = inner.vector_store.save_to() { tracing::warn!("[OngoingTasks] 向量持久化失败: {error}"); }
+        drop(inner);
+        self.search_cache.lock().clear();
+        self.emit_memory_updated();
+        // A committed maintenance result is a factual stimulus, never an automatic message.
+        if let Some(brain) = crate::character_registry::get_brain(self.char_id()) {
+            if let Some(next) = next_task {
+                let kind = format!("agreement:{id}");
+                let event = if next.status == super::ongoing_tasks::Status::Active {
+                    next.last_maintenance.filter(|receipt| previous_task.as_ref().and_then(|t|t.last_maintenance.as_ref()).map(|r|&r.id) != Some(&receipt.id))
+                        .map(|receipt| crate::mind::conversation::ConversationEvent {
+                            id:receipt.id,kind:kind.clone(),fact:receipt.summary,at:receipt.at,
+                        })
+                } else { None };
+                if next.status != super::ongoing_tasks::Status::Active || event.is_some() {
+                    let changed = {brain.mind.conversation_opportunities.write().replace_committed_event(&kind,event)};
+                    if changed {
+                        brain.mind.request_thought_refresh();
+                    }
+                }
+            }
+        }
+        Ok(Some(id))
+    }
+
     /// 原子地合并 metadata 字段到指定记忆（用于巩固流水线注入 promoted_from 等）。
     ///
     /// 在已有 metadata 基础上做对象级 merge：`patch` 中的键覆盖已有同名键。

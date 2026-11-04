@@ -14,6 +14,21 @@ fn err_str(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+#[tauri::command]
+pub async fn create_agreement(state: State<'_, Arc<AppState>>, character_id: String,
+    title: String, goal: String, trigger: String) -> Result<String,String> {
+    let memory=state.get_character(Some(&character_id))?.brain.memory.clone();
+    tokio::task::spawn_blocking(move ||memory.create_agreement(&title,&goal,&trigger).map_err(err_str)?
+        .ok_or_else(||"约定未保存，请刷新后重试".to_string())).await.map_err(err_str)?
+}
+
+#[tauri::command]
+pub async fn set_agreement_state(state: State<'_, Arc<AppState>>, character_id: String,
+    id: String, revision: u64, status: crate::memory::ongoing_tasks::Status) -> Result<bool,String> {
+    let memory=state.get_character(Some(&character_id))?.brain.memory.clone();
+    tokio::task::spawn_blocking(move ||memory.set_agreement_state(&id,revision,status).map_err(err_str)).await.map_err(err_str)?
+}
+
 fn item_to_value(item: &crate::memory::types::MemoryItem) -> Value {
     serde_json::to_value(item).unwrap_or(json!({}))
 }

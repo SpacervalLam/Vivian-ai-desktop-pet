@@ -109,6 +109,13 @@ pub(crate) async fn write_after_dream(brain: &Brain, day: NaiveDate, trigger_typ
     let mut ctx = collect_daily_context(brain, day).await;
     ctx.dream = Some(dream.clone());
 
+    // Review actual messages separately from diary narration. No tools or public notifications.
+    if let Some(chain) = &brain.chat_chain {
+        if let Err(error) = chain.auto_extractor.review_ongoing_for_diary(start_ts as f64, end_ts as f64, &date).await {
+            tracing::warn!("[OngoingTasks] 日记补漏失败，常规提取队列仍保留原话: {error}");
+        }
+    }
+
     let trigger_score = calculate_trigger_score(&ctx.interactions, Some(&ctx.mood_summary));
     let fallback_mood_tag = get_mood_tag(&ctx.mood_summary);
     let interaction_count = ctx.interactions.len();

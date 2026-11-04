@@ -1,0 +1,24 @@
+.agreement-page { color:var(--rec-ink, var(--panel-text)); overflow:auto; min-height:0; }
+.agreement-intro, .agreement-trigger { color:var(--rec-muted, var(--panel-text-secondary)); font-size:12px; line-height:1.7; }
+.agreement-page .record-plan-bar { flex-wrap:wrap; gap:10px; }
+.agreement-list { display:grid; gap:16px; margin-top:18px; }
+.agreement-card { padding:18px; border:1px solid var(--rec-line, var(--panel-border)); border-radius:12px; overflow-wrap:anywhere; }
+.agreement-card-top, .agreement-actions { display:flex; align-items:center; flex-wrap:wrap; gap:9px; }
+.agreement-card-top h3 { font-size:15px; margin:0; flex:1; min-width:100px; }
+.agreement-card-top > span { font-size:11px; color:var(--rec-muted, var(--panel-text-secondary)); }
+.agreement-card > p { line-height:1.7; font-size:13px; white-space:pre-wrap; margin:12px 0; }
+.agreement-actions { margin:14px 0; }
+.agreement-form { display:grid; gap:12px; padding:16px; margin:14px 0; background:var(--panel-subtle-bg, transparent); border:1px solid var(--rec-line, var(--panel-border)); border-radius:10px; }
+.agreement-form label { display:grid; gap:6px; font-size:12px; }
+.agreement-form .rec-input, .agreement-form .rec-textarea { width:100%; box-sizing:border-box; }
+.agreement-collection { margin:14px 0; border-top:1px solid var(--rec-line, var(--panel-border)); padding-top:12px; font-size:12px; }
+.agreement-collection summary { cursor:pointer; }
+.agreement-collection ul { padding-left:18px; }
+.agreement-collection li { margin:12px 0; }
+.agreement-collection blockquote { margin:6px 0; padding-left:10px; border-left:2px solid var(--rec-line, var(--panel-border)); color:var(--rec-muted, var(--panel-text-secondary)); }
+.agreement-todos { margin:14px 0; font-size:12px; }
+.agreement-todos h4 { margin:8px 0; }
+.agreement-todos > div { display:flex; align-items:center; gap:10px; padding:7px 0; }
+.agreement-todos > div > span:first-child { flex:1; }
+.agreement-error { color:#b4553f; font-size:12px; overflow-wrap:anywhere; }
+.agreement-link { display:inline-flex; align-items:center; gap:5px; border:0; background:transparent; padding:4px 0; font-size:11px; color:var(--rec-accent, var(--panel-accent)); text-align:left; cursor:pointer; }

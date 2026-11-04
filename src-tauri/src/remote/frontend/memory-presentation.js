@@ -24,6 +24,10 @@ var MemoryPresentation = (() => {
     conversationThreads: () => conversationThreads,
     isMemorySummary: () => isMemorySummary,
     isVisibleMemoryFact: () => isVisibleMemoryFact,
+    isVisibleOngoingTask: () => isVisibleOngoingTask,
+    ongoingLabel: () => ongoingLabel,
+    ongoingSearchText: () => ongoingSearchText,
+    ongoingTaskOf: () => ongoingTaskOf,
     sharedEventTimeline: () => sharedEventTimeline,
     splitActionText: () => splitActionText
   });
@@ -284,6 +288,36 @@ var MemoryPresentation = (() => {
   };
   var isMemoryFact = (item) => item.metadata?.record_kind === "fact";
   var isMemorySummary = (item) => item.metadata?.record_kind === "session_summary";
+  var ongoingTaskOf = (item) => {
+    const value = item.metadata?.ongoing_task;
+    return item.metadata?.record_kind === "ongoing_task" && value && Array.isArray(value.entries) && typeof value.title === "string" && typeof value.goal === "string" && ["candidate", "active", "paused", "completed", "cancelled"].includes(value.status) ? value : void 0;
+  };
+  var isVisibleOngoingTask = (item) => !!ongoingTaskOf(item) && !item.consolidated && !["system_seed", "environment_preset"].includes(String(item.metadata?.source ?? ""));
+  var ongoingLabel = (value, language = "zh") => {
+    const labels = {
+      ongoing: ["\u5173\u6CE8\u4E0E\u7EA6\u5B9A", "Interest & agreement", "\u95A2\u5FC3\u3068\u7D04\u675F"],
+      candidate: ["\u5019\u9009\u5173\u6CE8", "Possible interest", "\u95A2\u5FC3\u306E\u5019\u88DC"],
+      active: ["\u7EF4\u62A4\u4E2D", "Active", "\u7D99\u7D9A\u4E2D"],
+      paused: ["\u5DF2\u6682\u505C", "Paused", "\u4E00\u6642\u505C\u6B62"],
+      completed: ["\u5DF2\u5B8C\u6210", "Completed", "\u5B8C\u4E86"],
+      cancelled: ["\u5DF2\u53D6\u6D88", "Cancelled", "\u53D6\u308A\u6D88\u3057"],
+      planned: ["\u8BA1\u5212\u4E2D", "Planned", "\u4E88\u5B9A"],
+      in_progress: ["\u8FDB\u884C\u4E2D", "In progress", "\u9032\u884C\u4E2D"],
+      dropped: ["\u5DF2\u653E\u4E0B", "Dropped", "\u4E2D\u6B62"],
+      recorded: ["\u5DF2\u8BB0\u5F55", "Recorded", "\u8A18\u9332\u6E08\u307F"],
+      collection: ["\u5B8C\u6574\u6E05\u5355", "Full collection", "\u5168\u30EA\u30B9\u30C8"]
+    };
+    return labels[value]?.[language.startsWith("en") ? 1 : language.startsWith("ja") ? 2 : 0] ?? value;
+  };
+  var ongoingSearchText = (item) => {
+    const task = ongoingTaskOf(item);
+    return task ? [
+      task.title,
+      task.goal,
+      task.trigger,
+      ...task.entries.flatMap((entry) => [entry.label, entry.detail, entry.evidence.quote])
+    ].join(" ") : "";
+  };
   var isImageObservation = (item) => item.metadata?.kind === "image";
   var isVisibleMemoryFact = (item) => !["system_seed", "environment_preset"].includes(String(item.metadata?.source ?? "")) && !!item.content.trim() && !item.consolidated && !isImageObservation(item) && !["subjective", "observation", "internal"].includes(String(item.metadata?.record_kind ?? "")) && isMemoryFact(item);
   var sharedEventTimeline = (items, records) => {

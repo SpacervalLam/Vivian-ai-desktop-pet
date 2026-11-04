@@ -379,6 +379,8 @@ pub fn run() {
             commands::chat::save_shared_file,
             commands::chat::wake_from_presence,
             commands::memory::get_memories,
+            commands::memory::create_agreement,
+            commands::memory::set_agreement_state,
             commands::memory::get_memory_conversations,
             commands::memory::summarize_memory_conversation,
             commands::memory::get_memory_summary,

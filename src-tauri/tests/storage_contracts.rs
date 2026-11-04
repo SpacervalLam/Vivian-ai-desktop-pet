@@ -16,6 +16,8 @@ pub mod entry_store;
 pub mod search_index;
 #[path = "../src/memory/kinds.rs"]
 pub mod kinds;
+#[path = "../src/memory/ongoing_tasks.rs"]
+pub mod ongoing_tasks;
 #[path = "../src/memory/provenance.rs"]
 pub mod provenance;
 #[path = "../src/memory/tokenize.rs"]
@@ -83,4 +85,30 @@ pub mod utils {
         }
     }
     pub use crate::{assets, fs, sqlite};
+}
+
+#[test]
+fn ongoing_collection_survives_storage_and_indexes_older_entries_with_character_privacy() {
+    use ongoing_tasks::{apply, Source, TaskPatch};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tasks.db");
+    let quotes: Vec<_> = (0..16).map(|i|format!("已看完了作品{i}号")).collect();
+    let text = format!("以后帮我持续记录看番进度。{}", quotes.join("，"));
+    let entries: Vec<_> = quotes.iter().enumerate().map(|(i,q)|serde_json::json!({
+        "key":format!("show-{i}"),"label":format!("作品{i}号"),"state":"completed",
+        "source_id":"original","source_quote":q})).collect();
+    let patch: TaskPatch = serde_json::from_value(serde_json::json!({"action":"activate","key":"anime-list",
+        "title":"番剧清单","goal":"维护看番记录","trigger":"用户提到追番进度","mode":"continuous",
+        "source_id":"original","source_quote":"以后帮我持续记录看番进度",
+        "request_quote":"以后帮我持续记录看番进度","entries":entries})).unwrap();
+    let item = apply(None,&patch,&[Source{id:"original".into(),content:text,timestamp:1.0}],"vivian","first").unwrap();
+    let store = entry_store::MemoryEntryStore::open(path.clone()).unwrap();
+    store.write_rows(vec![(item.id.clone(),item.clone())],&[]).unwrap();
+    drop(store);
+    let store = entry_store::MemoryEntryStore::open(path).unwrap();
+    let restored = store.load_by_ids(&[item.id.clone()],Some("vivian"),&Default::default()).unwrap().pop().unwrap();
+    assert_eq!(ongoing_tasks::task(&restored).unwrap().entries.len(),16);
+    assert!(!restored.content.contains("作品0号"));
+    assert!(store.search_candidates("作品0号","vivian",&Default::default(),5).unwrap().iter().any(|(id,_)|id==&item.id));
+    assert!(store.search_candidates("番剧清单","nana",&Default::default(),5).unwrap().is_empty());
 }

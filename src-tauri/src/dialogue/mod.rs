@@ -973,6 +973,18 @@ impl DialogueManager {
         Ok((rows.pop(), count))
     }
 
+    /// Validate queued evidence after an async review without rereading historical bodies.
+    pub fn existing_history_source_ids(&self, ids: &[String]) -> VivianResult<std::collections::HashSet<String>> {
+        let _io = self.history_io.lock();
+        let pending = self.buffer.lock();
+        let path = self.history_jsonl_file();
+        let mut cached = self.history_index.lock();
+        let index = cached.get_or_insert_with(|| jsonl_index::HistoryIndex::restore(&path));
+        index.refresh(&path)?;
+        Ok(ids.iter().filter(|id| index.contains(id) || pending.iter().any(|entry| &entry.id == *id))
+            .cloned().collect())
+    }
+
     pub fn has_more_messages(&self, offset: usize) -> bool {
         !self.indexed_page(offset, 1, false).0.is_empty()
     }

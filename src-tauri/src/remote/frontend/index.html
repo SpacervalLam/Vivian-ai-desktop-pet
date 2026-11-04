@@ -624,6 +624,7 @@
     <div class="page-body">
       <div class="list-view">
 
+        <section id="mobileAgreements" aria-label="关注与约定"></section>
         <div class="mobile-segments" id="planFilters" aria-label="筛选待办"><button data-filter="pending" aria-pressed="true">待完成</button><button data-filter="completed" aria-pressed="false">已完成</button><button data-filter="all" aria-pressed="false">全部</button></div>
         <label class="mobile-search"><span aria-hidden="true">⌕</span><input id="planSearch" type="search" aria-label="搜索待办" placeholder="搜索事项或描述"></label>
         <div id="planSummary" class="mobile-caption" role="status"></div>
@@ -858,7 +859,7 @@ function openPage(el, id) {
   if (id === 'wechat') { showWxList(); }
   else if (id === 'memory') loadMemories();
   else if (id === 'notes') loadNotes();
-  else if (id === 'todo') { loadTodos(); loadTasks(); }
+  else if (id === 'todo') { loadTodos(); loadTasks(); window.MobileAgreements?.load(); }
   if (page) document.dispatchEvent(new CustomEvent('mobile:pagechange', { detail: id }));
 }
 function goHome() {
@@ -1614,6 +1615,7 @@ async function loadTodos() {
   el.innerHTML = '<div class="loading">加载中...</div>';
   try {
     const data = await api('/api/todos?include_completed=true');
+    window.MobileAgreements?.setTodos(data.items || []);
     el.innerHTML = '';
     if (!data.items || data.items.length === 0) { el.innerHTML = '<div class="empty">暂无待办</div>'; window.MobileUI?.filterPlans(); return; }
     data.items.forEach(it => {
@@ -1627,12 +1629,18 @@ async function loadTodos() {
         '<div class="meta">' + due + '</div>' +
         '<div class="actions"><button class="btn small outline" onclick="editTodo(\'' + it.id + '\')">编辑</button><button class="btn small danger" onclick="removeTodo(\'' + it.id + '\')">删除</button></div></div>';
       el.appendChild(div);
+      if (it.agreement) {
+        const link=document.createElement('button');link.type='button';link.className='btn small outline';
+        link.textContent='来自约定：'+it.agreement.title;link.onclick=()=>window.MobileAgreements?.focus(it.agreement);
+        div.querySelector('.body').appendChild(link);
+      }
     });
     window.MobileUI?.filterPlans();
   } catch (e) { el.innerHTML = '<div class="error">加载失败: ' + escapeHtml(e.message) + '</div>'; }
 }
 let editingTodoId = null;
-function newTodo() { editingTodoId = null; document.getElementById('todoModalTitle').textContent='添加待办'; document.getElementById('todoTitle').value=''; document.getElementById('todoDesc').value=''; document.getElementById('todoPriority').value='1'; document.getElementById('todoDue').value=''; showModal('todoModal'); }
+window.agreementTodoOrigin = null;
+function newTodo() { window.agreementTodoOrigin = null; editingTodoId = null; document.getElementById('todoModalTitle').textContent='添加待办'; document.getElementById('todoTitle').value=''; document.getElementById('todoDesc').value=''; document.getElementById('todoPriority').value='1'; document.getElementById('todoDue').value=''; showModal('todoModal'); }
 function editTodo(id) {
   editingTodoId = id;
   document.getElementById('todoModalTitle').textContent='编辑待办';
@@ -1647,9 +1655,10 @@ async function saveTodo() {
   if (!title) { alert('事项不能为空'); return; }
   const body = { title, description: document.getElementById('todoDesc').value.trim(), priority: parseInt(document.getElementById('todoPriority').value), due_date: document.getElementById('todoDue').value.trim() || null };
   try {
+    if (!editingTodoId && window.agreementTodoOrigin) body.agreement = window.agreementTodoOrigin;
     if (editingTodoId) { await api('/api/todos/' + editingTodoId, { method: 'PUT', body: JSON.stringify(body) }); }
     else { await api('/api/todos', { method: 'POST', body: JSON.stringify(body) }); }
-    hideModal('todoModal'); loadTodos();
+    window.agreementTodoOrigin = null; hideModal('todoModal'); loadTodos();
   } catch (e) { alert('保存失败: ' + e.message); }
 }
 async function toggleTodo(id) { try { await api('/api/todos/' + id + '/complete', { method: 'POST' }); loadTodos(); } catch (e) { toast('更新失败：' + e.message); } }
@@ -2032,5 +2041,6 @@ setInterval(pollToasts, 5000);
 setInterval(pollConfirmations, 3000);
 </script>
 <script src="/companion-ui.js"></script>
+<script src="/agreements-ui.js"></script>
 </body>
 </html>

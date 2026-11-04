@@ -677,6 +677,7 @@
   box-shadow:0 8px 32px #535a6812; transition:left .75s cubic-bezier(.22,.61,.36,1);
 }
 .planner-sliding[data-mode="scheduler"] .planner-sliding-card { left:44%; }
+.planner-sliding[data-mode="agreements"] .planner-sliding-card { left:22%; }
 .planner-mode-title { display:flex; align-items:center; gap:10px; font-size:17px; font-weight:600; color:#776080; padding-bottom:18px; margin-bottom:20px; border-bottom:1px solid #c2b6bd55; }
 .planner-morph-content { position:relative; flex:1; min-height:0; }
 .planner-mode-content { position:absolute; inset:0; display:flex; flex-direction:column; opacity:0; visibility:hidden; pointer-events:none; transition:opacity .3s ease,visibility 0s .3s; }
@@ -698,6 +699,7 @@
   .unified-functional-panel.source-planner.is-expanded .record-plan-bar .rec-btn.is-primary { margin-left:auto; }
   .planner-sliding-card { padding:14px; width:78%; }
   .planner-sliding[data-mode="scheduler"] .planner-sliding-card { left:22%; }
+  .planner-sliding[data-mode="agreements"] .planner-sliding-card { left:11%; }
   .planner-switch-space { width:22%; }
   .planner-switch-space > span { flex-direction:column; padding:10px; gap:8px; font-size:12px; text-align:center; }
 }

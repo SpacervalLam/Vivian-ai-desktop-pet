@@ -34,6 +34,7 @@ pub mod manager;
 pub mod memory_md;
 pub mod memory_router;
 pub mod ollama_service;
+pub mod ongoing_tasks;
 pub mod pipeline;
 pub mod precision_filter;
 pub mod provenance;
