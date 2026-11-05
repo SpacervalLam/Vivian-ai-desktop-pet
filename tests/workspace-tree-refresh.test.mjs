@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-const source = readFileSync(new URL('../src/components/mind-inspector/pages/CodeAgentPageNew.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const source = readFileSync(new URL('../src/components/mind-inspector/pages/WorkspaceFileTree.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const start = source.indexOf('  useEffect(() => {\n    if (!root) return;');
 assert.ok(start > 0);
-const end = source.indexOf('  const toggleDir', start);
+const end = source.indexOf('  const input =', start);
 const code = ts.transpileModule(source.slice(start, end), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 

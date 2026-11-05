@@ -13,7 +13,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
-import { invoke, Channel, convertFileSrc } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { saveSharedFile } from '../../../utils/sharedFiles';
@@ -58,6 +58,8 @@ import DOMPurify from 'dompurify';
 const TerminalPanel = lazy(() => import('./TerminalPanel'));
 const WorkflowPanel = lazy(() => import('./WorkflowPanel'));
 const ChangesPanel = lazy(() => import('./ChangesPanel'));
+const WorkspaceFileTree = lazy(() => import('./WorkspaceFileTree'));
+const WorkDiffBlock = lazy(() => import('./WorkDiffBlock'));
 const BrowserPanel = lazy(() => import('./BrowserPanel'));
 
 /**
@@ -741,23 +743,9 @@ const DiffCodeBlock: React.FC<{ text: string; maxHeight?: number }> = ({ text, m
   if (!looksLikeDiff(text)) {
     return <pre className="codex-pre" style={{ maxHeight }}>{text}</pre>;
   }
-  const lines = text.split('\n');
-  return (
-    <div className="codex-pre" style={{ maxHeight, padding: '6px 0' }}>
-      {lines.map((l, i) => {
-        let cls = '';
-        if (l.startsWith('@@')) cls = 'codex-diff-hunk';
-        else if (l.startsWith('+++') || l.startsWith('---')) cls = 'codex-diff-meta';
-        else if (l.startsWith('+')) cls = 'codex-diff-add';
-        else if (l.startsWith('-')) cls = 'codex-diff-del';
-        return (
-          <div key={i} className={`codex-diff-line ${cls}`}>
-            {l === '' ? '\u00A0' : l}
-          </div>
-        );
-      })}
-    </div>
-  );
+  return <Suspense fallback={<pre className="codex-pre" style={{ maxHeight }}>{text}</pre>}>
+    <WorkDiffBlock text={text} maxHeight={maxHeight} />
+  </Suspense>;
 };
 
 const HEAD_TAIL_MAX_LINES = 40;
@@ -2315,237 +2303,6 @@ const MessageRow: React.FC<{
             <GitFork size={12} />
           </button>
         </div>
-      )}
-    </div>
-  );
-};
-
-const FileTreeNode: React.FC<{
-  node: FileNode;
-  depth: number;
-  expandedSet: Set<string>;
-  onToggle: (path: string) => void;
-}> = ({ node, depth, expandedSet, onToggle }) => {
-  const hasChildren = !!node.children && node.children.length > 0;
-  const expanded = expandedSet.has(node.path);
-  const Icon = node.is_dir ? (expanded ? FolderOpen : FolderTree) : FileText;
-
-  return (
-    <div>
-      <div
-        onClick={() => node.is_dir && onToggle(node.path)}
-        className="codex-tree-node"
-        style={{ paddingLeft: 7 + depth * 14 }}
-        title={node.path}
-      >
-        {node.is_dir ? (
-          <span style={{ color: 'var(--codex-ink-faint)', display: 'inline-flex', flexShrink: 0 }}>
-            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </span>
-        ) : <span style={{ width: 12, flexShrink: 0 }} />}
-        <span style={{ display: 'inline-flex', color: node.is_dir ? 'var(--codex-ink-faint)' : 'var(--codex-ink-faint)', flexShrink: 0 }}>
-          <Icon size={14} />
-        </span>
-        <span className="codex-tree-name">{node.name}</span>
-      </div>
-      {node.is_dir && expanded && hasChildren && (
-        <div>
-          {node.children!.sort((a, b) => {
-            if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-            return a.name.localeCompare(b.name);
-          }).map((c) => (
-            <FileTreeNode
-              key={c.path}
-              node={c}
-              depth={depth + 1}
-              expandedSet={expandedSet}
-              onToggle={onToggle}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ============ 左侧工作区文件树（懒加载，点击文件打开预览） ============
-
-const WorkspaceFileTree: React.FC<{
-  root: string;
-  onOpenFile: (path: string) => void;
-}> = ({ root, onOpenFile }) => {
-  const { t } = useTranslation();
-  const [roots, setRoots] = useState<FileNode[] | null>(null);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set([root]));
-  const [loading, setLoading] = useState<Set<string>>(new Set());
-  const [error, setError] = useState('');
-  /** 单层懒加载目录缓存：key=目录路径 → 子节点列表（随组件实例隔离，切换工作区自动重建） */
-  const depthCache = useRef<Record<string, FileNode[]>>({}).current;
-
-  // 切换工作区时重置 UI；旧请求由下面 effect 的清理函数隔离。
-  useEffect(() => {
-    setError('');
-    setRoots(null);
-    setExpanded(new Set([root]));
-    setLoading(new Set());
-    for (const k of Object.keys(depthCache)) delete depthCache[k];
-  }, [root, depthCache]);
-
-  useEffect(() => {
-    if (!root) return;
-    let cancelled = false;
-    let refreshing = false;
-    let timer: number | undefined;
-    let watchId: string | undefined;
-    const directories = [root, ...Array.from(expanded).filter((path) => path !== root)];
-    const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '');
-    const pending = new Set<string>(directories);
-    const isHidden = () => document.visibilityState === 'hidden';
-    const refresh = async () => {
-      if (cancelled || refreshing || isHidden() || !pending.size) return;
-      refreshing = true;
-      const changed = Array.from(pending);
-      pending.clear();
-      setLoading(new Set(changed.filter((path) => path !== root && depthCache[path] === undefined)));
-      try {
-        const results = await Promise.allSettled(changed.map((directory) =>
-          invoke<FileNode[]>('coding_list_dir_tree', { directory, maxDepth: 1 })));
-        if (cancelled) return;
-        for (const path of Object.keys(depthCache)) {
-          if (!expanded.has(path)) delete depthCache[path];
-        }
-        results.forEach((result, index) => {
-          const path = changed[index];
-          if (result.status === 'fulfilled') {
-            const children = new Set(result.value.filter((node) => node.is_dir).map((node) => normalize(node.path)));
-            setExpanded((previous) => {
-              const removed = Array.from(previous).filter((entry) => {
-                const normalized = normalize(entry);
-                return normalized.slice(0, normalized.lastIndexOf('/')) === normalize(path) && !children.has(normalized);
-              });
-              if (!removed.length) return previous;
-              return new Set(Array.from(previous).filter((entry) => !removed.some((removedPath) =>
-                entry === removedPath || normalize(entry).startsWith(normalize(removedPath) + '/'))));
-            });
-          }
-          if (path === root) {
-            if (result.status === 'fulfilled') {
-              setRoots(result.value || []);
-              setError('');
-            } else setError(String(result.reason));
-          } else depthCache[path] = result.status === 'fulfilled' ? result.value || [] : [];
-        });
-        setLoading(new Set());
-      } finally {
-        refreshing = false;
-        if (!cancelled && pending.size && !isHidden()) schedule();
-      }
-    };
-    const schedule = () => {
-      // 合并连续创建/删除/重命名事件；持续变更时也不会无限推迟刷新。
-      if (cancelled || timer !== undefined) return;
-      timer = window.setTimeout(() => { timer = undefined; void refresh(); }, 100);
-    };
-    const onVisible = () => { if (pending.size) schedule(); };
-    const channel = new Channel<string>();
-    channel.onmessage = (directory) => {
-      if (cancelled) return;
-      for (const path of directories) {
-        if (!directory || normalize(path) === normalize(directory)) pending.add(path);
-      }
-      if (pending.size) schedule();
-    };
-    // 先建立监听，再读取快照，避免初始读取与注册监听之间漏掉变更。
-    void invoke<string>('coding_watch_directories', { directories, onChange: channel }).then((id) => {
-      if (cancelled) {
-        void invoke('coding_unwatch_directories', { id }).catch(console.error);
-      } else {
-        watchId = id;
-        void refresh();
-      }
-    }).catch((error) => {
-      if (!cancelled) {
-        setError(String(error));
-        console.error('Workspace filesystem watch failed', error);
-      }
-    });
-    window.addEventListener('focus', onVisible);
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-      if (watchId) void invoke('coding_unwatch_directories', { id: watchId }).catch(console.error);
-      window.removeEventListener('focus', onVisible);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
-  }, [root, expanded, depthCache]);
-
-  const toggleDir = useCallback((path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
-
-  const renderNode = useCallback((node: FileNode, depth: number): React.ReactNode => {
-    const isExpanded = expanded.has(node.path);
-    const isLoading = loading.has(node.path);
-    const children = (node.is_dir ? depthCache[node.path] : undefined) ?? node.children ?? [];
-    const hasChildren = node.is_dir && (children.length > 0 || isLoading);
-    return (
-      <div key={node.path}>
-        <div
-          role="treeitem"
-          aria-expanded={node.is_dir ? isExpanded : undefined}
-          className={`codex-tree-node ${!node.is_dir ? 'codex-tree-file' : ''}`}
-          style={{ paddingLeft: 7 + depth * 14 }}
-          title={node.path}
-          onClick={() => {
-            if (node.is_dir) void toggleDir(node.path);
-            else onOpenFile(node.path);
-          }}
-        >
-          {node.is_dir ? (
-            <span style={{ color: 'var(--codex-ink-faint)', display: 'inline-flex', flexShrink: 0 }}>
-              {isLoading ? <Loader2 size={12} className="codex-spin" /> : isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            </span>
-          ) : <span style={{ width: 12, flexShrink: 0 }} />}
-          <span style={{ display: 'inline-flex', color: 'var(--codex-ink-faint)', flexShrink: 0 }}>
-            {node.is_dir ? (isExpanded ? <FolderOpen size={14} /> : <FolderTree size={14} />) : <FileText size={14} />}
-          </span>
-          <span className="codex-tree-name">{node.name}</span>
-        </div>
-        {node.is_dir && isExpanded && hasChildren && (
-          <div>
-            {[...children]
-              .sort((a, b) => {
-                if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
-                return a.name.localeCompare(b.name);
-              })
-              .map((c) => renderNode(c, depth + 1))}
-            {!isLoading && children.length === 0 && (
-              <div className="codex-tree-empty" style={{ paddingLeft: 21 + depth * 14 }}>
-                {t('mind_inspector.code_tree_empty', { defaultValue: '（空目录）' })}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  }, [expanded, loading, toggleDir, onOpenFile, t, depthCache]);
-
-  return (
-    <div className="codex-workspace-tree">
-      {error ? (
-        <div className="codex-tree-error">{error}</div>
-      ) : roots === null ? (
-        <div className="codex-tree-loading"><Loader2 size={13} className="codex-spin" /></div>
-      ) : roots.length === 0 ? (
-        <div className="codex-tree-empty">{t('mind_inspector.code_tree_no_files', { defaultValue: '工作区为空' })}</div>
-      ) : (
-        roots.map((n) => renderNode(n, 0))
       )}
     </div>
   );
@@ -6008,11 +5765,13 @@ const CodeAgentPage: React.FC = () => {
                 <ChevronDown className={workspaceTreeOpen ? '' : 'collapsed'} size={12} />
               </button>
               {workspaceTreeOpen && (
-                <WorkspaceFileTree
-                  key={activeSession.session_id}
-                  root={activeSession.working_directory}
-                  onOpenFile={openPreview}
-                />
+                <Suspense fallback={<div className="codex-tree-loading"><Loader2 size={13} className="codex-spin" /></div>}>
+                  <WorkspaceFileTree
+                    key={`${activeSession.session_id}:${activeSession.working_directory}`}
+                    root={activeSession.working_directory}
+                    onOpenFile={openPreview}
+                  />
+                </Suspense>
               )}
             </div>
           ) : null}

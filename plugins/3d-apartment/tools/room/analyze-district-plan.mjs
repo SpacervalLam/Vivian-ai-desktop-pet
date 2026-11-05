@@ -46,10 +46,21 @@ const block = src.slice(i0, i1)
   .replace(/\/\/[^\n]*/g, '')
   .replace(/\bexport\s+/g, '')
   .replace(/:\s*(?:CityLot\[\]|CityLot|number|string|boolean)/g, '')
-  .replace(/([A-Za-z_$][\w$]*)\?(?=\s*[,)])/g, '$1');   // 可选参数 floors?
-const CITY_LOTS = new Function(`${block}; return CITY_LOTS;`)();  // eslint-disable-line no-new-func
+  .replace(/([A-Za-z_$][\w$]*)\?(?=\s*[,)])/g, '$1')   // 可选参数 floors?
+  .replace(/new Set<[^>]*>\(/g, 'new Set(');            // new Set<string>() 在纯 JS 里是语法错
+const { CITY_LOTS, CITY_INBLOCK_TOWER_LOTS } = new Function(
+  `${block}; return {CITY_LOTS, CITY_INBLOCK_TOWER_LOTS};`
+)();  // eslint-disable-line no-new-func
 
-const xCells = JSON.parse(grab(/const xCells=(\[\[[\s\S]*?\]\]);/));
+/* xCells 原先是 urbanStreets.ts 里的字面量常量，后来随地块表重写被删掉了，
+ * 脚本却还在 grab() 它 —— 这正是整个分析脚本跑不起来的第二个原因。
+ * 直接由唯一的真源 CITY_ROADS 推导：两条南北路各切掉半个路宽，剩下三段。 */
+const nsRoads = CITY_ROADS.northSouth.slice().sort((a, b) => a.x - b.x);
+const xCells = [
+  [CITY_ROADS.bounds.x0, nsRoads[0].x - nsRoads[0].width / 2],
+  [nsRoads[0].x + nsRoads[0].width / 2, nsRoads[1].x - nsRoads[1].width / 2],
+  [nsRoads[1].x + nsRoads[1].width / 2, CITY_ROADS.bounds.x1],
+];
 
 const FLOOR_H = 2.8;
 const line = (s) => console.log(s);
@@ -258,6 +269,93 @@ for (const z of rowsZ) {
   for (let i = 0; i < row.length; i++) for (let j = i + 1; j < row.length; j++) if (pick(row[i].i) === pick(row[j].i)) samePair++;
 }
 line(`  同一行内同色对数：${samePair}（旧版 index%5 在 8 列上是每行必 3 对）`);
+
+// ---- 5b. 门面落位不变量 ----------------------------------------------------
+/**
+ * 纯静态核对「身份表里的每家店是否都有落位」。
+ * 曾经 ARTISAN_SHOPS 有 40 项、artisanSites 只有 32 项，末尾 8 家的手绘招牌
+ * 和 switch 里的 case 32..39 橱窗永远不会执行，而场景照常启动、不报任何错。
+ * 运行时在 sakuraTown.ts 里也有一条 throw 断言；这里让 CI/命令行不开浏览器就能查。
+ */
+line('');
+line('─'.repeat(78));
+line('E. 手作店门面 / 身份表落位不变量');
+line('─'.repeat(78));
+const animeDir = resolve(here, '../../../../plugins/3d-apartment/src/anime');
+const shopsSrc = readFileSync(resolve(animeDir, 'artisanShops.ts'), 'utf8');
+const townSrc = readFileSync(resolve(animeDir, 'sakuraTown.ts'), 'utf8');
+const storiesSrc = readFileSync(resolve(animeDir, 'streetStories.ts'), 'utf8');
+const identities = new Function(`return ${shopsSrc.match(/export const ARTISAN_SHOPS = (\[[\s\S]*?\]) as const;/)[1]};`)().length;
+const stories = new Function(`return ${storiesSrc.match(/export const STREET_STORIES = (\[[\s\S]*?\]) as const;/)[1]};`)().length;
+const lotSites = CITY_LOTS.filter(l => !l.id.endsWith('-19.6') && !CITY_INBLOCK_TOWER_LOTS.has(l.id)).length;
+const approachRow = (townSrc.match(/for\(const \[i,x\] of \[([^\]]+)\]\.entries\(\)\)/) || [, ''])[1];
+const approach = approachRow.split(',').filter(v => v.trim()).length;
+// R2 起，主视轴的门面补白由新坐标系契约 sakuraPlan.FRONTAGES 提供，
+// sakuraTown 里不再有字面量坐标；站点数从契约的 count 读，避免两处漂移。
+const planSrc = readFileSync(resolve(animeDir, 'sakuraPlan.ts'), 'utf8');
+const usesPlan = /artisanSites\.push\(\s*\.\.\.FRONTAGES\s*\)/.test(townSrc);
+const infill = usesPlan ? Number((planSrc.match(/count:\s*(\d+)/) || [, '0'])[1]) : 0;
+const sites = lotSites + approach + infill;
+line(`  ARTISAN_SHOPS 身份             ${identities}`);
+line(`  = 地块派生 ${lotSites} + 駅前通り ${approach} + 主视轴街墙 ${infill} = ${sites} 个站点`);
+if (!usesPlan) line('  ⚠ sakuraTown 未接 FRONTAGES，主视轴街墙可能被静默丢掉');
+const matched = identities === sites;
+line(`  ${matched ? '✓ 一一对应，全部招牌/橱窗都会落位' : `✗ 不一致，末尾 ${identities - sites} 家的招牌与橱窗不会执行`}`);
+line(`  STREET_STORIES 装置             ${stories} 条（落位结果看 one-off-street-stories.userData.plan.rejected）`);
+if (!matched) process.exitCode = 1;
+
+// ---- 5c. 公寓体量坐标唯一真源 ----------------------------------------------
+/**
+ * R2 起始把散在 exterior.ts 的 APT_X0/X1、W=62、两份 UNITS、PARTITIONS、
+ * APT_WALL_BOXES 里的 203 边界全收进 sakuraPlan.APARTMENT_PLAN。
+ * 这里不开浏览器核对两件事：中户是否仍与 203 对齐、exterior 是否真的接了契约。
+ */
+line('');
+line('─'.repeat(78));
+line('F. 公寓体量坐标（sakuraPlan 唯一真源）');
+line('─'.repeat(78));
+const extSrc = readFileSync(resolve(animeDir, 'exterior.ts'), 'utf8');
+const num = (re, text) => Number((text.match(re) || [, 'NaN'])[1]);
+const px0 = num(/x0:\s*(-?[\d.]+)/, planSrc);
+const px1 = num(/x1:\s*(-?[\d.]+)/, planSrc);
+const unitCount = num(/unitCount:\s*(\d+)/, planSrc);
+const own0 = num(/ownUnitX0:\s*(-?[\d.]+)/, planSrc);
+const own1 = num(/ownUnitX1:\s*(-?[\d.]+)/, planSrc);
+const step = (px1 - px0) / unitCount;
+const mid = Math.floor(unitCount / 2);
+const derived = [px0 + mid * step, px0 + (mid + 1) * step];
+line(`  面宽 x∈[${px0}, ${px1}] = ${px1 - px0}m，${unitCount} 户等分 ${step.toFixed(1)}m/户`);
+line(`  203 中户派生 [${derived[0].toFixed(1)}, ${derived[1].toFixed(1)}]，声明 [${own0}, ${own1}]`);
+const aligned = Math.abs(derived[0] - own0) < 1e-6 && Math.abs(derived[1] - own1) < 1e-6;
+line(`  ${aligned ? '✓ 中户与 203 房间壳对齐' : '✗ 中户与 203 错位，assertApartmentPlan() 会抛错'}`);
+const wired = /W\s*=\s*APARTMENT_WIDTH/.test(extSrc)
+  && /const UNITS\s*=\s*apartmentUnits\(\)/.test(extSrc)
+  && /const PARTITIONS\s*=\s*apartmentPartitions\(\)/.test(extSrc)
+  && /assertApartmentPlan\(\)/.test(extSrc);
+line(`  ${wired ? '✓ exterior 的 W / UNITS / PARTITIONS 全部由契约派生' : '✗ exterior 仍有未接契约的硬编码坐标'}`);
+if (!aligned || !wired) process.exitCode = 1;
+
+// ---- 5d. 收缩收口：贴边系统必须都从契约派生 --------------------------------
+/**
+ * 62m → 37.2m 那次试跑暴露过 4 组绝对坐标（山墙、电梯塔、楼梯区、外廊边），
+ * 它们不会抛错，只会静默悬空在旧位置。这里不开浏览器逐条查接线。
+ */
+line('');
+const archSrc = readFileSync(resolve(animeDir, 'apartmentArchitecture.ts'), 'utf8');
+const liftSrc = readFileSync(resolve(animeDir, 'apartmentLift.ts'), 'utf8');
+const shrinkChecks = [
+  ['架构山墙 / 屋顶亭 / 柱子接契约',
+    /gx\s*\+\s*side\*0\.075/.test(archSrc) && /apartmentUnits\(\)/.test(archSrc) && /apartmentPartitions\(\)/.test(archSrc)],
+  ['电梯塔几何与碰撞随 x0 平移',
+    /LIFT_SHIFT_X\s*=\s*APARTMENT_PLAN\.x0\s*-\s*LEGACY_APT_X0/.test(liftSrc) && /x\s*\+\s*sx/.test(liftSrc)],
+  ['东端楼梯细节贴 APT_X1',
+    /canopy\.position\.set\(APT_X1 \+ 0\.72/.test(extSrc) && /gate\.position\.set\(APT_X1 \+ 5\.82/.test(extSrc)
+      && /bike\(APT_X1 \+ 2\.7/.test(extSrc)],
+  ['公共外廊边贴 APT_X0', /edges\.push\(\{ x0: APT_X0 \+ 0\.1/.test(extSrc)],
+  ['裙房露台庭园接 PODIUM_HALF_WIDTH', /PODIUM_HALF_WIDTH/.test(archSrc) && /terrace-deck/.test(archSrc)],
+];
+shrinkChecks.forEach(([label, ok]) => line(`  ${ok ? '✓' : '✗'} ${label}`));
+if (shrinkChecks.some(([, ok]) => !ok)) process.exitCode = 1;
 
 // ---- 6. 结论摘要 -----------------------------------------------------------
 line('');

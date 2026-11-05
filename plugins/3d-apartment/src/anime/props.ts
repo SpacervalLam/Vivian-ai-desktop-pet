@@ -2213,7 +2213,7 @@ export function buildBathroom(spec: { pos: [number, number, number]; size: [numb
 }
 
 /** 和室小物件：挂轴（床之间墙上）+ 矮桌上不需要，桌复用 buildLowTable。 */
-export function buildScroll(_spec: { pos: [number, number, number] }): THREE.Group {
+export function buildScroll(spec: { pos: [number, number, number] }): THREE.Group {
   const g = new THREE.Group();
   // 挂轴：面朝 +X（挂 -X 墙）
   g.add(m(box(0.03, 0.72, 0.30), toon('#f2ecdc'), [0, 0, 0], 'cast'));
@@ -2223,6 +2223,8 @@ export function buildScroll(_spec: { pos: [number, number, number] }): THREE.Gro
   g.add(m(new THREE.PlaneGeometry(0.20, 0.50), emissive('#f7f2e4'), [0.017, 0, 0], 'none'));
   g.add(m(sph(0.035, 10, 8), toon('#e2dac6'), [0.017, 0.14, -0.04], 'none'));
   g.add(m(new THREE.CircleGeometry(0.075, 16), toon('#a9c4b2'), [0.018, -0.10, 0.04], 'none'));
+  // 参数原本被写成 _spec 丢掉了：从家具表按 kind:'scroll' 摆的挂轴会全部叠在原点。
+  g.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
   return g;
 }
 
@@ -4465,7 +4467,7 @@ const jpFuton = () => toon('#ffffff', { map: jpFutonTexture() });
 const jpDeck = () => toon('#ffffff', { map: jpDeckWoodTexture() });
 const jpFixture = () => toon(C('jpFixtureWhite', '#eef0ee'), { finish: 'soft' });
 const jpBathTile = () => toon('#ffffff', { map: jpBathTileTexture() });
-const jpPosterMat = () => toon('#ffffff', { map: jpPosterTexture() });
+const jpPosterMat = (variant = 0) => toon('#ffffff', { map: jpPosterTexture(variant) });
 const jpClockMat = () => toon('#ffffff', { map: jpClockFaceTexture() });
 
 /* ---------------- 卧室 ---------------- */
@@ -5149,11 +5151,12 @@ export function buildJpWallClock(pos: [number, number, number], rot = 0): THREE.
 export function buildJpPoster(
   pos: [number, number, number],
   size: [number, number],
-  rot = 0
+  rot = 0,
+  variant = 0
 ): THREE.Group {
   const g = new THREE.Group();
   g.add(m(box(size[0] + 0.05, size[1] + 0.05, 0.02), jpOakSolid(), [0, 0, 0], 'cast'));
-  g.add(m(new THREE.PlaneGeometry(size[0], size[1]), jpPosterMat(), [0, 0, 0.015], 'none'));
+  g.add(m(new THREE.PlaneGeometry(size[0], size[1]), jpPosterMat(variant), [0, 0, 0.015], 'none'));
   g.position.set(pos[0], pos[1], pos[2]);
   g.rotation.y = rot;
   return g;

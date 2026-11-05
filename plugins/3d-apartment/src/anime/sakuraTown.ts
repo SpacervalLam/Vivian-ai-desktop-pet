@@ -3,7 +3,8 @@ import { mergeByMaterial, freezeStatic } from './merge';
 import { createBlossomField, createFallenPetals, createLeafField, createTrunkField } from './foliage';
 import type { Collider } from './collider';
 import { CITY_LOTS, CITY_INBLOCK_TOWER_LOTS } from './urbanStreets';
-import { createArtisanShops } from './artisanShops';
+import { createArtisanShops, ARTISAN_SHOPS } from './artisanShops';
+import { FRONTAGES, ALLEY_TREES } from './sakuraPlan';
 
 /** Human-scale foreground. All shop dimensions and collision boxes share local coordinates. */
 export function createSakuraTown(scene: THREE.Scene) {
@@ -197,6 +198,17 @@ export function createSakuraTown(scene: THREE.Scene) {
     .map((lot, i) => ({ x: lot.x, z: lot.z - 3.3, height: 5.5 + (i % 4) * .25 }));
   // Continuous frontage links the original shops to the railway approach.
   for(const [i,x] of [49,52.5,56,59.5,68,71.5,75].entries())artisanSites.push({ x, z: 16.7, height: 5.6 + (i % 3) * .3 });
+  /* 主视轴街墙：坐标与数量的唯一真源是 sakuraPlan.FRONTAGES。
+   * 这 8 家原先散在 z=-60/-34/40/70 的远处街排，站在公寓前根本看不见；
+   * 迁到公寓正南后，门口与阳台都能读出概念图 1 的「近景低层街屋」这一层。
+   * 8 个坐标逐个按店屋 AABB 与既有碰撞盒核过账，零相交。
+   * 它们仍是 identity 32..39 的唯一落位——少了这段，那 8 块手绘招牌和
+   * case 32..39 的橱窗永远不会被执行。 */
+  artisanSites.push(...FRONTAGES);
+  /* 站点数必须等于身份数，否则末尾那些身份的招牌与橱窗又会被静默丢掉。
+   * 这是一条结构不变量，不是调试日志：写成抛错，下次增删任一侧立刻就能发现。 */
+  if(artisanSites.length!==ARTISAN_SHOPS.length)
+    throw new Error(`Artisan frontage/identity mismatch: ${artisanSites.length} sites vs ${ARTISAN_SHOPS.length} shops`);
   shopSpecs.forEach((spec,shopNumber)=>{
     const index=spec.kind;
     const g=new THREE.Group();g.name=`sakura-shop-${shopNumber}`;g.position.set(spec.x,0,spec.z??15.8);root.add(g);
@@ -635,7 +647,10 @@ export function createSakuraTown(scene: THREE.Scene) {
   mergeByMaterial(garden);freezeStatic(garden);
 
   // Branching cherry trees. Hundreds of small, irregular blossoms replace smooth pink blobs.
-  const treePositions: Array<[number,number]>=[[-11.6,13.4],[19.55,13.45],[27.20,14.0],[36.9,15.1],[-6.85,22.8],[48.2,13.5],[57,13.5],[66.6,13.5],[75.9,13.5],[54.3,36.5],[31,36.5]];
+  /* 末尾 4 棵是主视轴街墙前的行道樱，坐标来自 sakuraPlan.ALLEY_TREES。
+   * 下面三套实例场（花簇 / 落花 / 树干）都按 treePositions.length 定容量，
+   * 所以这里 append 一次，树冠、落花、干场与碰撞盒会一起跟上，不会漏建。 */
+  const treePositions: Array<[number,number]>=[[-11.6,13.4],[19.55,13.45],[27.20,14.0],[36.9,15.1],[-6.85,22.8],[48.2,13.5],[57,13.5],[66.6,13.5],[75.9,13.5],[54.3,36.5],[31,36.5],...ALLEY_TREES.map(([x,z])=>[x,z] as [number,number])];
   // Cutout flower sprays give the canopy fine, airy edges instead of faceted pink boulders.
   // 贴图与实例收集器来自 foliage —— 社区绿地与市政行道树用的是同一套
   // （见 urbanStreets），免得几处树冠各长各的、从阳台望出去一中景就露馅。

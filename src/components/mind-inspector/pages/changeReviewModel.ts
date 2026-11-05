@@ -1,3 +1,5 @@
+import type { GitStatusEntry } from '@pierre/trees';
+
 export type DiffScope = 'all' | 'staged' | 'unstaged';
 export interface ChangedFile {
   path: string;
@@ -34,6 +36,25 @@ export interface ReviewComment {
   line: number;
   quote: string;
   body: string;
+}
+
+export function changedFileTreeInput(files: readonly ChangedFile[], filter: string) {
+  const paths = new Set<string>();
+  const gitStatus: GitStatusEntry[] = [];
+  const query = filter.trim().toLocaleLowerCase();
+  for (const file of files) {
+    if (!`${file.path} ${file.original_path ?? ''}`.toLocaleLowerCase().includes(query)) continue;
+    paths.add(file.path);
+    let parent = file.path.lastIndexOf('/');
+    while (parent > 0) {
+      paths.add(file.path.slice(0, parent + 1));
+      parent = file.path.lastIndexOf('/', parent - 1);
+    }
+    const status = file.index_status + file.worktree_status;
+    gitStatus.push({ path: file.path, status: file.conflict ? 'modified' : file.untracked ? 'untracked'
+      : status.includes('R') ? 'renamed' : status.includes('D') ? 'deleted' : status.includes('A') ? 'added' : 'modified' });
+  }
+  return { paths: [...paths], gitStatus };
 }
 
 export function diffLines(patch: string): DiffLine[] {

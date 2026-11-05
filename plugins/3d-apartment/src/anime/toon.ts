@@ -1,15 +1,16 @@
 /**
- * 日式赛璐璐（Cel-shading）渲染工具箱。
+ * 场景材质工厂（PBR）+ 描边 + 程序化贴图。
  *
- * 三件事：
- *  1. 阶梯渐变图 —— MeshToonMaterial 靠它把连续光照压成 2~4 级色阶，这是"动画感"的根
- *  2. 描边 —— 反面外扩（inverted hull）。先合并顶点、平均法线，否则立方体的角上
- *     法线是分裂的，外扩后会在每条棱上裂开缝。描边分两级：主结构全厚度、
- *     次结构细线，分级打在材质上（userData.outlineWeight），发光体不描
- *  3. 程序化贴图 —— 全部用 canvas 现画。不引入任何二进制美术资源，包体零增长，
- *     且风格统一（日式动画的背景本来就偏"手绘平涂"，程序化反而比照片贴图更贴）
+ * 材质：toon() 是全场实体表面的唯一入口，返回 MeshStandardMaterial。旧版返回
+ * MeshToonMaterial（4 级色阶），所有表面在光下响应完全相同，只能往 shader 里
+ * 烘焙假高光去装出材质差别；现在 finish 直接映射成 roughness / metalness /
+ * envMapIntensity，配合 RoomScene 已有的 PMREM 环境贴图，灰泥、木、金属、玻璃
+ * 在同一盏光下各读各的。toonGradient() 只剩 GLB 角色的 toonifyModel() 在用。
  *
- * 所有贴图都是模块级单例，重复调用不重复生成。
+ * 描边：反面外扩（inverted hull）。先合并顶点、平均法线，否则立方体的角上
+ * 法线是分裂的，外扩后会在每条棱上裂开缝。分级打在材质 userData.outlineWeight。
+ *
+ * 程序化贴图：全部 canvas 现画，不引入二进制美术资源，模块级单例。
  */
 
 import * as THREE from 'three';
@@ -58,21 +59,13 @@ export type ToonOpts = {
   side?: THREE.Side;
   depthWrite?: boolean;
   /**
-   * 材质分档：决定这块表面"怎么反光"。
-   *
-   * MeshToonMaterial 本体只有色阶，没有粗糙度/金属度——所有表面在光下的响应
-   * 是同一个，这正是画面"看不出材质差别"的根因。finish 往 shader 里注入一段
-   * 风格化的 specular + rim，让不同材质拿到不同的高光响应：
-   *   matte  不注入（默认，木头/布/墙/纸，行为与从前完全一致，零风险）
-   *   soft   极弱边缘亮（塑料、陶瓷、漆面）
-   *   metal  硬高光 + 中等亮边（五金、支脚、栏杆、灯杆）
-   *   glass  强亮边 + 中高光（玻璃门、酒柜玻璃）
-   *   wet    软高光 + 冷色亮边（湿面，备用）
-   *
-   * 注入是纯 GLSL 常量烘焙（见 FINISH_PRESETS），不带自定义 uniform ——
-   * three 对缓存命中的材质不会重跑 onBeforeCompile，走 uniform 的话同一档位里
-   * 只有第一个材质的值会生效，其余全静默漏掉。烘焙成常量后同档共享 program
-   * 是安全的：program 即档位，没有可变状态。
+   * 材质分档 → 真实 PBR 参数（见 SURFACE_PRESETS）：
+   *   matte  木头 / 布 / 灰泥 / 纸，高粗糙度、无金属
+   *   soft   塑料 / 陶瓷 / 漆面
+   *   metal  五金 / 支脚 / 栏杆 / 灯杆
+   *   glass  玻璃门 / 酒柜玻璃
+   *   wet    雨夜湿面
+   * 分档必须留在材质缓存键里，否则不同档位会共享同一实例、先建的赢。
    */
   finish?: ToonFinish;
   /**
@@ -119,90 +112,34 @@ function defaultOutlineWeight(finish?: ToonFinish): OutlineWeight {
 }
 
 /**
- * 主光方向（世界空间，指向光源）。
+ * finish → 真实 PBR 参数。
  *
- * specular 的半程向量需要"表面指向光源"的方向。主光位置来自 layout.lighting.key，
- * 是静态的（本次不做昼夜变化），所以直接烘焙成 shader 常量，不搞 uniform。
- * 必须在**任何带 finish 的 toon() 调用之前**设好——RoomScene 在 setArtStyle 之后、
- * 造任何家具之前调用 setToonKeyLight。
+ * 旧版这几档是往 MeshToonMaterial 的 shader 里烘焙的假 specular / rim，因为 Toon
+ * 材质没有粗糙度与金属度。现在工厂返回 MeshStandardMaterial，直接给
+ * roughness / metalness / envMapIntensity，配合 RoomScene 已有的 PMREM 环境贴图，
+ * 灰泥、木、金属、玻璃在同一盏光下各有各的响应——不需要再往 GLSL 里补丁。
  */
-const KEY_LIGHT_DIR = new THREE.Vector3(0.42, 0.72, 0.55).normalize();
-
-export function setToonKeyLight(x: number, y: number, z: number): void {
-  KEY_LIGHT_DIR.set(x, y, z).normalize();
-}
-
-type FinishPreset = {
-  rimLow: number;
-  rimHigh: number;
-  rimStrength: number;
-  rimColor: string;
-  /** 半程向量与法线点积的硬切阈值，越接近 1 高光越小越锐。 */
-  specCut: number;
-  specStrength: number;
-  specColor: string;
+type SurfacePreset = { roughness: number; metalness: number; envMapIntensity: number };
+const SURFACE_PRESETS: Record<ToonFinish, SurfacePreset> = {
+  matte: { roughness: 0.92, metalness: 0,    envMapIntensity: 0.55 },
+  soft:  { roughness: 0.58, metalness: 0,    envMapIntensity: 0.85 },
+  metal: { roughness: 0.32, metalness: 0.72, envMapIntensity: 1.15 },
+  glass: { roughness: 0.12, metalness: 0.08, envMapIntensity: 1.45 },
+  wet:   { roughness: 0.18, metalness: 0.04, envMapIntensity: 1.35 },
 };
 
-const FINISH_PRESETS: Record<Exclude<ToonFinish, 'matte'>, FinishPreset> = {
-  soft: { rimLow: 0.66, rimHigh: 0.94, rimStrength: 0.2, rimColor: '#fff6e8', specCut: 0.992, specStrength: 0.0, specColor: '#ffffff' },
-  metal: { rimLow: 0.5, rimHigh: 0.88, rimStrength: 0.4, rimColor: '#fff1d8', specCut: 0.968, specStrength: 0.55, specColor: '#fff4e0' },
-  glass: { rimLow: 0.38, rimHigh: 0.8, rimStrength: 0.58, rimColor: '#cfe2ff', specCut: 0.978, specStrength: 0.35, specColor: '#e8f2ff' },
-  wet: { rimLow: 0.52, rimHigh: 0.9, rimStrength: 0.34, rimColor: '#dbe8ff', specCut: 0.958, specStrength: 0.28, specColor: '#e6efff' },
-};
-
-/** hex → GLSL vec3 字面量（linear 感知无所谓：这里注入的是光上加色，按 sRGB 直取已够用）。 */
-function glslVec3(hex: string): string {
-  const c = new THREE.Color(hex);
-  return `vec3(${c.r.toFixed(5)}, ${c.g.toFixed(5)}, ${c.b.toFixed(5)})`;
-}
-
-/**
- * 拼出这一档的注入代码。两处落点：
- *  - 常量声明插在 `#include <common>` 之后（全局作用域，main 之前）
- *  - 计算插在 `#include <opaque_fragment>` 之前（此时 outgoingLight 刚拼完，
- *    还没做色调映射和 sRGB 转换——高光必须加在线性空间，加了顺序就错了）
- *
- * 可用变量（都由 toon 模板保证存在）：normal（view space，normal_fragment_begin
- * 定义的）、vViewPosition（lights_toon_pars_fragment 定义的 = -mvPosition.xyz，
- * 所以 normalize 后就是"表面指向相机"）、viewMatrix（three 片元内建 uniform）。
- */
-function finishShaderPatch(finish: Exclude<ToonFinish, 'matte'>): { decl: string; code: string } {
-  const p = FINISH_PRESETS[finish];
-  const decl = `
-  // —— finish: ${finish}（风格化 specular + rim，常量烘焙，无 uniform）——
-  const vec3 finishKeyDirW = vec3(${KEY_LIGHT_DIR.x.toFixed(5)}, ${KEY_LIGHT_DIR.y.toFixed(5)}, ${KEY_LIGHT_DIR.z.toFixed(5)});
-  const vec3 finishSpecColor = ${glslVec3(p.specColor)};
-  const vec3 finishRimColor = ${glslVec3(p.rimColor)};
-  const float finishRimLow = ${p.rimLow.toFixed(4)};
-  const float finishRimHigh = ${p.rimHigh.toFixed(4)};
-  const float finishRimStrength = ${p.rimStrength.toFixed(4)};
-  const float finishSpecCut = ${p.specCut.toFixed(4)};
-  const float finishSpecStrength = ${p.specStrength.toFixed(4)};
-`;
-  const code = `
-  {
-    vec3 finishViewDir = normalize( vViewPosition );
-    vec3 finishLightDir = normalize( ( viewMatrix * vec4( finishKeyDirW, 0.0 ) ).xyz );
-    float finishNdh = saturate( dot( normal, normalize( finishViewDir + finishLightDir ) ) );
-    float finishSpec = step( finishSpecCut, finishNdh );
-    float finishFres = 1.0 - saturate( dot( normal, finishViewDir ) );
-    float finishRim = smoothstep( finishRimLow, finishRimHigh, finishFres );
-    outgoingLight += finishSpecColor * ( finishSpec * finishSpecStrength )
-                   + finishRimColor * ( finishRim * finishRimStrength );
-  }
-`;
-  return { decl, code };
-}
-
-function createToon(color: THREE.Color, opts: ToonOpts): THREE.MeshToonMaterial {
-  const m = new THREE.MeshToonMaterial({
+function createSurface(color: THREE.Color, opts: ToonOpts): THREE.MeshStandardMaterial {
+  const preset = SURFACE_PRESETS[opts.finish ?? 'matte'];
+  const m = new THREE.MeshStandardMaterial({
     color,
-    gradientMap: toonGradient(),
     map: opts.map ?? null,
     transparent: opts.transparent ?? false,
     opacity: opts.opacity ?? 1,
     side: opts.side ?? THREE.FrontSide,
     depthWrite: opts.depthWrite ?? true,
+    roughness: preset.roughness,
+    metalness: preset.metalness,
+    envMapIntensity: preset.envMapIntensity,
   });
   if (opts.emissive !== undefined) {
     m.emissive = new THREE.Color(opts.emissive);
@@ -210,20 +147,6 @@ function createToon(color: THREE.Color, opts: ToonOpts): THREE.MeshToonMaterial 
   }
   // 分级跟着材质走：合批后实体 mesh 只留材质引用，weight 必须从材质上读回来
   m.userData.outlineWeight = opts.outlineWeight ?? defaultOutlineWeight(opts.finish);
-  if (opts.finish && opts.finish !== 'matte') {
-    const patch = finishShaderPatch(opts.finish);
-    m.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader
-        .replace('#include <common>', '#include <common>\n' + patch.decl)
-        .replace('#include <opaque_fragment>', patch.code + '\n\t#include <opaque_fragment>');
-    };
-    /**
-     * 档位必须进 program 缓存键。three 默认拿 onBeforeCompile.toString() 当键，
-     * 而各档位的 onBeforeCompile 是同一个函数——不区分的话不同档位会复用同一个
-     * program，先编译的那档的注入会顶掉其他档。
-     */
-    m.customProgramCacheKey = () => `room-toon-${opts.finish}`;
-  }
   return m;
 }
 
@@ -234,12 +157,12 @@ function createToon(color: THREE.Color, opts: ToonOpts): THREE.MeshToonMaterial 
  * 拢共几十种。逐个 new 出来的材质在渲染时既无法合批，又让渲染队列的排序
  * （按材质 id 分组）退化成两千多个单元素组，这部分 CPU 开销比 GPU 还贵。
  */
-const toonCache = new Map<string, THREE.MeshToonMaterial>();
+const toonCache = new Map<string, THREE.MeshStandardMaterial>();
 
-/** 统一入口：房间里的所有实体表面都走这里，保证 gradientMap 一定挂上。 */
-export function toon(color: THREE.ColorRepresentation, opts: ToonOpts = {}): THREE.MeshToonMaterial {
+/** 统一入口：全场实体表面都走这里，保证 PBR 分档与共享缓存一致。 */
+export function toon(color: THREE.ColorRepresentation, opts: ToonOpts = {}): THREE.MeshStandardMaterial {
   const c = new THREE.Color(color);
-  if (opts.unique) return createToon(c, opts);
+  if (opts.unique) return createSurface(c, opts);
 
   const key = [
     c.getHexString(),
@@ -258,7 +181,7 @@ export function toon(color: THREE.ColorRepresentation, opts: ToonOpts = {}): THR
 
   let mat = toonCache.get(key);
   if (!mat) {
-    mat = createToon(c, opts);
+    mat = createSurface(c, opts);
     // 标记共享缓存材质：场景卸载做 dispose 遍历时必须跳过，
     // 否则缓存单例被销毁后仍留在 Map 里，下次重建白白浪费 program 重建
     mat.userData.__roomCached = true;
@@ -451,11 +374,11 @@ function sharedOutlineMaterial(thickness: number, color: THREE.ColorRepresentati
 }
 
 /**
- * 描边分级的厚度系数。weight 2 是全厚度（调用方给的 thickness），
- * weight 1 收细——次结构线太粗会跟外轮廓抢戏，画面就回到"所有边一样粗"
- * 的老样子。weight 0 在这里没有系数：根本不建壳。
+ * 描边分级的厚度系数。半写实档下只保留一线极细的轮廓，形体边界交给
+ * PBR 明暗与软阴影承担——原来 1 / 0.55 的黑线是赛璐璐语言，留着会把
+ * 刚换好的材质又拉回卡通感。weight 0 依旧不建壳。
  */
-const OUTLINE_WEIGHT_FACTOR: Record<1 | 2, number> = { 1: 0.55, 2: 1 };
+const OUTLINE_WEIGHT_FACTOR: Record<1 | 2, number> = { 1: 0.12, 2: 0.22 };
 
 /** 从 mesh 的材质上读描边分级。材质没带标记（比如直接 new 出来的）按全厚度处理。 */
 function outlineWeightOf(mesh: THREE.Mesh): OutlineWeight {
@@ -2838,10 +2761,20 @@ export function jpFutonTexture(): THREE.Texture {
   return _jpFuton;
 }
 
-/* --- 14. 日式海报（《你的名字》彗星夜空母题） --------------------------- */
-let _jpPoster: THREE.Texture | null = null;
-export function jpPosterTexture(): THREE.Texture {
-  if (_jpPoster) return _jpPoster;
+/* --- 14. 日式海报（按 variant 缓存的多幅画面） --------------------------- */
+const _jpPosters = new Map<number, THREE.Texture>();
+/**
+ * variant 0 = 彗星夜空（原有那幅），1 = 层叠远山。
+ * 挂多幅画时不能都指向同一张缓存贴图，否则一面墙看起来像复制粘贴。
+ */
+export function jpPosterTexture(variant = 0): THREE.Texture {
+  const hit = _jpPosters.get(variant);
+  if (hit) return hit;
+  const result = variant === 1 ? jpPosterHillsTexture() : jpPosterCometTexture();
+  _jpPosters.set(variant, result);
+  return result;
+}
+function jpPosterCometTexture(): THREE.Texture {
   const W = 256, H = 384;
   const { canvas, ctx } = makeCanvas(W, H);
   const img = ctx.createImageData(W, H);
@@ -2877,8 +2810,40 @@ export function jpPosterTexture(): THREE.Texture {
     }
   }
   ctx.putImageData(img, 0, 0);
-  _jpPoster = toTexture(canvas, [1, 1]);
-  return _jpPoster;
+  return toTexture(canvas, [1, 1]);
+}
+
+/** 第二幅：暖纸底 + 三层远山 + 一轮浅月，和彗星夜空拉开色调与构图。 */
+function jpPosterHillsTexture(): THREE.Texture {
+  const W = 256, H = 384;
+  const { canvas, ctx } = makeCanvas(W, H);
+  ctx.fillStyle = '#d8c7a6'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#f0e2c3';
+  ctx.beginPath(); ctx.arc(178, 96, 34, 0, Math.PI * 2); ctx.fill();
+  const ridges = [
+    { y: 250, color: '#7f969b', amp: 22 },
+    { y: 296, color: '#547277', amp: 16 },
+    { y: 338, color: '#2f4a55', amp: 12 },
+  ];
+  for (const r of ridges) {
+    ctx.fillStyle = r.color;
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 8) {
+      ctx.lineTo(x, r.y + Math.sin(x * 0.022 + r.y) * r.amp + Math.sin(x * 0.061) * r.amp * 0.35);
+    }
+    ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  }
+  // 几道等高线：让它读作版画，而不是一张照片
+  ctx.strokeStyle = 'rgba(236,225,203,.34)'; ctx.lineWidth = 1;
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 8) {
+      const y = 268 + i * 17 + Math.sin(x * 0.03 + i) * 9;
+      if (x) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  }
+  return toTexture(canvas, [1, 1]);
 }
 
 /* --- 15. 钟面（极简刻度盘） --------------------------------------------- */

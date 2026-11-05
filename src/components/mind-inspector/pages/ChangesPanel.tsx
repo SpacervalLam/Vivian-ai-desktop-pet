@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { RefreshCw, FileDiff as FileDiffIcon, MessageSquare, X } from 'lucide-react';
 import { diffLines, readReviewComments, reviewPrompt, reviewStorageKey,
   type ChangesSnapshot, type DiffLine, type DiffScope, type FileDiff, type ReviewComment } from './changeReviewModel';
+import ChangesFileTree from './ChangesFileTree';
+import ReviewDiffView from './ReviewDiffView';
 import './changeReviewStrings';
 import './ChangesPanel.css';
 
@@ -86,10 +88,19 @@ export default function ChangesPanel({ workspace, onOpen, onAddToChat, fallback 
 
   const file = snapshot?.files.find(item => item.path === selected);
   const rows = useMemo(() => diff ? diffLines(diff.patch) : [], [diff]);
-  const selectFile = (path: string) => {
+  const stats = useMemo(() => rows.reduce((counts, row) => {
+    if (row.kind === 'add') counts.added++;
+    if (row.kind === 'delete') counts.removed++;
+    return counts;
+  }, { added: 0, removed: 0 }), [rows]);
+  const selectFile = useCallback((path: string) => {
     if (path === selected) return;
     setSelected(path); setDiff(null); setAnchor(null); setBody('');
-  };
+  }, [selected]);
+  const beginComment = useCallback((row: DiffLine, side: 'old' | 'new') => {
+    if (!diff) return;
+    setAnchor({ row, revision: diff.revision, side }); setBody('');
+  }, [diff]);
   const saveComment = () => {
     if (!anchor || !diff || !body.trim() || comments.length >= 100) return;
     const line = anchor.side === 'old' ? anchor.row.oldLine : anchor.row.newLine;
@@ -115,35 +126,18 @@ export default function ChangesPanel({ workspace, onOpen, onAddToChat, fallback 
       <input className="change-review-filter" value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('changeReview.search')} aria-label={t('changeReview.search')} />
       {snapshot.truncated && <p role="status">{t('changeReview.truncated')}</p>}
       {!snapshot.files.length && <p>{t('changeReview.empty')}</p>}
-      <div className="change-review-files">
-        {snapshot.files.filter(item => `${item.path} ${item.original_path ?? ''}`.toLowerCase().includes(filter.toLowerCase())).map(item =>
-          <button key={item.path} type="button" className={selected === item.path ? 'selected' : ''} aria-pressed={selected === item.path} title={item.path} onClick={() => selectFile(item.path)}>
-            <span className={item.conflict ? 'change-review-conflict' : 'change-review-status'}>{item.index_status}{item.worktree_status}</span>
-            <span>{item.original_path ? `${item.original_path} → ${item.path}` : item.path}</span>
-            {item.conflict && <span>{t('changeReview.conflict')}</span>}
-          </button>)}
-      </div>
+      <div className="change-review-file-count">{t('changeReview.files', { count: snapshot.files.length })}</div>
+      {snapshot.files.length > 0 && <ChangesFileTree files={snapshot.files} selected={selected} filter={filter} onSelect={selectFile} />}
       {selected ? <div className="change-review-detail">
-        <div className="change-review-path"><span>{selected}</span>{file?.worktree_status !== 'D' && file?.index_status !== 'D' &&
+        <div className="change-review-path"><span>{file?.original_path ? `${file.original_path} → ${selected}` : selected}</span>{file?.worktree_status !== 'D' && file?.index_status !== 'D' &&
           <button type="button" onClick={() => onOpen(`${snapshot.root}/${selected}`)}>{t('changeReview.open')}</button>}</div>
         {diffLoading && <p role="status">{t('changeReview.loading')}</p>}
         {diffError && <p className="change-review-error" role="alert">{diffError}</p>}
         {diff?.binary ? <p>{t('changeReview.binary')}</p> : diff && <>
           <p className="change-review-hint">{t('changeReview.commentHint')}</p>
-          <div className="change-review-stats"><span>+{rows.filter(row => row.kind === 'add').length}</span><span>−{rows.filter(row => row.kind === 'delete').length}</span></div>
-          {diff.patch ? <div className="change-review-diff" aria-label={selected}>
-            {rows.map((row, index) => <div key={index} className={`change-review-line ${row.kind}`}>
-              <span className="change-review-gutter">{(['old', 'new'] as const).map(side => {
-                const line = side === 'old' ? row.oldLine : row.newLine;
-                return line === undefined ? <span key={side} /> : <button key={side} type="button"
-                  title={`${t('changeReview.comment')} · ${t(`changeReview.${side}`)} ${line}`}
-                  aria-label={`${t('changeReview.comment')} ${t(`changeReview.${side}`)} ${line}`}
-                  aria-pressed={anchor?.row === row && anchor.side === side}
-                  onClick={() => { setAnchor({ row, revision: diff.revision, side }); setBody(''); }}>{line}</button>;
-              })}</span>
-              <code>{row.text || ' '}</code>
-            </div>)}
-          </div> : <p>{t('changeReview.noDiff')}</p>}
+          <div className="change-review-stats"><span>+{stats.added}</span><span>−{stats.removed}</span></div>
+          {diff.patch ? <ReviewDiffView key={`${workspace}:${scope}:${selected}`} path={selected} diff={diff} rows={rows}
+            onComment={beginComment} /> : <p>{t('changeReview.noDiff')}</p>}
         </>}
         {diff?.truncated && <p role="status">{t('changeReview.truncated')}</p>}
         {anchor && <div className="change-review-editor">

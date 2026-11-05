@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 
 const modelBundle = await build({ entryPoints: ['src/components/mind-inspector/pages/changeReviewModel.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
-const { diffLines, reviewPrompt, readReviewComments, reviewStorageKey } = await import(`data:text/javascript;base64,${Buffer.from(modelBundle.outputFiles[0].text).toString('base64')}`);
+const { diffLines, reviewPrompt, readReviewComments, reviewStorageKey, changedFileTreeInput } = await import(`data:text/javascript;base64,${Buffer.from(modelBundle.outputFiles[0].text).toString('base64')}`);
 const patch = 'diff --git a/file b/file\n--- a/file\n+++ b/file\n@@ -10,2 +10,3 @@\n context\n-old\n+new\n++literal plus\n\\ No newline at end of file\n';
 const lines = diffLines(patch);
 assert.deepEqual(lines.find(row => row.kind === 'delete'), { text: '-old', kind: 'delete', oldLine: 11 });
@@ -11,6 +11,12 @@ assert.equal(lines.find(row => row.text === '--- a/file').oldLine, undefined);
 assert.equal(diffLines('@@ -0,0 +1 @@\n+first')[1].newLine, 1);
 assert.equal(diffLines('@@ -3 +0,0 @@\n-deleted')[1].oldLine, 3);
 assert.equal(diffLines('@@ -1 +1 @@\n-a\n+b\ndiff --git a/next b/next\n+++ b/next')[4].newLine, undefined);
+const changed = [{ path: 'src/new/file.ts', original_path: 'lib/old.ts', index_status: 'R', worktree_status: ' ', untracked: false, conflict: false },
+  { path: 'src/conflict.ts', index_status: 'U', worktree_status: 'U', untracked: false, conflict: true },
+  { path: 'new.txt', index_status: '?', worktree_status: '?', untracked: true, conflict: false }];
+assert.deepEqual(changedFileTreeInput(changed, 'LIB/old').paths.sort(), ['src/', 'src/new/', 'src/new/file.ts']);
+assert.deepEqual(changedFileTreeInput(changed, '').gitStatus.map(entry => entry.status), ['renamed', 'modified', 'untracked']);
+assert.deepEqual(changedFileTreeInput(changed, 'missing').paths, []);
 
 const stored = new Map();
 globalThis.localStorage = { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
@@ -35,14 +41,17 @@ globalThis.window = {
 globalThis.document = { visibilityState: 'visible' };
 const mocks = {
   react: `const h=globalThis.__changeReview; export const useState=h.state,useRef=h.ref,useEffect=h.effect,useMemo=h.memo,useCallback=(fn,deps)=>h.memo(()=>fn,deps); export default {};`,
-  'react/jsx-runtime': 'export const jsx=(type,props)=>({type,props}),jsxs=jsx,Fragment="fragment";',
+  'react/jsx-runtime': 'export const jsx=(type,props)=>type?.fixture?type(props):({type,props}),jsxs=jsx,Fragment="fragment";',
   'react-i18next': `export const useTranslation=()=>({t:(key)=>key});`,
   '@tauri-apps/api/core': 'export const invoke=(...args)=>globalThis.__changeReview.invoke(...args);',
   'lucide-react': `export const RefreshCw='icon',FileDiff='icon',MessageSquare='icon',X='icon';`,
+  ChangesFileTree: `import {jsx} from 'react/jsx-runtime'; const Tree=({files,onSelect})=>files.map(item=>jsx('button',{onClick:()=>onSelect(item.path),children:item.index_status+item.worktree_status+item.path}));Tree.fixture=true;export default Tree;`,
+  ReviewDiffView: `import {jsx} from 'react/jsx-runtime'; const Diff=({rows,onComment})=>rows.map(row=>['old','new'].map(side=>{const line=side==='old'?row.oldLine:row.newLine;return line===undefined?null:jsx('button',{'aria-label':'changeReview.comment changeReview.'+side+' '+line,onClick:()=>onComment(row,side),children:row.text});}));Diff.fixture=true;export default Diff;`,
 };
 const bundle = await build({ entryPoints: ['src/components/mind-inspector/pages/ChangesPanel.tsx'], bundle: true, write: false, platform: 'node', format: 'esm', plugins: [{ name: 'review-fixture', setup(b) {
   b.onResolve({ filter: /^react$|^react\/jsx-runtime$|^react-i18next$|^@tauri-apps\/api\/core$|^lucide-react$/ }, ({ path }) => ({ path, namespace: 'fixture' }));
   b.onResolve({ filter: /changeReviewStrings$/ }, () => ({ path: 'strings', namespace: 'fixture' }));
+  b.onResolve({ filter: /\/(ChangesFileTree|ReviewDiffView)$/ }, ({path}) => ({ path: path.split('/').pop(), namespace: 'fixture' }));
   b.onLoad({ filter: /\.css$/ }, () => ({ contents: '', loader: 'js' }));
   b.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ contents: mocks[path] ?? '' }));
 } }] });

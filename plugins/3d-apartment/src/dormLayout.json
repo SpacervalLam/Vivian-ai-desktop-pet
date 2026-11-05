@@ -119,7 +119,8 @@
     "toneMapping": "neutral",
     "exposure": 1.02,
     "bloom": { "strength": 0.3, "radius": 0.6, "threshold": 0.9 },
-    "fog": { "color": "#131E2C", "near": 18, "far": 115 }
+    "_fog_note": "near/far 是全场雾距离的唯一真源（晴天基准；atmosphere.ts 按 night/storm 折算倍率）。雾色跟 skyPalette 的地平线走，这里的 color 只做 12% 微调，不是主色。改 near 后浏览器里 scene.fog.near 必须同步变化。85/300 取自重构前实际生效值，保证画面不跳。",
+    "fog": { "color": "#131E2C", "near": 85, "far": 300 }
   },
   "weather": {
     "_note": "雨 + 湿地。雨区跟随焦点（第一人称=玩家，观察者=注视点），radius 是焦点四周的水平半径，不必铺满整个街区；相机走进有顶房间时整场雨收起并停更。落雨禁区由户型自动算：有顶室内不落，阳台(ceiling:false)会落。layers=3 把雨按 z 切近/中/远三档。",
@@ -280,6 +281,13 @@
     ],
     "clock": { "pos": [6.14, 1.5, 2.7], "wall": "east" },
     "poster": { "pos": [-6.12, 1.5, 2], "size": [0.55, 0.8], "wall": "west" },
+    "_wallArt_note": "单件 clock/poster 之外再挂一组：ix-mw:b 是主卧/客厅隔墙朝客厅那一侧（内墙两侧各有 decor 组，:b 为 +X 向），从客厅平视过去原本是一整片素墙。",
+    "wallArt": [
+      { "kind": "poster", "wall": "ix-mw:b", "pos": [-1.71, 1.62, 2.0], "size": [0.52, 0.72], "variant": 0 },
+      { "kind": "poster", "wall": "ix-mw:b", "pos": [-1.71, 1.42, 3.25], "size": [0.38, 0.54], "variant": 1 },
+      { "kind": "poster", "wall": "east", "pos": [6.14, 1.55, -0.2], "size": [0.46, 0.62], "variant": 1 }
+    ],
+    "stringLights": { "wall": "south", "from": [-1.25, 2.45, 4.62], "to": [1.25, 2.45, 4.62], "sag": 0.12 },
     "sunbeams": [
       { "wall": "south", "x0": -1.2, "x1": 1.2, "y0": 0.05, "y1": 2.4, "z": 4.8, "dir": [0.425, -0.46, -0.779], "sheets": 3, "opacity": 0.1 },
       { "wall": "south", "x0": -5.4, "x1": -4, "y0": 0.45, "y1": 2.35, "z": 4.8, "dir": [0.425, -0.46, -0.779], "sheets": 2, "opacity": 0.05 }
@@ -287,8 +295,7 @@
     "motes": {
       "count": 150,
       "bounds": { "x": [-6, 6], "y": [0.1, 2.7], "z": [-5.7, 6.2] }
-    },
-    "cushions": []
+    }
   },
   "characters": {
     "_height_note": "1.30 不是拍脑袋取的：角色过门时窄的是「身厚」方向——1.45m 时身厚 0.70，而最窄门洞只有 0.72，只剩 2cm（必然擦门框）；缩到 1.30 后身厚 0.63（余量 9cm）、臂展 0.82（1.2m 走廊够用）。再往下收益递减且比例失真。改这个值必须同步改各坐点抬升量，哨兵会拦。",

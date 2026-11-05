@@ -44,9 +44,10 @@ import {
   type DayPeriod, type EnvironmentInput, type WeatherKind,
 } from './worldEnvironment';
 import type { WorldSnapshotResponse } from './hostContract';
-import { setOutlineDistanceScale, setToonKeyLight, toonGradient, makeRng } from './anime/toon';
+import { setOutlineDistanceScale, toonGradient, makeRng } from './anime/toon';
 import { mergeByMaterial, freezeStatic, dedupeGeometries } from './anime/merge';
 import { compactGeometries } from './anime/geometryMemory';
+import { fogFor, skyPalette } from './anime/atmosphere';
 import { loadBlenderTrunks } from './anime/blenderTrunks';
 import { buildExteriorGround, buildStreetscape, buildApartmentShell, buildApartmentTwin, buildConvenienceStore, buildStreetscapeRipples, buildApartmentEaveDrips, buildSubwayEntrance, buildIzakaya, buildSmallPark, buildUtilityPoles, buildStreetFurniture, buildStreetBookStore, STRS, FLOORS, APT_X0, APT_X1, APT_ZN, APT_ZB, APT_WALL_BOXES, APT_CORRIDOR_N } from './anime/exterior';
 import { buildRiverbank } from './anime/riverbank';
@@ -713,14 +714,8 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
 
     const layout = layoutData as any;
     setArtStyle(layout.palette, layout.style);
-    /**
-     * 主光方向喂给材质分档。必须在这里调（任何 builder 之前）：finish 的高光方向
-     * 是烘焙进 shader 的常量，材质一建就定型，事后改不回来。
-     * 取 key.position 归一化 = 表面指向光源的方向（DirectionalLight 默认 target 在原点）。
-     */
-    const KP = layout.lighting.key.position as [number, number, number];
-    setToonKeyLight(KP[0], KP[1], KP[2]);
-
+    // 材质分档现在是真实 PBR 参数，主光方向由场景里的 DirectionalLight 自己提供，
+    // 不再需要把光方向烘焙进 shader 常量。
     let alive = true;
 
     /* ---------------- Renderer / Scene / Camera ---------------- */
@@ -773,17 +768,16 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
      * 完全吞掉，看不到"世界的边缘"。远景幕布和窗外贴图类材质走 noFog，
      * 它们的空气透视是画出来的，不吃场景雾。
      */
-    // 存一份引用：按 P 做 A/B 对照时要能整段摘掉雾
+    // 存一份引用：按 P 做 A/B 对照时要能整段摘掉雾。
+    // 距离基准只从 postfx.fog 读，时段/天气倍率与天空色见 atmosphere.ts；
+    // 全场只有这里和下面的 setEnvironment 会写 scene.fog。
     let roomFog: THREE.Fog | null = null;
-    if (FX.fog) {
+    {
       // 这里在 B 声明之前，直接用 layout.room.bounds，别引用 B（会踩 TDZ）
       const fb = layout.room.bounds;
       const fr = Math.hypot((fb.x1 - fb.x0) / 2, (fb.z1 - fb.z0) / 2);
-      roomFog = new THREE.Fog(
-        new THREE.Color(FX.fog.color ?? '#e0d3c2'),
-        FX.fog.near ?? fr * 2.0,
-        FX.fog.far ?? fr * 6.5
-      );
+      const { period, weather } = environmentRef.current;
+      roomFog = fogFor(FX.fog, period, weather, skyPalette(period, weather), fr * 2.0, fr * 6.5);
       scene.fog = roomFog;
     }
 
@@ -1228,7 +1222,10 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       const mixColor = (hex: string) => new THREE.Color(hex).lerp(tint, tuning.tintAmount);
       environmentRef.current = { period: nextPeriod, weather: nextWeather };
       scene.background = new THREE.Color(profile.background).lerp(tint, tuning.tintAmount * 0.38);
-      scene.fog = new THREE.Fog(new THREE.Color(profile.fog).lerp(tint, tuning.tintAmount * 0.5), FX.fog?.near ?? sceneRadius * 2.0, FX.fog?.far ?? sceneRadius * 6.5);
+      // 雾的唯一写入点。districtArt.setEnvironment 只设自己的天空 shader，不再覆盖这里。
+      // 天气 tint 仍作用在背景与灯光上；雾色跟天空地平线走，避免远景和天色断成两条带。
+      roomFog = fogFor(FX.fog, nextPeriod, nextWeather, skyPalette(nextPeriod, nextWeather), sceneRadius * 2.0, sceneRadius * 6.5);
+      scene.fog = roomFog;
       renderer.toneMappingExposure = profile.exposure * tuning.exposure;
       scene.environmentIntensity = (nextPeriod === 'night' ? 0.20 : nextPeriod === 'dusk' ? 0.28 : 0.36) * tuning.exposure;
       ambient.color.copy(mixColor(profile.ambient));
@@ -1995,6 +1992,18 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
 
     placeProp(buildJpWallClock(P.clock.pos, wallRotY(P.clock.wall)), wallDecor.get(P.clock.wall) ?? scene);
     placeProp(buildJpPoster(P.poster.pos, P.poster.size, wallRotY(P.poster.wall)), wallDecor.get(P.poster.wall) ?? scene);
+    /* 挂墙装饰从「一钟一画」扩成清单：203 的客厅隔墙和东墙原先各只有一件，
+     * 平视进去是大片素墙。每项走同一套 wallRotY + wallDecor，保证正脸朝室内、
+     * 且和墙板同进退；墙侧写错会退回单元根节点并喊出来，不静默丢件。 */
+    for (const art of P.wallArt ?? []) {
+      const rot = wallRotY(art.wall);
+      const obj = art.kind === 'clock'
+        ? buildJpWallClock(art.pos, rot)
+        : buildJpPoster(art.pos, art.size, rot, art.variant ?? 0);
+      const parent = wallDecor.get(art.wall);
+      if (!parent) console.warn(`[room] 挂墙装饰的 wall 无效（${art.wall}），改挂单元根节点`);
+      placeProp(obj, parent ?? unitGroup);
+    }
     if (P.stringLights) {
       const sl = buildStringLights(P.stringLights.from, P.stringLights.to, P.stringLights.sag);
       // 灯串是贴顶的细管，遍历收进去会沿天花板拉出一排薄碰撞盒（玩家本就走不到）；
@@ -2079,7 +2088,7 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       const yHi = UNIT_LIFT + layout.room.height + 0.1;
       rainIndoors = (x, y, z) =>
         (x > -31 && x < 31 && z > -5.9 && z < 4.7 && y > 0 && y < 3.3) ||
-        (x > -36.8 && x < -31 && z > -7.2 && z < 4.7 && y > 0 && y < 12.2) ||
+        (x > APT_X0 - 5.8 && x < APT_X0 && z > -7.2 && z < 4.7 && y > 0 && y < 12.2) ||
         (y > yLo && y < yHi && roofed.some((r) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1));
       const rain = buildRain({
         count: R.count,
@@ -2226,7 +2235,7 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
       allow: {
         apt2out: [
           { x0: APT_X0, x1: STRS.lx0, z0: APT_CORRIDOR_N, z1: APT_ZN },                 // 北侧外廊
-          { x0: -36.8, x1: APT_X0, z0: -7.18, z1: 4.68 },                              // 2F 电梯厅
+          { x0: APT_X0 - 5.8, x1: APT_X0, z0: -7.18, z1: 4.68 },                       // 2F 电梯厅
           { x0: STRS.lx0, x1: STRS.ex1, z0: STRS.za0, z1: STRS.zb1 },                   // 东端楼梯平台
         ],
       },
@@ -2331,8 +2340,10 @@ export function RoomScene({ onDisposeReady }: RoomSceneProps = {}) {
     let pointPool: THREE.PointLight[] | null = null;
     const disposeBlenderFurniture = loadBlenderFurniture(blenderSlots, () => {
       shadowPending = true;
-      // 家具 GLB 是异步落进场景的，上面那次去重跑在它之前——补跑一次。
-      // 函数本身幂等：没有新的重复项就什么都不做。
+      // 家具 GLB 是异步落进场景的，装配期那两次收口跑在它之前——补跑一次。
+      // 两者都幂等：compactGeometries 见到已带 index 的几何直接跳过，
+      // dedupeGeometries 没有新的重复项就什么都不做。顺序与装配期保持一致。
+      compactGeometries(scene);
       dedupeGeometries(scene);
     }, interiorDesign.prepareFurniture);
 

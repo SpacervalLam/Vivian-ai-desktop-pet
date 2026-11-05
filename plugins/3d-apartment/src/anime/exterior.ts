@@ -1,6 +1,9 @@
 import { buildApartmentPodium, type PodiumAutoDoor } from './apartmentPodium';
 import { rebuildApartmentArchitecture } from './apartmentArchitecture';
 import { buildLiftTower } from './apartmentLift';
+import {
+  APARTMENT_PLAN, APARTMENT_WIDTH, apartmentUnits, apartmentPartitions, assertApartmentPlan, unitNumber,
+} from './sakuraPlan';
 /**
  * 室外世界层（B+ 架构，按到房间的距离分层）。
  *
@@ -1289,13 +1292,18 @@ const RESIDENT_POOL = [
   'DeepSeek', 'GLM', 'ERNIE', 'Mistral', 'Gemma', 'Doubao',
   '', '', // 两户空置（无人居住）
 ];
-const RESIDENT_UNITS = [
-  '201', '202', '204', '205',
-  '301', '302', '303', '304', '305',
-  '401', '402', '403', '404', '405',
-];
+/** 户号由契约的层数 × 户数生成，跳过 203（主角户单独登记）；5 户/3 户都自适应。 */
+const RESIDENT_UNITS: string[] = [];
+for (let floor = 2; floor <= 4; floor++) {
+  for (let u = 0; u < APARTMENT_PLAN.unitCount; u++) {
+    if (floor === 2 && u === APARTMENT_PLAN.ownUnitIndex) continue;
+    RESIDENT_UNITS.push(`${floor}${unitNumber(u)}`);
+  }
+}
 const RESIDENTS: Record<string, string> = { '203': 'Vivian Nana' };
-RESIDENT_POOL.forEach((name, i) => { RESIDENTS[RESIDENT_UNITS[i]] = name; });
+RESIDENT_POOL.slice(0, RESIDENT_UNITS.length).forEach((name, i) => {
+  RESIDENTS[RESIDENT_UNITS[i]] = name;
+});
 
 /* ============================================================================
  * 公寓楼外壳（203 室所在的这栋四层公寓）
@@ -1314,14 +1322,16 @@ RESIDENT_POOL.forEach((name, i) => { RESIDENTS[RESIDENT_UNITS[i]] = name; });
  *        zb1 └────────────┘
  *             wx1      ex1（东端折返平台：转身 180° 上第二跑）
  */
+/** 整座楼梯贴公寓东妻壁，x 只从契约派生：收缩面宽时不会悬空在原地。 */
+const STAIR_X0 = APARTMENT_PLAN.x1 + 0.15;
 export const STRS = {
-  lx0: 31.15,   // 西侧平台西缘（贴东妻壁外皮 31.08）
-  lx1: 32.45,   // 西侧平台东缘 = 两跑梯的到达边
-  wx1: 36.55,   // 2F 步行廊东缘 = 东端折返平台西缘
-  ex1: 37.75,   // 东端折返平台东缘（也是整座楼梯的东界）
-  f1Bot: 36.95, // 第一跑起步（地面）前缘
-  za0: -7.75, za1: -6.52, // 北梯带：两跑上行梯上下叠合
-  zb0: -6.52, zb1: -5.29, // 南梯带：2F 步行廊 / 楼下半开放区
+  lx0: STAIR_X0,
+  lx1: STAIR_X0 + 1.30,
+  wx1: STAIR_X0 + 5.40,
+  ex1: STAIR_X0 + 6.60,
+  f1Bot: STAIR_X0 + 5.80,
+  za0: -7.75, za1: -6.52,
+  zb0: -6.52, zb1: -5.29,
 };
 
 /**
@@ -1329,8 +1339,10 @@ export const STRS = {
  * 与 exterior.ts 标高漂移打架）。单点真相。
  */
 export const FLOORS = [3.4, 6.2, 9.0]; // 2F / 3F / 4F 世界标高（四层：1F + 2~4F）
-export const APT_X0 = -31;            // 公寓西端（妻壁外皮）
-export const APT_X1 = 31;             // 公寓东端（妻壁外皮；楼梯在其东侧外挑）
+// 公寓体量的唯一真源在 sakuraPlan.ts；这里保留导出名，避免下游十几个模块改动。
+export const APT_X0 = APARTMENT_PLAN.x0;   // 公寓西端（妻壁外皮）
+export const APT_X1 = APARTMENT_PLAN.x1;   // 公寓东端（妻壁外皮；楼梯在其东侧外挑）
+assertApartmentPlan();                     // 中户必须和 203 的房间壳对齐，加载即校验
 export const APT_ZN = -5.9;           // 北立面（外廊侧）
 export const APT_ZF = 4.7;            // 主体量南立面（阳台内缘；1F 无阳台，南墙就在这条线上）
 export const APT_ZB = 6.3;            // 阳台外缘（栏杆线；2F 起阳台挑出到此）
@@ -1533,7 +1545,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
   /* ---------------- 体量常量 ---------------- */
   // 楼栋加宽：每一户都双倍宽（12.4m），5 户 = 62m。
   // 203 仍居中（[-6.2, 6.2]），东西各两户对称展开。
-  const X0 = APT_X0, X1 = APT_X1, W = 62;
+  const X0 = APT_X0, X1 = APT_X1, W = APARTMENT_WIDTH;
   const ZN = APT_ZN;  // 北立面（外廊侧）
   const ZF = APT_ZF;  // 南立面（阳台内缘，与 203 南墙同一条线）
   const ZB = APT_ZB;  // 阳台外缘（栏杆线，与 203 阳台外缘同一条线）
@@ -1541,12 +1553,10 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
   // FLOORS 已提到模块级导出（见文件头），这里直接复用同一套标高
   const RF = F2 + LVL * 3;                       // 11.8 屋顶
   const GAP = 0.04;
-  /** 每户的 x 边界：5 户等宽 12.4m，203 居中占中户 */
-  const UNITS: Array<[number, number]> = [
-    [-31, -18.6], [-18.6, -6.2], [-6.2, 6.2], [6.2, 18.6], [18.6, 31],
-  ];
-  /** 戸境（户与户之间的分隔）位置，含两端妻壁 */
-  const PARTITIONS = [X0, -18.6, -6.2, 6.2, 18.6, X1];
+  /** 每户的 x 边界：由 sakuraPlan 的面宽与户数等分派生，203 居中占中户。 */
+  const UNITS = apartmentUnits();
+  /** 戸境（户与户之间的分隔）位置，含两端妻壁，同样由契约派生。 */
+  const PARTITIONS = apartmentPartitions();
 
   const put = (
     geo: THREE.BufferGeometry,
@@ -2687,7 +2697,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
        * 规格照抄邻户（顶面 = 户内地板标高 F、挑出到 ZB），只把板厚从 0.14
        * 收到 0.12：木地板 plane 已经占着 y=F 这一层，板顶停在 F-0.01 避开
        * 共面闪面；板底 F-0.13 与邻户的 F-0.14 只差 1cm，仰视读不出台阶。 */
-      if (fi === 0 && ui === 2) {
+      if (fi === 0 && ui === APARTMENT_PLAN.ownUnitIndex) {
         put(gbox(uw - GAP * 2, 0.12, ZB - ZF), M.slab, ucx, F - 0.07, (ZF + ZB) / 2);
         put(gbox(0.16, 0.03, 0.16), M.dark, ux1 - 0.35, F - 0.005, ZB - 0.35);
         /* 主楼（ownUnit:'room'）：203 的栏杆 / 落地窗 / 覆板 / 生活件全由它自己的
@@ -2737,7 +2747,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
         ux0, ux1, F, z: ZF + 0.09, mat: M.wall, trim: true,
         // 203 那一跨（只有景观复制品会走到这里）两侧补满，与它北面那圈覆板同一口径；
         // 邻户保留 4cm 内缩，拼起来是一道 8cm 的竖缝，读作"预制板挂上去"的分缝。
-        bleed: fi === 0 && ui === 2 ? 0.08 : undefined,
+        bleed: fi === 0 && ui === APARTMENT_PLAN.ownUnitIndex ? 0.08 : undefined,
         holes,
       });
       /* 窗后的屋子：结构板把退让掉的外皮补回 z=ZF，里头是内衬 + 低模家具。
@@ -2796,7 +2806,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
       put(gbox(uw - 0.24, 0.012, 0.13), M.slabDark, ucx, F + 0.016, ZB - 0.24);
 
       /** 203 的左右贴邻（202 / 204）：从自家阳台天天看，这两户给完整配置。 */
-      const near203 = fi === 0 && (ui === 1 || ui === 3);
+      const near203 = fi === 0 && (ui === APARTMENT_PLAN.ownUnitIndex - 1 || ui === APARTMENT_PLAN.ownUnitIndex + 1);
       // 花箱贴栏杆摆（晒得到太阳），东西两端各一个，中间留给晾衣架和桌椅
       const nPlanter = near203 ? 2 : rnd() < 0.72 ? 1 : 0;
       for (let i = 0; i < nPlanter; i++) {
@@ -2821,7 +2831,9 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
      * 不是一条通长走廊。203 自己有侧栏杆，那两片跳过。
      */
     for (const px of PARTITIONS) {
-      if (fi === 0 && (px === -6.2 || px === 6.2)) continue;
+      // 203 侧栏杆的边界跟契约走，别再写字面量：收缩面宽时这两个数会变，
+      // 写死就会静默多建两片隔板把自家阳台封住。
+      if (fi === 0 && (px === APARTMENT_PLAN.ownUnitX0 || px === APARTMENT_PLAN.ownUnitX1)) continue;
       put(gbox(0.07, 1.15, ZB - ZF - 0.02), M.slabDark, px, F + 1.15 / 2, (ZF + ZB) / 2);
       // 顶部压条：混凝土板直接切齐会毛，真楼这儿都有一道金属收口压住
       put(gbox(0.095, 0.03, ZB - ZF - 0.02), M.metal, px, F + 1.16, (ZF + ZB) / 2);
@@ -2927,7 +2939,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
       // 所以让 2F 中户直接落到下面的邻户分支——那一段的 `NORTH_HOLES` 用
       // `O(dx)=ucx+dx`，ucx=0 时与上面这套洞口**逐值相同**，门扇/门套/对讲机/
       // 雨庇/门垫/盆栽全都齐，户号牌 `${fi+2}${unitNum}` 正好读出 "203"。
-      if (fi === 0 && ui === 2 && !genericOwnUnit) {
+      if (fi === 0 && ui === APARTMENT_PLAN.ownUnitIndex && !genericOwnUnit) {
         unitFace({
           ux0, ux1, F, z: ZN - 0.09, mat: M.wallAlt, trim: false, bleed: 0.08,
           holes: [
@@ -2979,7 +2991,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
        * ui=2(中)→03，ui=1→04，ui=0(西)→05。2F 中户(ui=2)是玩家自己的 203，
        * 正门/窗由房间自身绘制、此处跳过，故 2F 中户无邻户牌（3F/4F 照常显示 303/403）。 */
       const doorTones = [M.doorA, M.doorB, M.doorC];
-      const unitNum = ['05', '04', '03', '02', '01'][ui];
+      const unitNum = unitNumber(ui);
       /* —— 玄関ドア ——
        * 覆板厚 0.13、外表面在 ZN-0.155，门洞 0.9×2.2 就开在这块板里。旧做法是
        * 往洞底贴一块 0.86×2.16 的素板、再垫一块更大的板当"门框"——可那块门框
@@ -3231,20 +3243,20 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
     }
     // 平台与妻壁的连接钢托（每层西平台都连到山墙；山墙只存在于 z≥-5.9，钢托落在南条内）
     for (const ly of FLOORS.map((F) => F - 0.1)) {
-      put(gbox(0.42, 0.09, 0.2), M.stairSteel, 31.29, ly, -5.62);
-      put(gbox(0.42, 0.09, 0.2), M.stairSteel, 31.29, ly, -5.86);
+      put(gbox(0.42, 0.09, 0.2), M.stairSteel, STRS.lx0 + 0.14, ly, -5.62);
+      put(gbox(0.42, 0.09, 0.2), M.stairSteel, STRS.lx0 + 0.14, ly, -5.86);
     }
 
     /* ---- 4F 平台小雨棚：山墙挑梁 + 两根立柱 + 微倾暗色棚面，顶层收头不上屋顶 ---- */
-    put(gbox(0.85, 0.09, 0.09), M.stairSteel, 31.5, F4 + 2.3, -5.62);            // 山墙挑梁
-    put(gbox(0.1, 2.4, 0.1), M.stairSteel, 32.2, F4 + 1.2, za0 + 0.15);          // 北立柱（立在 4F 平台上）
-    put(gbox(0.1, 2.4, 0.1), M.stairSteel, 32.2, F4 + 1.2, zb1 - 0.15);          // 南立柱
+    put(gbox(0.85, 0.09, 0.09), M.stairSteel, APT_X1 + 0.5, F4 + 2.3, -5.62);            // 山墙挑梁
+    put(gbox(0.1, 2.4, 0.1), M.stairSteel, APT_X1 + 1.2, F4 + 1.2, za0 + 0.15);          // 北立柱（立在 4F 平台上）
+    put(gbox(0.1, 2.4, 0.1), M.stairSteel, APT_X1 + 1.2, F4 + 1.2, zb1 - 0.15);          // 南立柱
     {
       const canopy = new THREE.Mesh(gbox(1.3, 0.05, 2.7), M.slabDark);
-      canopy.position.set(31.72, F4 + 2.4, (za0 + zb1) / 2);
+      canopy.position.set(APT_X1 + 0.72, F4 + 2.4, (za0 + zb1) / 2);
       canopy.rotation.z = -0.1;   // 向东微倾，雨水排离山墙
       g.add(canopy);
-      put(gbox(0.05, 0.04, 2.66), M.dark, 32.3, F4 + 2.34, (za0 + zb1) / 2);   // 棚口滴水线
+      put(gbox(0.05, 0.04, 2.66), M.dark, APT_X1 + 1.3, F4 + 2.34, (za0 + zb1) / 2);   // 棚口滴水线
     }
 
     /* ---- 排水：折返平台集水口 + 落水管，步行廊集水口 ---- */
@@ -3255,8 +3267,8 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
     /* ---- 楼梯照明：每层山墙壁灯 + 折返平台下一盏暗灯，克制偏暖 ----
      * 壁灯装在真实存在的山墙范围内（z≥-5.9）。 */
     for (const ly of FLOORS.map((F) => F + 1.32)) {
-      put(gbox(0.09, 0.15, 0.2), M.dark, 31.13, ly, -5.6);
-      put(gbox(0.035, 0.09, 0.13), M.warm, 31.19, ly, -5.6);
+      put(gbox(0.09, 0.15, 0.2), M.dark, APT_X1 + 0.13, ly, -5.6);
+      put(gbox(0.035, 0.09, 0.13), M.warm, APT_X1 + 0.19, ly, -5.6);
     }
     put(gbox(0.26, 0.03, 0.3), M.warmSoft, ex1 - 0.55, F2 - 0.22, -6.9);   // 起步上方暗灯
     // 平台处的楼层牌（朝东贴山墙，爬楼梯时读）
@@ -3264,7 +3276,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
       const ly = FLOORS[fi] + 1.95;
       const lbl = `${fi + 2}F`;
       const p = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.2), floorPlateMat(lbl));
-      p.position.set(31.1, ly, -5.6);
+      p.position.set(APT_X1 + 0.1, ly, -5.6);
       p.rotation.y = Math.PI / 2;
       g.add(p);
     }
@@ -3275,38 +3287,38 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
      */
     const TW = 3.16;   // 储物间净高（到平台梁底）
     // 北墙（带门）：设备间门朝北，正对楼背的通道
-    put(gbox(0.34, TW, 0.08), M.trunkWall, 31.29, TW / 2, za0 + 0.03);
-    put(gbox(0.2, TW, 0.08), M.trunkWall, 32.34, TW / 2, za0 + 0.03);
-    put(gbox(0.86, TW - 2.06, 0.08), M.trunkWall, 31.85, 2.06 + (TW - 2.06) / 2, za0 + 0.03);
-    put(gbox(0.82, 2.02, 0.05), M.metal, 31.85, 1.01, za0 + 0.03);        // 深灰钢门
-    put(gbox(0.92, 2.12, 0.03), M.dark, 31.85, 1.06, za0 + 0.075);        // 门框
-    put(gbox(0.14, 0.03, 0.1), M.warmSoft, 31.85, 2.24, za0 + 0.09);      // 门楣小灯
+    put(gbox(0.34, TW, 0.08), M.trunkWall, STRS.lx0 + 0.14, TW / 2, za0 + 0.03);
+    put(gbox(0.2, TW, 0.08), M.trunkWall, STRS.lx0 + 1.19, TW / 2, za0 + 0.03);
+    put(gbox(0.86, TW - 2.06, 0.08), M.trunkWall, APT_X1 + 0.85, 2.06 + (TW - 2.06) / 2, za0 + 0.03);
+    put(gbox(0.82, 2.02, 0.05), M.metal, APT_X1 + 0.85, 1.01, za0 + 0.03);        // 深灰钢门
+    put(gbox(0.92, 2.12, 0.03), M.dark, APT_X1 + 0.85, 1.06, za0 + 0.075);        // 门框
+    put(gbox(0.14, 0.03, 0.1), M.warmSoft, APT_X1 + 0.85, 2.24, za0 + 0.09);      // 门楣小灯
     // 配电室北墙碰撞：三段墙 + 闭着的钢门（无开门机制）整面收成一道实墙，禁止穿墙进配电室
-    boxes.push(boxSpec('stair-store-north', 31.12, 32.44, 0, TW, za0 + 0.03 - 0.04, za0 + 0.03 + 0.04));
+    boxes.push(boxSpec('stair-store-north', APT_X1 + 0.12, APT_X1 + 1.44, 0, TW, za0 + 0.03 - 0.04, za0 + 0.03 + 0.04));
     // 南墙（带两个通风格栅）
-    put(gbox(1.32, TW, 0.08), M.trunkWall, 31.78, TW / 2, zb1 + 0.04);
-    for (const vx of [31.52, 32.06]) {
+    put(gbox(1.32, TW, 0.08), M.trunkWall, STRS.lx0 + 0.63, TW / 2, zb1 + 0.04);
+    for (const vx of [APT_X1 + 0.52, APT_X1 + 1.06]) {
       put(gbox(0.28, 0.2, 0.02), M.dark, vx, 2.1, zb1 + 0.005);
       for (let s = 0; s < 3; s++) put(gbox(0.24, 0.018, 0.03), M.metal, vx, 2.04 + s * 0.06, zb1 - 0.005);
     }
-    boxes.push(boxSpec('stair-store-south', 31.12, 32.44, 0, TW, zb1 + 0.04 - 0.04, zb1 + 0.04 + 0.04));
+    boxes.push(boxSpec('stair-store-south', APT_X1 + 0.12, APT_X1 + 1.44, 0, TW, zb1 + 0.04 - 0.04, zb1 + 0.04 + 0.04));
     // 东墙（设备墙：燃气表一排 + 分电盘）
-    put(gbox(0.08, TW, zb1 - za0 - 0.06), M.trunkWall, 32.42, TW / 2, (za0 + zb1) / 2);
-    boxes.push(boxSpec('stair-store-east', 32.42 - 0.04, 32.42 + 0.04, 0, TW, za0 + 0.03, zb1 - 0.03));
+    put(gbox(0.08, TW, zb1 - za0 - 0.06), M.trunkWall, STRS.lx0 + 1.27, TW / 2, (za0 + zb1) / 2);
+    boxes.push(boxSpec('stair-store-east', STRS.lx0 + 1.23, STRS.lx0 + 1.31, 0, TW, za0 + 0.03, zb1 - 0.03));
     for (let i = 0; i < 4; i++) {
-      put(gbox(0.26, 0.36, 0.16), M.metal, 32.53, 1.32, -6.26 + i * 0.32);   // 燃气表
-      put(gbox(0.2, 0.1, 0.03), M.dark, 32.62, 1.32, -6.26 + i * 0.32);      // 表盘
+      put(gbox(0.26, 0.36, 0.16), M.metal, APT_X1 + 1.53, 1.32, -6.26 + i * 0.32);   // 燃气表
+      put(gbox(0.2, 0.1, 0.03), M.dark, APT_X1 + 1.62, 1.32, -6.26 + i * 0.32);      // 表盘
     }
-    put(new THREE.CylinderGeometry(0.028, 0.028, 2.3, 6), M.pipe, 32.56, 1.15, -6.95);  // 燃气立管
-    put(gbox(0.14, 0.78, 0.46), M.metal, 32.55, 1.55, -7.25);                // 分电盘
+    put(new THREE.CylinderGeometry(0.028, 0.028, 2.3, 6), M.pipe, APT_X1 + 1.56, 1.15, -6.95);  // 燃气立管
+    put(gbox(0.14, 0.78, 0.46), M.metal, APT_X1 + 1.55, 1.55, -7.25);                // 分电盘
     // 南侧围栏（矮坎 + 立杆 + 两道横杆），东端一扇半开的矮门
-    put(gbox(5.3, 0.22, 0.1), M.trunkWall, 35.1, 0.11, zb1 - 0.07);
-    for (let fx = 32.55; fx <= 36.75; fx += 1.05) {
+    put(gbox(5.3, 0.22, 0.1), M.trunkWall, APT_X1 + 4.1, 0.11, zb1 - 0.07);
+    for (let fx = APT_X1 + 1.55; fx <= APT_X1 + 5.75; fx += 1.05) {
       put(gbox(0.045, 1.28, 0.045), M.stairSteel, fx, 0.86, zb1 - 0.07);
     }
-    put(gbox(4.3, 0.05, 0.05), M.railTop, 34.65, 1.5, zb1 - 0.07);
-    put(gbox(4.3, 0.04, 0.04), M.railTop, 34.65, 1.02, zb1 - 0.07);
-    boxes.push(boxSpec('stair-fence-rail', 32.45, 37.75, 0, 1.55, zb1 - 0.13, zb1 - 0.01));   // 南侧围栏整排（矮坎+立杆+横杆）当一道实墙收
+    put(gbox(4.3, 0.05, 0.05), M.railTop, APT_X1 + 3.65, 1.5, zb1 - 0.07);
+    put(gbox(4.3, 0.04, 0.04), M.railTop, APT_X1 + 3.65, 1.02, zb1 - 0.07);
+    boxes.push(boxSpec('stair-fence-rail', APT_X1 + 1.45, APT_X1 + 6.75, 0, 1.55, zb1 - 0.13, zb1 - 0.01));   // 南侧围栏整排（矮坎+立杆+横杆）当一道实墙收
     {
       const gate = new THREE.Group();
       const gm = (w: number, h: number, d: number, gx: number, gy: number) => {
@@ -3319,7 +3331,7 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
       gm(0.9, 0.05, 0.05, 0.42, 1.45);
       gm(0.9, 0.05, 0.05, 0.42, 0.95);
       for (let bi = 1; bi <= 3; bi++) gm(0.04, 1.15, 0.04, bi * 0.21, 0.86);
-      gate.position.set(36.82, 0.22, zb1 - 0.07);
+      gate.position.set(APT_X1 + 5.82, 0.22, zb1 - 0.07);
       gate.rotation.y = -0.6;   // 半开
       g.add(gate);
       // 栅栏门碰撞：整扇门一个轴对齐盒（半开，按真实世界 AABB 收，避免漏角）
@@ -3331,14 +3343,14 @@ export function buildApartmentShell(opts?: ApartmentShellOptions): ApartmentShel
     put(gbox(0.1, 0.07, 0.18), toon('#8f97a2'), ex1 - 0.18, F2 - 0.28, zb1 - 0.22, Math.PI / 2);
     put(gbox(0.045, 0.045, 0.03), M.dark, ex1 - 0.27, F2 - 0.28, zb1 - 0.22, Math.PI / 2);
     // 楼下自行车两辆（顶层车棚之外的溢出车位，日本公寓常态）
-    bike(33.7, -6.02, 0.07, 8101, true);
-    bike(34.85, -5.88, -0.09, 8102, false);
+    bike(APT_X1 + 2.7, -6.02, 0.07, 8101, true);
+    bike(APT_X1 + 3.85, -5.88, -0.09, 8102, false);
     // 混凝土护脚（楼梯整个落在这块台基上）+ 向南通往楼侧的步道
-    flatUp(7.3, 2.9, toon('#79828e', { finish: 'wet' }), 34.6, 0.006, -6.55);
-    flatUp(1.1, 3.1, toon('#79828e', { finish: 'wet' }), 37.65, 0.006, -3.55);
+    flatUp(7.3, 2.9, toon('#79828e', { finish: 'wet' }), APT_X1 + 3.6, 0.006, -6.55);
+    flatUp(1.1, 3.1, toon('#79828e', { finish: 'wet' }), APT_X1 + 6.65, 0.006, -3.55);
     // 少量积水（雨夜）
-    puddle(35.4, -6.7, 0.55);
-    puddle(33.2, -5.72, 0.4);
+    puddle(APT_X1 + 4.4, -6.7, 0.55);
+    puddle(APT_X1 + 2.2, -5.72, 0.4);
   }
 
   /* ================= 203 段的外墙覆板 =================
@@ -3496,7 +3508,7 @@ export function buildApartmentTwin(dz: number = APT_TWIN_DZ): { group: THREE.Gro
    * 外廓取自塔楼几何：西墙外皮 -36.80、屋面 -36.87..-30.93、南北墙 -7.34..4.85
    * （含南面那圈幕墙鳍片的外挑），高到屋面顶 12.34。
    */
-  const liftMass = boxSpec('apt-twin-lift-mass', -36.87, -30.93, 0, 12.34, -7.34, 4.85);
+  const liftMass = boxSpec('apt-twin-lift-mass', APT_X0 - 5.87, APT_X0 + 0.07, 0, 12.34, -7.34, 4.85);
   return {
     group: twin.group,
     boxes: [
@@ -3636,8 +3648,8 @@ export const APT_WALL_BOXES: BoxColliderSpec[] = [
    * 碰撞体，碰撞全靠这里声明）。
    * 2F 的 203 段（x∈[-6.2, 6.2]）跳过：203 的南墙由房间自己的 shell 提供，
    * 那里是一道能推开的玻璃滑门，玩家要能进出阳台。 */
-  boxSpec('apt-room-south-2f-w', APT_X0 - SHELL_T, -6.2 + SHELL_T, FLOORS[0], FLOORS[1], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
-  boxSpec('apt-room-south-2f-e', 6.2 - SHELL_T, APT_X1 + SHELL_T, FLOORS[0], FLOORS[1], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
+  boxSpec('apt-room-south-2f-w', APT_X0 - SHELL_T, APARTMENT_PLAN.ownUnitX0 + SHELL_T, FLOORS[0], FLOORS[1], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
+  boxSpec('apt-room-south-2f-e', APARTMENT_PLAN.ownUnitX1 - SHELL_T, APT_X1 + SHELL_T, FLOORS[0], FLOORS[1], APT_ZF - SHELL_T, APT_ZF + SHELL_T),
   boxSpec('apt-room-south-up', APT_X0 - SHELL_T, APT_X1 + SHELL_T, FLOORS[1], SHELL_RF, APT_ZF - SHELL_T, APT_ZF + SHELL_T),
 
   // Ground-floor lobby walls and furniture are supplied by buildApartmentPodium.
@@ -6034,8 +6046,8 @@ function bookSpineRow(seed: number): number {
 }
 
 /** 书脊材质：整本书店只有一份，20 条书脊带共用 → 合批成 1 个 mesh。 */
-let bookSpineMat: THREE.MeshToonMaterial | null = null;
-function bookSpineMaterial(): THREE.MeshToonMaterial {
+let bookSpineMat: THREE.MeshStandardMaterial | null = null;
+function bookSpineMaterial(): THREE.MeshStandardMaterial {
   if (!bookSpineMat) {
     bookSpineMat = toon('#ffffff', {
       map: bookSpineAtlas(),
@@ -6943,7 +6955,7 @@ export function buildSmallPark(): THREE.Group {
    * 现在整块落在公寓外壳（x≥-31.38）以西：x 上完全没有交集，z 也就无所谓了。
    * 这是这一带唯一一块真正空着、又能被 203 的西侧视线看到的场地。
    */
-  const PX0 = -40.4, PX1 = -31.4;   // 公园 x 范围（东边界卡在公寓西皮之外）
+  const PX0 = APT_X0 - 9.4, PX1 = APT_X0 - 0.4;   // 公园贴公寓西皮，随面宽收缩
   const PZ0 = -13.3, PZ1 = -7.3;    // 公园 z 范围（PZ1 那侧贴公寓电梯井，见下）
   const PCX = (PX0 + PX1) / 2;      // 公园中心 x
   const PCZ = (PZ0 + PZ1) / 2;      // 公园中心 z
@@ -7410,17 +7422,15 @@ export function buildApartmentEaveDrips(): { object: THREE.Group; update: (t: nu
   const ZB = 6.3;
   const F2 = 3.4, LVL = 2.8;
   const FLOORS = [F2, F2 + LVL, F2 + LVL * 2]; // 2F 3.4 / 3F 6.2 / 4F 9.0（四层）
-  const UNITS: Array<[number, number]> = [
-    [-31, -18.6], [-18.6, -6.2], [-6.2, 6.2], [6.2, 18.6], [18.6, 31],
-  ];
+  const UNITS = apartmentUnits();
   const edges: DripEdge[] = [];
   FLOORS.forEach((F, fi) => {
     UNITS.forEach(([ux0, ux1], ui) => {
-      if (fi === 0 && ui === 2) return; // 203 自家阳台，跳过
+      if (fi === 0 && ui === APARTMENT_PLAN.ownUnitIndex) return; // 203 自家阳台，跳过
       edges.push({ x0: ux0 + 0.08, x1: ux1 - 0.08, z: ZB, y: F - 0.14 });
     });
     // 公共外廊外缘（z=-7.19，腰壁之外）
-    edges.push({ x0: -30.9, x1: STRS.lx0 - 0.1, z: -7.21, y: F - 0.14 });
+    edges.push({ x0: APT_X0 + 0.1, x1: STRS.lx0 - 0.1, z: -7.21, y: F - 0.14 });
   });
   // 共用外楼梯：逐层西平台南北檐口 + (非顶层) 步行廊/折返平台檐口
   FLOORS.forEach((F, fi) => {

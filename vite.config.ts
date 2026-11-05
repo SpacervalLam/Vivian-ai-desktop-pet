@@ -166,13 +166,8 @@ export default defineConfig(async () => ({
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
           if (id.includes("@tauri-apps")) return "tauri";
-          if (
-            id.includes("/react/") ||
-            id.includes("/react-dom/") ||
-            id.includes("/react-is/") ||
-            id.includes("/scheduler/") ||
-            id.includes("/zustand/")
-          ) {
+          // Match package roots; Pierre's /dist/react/ entry points stay lazy.
+          if (/\/node_modules\/(react|react-dom|react-is|scheduler|zustand)\//.test(id.replace(/\\/g, "/"))) {
             return "react";
           }
           if (id.includes("/i18next/") || id.includes("/react-i18next/")) {

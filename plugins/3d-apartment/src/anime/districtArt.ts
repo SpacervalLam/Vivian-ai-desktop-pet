@@ -1,5 +1,6 @@
 import { buildUrbanStreets, CITY_LOTS, CITY_ROADS, CITY_INBLOCK_TOWER_LOTS } from './urbanStreets';
 import { asphaltTexture, plazaStoneTexture, sidewalkTexture, curbTexture } from './toon';
+import { skyPalette } from './atmosphere';
 import type { Collider } from './collider';
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
@@ -691,13 +692,15 @@ export function createDistrictArt(scene: THREE.Scene) {
       civicQuarter.setEnvironment(period);
       /* 世界广场的灯笼 / 欧式窗 / 街灯。同样只吃 period。 */
       globalSquare.setEnvironment(period);
-      const night=period==='night',dusk=period==='dusk';const overcast=weather==='storm';
-      streets.setWet(weather==='drizzle'||overcast);
-      skyMaterial.uniforms.top.value.set(overcast?'#182b3c':night?'#09172e':dusk?'#424d79':'#468ab8');
-      skyMaterial.uniforms.horizon.value.set(overcast?'#4b626f':night?'#334b60':dusk?'#e6ae94':'#c1d9dc');
-      skyMaterial.uniforms.night.value=night?1:0;skyMaterial.uniforms.cloud.value=weather==='clear'?.22:overcast?1:.7;
-      glow.emissiveIntensity=night?1.5:dusk?.9:0;
-      scene.fog=new THREE.Fog(skyMaterial.uniforms.horizon.value,overcast?32:night?55:85,overcast?140:night?230:300);
+      const sky=skyPalette(period,weather);
+      streets.setWet(weather==='drizzle'||weather==='storm');
+      skyMaterial.uniforms.top.value.set(sky.top);
+      skyMaterial.uniforms.horizon.value.set(sky.horizon);
+      skyMaterial.uniforms.night.value=sky.night;
+      skyMaterial.uniforms.cloud.value=sky.cloud;
+      glow.emissiveIntensity=sky.glow;
+      /* 不再写 scene.fog：雾的距离与颜色由 RoomScene 经 atmosphere.fogFor 统一写入，
+       * 这里只负责自己的天空 shader 与各子系统的自发光。见 atmosphere.ts 的说明。 */
     },
     update(camera:THREE.Camera,dt:number){
       sky.position.copy(camera.position);

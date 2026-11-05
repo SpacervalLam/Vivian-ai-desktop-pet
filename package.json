@@ -1,6 +1,6 @@
 {
   "name": "vivian",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Vivian AI Desktop Pet - Rust + Tauri + React",
   "type": "module",
   "scripts": {
@@ -45,6 +45,8 @@
     "package:browser-runtime": "node scripts/package-browser-runtime.mjs"
   },
   "dependencies": {
+    "@pierre/diffs": "1.6.4",
+    "@pierre/trees": "1.0.0-beta.6",
     "@playwright/test": "1.64.1",
     "@tanstack/react-virtual": "^3.14.6",
     "@tauri-apps/api": "^2.1.1",

@@ -1,0 +1,24 @@
+.work-file-tree {
+  display: block;
+  height: 252px;
+  min-width: 0;
+  --trees-bg-override: var(--codex-paper);
+  --trees-fg-override: var(--codex-ink);
+  --trees-fg-muted-override: var(--codex-ink-faint);
+  --trees-bg-muted-override: var(--codex-accent-soft);
+  --trees-selected-bg-override: var(--codex-accent-soft);
+  --trees-selected-fg-override: var(--codex-ink);
+  --trees-border-color-override: var(--codex-line);
+  --trees-focus-ring-color-override: var(--codex-accent);
+  --trees-selected-focused-border-color-override: var(--codex-accent);
+  --trees-font-family-override: inherit;
+  --trees-font-size-override: 12px;
+  --trees-git-added-color-override: var(--codex-success);
+  --trees-git-untracked-color-override: var(--codex-success);
+  --trees-git-deleted-color-override: var(--codex-danger);
+  --trees-git-modified-color-override: var(--codex-accent);
+}
+.workspace-file-tree { min-width: 0; }
+.workspace-file-tree-search { display: flex; align-items: center; gap: 5px; padding: 4px 8px 6px; color: var(--codex-ink-faint); }
+.workspace-file-tree-search input { width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--codex-line); border-radius: 5px; background: var(--codex-paper); color: var(--codex-ink); font: inherit; font-size: 11px; }
+.workspace-file-tree-search input:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 1px; }

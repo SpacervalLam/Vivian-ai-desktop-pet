@@ -2,6 +2,8 @@ import i18n from 'i18next';
 
 const strings = {
   'zh-CN': {
+    treeSearch: '筛选已加载的文件路径…', noMatches: '没有匹配的文件', files: '{{count}} 个变更文件',
+    display: '差异显示', unified: '统一', split: '并排', wrap: '自动换行', rawPatch: '此补丁不完整或包含合并冲突，显示原始差异。',
     title: '工作区变更', all: '全部', staged: '已暂存', unstaged: '未暂存', refresh: '刷新变更',
     search: '筛选文件路径…', loading: '正在读取 Git 变更…', empty: '此范围内没有变更',
     noWorkspace: '选择工作区后查看变更', notRepo: '此工作区不是 Git 仓库，以下为工具记录的变更',
@@ -16,6 +18,8 @@ const strings = {
     storageError: '审阅意见无法保存到本地，请先加入输入框备份。', limit: '最多保留 100 条审阅意见',
   },
   en: {
+    treeSearch: 'Filter loaded file paths…', noMatches: 'No matching files', files: '{{count}} changed files',
+    display: 'Diff display', unified: 'Unified', split: 'Split', wrap: 'Wrap lines', rawPatch: 'This patch is incomplete or contains merge conflicts. Showing the raw diff.',
     title: 'Workspace changes', all: 'All', staged: 'Staged', unstaged: 'Unstaged', refresh: 'Refresh changes',
     search: 'Filter file paths…', loading: 'Reading Git changes…', empty: 'No changes in this scope',
     noWorkspace: 'Select a workspace to view changes', notRepo: 'This workspace is not a Git repository. Showing tool-recorded changes.',
@@ -30,6 +34,8 @@ const strings = {
     storageError: 'Review comments could not be saved locally. Add them to the composer to keep a copy.', limit: 'Keep up to 100 review comments',
   },
   ja: {
+    treeSearch: '読み込み済みのパスを絞り込み…', noMatches: '一致するファイルはありません', files: '変更ファイル {{count}} 件',
+    display: '差分表示', unified: '統合', split: '左右', wrap: '折り返し', rawPatch: '不完全なパッチまたは競合のため、元の差分を表示しています。',
     title: 'ワークスペースの変更', all: 'すべて', staged: 'ステージ済み', unstaged: '未ステージ', refresh: '変更を更新',
     search: 'ファイルパスを絞り込み…', loading: 'Git の変更を読み込み中…', empty: 'この範囲に変更はありません',
     noWorkspace: 'ワークスペースを選択してください', notRepo: 'Git リポジトリではありません。ツールが記録した変更を表示します。',

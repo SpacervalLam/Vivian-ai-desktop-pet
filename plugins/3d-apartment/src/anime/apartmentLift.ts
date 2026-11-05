@@ -1,9 +1,12 @@
 import * as THREE from 'three';
 import { buildBoxColliders, type BoxColliderSpec, type Collider } from './collider';
 import type { FPSControls } from './fpsControls';
+import { APARTMENT_PLAN, LEGACY_APT_X0 } from './sakuraPlan';
 
 export const LIFT_LEVELS = [0, 3.4, 6.2, 9.0] as const;
-export const LIFT_CABIN = { x: -34.6, z: -2.4 };
+/** 塔楼贴西山墙外侧 3.6m；面宽收缩时整塔跟着 x0 平移。 */
+const LIFT_SHIFT_X = APARTMENT_PLAN.x0 - LEGACY_APT_X0;
+export const LIFT_CABIN = { x: -34.6 + LIFT_SHIFT_X, z: -2.4 };
 /** 轿厢门扇所在的 z（门洞平面）：门外侧是 z 大于它的那一侧 */
 const DOOR_Z = -0.92;
 export const liftTravelMs = (from: number, to: number) => 1200 + Math.abs(to-from)*1500;
@@ -159,18 +162,21 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
   const geometries=new Map<string,THREE.BoxGeometry>();
   function box(name:string,x:number,y:number,z:number,w:number,h:number,d:number,mat:THREE.Material,solid=false,parent:THREE.Object3D=group){
     const key=[w,h,d].join('/');let geo=geometries.get(key);if(!geo){geo=new THREE.BoxGeometry(w,h,d);geometries.set(key,geo);}
-    const mesh=new THREE.Mesh(geo,mat);mesh.name='lift-'+name;mesh.position.set(x,y,z);mesh.castShadow=parent===group;mesh.receiveShadow=true;mesh.userData.noOutline=true;parent.add(mesh);
-    if(solid)specs.push({id:mesh.name,pos:[x,y,z],size:[w,h,d]});return mesh;
+    // parent 是 group/dynamic 时 x 是世界坐标，要跟着塔楼平移；
+    // parent 是门扇等子件时 x 是局部坐标，一律不动。
+    const sx=(parent===group||parent===dynamic)?LIFT_SHIFT_X:0;
+    const mesh=new THREE.Mesh(geo,mat);mesh.name='lift-'+name;mesh.position.set(x+sx,y,z);mesh.castShadow=parent===group;mesh.receiveShadow=true;mesh.userData.noOutline=true;parent.add(mesh);
+    if(solid)specs.push({id:mesh.name,pos:[x+sx,y,z],size:[w,h,d]});return mesh;
   }
   /** 圆片（层号 / 呼叫箭头 / 功能键）：CylinderGeometry 默认轴就是 Y，平放不用转。
    *  faceRotY 决定盘面朝向：轿厢内的操纵盘朝 −z（π），电梯厅的呼叫盘朝 +z（0）。 */
   function disc(name:string,x:number,y:number,z:number,r:number,h:number,mat:THREE.Material,faceZ?:number,faceMat?:THREE.Material,faceRotY=Math.PI){
     const body=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,20),mat);
-    body.name='lift-'+name;body.rotation.x=Math.PI/2;body.position.set(x,y,z);
+    body.name='lift-'+name;body.rotation.x=Math.PI/2;body.position.set(x+LIFT_SHIFT_X,y,z);
     body.castShadow=false;body.receiveShadow=true;body.userData.noOutline=true;group.add(body);
     if(faceMat!==undefined){
       const face=new THREE.Mesh(new THREE.CircleGeometry(r*.94,20),faceMat);
-      face.name='lift-'+name+'-face';face.position.set(x,y,faceZ!);face.rotation.y=faceRotY;
+      face.name='lift-'+name+'-face';face.position.set(x+LIFT_SHIFT_X,y,faceZ!);face.rotation.y=faceRotY;
       face.userData.noOutline=true;group.add(face);
     }
   }
@@ -207,7 +213,7 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
   for(let floor=0;floor<4;floor++){
     const F=LIFT_LEVELS[floor],top=F+.062;
     box('landing-floor',-33.9,F+.032,-1.25,5.76,.06,11.86,stone);
-    floors.push({min:new THREE.Vector3(-36.8,F-.02,-7.18),max:new THREE.Vector3(-31,top,4.68),kind:'floor',source:`lift-floor-${floor+1}`});
+    floors.push({min:new THREE.Vector3(-36.8+LIFT_SHIFT_X,F-.02,-7.18),max:new THREE.Vector3(-31+LIFT_SHIFT_X,top,4.68),kind:'floor',source:`lift-floor-${floor+1}`});
     box('landing-ceiling',-33.9,F+2.72,-1.25,5.56,.07,11.66,stone);
     /* 结构壳体：四壁 + 门楣 + 门洞上方补板。这些是碰撞体，位置尺寸原样保留。 */
     box('cabin-back',-34.6,F+1.40,-3.95,3.1,2.60,.10,wood,true);
@@ -224,7 +230,7 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
      *    比电梯厅的米色石灰石深两档，一进门就有「轿厢」与「厅」的分界。 —— */
     const cabFloor=new THREE.Mesh(new THREE.PlaneGeometry(3.12,3.06),floorStone);
     cabFloor.name='lift-cabin-floor';cabFloor.rotation.x=-Math.PI/2;
-    cabFloor.position.set(-34.60,F+.0665,-2.43);cabFloor.receiveShadow=true;
+    cabFloor.position.set(-34.60+LIFT_SHIFT_X,F+.0665,-2.43);cabFloor.receiveShadow=true;
     cabFloor.userData.noOutline=true;group.add(cabFloor);
 
     /* —— 后壁：两片橡木 + 中间整高缎面背漆玻璃（青铜框）。
@@ -292,7 +298,7 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
     box('cabin-light',-34.60,F+2.674,-2.43,2.06,.02,2.00,light);
     for(const x of [-35.80,-33.40])for(const z of [-3.60,-1.26]){
       const spot=new THREE.Mesh(new THREE.CylinderGeometry(.055,.055,.014,18),light);
-      spot.name='lift-downlight';spot.position.set(x,F+2.578,z);
+      spot.name='lift-downlight';spot.position.set(x+LIFT_SHIFT_X,F+2.578,z);
       spot.userData.noOutline=true;group.add(spot);
     }
     /* 轿厢自己的真实光源。发光软膜只是 emissive 材质，**不照亮任何东西** —— 这间
@@ -309,7 +315,7 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
      * 附近时它们自然排不进前 16 盏，所以不会白付片元成本。 */
     if (lights) for(const x of [-35.80,-33.40]){
       const cabLight=new THREE.PointLight('#ffe4bc',3.6,5.0,2);
-      cabLight.position.set(x,F+2.50,-2.43);group.add(cabLight);
+      cabLight.position.set(x+LIFT_SHIFT_X,F+2.50,-2.43);group.add(cabLight);
     }
 
     /* —— 门洞：轿厢侧青铜门套 + 门楣名牌；门洞上方补一块石过梁。 —— */
@@ -330,7 +336,7 @@ export function buildLiftTower(opts: { lights?: boolean } = {}) {
 
     /* —— 门扇：加一条竖向青铜嵌条 + 底部踢脚板（挂在门扇下面，跟着一起滑）。 —— */
     const door=(sign:number)=>{
-      const leaf=box('sliding-door',-34.6+sign*1.47,F+1.25,DOOR_Z,.95,2.34,.045,doorMat,false,dynamic);
+      const leaf=box('sliding-door',-34.6+sign*1.47,F+1.25,DOOR_Z,.95,2.34,.045,doorMat,false,dynamic);  // box() 已按 parent=dynamic 加 SHIFT
       /* 嵌条贴在**前缘**（合拢时两扇相接的那条边，局部 x = −sign·0.44）：
        * 贴在尾缘的话开门时它跟着滑进回转壁后面，等于白做。 */
       box('door-inlay',-sign*.44,0,-.0295,.05,2.28,.014,metal,false,leaf);

@@ -1,4 +1,5 @@
 .change-review { display: flex; flex-direction: column; gap: 10px; padding: 12px; color: var(--codex-ink); font-size: 12px; min-width: 0; }
+.work-diff-block { padding: 0; }
 .change-review button { color: inherit; font: inherit; border: 1px solid var(--codex-line); background: var(--codex-paper); border-radius: 5px; padding: 5px 8px; cursor: pointer; }
 .change-review button:disabled { opacity: .5; cursor: default; }
 .change-review button:hover:not(:disabled), .change-review button[aria-pressed="true"] { background: var(--codex-accent-soft); }
@@ -7,18 +8,35 @@
 .change-review-heading strong, .change-review-path > span, .change-review-comments article > div > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .change-review-heading button { display: flex; }
 .change-review-scopes { display: flex; gap: 5px; }
-.change-review-scopes button { flex: 1; }
+.change-review-scopes button { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .change-review input, .change-review textarea { box-sizing: border-box; width: 100%; color: var(--codex-ink); background: var(--codex-paper); border: 1px solid var(--codex-line); border-radius: 5px; padding: 7px; font: inherit; }
 .change-review p { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
 .change-review-hint { color: var(--codex-ink-faint); }
 .change-review-error, .change-review-conflict { color: var(--codex-danger); }
 .change-review-error button { margin-left: 8px; }
-.change-review-files { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
-.change-review-files button { display: flex; gap: 8px; text-align: left; border-color: transparent; align-items: baseline; }
-.change-review-files button.selected { border-color: var(--codex-line); background: var(--codex-accent-soft); }
-.change-review-files button > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; flex: 1; }
 .change-review-status, .change-review-conflict { white-space: pre; font-family: monospace; }
 .change-review-detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.change-review-file-count { color: var(--codex-ink-faint); font-variant-numeric: tabular-nums; }
+.change-review-diff-toolbar { display: flex; flex-wrap: wrap; gap: 4px; }
+.change-review-diff-toolbar button:last-child { margin-left: auto; }
+.change-review-code-region { min-width: 0; overflow: hidden; border: 1px solid var(--codex-line); border-radius: 6px; }
+.change-review-code-view {
+  height: 440px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  min-width: 0;
+  --diffs-font-family: var(--codex-mono, Consolas, monospace);
+  --diffs-font-size: 11px;
+  --diffs-line-height: 22px;
+  --diffs-bg-context-override: var(--codex-paper);
+  --diffs-bg-context-gutter-override: var(--codex-paper);
+  --diffs-bg-buffer-override: var(--codex-paper);
+  --diffs-bg-addition-override: var(--codex-success-soft);
+  --diffs-bg-deletion-override: var(--codex-danger-soft);
+  --diffs-fg-number-override: var(--codex-ink-faint);
+}
+.change-review-raw { height: 440px; line-height: 22px; }
+.change-review-metadata { margin: 0; padding: 8px; max-height: 160px; overflow: auto; border: 1px solid var(--codex-line); border-radius: 5px; font: 11px/1.6 var(--codex-mono, monospace); }
 .change-review-path { padding: 7px 0; border-top: 1px solid var(--codex-line); }
 .change-review-path button { flex-shrink: 0; }
 .change-review-diff { overflow: auto; max-height: 480px; border: 1px solid var(--codex-line); border-radius: 5px; font: 11px/1.65 Consolas, monospace; }

@@ -2,10 +2,11 @@
 // @test-environment live-desktop
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
+const sleepSpec = JSON.parse(readFileSync('src/chibi/animations.json', 'utf8')).animations.find(spec => spec.name === 'sleep');
 const port = 9300 + Math.floor(Math.random() * 1000);
 const profile = mkdtempSync(join(tmpdir(), 'vivian-idle-'));
 const chrome = spawn('C:/Program Files/Google/Chrome/Application/chrome.exe', [
@@ -47,8 +48,8 @@ try {
     return reply.result.result.value;
   };
   const open = async character => {
-    await send('Page.navigate', { url: `http://localhost:1420/?view=rig_preview&character=${character}` });
-    for (let i = 0; i < 60; i++) {
+    await send('Page.navigate', { url: `http://127.0.0.1:1420/?view=rig_preview&character=${character}` });
+    for (let i = 0; i < 300; i++) {
       if (await evaluate(`!!document.querySelector('.chibi-pet-${character}')`)) return;
       await delay(100);
     }
@@ -75,7 +76,9 @@ try {
   let samples = await record('入睡', 6100);
   const tail = samples.slice(-45);
   assert(tail.every(s => s.pose.includes('pose-sleep')));
-  assert.deepEqual([...new Set(tail.map(s => s.pos))].sort(), ['100% 100%', '66.6667% 100%'].sort());
+  // A held sleep stays on the final frame; a non-held sleep breathes between two.
+  const expectedTail = sleepSpec.hold ? ['100% 100%'] : ['100% 100%', '66.6667% 100%'].sort();
+  assert.deepEqual([...new Set(tail.map(s => s.pos))].sort(), expectedTail);
   samples = await record('回到待机', 1500, '', true);
   assert(samples.some(s => s.pose.includes('pose-wake')));
   assert(samples.at(-1).pose.includes('pose-idle'));
@@ -93,7 +96,7 @@ try {
   assert(poses.findIndex(s => s.includes('pose-tend ' ) || s.endsWith('pose-tend')) < poses.findIndex(s => s.includes('pose-tend-out')));
   assert(samples.some(s => s.sheet.includes('nana-tend-out-sheet.webp')));
   assert(samples.at(-1).pose.includes('pose-idle'));
-  console.log('PASS: sleep tail loop, reset/click/timer wake, Nana tend → tend-out → idle');
+  console.log('PASS: configured sleep hold/loop, reset/click/timer wake, Nana tend → tend-out → idle');
   // Browser.close may close the socket before replying.
   socket.send(JSON.stringify({ id: 999998, method: 'Browser.close' }));
   await delay(500);

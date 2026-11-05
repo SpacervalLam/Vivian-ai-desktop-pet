@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { createLeafField } from './foliage';
+import { APARTMENT_PLAN, PODIUM_HALF_WIDTH, apartmentUnits, apartmentPartitions } from './sakuraPlan';
 
 /** Architectural renovation. Coordinates deliberately retain the navigable floor/door contract. */
 export function rebuildApartmentArchitecture(group: THREE.Group) {
@@ -62,22 +63,25 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
   }
   // Gables are newly segmented solids with recessed terracotta fields, not decals on old walls.
   for(const side of [-1,1]){
-    put(newParts,'gable-base',side*31.075,7.64,-.6,.15,8.48,10.6,materials.clay);
-    for(const z of [-5.7,-2.2,1.3,4.55])put(newParts,'gable-pier',side*31.20,7.695,z,.18,8.53,.22,materials.coping,true);
-    for(const y of [3.48,6.28,9.08,11.88])put(newParts,'gable-course',side*31.31,y+.013,-.6,.14,.145,10.6,materials.coping);
-    for(let z=-5.35;z<4.4;z+=.37)put(newParts,'gable-ceramic-rib',side*31.17,7.6,z,.035,7.8,.06,materials.clay);
+    // 山墙贴妻壁外皮：面宽收缩时整组跟着走，不能留 31.075 这类绝对值。
+    const gx = side < 0 ? APARTMENT_PLAN.x0 : APARTMENT_PLAN.x1;
+    put(newParts,'gable-base',gx+side*0.075,7.64,-.6,.15,8.48,10.6,materials.clay);
+    for(const z of [-5.7,-2.2,1.3,4.55])put(newParts,'gable-pier',gx+side*0.20,7.695,z,.18,8.53,.22,materials.coping,true);
+    for(const y of [3.48,6.28,9.08,11.88])put(newParts,'gable-course',gx+side*0.31,y+.013,-.6,.14,.145,10.6,materials.coping);
+    for(let z=-5.35;z<4.4;z+=.37)put(newParts,'gable-ceramic-rib',gx+side*0.17,7.6,z,.035,7.8,.06,materials.clay);
   }
-  // Five roof pavilions replace the single 62 m slab. Joints are real 6 cm gaps.
-  for(let unit=0;unit<5;unit++){
-    const x=-24.8+unit*12.4;
+  // 屋顶亭按户数派生，中心落在每户中点。等分户宽不变时 12.xx 尺寸原样保留。
+  for(const [ui,[u0,u1]] of apartmentUnits().entries()){
+    const x=(u0+u1)/2;
     put(newParts,'roof-slab',x,12.00,-.6,12.34,.40,10.9,materials.coping);
     put(newParts,'roof-inset',x,12.245,-.6,11.8,.07,10.34,materials.roof);
     for(const z of [-6.0,4.8]){
       put(newParts,'roof-parapet',x,12.55,z,12.28,.70,.18,materials.plaster);
       put(newParts,'roof-coping',x,12.93,z,12.36,.09,.26,materials.metal,true);
     }
-    for(const dx of [-6.05,6.05])put(newParts,'roof-party-wall',x+dx,12.49,-.6,.16,.58,10.58,materials.clay);
-    const plantHeight=unit%2===0?1.1:.75;
+    const half=(u1-u0)/2-0.15;
+    for(const dx of [-half,half])put(newParts,'roof-party-wall',x+dx,12.49,-.6,.16,.58,10.58,materials.clay);
+    const plantHeight=ui%2===0?1.1:.75;
     put(newParts,'roof-service-room',x-2,12.28+plantHeight/2,-1.7,2.5,plantHeight,2.1,materials.stone,true);
     put(newParts,'roof-service-cap',x-2,12.32+plantHeight,-1.7,2.64,.08,2.24,materials.metal);
     for(let n=0;n<8;n++)put(newParts,'roof-vent',x-2,12.45+n*.075,-.63,2.1,.022,.035,materials.metal);
@@ -92,13 +96,15 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
     }
   }
   // Columns sit at party walls, clear of every window and the 203 entrance.
-  for(const x of [-30.88,-18.6,-6.2,6.2,18.6,30.88]){
+  const parts=apartmentPartitions();
+  const piers=[parts[0]+0.12,...parts.slice(1,-1),parts[parts.length-1]-0.12];
+  for(const x of piers){
     put(newParts,'front-pier',x,7.6,6.39,.22,8.6,.22,materials.coping,true);
     put(newParts,'rear-pier',x,7.6,-7.26,.18,8.6,.18,materials.clay,true);
   }
   for(const F of [3.4,6.2,9.0]){
-    for(let unit=0;unit<5;unit++){
-      const x=-24.8+unit*12.4;
+    for(const [u0,u1] of apartmentUnits()){
+      const x=(u0+u1)/2;
       // Fascia is outside the existing deck edge by 35 mm. No duplicate horizontal surface.
       put(newParts,'balcony-fascia',x,F-.115,6.405,12.15,.19,.14,materials.coping,true);
       put(newParts,'balcony-shadow-line',x,F-.25,6.405,12.06,.04,.09,materials.metal);
@@ -131,8 +137,8 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
    * 压回壁柱顶（11.744）以下 1cm，共面只是变小、没有消失。
    */
   const CEIL_TOP = 11.8, CEIL_TH = 0.14;   // 顶面标高 / 板厚（与各层楼板同）
-  for(let unit=0;unit<5;unit++){
-    const x=-24.8+unit*12.4;
+  for(const [u0,u1] of apartmentUnits()){
+    const x=(u0+u1)/2;
     put(newParts,'balcony-top-slab',x,CEIL_TOP-CEIL_TH/2,5.5,12.28,CEIL_TH,1.6,materials.coping);
     // 外缘边梁 + 阴影线：与上面各层同规格，标高换到顶板的顶面
     put(newParts,'balcony-fascia',x,CEIL_TOP-.115,6.405,12.15,.19,.14,materials.coping,true);
@@ -141,6 +147,37 @@ export function rebuildApartmentArchitecture(group: THREE.Group) {
      * 与上面 `rear-corridor-fascia` 同规格、同 z，标高换到 11.8 —— 相当于"5F 的廊板"。
      * 没有它，顶层外廊外缘会是一道光秃秃的混凝土边，而 2F/3F/4F 都有一道陶土色压边。 */
     put(newParts,'rear-corridor-fascia',x,CEIL_TOP-.10,-7.27,12.15,.16,.10,materials.clay);
+  }
+  /* ================= 裙房屋顶庭园（住宅收缩后露出的两段） =================
+   * 住宅体量收到 37.2m，1F 商业大堂仍按 62m 铺满，两端各露出约 12.4m 宽的
+   * 裙房屋面（podium 的 lobby-ceiling 顶面 y=3.30）。留白就是两片刺眼的纯白
+   * 空板，看着像没收干净的残骸。铺木地板 + 矮女儿墙 + 三列花池灌木，把退台
+   * 读成日式公寓常见的屋顶庭园，而不是结构缺口。
+   *
+   * 叶簇与屋顶花池共用同一个 createLeafField，最后一起 build（自带 noMerge，
+   * 外层合批不会烘掉）。露台玩家上不去，不声明碰撞。
+   */
+  const terraces: Array<[number, number]> = [
+    [-PODIUM_HALF_WIDTH, APARTMENT_PLAN.x0],
+    [APARTMENT_PLAN.x1, PODIUM_HALF_WIDTH],
+  ];
+  for (const [tx0, tx1] of terraces) {
+    if (tx1 - tx0 < 0.5) continue;   // 面宽回到 62m 时自动不建
+    const cx = (tx0 + tx1) / 2, w = tx1 - tx0;
+    put(newParts, 'terrace-deck', cx, 3.315, -.6, w - .12, .03, 10.3, materials.wood);
+    for (const z of [-5.72, 4.52]) {
+      put(newParts, 'terrace-parapet', cx, 3.56, z, w - .12, .48, .16, materials.plaster);
+      put(newParts, 'terrace-coping', cx, 3.815, z, w - .04, .06, .24, materials.coping, true);
+    }
+    put(newParts, 'terrace-end', tx0 + (tx0 < 0 ? .06 : w - .06), 3.56, -.6, .12, .48, 10.3, materials.plaster);
+    for (let n = 0; n < 3; n++) {
+      const pz = -4.0 + n * 3.2;
+      put(newParts, 'terrace-planter', cx, 3.48, pz, 1.5, .34, 2.0, materials.clay, true);
+      for (let k = 0; k < 22; k++) {
+        roofShrubs.spray(cx - .62 + roofRnd() * 1.24, 3.72 + roofRnd() * .24,
+          pz - .85 + roofRnd() * 1.7, .13 + roofRnd() * .11);
+      }
+    }
   }
   /* 全部花池登记完才 build。放在下面的 `traverse` **之前**：那两趟遍历会收集
    * "还在用"的几何与材质，晚挂进去的会被当成游离资源释放掉。

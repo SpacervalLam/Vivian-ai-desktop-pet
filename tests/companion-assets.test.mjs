@@ -57,22 +57,16 @@ for (const character of ['nana', 'vivian']) {
     assert.equal(resolveMotion(alias, character).promptable, true);
   }
 }
-const provenance = JSON.parse(await readFile('assets/chibi/rps/generation.json', 'utf8'));
-assert.equal(provenance.records.length, 6);
-for (const record of provenance.records) {
-  const png = record.sheet.replace(`${record.character}-rps-${record.hand}-sheet.webp`, `rps-${record.hand}/001.png`);
-  const sourceMetadata = await sharp(record.source).metadata();
-  assert.equal(sourceMetadata.hasAlpha, true, `${record.character}/${record.hand}: recorded source exists`);
-  // Generated intermediate frames are optional, just like the source directories above.
-  const frame = await readFile(png).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-  if (frame !== null) {
-    const original = await sharp(frame).flatten({ background: '#ffffff' }).raw().toBuffer();
-    const decoded = await sharp(record.sheet).flatten({ background: '#ffffff' }).raw().toBuffer();
-    assert.deepEqual(decoded, original, `${record.character}/${record.hand}: lossless visible pixels`);
-  }
-  const { data, info } = await sharp(record.sheet).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+// Runtime gestures use the shared remastered cell baseline. Archived generation
+// records describe the previous artwork and are not runtime pixel contracts.
+for (const character of manifest.characters) for (const hand of ['rock', 'scissors', 'paper']) {
+  const file = `public/chibi/motion/${character}/${character}-rps-${hand}-sheet.webp`;
+  const { data, info } = await sharp(file).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  assert.deepEqual([info.width, info.height], [512, 512]);
   let bottom = -1;
-  for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) if (data[(y * info.width + x) * 4 + 3] >= 16) bottom = y;
-  assert.ok(Math.abs(bottom - record.foot_baseline) <= 2, `${record.character}/${record.hand}: baseline`);
+  for (let y = 0; y < info.height; y++) for (let x = 0; x < info.width; x++) {
+    if (data[(y * info.width + x) * 4 + 3] >= 16) bottom = y;
+  }
+  assert.ok(Math.abs(bottom - 496) <= 3, `${character}/${hand}: shared foot baseline`);
 }
-console.log('18 companion animation groups: 112 transparent cells, source frames, playback, character availability and RPS baselines passed');
+console.log('Companion animation groups: runtime grids, transparency, playback, character availability and six RPS baselines passed.');
