@@ -1,0 +1,11 @@
+.reminder-window { height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; padding: 16px; gap: 12px; background: #f7f3ed; color: #493e36; border: 1px solid #dfd6c9; border-radius: 18px; font-size: 14px; }
+.reminder-window header, .reminder-window footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.reminder-window section { flex: 1; min-height: 0; overflow-y: auto; }
+.reminder-window article { margin-bottom: 12px; padding: 14px; border: 1px solid #dfd6c9; border-radius: 12px; background: #fffdf9; }
+.reminder-window small, .reminder-empty { color: #887b6c; }
+.reminder-window p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.reminder-window button { border: 1px solid #d8cdbd; border-radius: 8px; background: #ece3d7; color: inherit; padding: 8px 10px; cursor: pointer; }
+.reminder-window button:disabled { opacity: .5; cursor: wait; }
+.reminder-window button:focus-visible { outline: 2px solid #a27b47; outline-offset: 2px; }
+.reminder-window [role="alert"] { color: #a33e35; margin: 0; }
+.reminder-open { align-self: flex-start; }

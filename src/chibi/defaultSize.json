@@ -1,0 +1,41 @@
+{
+  "note": "四个角色默认 idle 素材尺寸不一致，渲染时由 .chibi-pet-default-size 包裹层统一缩放 + 对齐脚底。由 scripts/calibrate-chibi-default-size.mjs 依据 public/ 素材实测生成，勿手改数值；改素材后需重跑本脚本。",
+  "originPercent": 90,
+  "target": {
+    "top": 40.75,
+    "foot": 480,
+    "height": 439.25
+  },
+  "measured": {
+    "vivian": {
+      "top": 25,
+      "foot": 493,
+      "height": 468,
+      "width": 377,
+      "projected": {
+        "top": 40.75,
+        "foot": 480
+      }
+    },
+    "nana": {
+      "top": 42,
+      "foot": 493,
+      "height": 451,
+      "width": 341,
+      "projected": {
+        "top": 40.75,
+        "foot": 480
+      }
+    }
+  },
+  "characters": {
+    "vivian": {
+      "scale": 0.938568,
+      "translateY": -2.152715
+    },
+    "nana": {
+      "scale": 0.973947,
+      "translateY": -2.375212
+    }
+  }
+}

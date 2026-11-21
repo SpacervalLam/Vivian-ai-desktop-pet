@@ -1,0 +1,25 @@
+.record-workspace {
+  position: relative;
+  isolation: isolate;
+  min-height: 0;
+  overflow: auto;
+}
+/* 四页现在与办公页同级，直接占据整个内容区：必须和办公页一样以视口高度为界，
+   否则页面会被内容撑高（笔记本尤其明显），页内索引与阅读区也失去独立滚动。
+   记忆页仍按整页文档滚动（见 MemoryPage.css），保留 min-height 以便内容自然长高。 */
+.record-workspace > .record-page:not(.record-memory) { height: 100%; min-height: 0; }
+.record-workspace::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background: var(--record-art) right bottom / auto 100% no-repeat;
+  opacity: .08;
+}
+.record-workspace[data-record-page="graph"] { --record-art: url('/record-art/memory-backdrop-v43.webp'); }
+.record-workspace[data-record-page="planner"] { --record-art: url('/record-art/planner-nana-backdrop-v44.webp'); }
+.record-workspace > .record-page { min-height: 100%; background: transparent; }
+.record-workspace .record-history-stamp { color: var(--claude-muted); font-size: 12px; margin-bottom: 8px; }
+.record-workspace .record-diary-body { position: relative; isolation: isolate; }
+.record-workspace .record-diary-body > :not(.record-diary-backdrop) { position: relative; }

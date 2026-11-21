@@ -1,0 +1,202 @@
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { createLeafField } from './foliage';
+import { APARTMENT_PLAN, PODIUM_HALF_WIDTH, apartmentUnits, apartmentPartitions } from './sakuraPlan';
+
+/** Architectural renovation. Coordinates deliberately retain the navigable floor/door contract. */
+export function rebuildApartmentArchitecture(group: THREE.Group) {
+  const materials = {
+    plaster: new THREE.MeshStandardMaterial({color:'#b9b4a5',roughness:.92}),
+    clay: new THREE.MeshStandardMaterial({color:'#956e59',roughness:.88}),
+    stone: new THREE.MeshStandardMaterial({color:'#646e69',roughness:.93}),
+    coping: new THREE.MeshStandardMaterial({color:'#d1cbbb',roughness:.78}),
+    metal: new THREE.MeshStandardMaterial({color:'#354b48',roughness:.52,metalness:.35}),
+    wood: new THREE.MeshStandardMaterial({color:'#9c7954',roughness:.79}),
+    roof: new THREE.MeshStandardMaterial({color:'#495852',roughness:.94}),
+    leaf: new THREE.MeshStandardMaterial({color:'#496b56',roughness:.96}),
+  };
+  Object.values(materials).forEach(m=>{m.userData.outlineWeight=0;});
+  const geometry = new Map<string,THREE.BufferGeometry>();
+  const newParts = new THREE.Group(); newParts.name='apartment-authored-architecture';
+  newParts.userData.sceneCollideSkip=true;group.add(newParts);
+  // 屋顶花池的叶簇场。自带 PRNG：叶簇贴图生成要抽几百次样，蹭别的随机流会错位。
+  let roofSeed=3313;const roofRnd=()=>{roofSeed=(Math.imul(roofSeed,1664525)+1013904223)>>>0;return roofSeed/4294967296;};
+  const roofShrubs=createLeafField(roofRnd,1200);
+  const put=(parent:THREE.Group,name:string,x:number,y:number,z:number,w:number,h:number,d:number,mat:THREE.Material,round=false)=>{
+    const key=`${w}/${h}/${d}/${round}`;let geo=geometry.get(key);
+    if(!geo){geo=round?new RoundedBoxGeometry(w,h,d,1,Math.min(.035,Math.min(w,h,d)*.15)):new THREE.BoxGeometry(w,h,d);geometry.set(key,geo);}
+    const mesh=new THREE.Mesh(geo,mat);mesh.name=name;mesh.position.set(x,y,z);mesh.castShadow=true;mesh.receiveShadow=true;parent.add(mesh);return mesh;
+  };
+  // Replace rather than overlay the old geometry. Other objects may share its geometry/material.
+  const removed:THREE.Object3D[]=[];
+  for(const child of [...group.children]){
+    if(child.name==='apt-roof'||child.name.startsWith('apt-old-roof-')||child.name.startsWith('apt-old-gable-')||child.name.startsWith('apt-old-entrance-')){group.remove(child);removed.push(child);}
+    if(child.name.startsWith('railing-')&&child instanceof THREE.Group){
+      const bounds=new THREE.Box3().setFromObject(child);const min=bounds.min,max=bounds.max;
+      const x0=min.x+.028,x1=max.x-.028,z=(min.z+max.z)/2,F=min.y;
+      removed.push(...child.children);child.clear();
+      const width=x1-x0;
+      put(child,'balcony-top-rail',(x0+x1)/2,F+1.05,z,width,.055,.095,materials.metal,true);
+      put(child,'balcony-lower-rail',(x0+x1)/2,F+.10,z,width,.055,.065,materials.metal);
+      const sections=Math.ceil(width/2.05),step=width/sections;
+      for(let n=0;n<=sections;n++)put(child,'balcony-post',x0+n*step,F+.54,z,.065,1.06,.085,materials.metal);
+      for(let n=0;n<sections;n++){
+        const start=x0+n*step+.08,end=x0+(n+1)*step-.08;
+        /**
+         * 木格栅：**方盒，不倒角**。
+         *
+         * 原本走 `round=true`（RoundedBoxGeometry），单根 108 个三角形。可它是一根
+         * 0.068×0.85×0.046 的细栅，倒角半径取 `min(.035, 0.046×.15) = 6.9mm`——
+         * 只有料厚的 15%；而全楼 1266 根、间距 0.14m 挤成一道密屏，6.9mm 在任何
+         * 还看得清它的距离上都已经小于一个像素。
+         *
+         * 实测这一项占 apartment-shell 的 35%（13.7 万三角形）、整场景的 11.6%，
+         * 是单个合批 mesh 里最重的一个。换回方盒：1266×12 ≈ 1.5 万三角形，
+         * 省下 12.2 万（整场景 10.4%），而画面逐像素无差。
+         *
+         * 其余 `round=true` 的构件（顶横档 / 山墙垛 / 屋顶压顶 / 前柱）不倒角半径
+         * 更小但**单件大、数量少**，倒角在近景是读得出来的，保持不动。
+         */
+        for(let x=start+.035;x<end;x+=.14)put(child,'cedar-balustrade',x,F+.555,z,.068,.85,.046,materials.wood,false);
+      }
+    }
+  }
+  // Gables are newly segmented solids with recessed terracotta fields, not decals on old walls.
+  for(const side of [-1,1]){
+    // 山墙贴妻壁外皮：面宽收缩时整组跟着走，不能留 31.075 这类绝对值。
+    const gx = side < 0 ? APARTMENT_PLAN.x0 : APARTMENT_PLAN.x1;
+    put(newParts,'gable-base',gx+side*0.075,7.64,-.6,.15,8.48,10.6,materials.clay);
+    for(const z of [-5.7,-2.2,1.3,4.55])put(newParts,'gable-pier',gx+side*0.20,7.695,z,.18,8.53,.22,materials.coping,true);
+    for(const y of [3.48,6.28,9.08,11.88])put(newParts,'gable-course',gx+side*0.31,y+.013,-.6,.14,.145,10.6,materials.coping);
+    for(let z=-5.35;z<4.4;z+=.37)put(newParts,'gable-ceramic-rib',gx+side*0.17,7.6,z,.035,7.8,.06,materials.clay);
+  }
+  // 屋顶亭按户数派生，中心落在每户中点。等分户宽不变时 12.xx 尺寸原样保留。
+  for(const [ui,[u0,u1]] of apartmentUnits().entries()){
+    const x=(u0+u1)/2;
+    put(newParts,'roof-slab',x,12.00,-.6,12.34,.40,10.9,materials.coping);
+    put(newParts,'roof-inset',x,12.245,-.6,11.8,.07,10.34,materials.roof);
+    for(const z of [-6.0,4.8]){
+      put(newParts,'roof-parapet',x,12.55,z,12.28,.70,.18,materials.plaster);
+      put(newParts,'roof-coping',x,12.93,z,12.36,.09,.26,materials.metal,true);
+    }
+    const half=(u1-u0)/2-0.15;
+    for(const dx of [-half,half])put(newParts,'roof-party-wall',x+dx,12.49,-.6,.16,.58,10.58,materials.clay);
+    const plantHeight=ui%2===0?1.1:.75;
+    put(newParts,'roof-service-room',x-2,12.28+plantHeight/2,-1.7,2.5,plantHeight,2.1,materials.stone,true);
+    put(newParts,'roof-service-cap',x-2,12.32+plantHeight,-1.7,2.64,.08,2.24,materials.metal);
+    for(let n=0;n<8;n++)put(newParts,'roof-vent',x-2,12.45+n*.075,-.63,2.1,.022,.035,materials.metal);
+    put(newParts,'roof-planter',x+3.8,12.48,2.9,2.4,.4,.7,materials.clay,true);
+    /* 屋顶花池的植栽走 `foliage` 的叶簇场。原来是 9 颗 `(0.26, 8, 6)` 的球 ——
+     * 8×6 段的球在 12m 高的屋顶上就是九个绿色多面体，而且九颗一样大。
+     * 叶簇场是**局部坐标**的（`newParts` 会被挂进带变换的父级），所以网格挂在
+     * `newParts` 里跟着走；`build()` 自带 `noMerge`，外层合批不会把它烘掉。 */
+    for(let n=0;n<26;n++){
+      const t=roofRnd();
+      roofShrubs.spray(x+2.78+t*2.04,12.74+roofRnd()*.34,2.62+roofRnd()*.56,.15+roofRnd()*.13);
+    }
+  }
+  // Columns sit at party walls, clear of every window and the 203 entrance.
+  const parts=apartmentPartitions();
+  const piers=[parts[0]+0.12,...parts.slice(1,-1),parts[parts.length-1]-0.12];
+  for(const x of piers){
+    put(newParts,'front-pier',x,7.6,6.39,.22,8.6,.22,materials.coping,true);
+    put(newParts,'rear-pier',x,7.6,-7.26,.18,8.6,.18,materials.clay,true);
+  }
+  for(const F of [3.4,6.2,9.0]){
+    for(const [u0,u1] of apartmentUnits()){
+      const x=(u0+u1)/2;
+      // Fascia is outside the existing deck edge by 35 mm. No duplicate horizontal surface.
+      put(newParts,'balcony-fascia',x,F-.115,6.405,12.15,.19,.14,materials.coping,true);
+      put(newParts,'balcony-shadow-line',x,F-.25,6.405,12.06,.04,.09,materials.metal);
+      put(newParts,'rear-corridor-fascia',x,F-.10,-7.27,12.15,.16,.10,materials.clay);
+      // Narrow side privacy screens at the party wall, leaving the balcony passage clear.
+      for(let n=0;n<6;n++)put(newParts,'balcony-privacy-fin',x-5.97,F+1.30,5.0+n*.19,.065,2.20,.08,materials.wood,true);
+    }
+  }
+  /**
+   * 4F 阳台顶板 —— 补上顶层阳台缺的天花板。
+   *
+   * 2F/3F 阳台的天花板不是单独做的，就是**上一层阳台的楼板**（exterior.ts 南立面
+   * 循环里那 12.32×0.14×1.6 的盒子，顶面 = 该层标高 F）。4F 上面没有楼层了，屋顶
+   * 亭子的板（roof-slab，z ∈ [-6.05, 4.85]）只铺到主体量 ZF=4.7 外 0.15m —— 整个
+   * 1.6m 挑出段上方是空的，4F 阳台因此露天。实测（tmp/_probe-balcony-ceiling.mjs）
+   * 阳台 7 个采样点里只有最里侧 z=4.75 有命中，而那一下打在滑門上方的墙垛
+   * （F+2.38=11.38）上，z=5…6.25 全部无遮挡。
+   *
+   * 标高照抄下层：顶面 = FLOORS[2] + LVL = 11.8（正好压在 roof-slab 的底面上，
+   * 两者法线相反、各自背面剔除，不构成共面），厚 0.14。4F 阳台净高于是也是 2.66m。
+   *
+   * 唯一与下层不同的是**宽度收 2cm**（12.28 而不是 12.32）：12.32 时顶板端面落在
+   * x = ux0+0.04 上，与 4F 窗套壁柱（unitFace 的 trim：x 从 ux0+0.04 起、0.13 宽、
+   * y 到 11.744）的外侧面**同坐标、同法线**，于是在全楼 10 处户境壁柱上各多出
+   * 83 cm² 的真共面（_zfight.mjs 实测：59 → 69 组）。收 2cm 后两者相距 20mm，
+   * 落在检测器的 2mm 近距带之外；2cm 的收边在 11.7m 高处读不出来。
+   *
+   * 试过的另外两个标高都被否掉：顶面取 11.90（与前山墙柱 front-pier 柱顶齐平）会让
+   * 板顶与柱顶的 AABB 面重合，_apt-surfaces.mjs 判 10 组贴面冲突；底面取 11.75 则又
+   * 压回壁柱顶（11.744）以下 1cm，共面只是变小、没有消失。
+   */
+  const CEIL_TOP = 11.8, CEIL_TH = 0.14;   // 顶面标高 / 板厚（与各层楼板同）
+  for(const [u0,u1] of apartmentUnits()){
+    const x=(u0+u1)/2;
+    put(newParts,'balcony-top-slab',x,CEIL_TOP-CEIL_TH/2,5.5,12.28,CEIL_TH,1.6,materials.coping);
+    // 外缘边梁 + 阴影线：与上面各层同规格，标高换到顶板的顶面
+    put(newParts,'balcony-fascia',x,CEIL_TOP-.115,6.405,12.15,.19,.14,materials.coping,true);
+    put(newParts,'balcony-shadow-line',x,CEIL_TOP-.25,6.405,12.06,.04,.09,materials.metal);
+    /* 北侧 4F 外廊顶板（板体在 `exterior.ts` 北立面循环里，见那里的注释）的外缘压边。
+     * 与上面 `rear-corridor-fascia` 同规格、同 z，标高换到 11.8 —— 相当于"5F 的廊板"。
+     * 没有它，顶层外廊外缘会是一道光秃秃的混凝土边，而 2F/3F/4F 都有一道陶土色压边。 */
+    put(newParts,'rear-corridor-fascia',x,CEIL_TOP-.10,-7.27,12.15,.16,.10,materials.clay);
+  }
+  /* ================= 裙房屋顶庭园（住宅收缩后露出的两段） =================
+   * 住宅体量收到 37.2m，1F 商业大堂仍按 62m 铺满，两端各露出约 12.4m 宽的
+   * 裙房屋面（podium 的 lobby-ceiling 顶面 y=3.30）。留白就是两片刺眼的纯白
+   * 空板，看着像没收干净的残骸。铺木地板 + 矮女儿墙 + 三列花池灌木，把退台
+   * 读成日式公寓常见的屋顶庭园，而不是结构缺口。
+   *
+   * 叶簇与屋顶花池共用同一个 createLeafField，最后一起 build（自带 noMerge，
+   * 外层合批不会烘掉）。露台玩家上不去，不声明碰撞。
+   */
+  const terraces: Array<[number, number]> = [
+    [-PODIUM_HALF_WIDTH, APARTMENT_PLAN.x0],
+    [APARTMENT_PLAN.x1, PODIUM_HALF_WIDTH],
+  ];
+  for (const [tx0, tx1] of terraces) {
+    if (tx1 - tx0 < 0.5) continue;   // 面宽回到 62m 时自动不建
+    const cx = (tx0 + tx1) / 2, w = tx1 - tx0;
+    put(newParts, 'terrace-deck', cx, 3.315, -.6, w - .12, .03, 10.3, materials.wood);
+    for (const z of [-5.72, 4.52]) {
+      put(newParts, 'terrace-parapet', cx, 3.56, z, w - .12, .48, .16, materials.plaster);
+      put(newParts, 'terrace-coping', cx, 3.815, z, w - .04, .06, .24, materials.coping, true);
+    }
+    put(newParts, 'terrace-end', tx0 + (tx0 < 0 ? .06 : w - .06), 3.56, -.6, .12, .48, 10.3, materials.plaster);
+    for (let n = 0; n < 3; n++) {
+      const pz = -4.0 + n * 3.2;
+      put(newParts, 'terrace-planter', cx, 3.48, pz, 1.5, .34, 2.0, materials.clay, true);
+      for (let k = 0; k < 22; k++) {
+        roofShrubs.spray(cx - .62 + roofRnd() * 1.24, 3.72 + roofRnd() * .24,
+          pz - .85 + roofRnd() * 1.7, .13 + roofRnd() * .11);
+      }
+    }
+  }
+  /* 全部花池登记完才 build。放在下面的 `traverse` **之前**：那两趟遍历会收集
+   * "还在用"的几何与材质，晚挂进去的会被当成游离资源释放掉。
+   * 叶簇材质是 MeshStandardMaterial，不受 toon 材质重映射影响。 */
+  newParts.add(roofShrubs.build('apartment-roof-planting'));
+  // Materials are private to this instance; never modify module-level toon caches.
+  const replacements=new Map<THREE.Material,THREE.Material>();
+  const palette=new Map([['98a3ae',materials.plaster],['8b96a5',materials.clay],['a9b2bb',materials.coping],['8b95a0',materials.stone],['6b7481',materials.stone],['5e6878',materials.metal],['3a424c',materials.metal],['a3aab2',materials.coping],['8b929b',materials.stone],['59626e',materials.clay]]);
+  group.traverse(o=>{if(!(o instanceof THREE.Mesh))return;const remap=(m:THREE.Material)=>{
+    if(!(m instanceof THREE.MeshToonMaterial))return m;
+    if(replacements.has(m))return replacements.get(m)!;
+    const target=!m.map?palette.get(m.color.getHexString()):undefined;
+    if(target){replacements.set(m,target);return target;}return m;
+  };o.material=Array.isArray(o.material)?o.material.map(remap):remap(o.material);});
+  // Detached unique resources must not leak; shared resources still in the scene remain alive.
+  const retainedG=new Set<THREE.BufferGeometry>();const retainedM=new Set<THREE.Material>();
+  group.traverse(o=>{if(o instanceof THREE.Mesh){retainedG.add(o.geometry);(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>retainedM.add(m));}});
+  const discardedG=new Set<THREE.BufferGeometry>();const discardedM=new Set<THREE.Material>();
+  removed.forEach(o=>o.traverse(n=>{if(n instanceof THREE.Mesh){if(!retainedG.has(n.geometry))discardedG.add(n.geometry);(Array.isArray(n.material)?n.material:[n.material]).forEach(m=>{if(!retainedM.has(m)&&!m.userData.__roomCached)discardedM.add(m);});}}));
+  discardedG.forEach(g=>g.dispose());discardedM.forEach(m=>m.dispose());
+  group.userData.architectureVersion=2;
+}

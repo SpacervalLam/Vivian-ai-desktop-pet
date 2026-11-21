@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桜町 · Tokyo Bloom — 独立街区原型</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#12131a}
+  canvas{display:block}
+  #hud{position:fixed;left:22px;top:20px;color:#f6efe2;font:13px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+       background:rgba(18,20,28,.62);backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.13);
+       border-radius:14px;padding:16px 18px 14px;min-width:238px;user-select:none;box-shadow:0 12px 40px #0006}
+  #hud h1{margin:0 0 2px;font:400 25px/1.2 Georgia,"Songti SC",serif;letter-spacing:.06em}
+  #hud .sub{font-size:10px;letter-spacing:.24em;color:#c9a98c;margin-bottom:14px;text-transform:uppercase}
+  #hud .grp{margin-bottom:11px}
+  #hud .lab{font-size:10px;letter-spacing:.18em;color:#9d9aa2;margin-bottom:6px}
+  #hud button{appearance:none;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.055);
+       color:#efe7da;border-radius:8px;padding:6px 10px;margin:0 5px 5px 0;cursor:pointer;font-size:12px;transition:.16s}
+  #hud button:hover{background:rgba(255,255,255,.14)}
+  #hud button.on{background:#c98f6a;border-color:#e3b08c;color:#1c1512;font-weight:600}
+  #tip{position:fixed;right:22px;bottom:20px;color:#f0e6d7;font:12px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+       background:rgba(18,20,28,.6);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.12);
+       border-radius:12px;padding:11px 15px;max-width:300px;pointer-events:none}
+  #tip b{color:#e9b98f;font-weight:600}
+  #loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;color:#e9d6bd;
+       font:15px Georgia,serif;letter-spacing:.22em;background:#12131a;z-index:10;transition:opacity .6s}
+</style>
+</head>
+<body>
+<div id="loading">桜 町 · BUILDING THE STREET</div>
+<div id="hud">
+  <h1>桜町</h1><div class="sub">Tokyo Bloom · independent study</div>
+  <div class="grp"><div class="lab">VIEW / 视轴站位</div><div id="views"></div></div>
+  <div class="grp"><div class="lab">TIME / 时段</div><div id="times"></div></div>
+  <div style="font-size:10px;color:#8d8a92;margin-top:4px">拖拽旋转 · 滚轮缩放 · 数字键 1–4 切机位</div>
+</div>
+<div id="tip"></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

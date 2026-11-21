@@ -1,0 +1,28 @@
+.provider-preset-updater {
+  margin: 0 0 18px; padding: 14px; border: 1px solid var(--panel-border);
+  border-radius: 10px; background: var(--panel-surface); font-weight: 400;
+}
+.provider-preset-update-heading { color: var(--panel-text); font-weight: 600; }
+.provider-preset-update-help { margin: 6px 0 12px; font-size: 12px; color: var(--panel-text-secondary); line-height: 1.6; }
+.provider-preset-update-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.provider-preset-update-actions button, .provider-preset-update-actions select {
+  padding: 6px 10px; border: 1px solid var(--panel-border); border-radius: 6px;
+  background: var(--panel-bg); color: var(--panel-text); font: inherit; font-size: 12px;
+}
+.provider-preset-update-actions button { cursor: pointer; }
+.provider-preset-update-actions button:disabled, .provider-preset-update-actions select:disabled { opacity: .5; cursor: default; }
+.provider-preset-update-actions .provider-preset-update-primary { border-color: var(--panel-accent); color: var(--panel-accent); }
+.provider-preset-update-progress { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--panel-text-secondary); }
+.provider-preset-update-progress progress { width: 100%; height: 6px; accent-color: var(--panel-accent); }
+.provider-preset-update-error, .provider-preset-update-state.failed { color: var(--panel-danger, #c74242); }
+.provider-preset-update-error { font-size: 12px; overflow-wrap: anywhere; }
+.provider-preset-update-details { margin-top: 12px; font-size: 12px; color: var(--panel-text-secondary); }
+.provider-preset-update-details summary { cursor: pointer; padding: 4px 0; }
+.provider-preset-update-table-wrap { overflow-x: auto; }
+.provider-preset-update-details table { width: 100%; border-collapse: collapse; margin-top: 6px; text-align: left; }
+.provider-preset-update-details th, .provider-preset-update-details td { padding: 8px 6px; border-bottom: 1px solid var(--panel-border); vertical-align: top; }
+.provider-preset-update-details th { font-weight: 500; white-space: nowrap; }
+.provider-preset-update-details small { color: var(--panel-text-tertiary); white-space: nowrap; }
+.provider-preset-update-state.updated, .provider-preset-update-state.verified { color: var(--panel-accent); }
+.provider-preset-update-message { max-width: 340px; margin-top: 4px; overflow-wrap: anywhere; white-space: pre-wrap; }
+.provider-preset-source { margin-left: 8px; padding: 0; border: 0; background: none; color: var(--panel-accent); font: inherit; cursor: pointer; }

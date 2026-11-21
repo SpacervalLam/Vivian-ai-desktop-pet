@@ -1,0 +1,12 @@
+[
+  {
+    "name": "bilibili",
+    "query_modifier": "site:bilibili.com",
+    "focus_hint": "创作、科技、游戏与新奇知识"
+  },
+  {
+    "name": "weibo",
+    "query_modifier": "site:weibo.com 微博热搜",
+    "focus_hint": "日常趣事与流行表达"
+  }
+]

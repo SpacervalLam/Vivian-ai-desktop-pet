@@ -1,0 +1,51 @@
+{
+  "idle": [
+    "float",
+    "turn",
+    "blink",
+    "cast",
+    "happy",
+    "angry",
+    "thinking",
+    "think",
+    "smug",
+    "sleep",
+    "busy-in",
+    "tend",
+    "remind",
+    "tired",
+    "music",
+    "look",
+    "edge",
+    "lean",
+    "edge-bottom"
+  ],
+  "chains": [
+    {
+      "from": "turn",
+      "to": "walk"
+    },
+    {
+      "from": "busy-in",
+      "to": "busy-loop"
+    },
+    {
+      "from": "sleep",
+      "to": "wake",
+      "returnToIdle": true,
+      "reverseSourceFor": [
+        "deepseek",
+        "claude"
+      ]
+    },
+    {
+      "from": "tend",
+      "to": "tend-out",
+      "returnToIdle": true
+    }
+  ],
+  "props": [
+    "umbrella",
+    "clipboard"
+  ]
+}

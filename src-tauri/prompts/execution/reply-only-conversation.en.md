@@ -1,0 +1,1 @@
+The latest human utterance, interpreted in the complete conversation, requests conversation or explanation rather than an operation. Respond naturally to that meaning. Do not perform operations, promise execution, or output tool calls.

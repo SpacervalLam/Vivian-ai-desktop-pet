@@ -1,0 +1,314 @@
+import { CHARACTER_IDS, isCharacterId, characterName } from '../../../characters';
+import { splitActionText } from '../../../utils/ActionText';
+import { useTranslation } from 'react-i18next';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { BookOpen, Clock3, Heart, Image as ImageIcon, MessageCircle, RefreshCw, Search, UserCircle, Sparkles, ArrowUpRight } from 'lucide-react';
+import UserProfilePage from './UserProfilePage';
+import StickerImage from '../../stickers/StickerImage';
+import ImageViewer from '../../ImageViewer';
+import { unifiedConversationThreads, sharedEventTimeline, isVisibleMemoryFact, isMemorySummary,
+  isVisibleOngoingTask, ongoingTaskOf, ongoingLabel, ongoingSearchText,
+  type Character, type MemoryRecord, type ConversationRecord } from './memoryPresentation';
+import './MemoryPage.css';
+import './ClaudeTheme.css';
+import { recordKeyForText } from '../../../i18n/records';
+
+type Layer = 'facts' | 'episodes' | 'recent' | 'profile';
+
+const SearchHighlightedText: React.FC<{ text: string; query: string }> = ({ text, query }) => {
+  const term = query.trim();
+  if (!term) return <>{text}</>;
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return <>{parts.map((part, index) => index % 2 === 1
+    ? <mark className="memory-search-highlight" key={index}>{part}</mark>
+    : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
+};
+
+const DialogueHighlightedText: React.FC<{ text: string; query: string }> = ({ text, query }) => <>{
+  splitActionText(text).map((part, index) => part.action
+    ? <em className="memory-action-text" key={index}><SearchHighlightedText text={part.text} query={query} /></em>
+    : <SearchHighlightedText key={index} text={part.text} query={query} />)
+}</>;
+
+const TABS = [
+  { key: 'facts', title: '长期记忆', subtitle: '事实、偏好和约定', icon: Heart },
+  { key: 'episodes', title: '共同经历', subtitle: '跨会话的事件与进展', icon: BookOpen },
+  { key: 'recent', title: '对话记录', subtitle: '每次交流的原始发言', icon: MessageCircle },
+  { key: 'profile', title: '用户画像', subtitle: '关于你的了解', icon: UserCircle },
+] as const;
+
+const layerOf = (item: MemoryRecord): Layer | null => {
+  return isVisibleMemoryFact(item) || isVisibleOngoingTask(item) ? 'facts' : null;
+};
+
+/* 事实层是「所有角色合并后的一张列表」（见 load() 的 flatMap），且群发消息会被
+   每个角色各自抽取成一条内容相同的记录。卡片上不标归属，这些记录就长得一模
+   一样，看起来像重复渲染。owner 使用 load() 写进 id 的角色前缀。 */
+const ownerOf = (item: MemoryRecord): Character => { const prefix = item.id.split(':')[0]; return isCharacterId(prefix) ? prefix : 'vivian'; };
+const ownerName = characterName;
+
+const memoryDateText = (value: number, language: string) => {
+  const millis = value < 1e12 ? value * 1000 : value;
+  return Number.isFinite(millis) && millis > 0
+    ? new Date(millis).toLocaleString(language, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '时间未知';
+};
+
+const categoryName = (item: MemoryRecord) => {
+  if (item.open_hooks?.some((hook) => hook.closed_at == null)) return '约定与待办';
+  if (item.tags.includes('preference')) return '偏好';
+  if (item.tags.includes('relationship')) return '关系';
+  if (item.tags.includes('user_profile')) return '关于你';
+  if (item.tags.includes('project_context')) return '共同话题';
+  if (isMemorySummary(item)) return '会话摘要';
+  return '事实与资料';
+};
+const topicName = (topic: string) => ({ preference: '偏好', identity: '身份', user_profile: '关于你',
+  project_context: '项目', relationship: '关系', health: '健康', reference: '参考', knowledge: '知识' }[topic] ?? topic);
+
+const MemoryPage: React.FC<{ initialLayer?: Layer; embedded?: boolean; refreshToken?: number; onLoadingChange?: (loading: boolean) => void }> = ({ initialLayer = 'facts', embedded = false, refreshToken = 0, onLoadingChange }) => {
+  const { t, i18n } = useTranslation();
+  const localize = (value: string) => { const key = recordKeyForText(value); return key ? t(`records.${key}`) : value; };
+  const displaySpeaker = (value: string) => value === '用户' ? t('records.user') : value === '大家' ? t('records.everyone') : value;
+  const dateText = (value: number) => localize(memoryDateText(value, i18n.resolvedLanguage ?? i18n.language));
+  const character: Character = 'vivian';
+  const [layer, setLayer] = useState<Layer>(initialLayer);
+  useEffect(() => { setLayer(initialLayer); }, [initialLayer]);
+  const [query, setQuery] = useState('');
+  const [items, setItems] = useState<MemoryRecord[]>([]);
+  const [conversations, setConversations] = useState<ConversationRecord[]>([]);
+  const [otherConversations, setOtherConversations] = useState<ConversationRecord[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [focused, setFocused] = useState('');
+  const [organizing, setOrganizing] = useState('');
+  const [notice, setNotice] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [cardViews, setCardViews] = useState<Set<string>>(new Set());
+  const [viewerSrc, setViewerSrc] = useState<string | null>(null);
+  const toggleCardView = (id: string) => setCardViews((value) => {
+    const next = new Set(value);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const requestId = useRef(0);
+
+  const load = useCallback(async () => {
+    const request = ++requestId.current;
+    setLoading(true);
+    setError('');
+    try {
+      const results = await Promise.all(CHARACTER_IDS.map(async (owner) => {
+        const [memories, records] = await Promise.all([
+          invoke<MemoryRecord[]>('get_memories', { characterId: owner }),
+          invoke<ConversationRecord[]>('get_memory_conversations', { characterId: owner }),
+        ]);
+        const conversationKey = (id: unknown) => id ? `${owner}:${id}` : '';
+        return {
+          items: (memories ?? []).map(item => ({ ...item, id: `${owner}:${item.id}`, metadata: {
+            ...item.metadata, conversation_id: conversationKey(item.metadata?.conversation_id),
+            evidence_sources: Array.isArray(item.metadata?.evidence_sources)
+              ? item.metadata.evidence_sources.map(source => ({ ...source, conversation_id: conversationKey(source.conversation_id) })) : [],
+          } })),
+          records: (records ?? []).map(record => ({ ...record, owner, id: conversationKey(record.id) })),
+        };
+      }));
+      if (request === requestId.current) {
+        setItems(results.flatMap(result => result.items));
+        setConversations(results[0].records);
+        setOtherConversations(results.slice(1).flatMap(result => result.records));
+      }
+    } catch (e) {
+      if (request === requestId.current) setError(String(e));
+    } finally {
+      if (request === requestId.current) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load, refreshToken]);
+  useEffect(() => { onLoadingChange?.(loading); }, [loading, onLoadingChange]);
+  useEffect(() => {
+    let cancelled = false;
+    const unlisten: Array<() => void> = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    for (const event of ['memory:updated', 'dialogue:changed', 'chat:history-cleared']) {
+      void listen<{ character_id?: string | null }>(event, ({ payload }) => {
+        if (!payload?.character_id || isCharacterId(payload.character_id)) {
+          clearTimeout(timer); timer = setTimeout(() => void load(), 350);
+        }
+      }).then((cleanup) => { if (cancelled) cleanup(); else unlisten.push(cleanup); }).catch(() => {});
+    }
+    return () => { cancelled = true; clearTimeout(timer); unlisten.forEach((cleanup) => cleanup()); };
+  }, [load]);
+
+  const recentThreads = useMemo(() => unifiedConversationThreads(conversations, otherConversations,
+    i18n.resolvedLanguage ?? i18n.language), [conversations, otherConversations, i18n.resolvedLanguage, i18n.language]);
+  const events = useMemo(() => sharedEventTimeline(items, [...conversations, ...otherConversations]), [items, conversations, otherConversations]);
+  const summaries = useMemo(() => {
+    const bySource = new Map(items.filter((item) => isMemorySummary(item) && !item.consolidated && item.metadata?.index_active !== false).map((item) => [String(item.metadata?.conversation_id ?? ''), item]));
+    for (const thread of recentThreads) {
+      const summary = bySource.get(thread.id) ?? thread.sourceIds.map(id => bySource.get(id)).find(Boolean);
+      if (summary) bySource.set(thread.id, summary);
+    }
+    return bySource;
+  }, [items, recentThreads]);
+  const showOriginal = (id: string) => {
+    const target = recentThreads.find(thread => thread.sourceIds.includes(id))?.id ?? id;
+    setExpanded((value) => new Set(value).add(target)); setFocused(target); setQuery(''); setLayer('recent');
+  };
+  /** 记忆页回看原图：图片实体存在 `<user_data_dir>/images/`，与聊天窗口同一份文件 */
+  const openStoredImage = async (path: string) => {
+    try {
+      const src = await invoke<string | null>('get_image_data_url', { imagePath: path });
+      if (src) setViewerSrc(src);
+      else setNotice(t('records.memoryImageMissing'));
+    } catch (e) { setError(String(e)); }
+  };
+  useEffect(() => {
+    if (layer !== 'recent' || !focused || loading) return;
+    const frame = requestAnimationFrame(() => document.getElementById(`memory-conversation-${encodeURIComponent(focused)}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [focused, layer, loading]);
+  const organize = async (id: string, owner: Character) => {
+    setOrganizing(`${owner}:${id}`); setNotice(''); setError('');
+    try {
+      const summary = await invoke<MemoryRecord>('summarize_memory_conversation', { characterId: owner, conversationId: id.startsWith(`${owner}:`) ? id.slice(owner.length + 1) : id });
+      setNotice(summary.metadata?.summary_status === 'no_content' ? t('records.memoryNoSummary')
+        : summary.metadata?.summary_status === 'partial' ? t('records.memoryPartial') : t('records.memoryUpdated'));
+      await load();
+    } catch (e) { setError(String(e)); }
+    finally { setOrganizing(''); }
+  };
+  const counts = useMemo(() => items.reduce((acc, item) => {
+    const key = layerOf(item);
+    if (key && key !== 'recent' && item.content.trim()) acc[key]++;
+    return acc;
+  }, { facts: 0, episodes: events.length, recent: recentThreads.length, profile: 0 }), [items, character, recentThreads, events]);
+
+  const visible = useMemo(() => items
+    .filter((item) => layerOf(item) === layer && [item.content,
+      ongoingSearchText(item),
+      item.metadata?.title ?? '', item.metadata?.source_quote ?? '',
+      ...(Array.isArray(item.metadata?.topics) ? item.metadata.topics : []),
+      ...(item.open_hooks ?? []).map((hook) => hook.condition)].join(' ').toLowerCase().includes(query.trim().toLowerCase()))
+    .sort((a, b) => Number(ongoingTaskOf(b)?.updated_at ?? b.metadata?.ended_at ?? b.created_at)
+      - Number(ongoingTaskOf(a)?.updated_at ?? a.metadata?.ended_at ?? a.created_at)), [items, layer, query, character]);
+  const visibleThreads = useMemo(() => recentThreads.filter((thread) => thread.searchText.toLowerCase().includes(query.trim().toLowerCase())), [recentThreads, query]);
+  const visibleEvents = useMemo(() => events.filter((event) => event.searchText.toLowerCase().includes(query.trim().toLowerCase())), [events, query]);
+
+  const activeTab = TABS.find((tab) => tab.key === layer)!;
+
+  return <section className={`memory-page claude-theme claude-page-memory record-page record-memory`}>
+
+    <div className="memory-history-view">
+    {embedded && <div className="record-history-stamp">{t('records.historicalRecord')}</div>}
+    {!embedded && <div className="memory-page-actions">
+      <button className="memory-refresh" type="button" onClick={() => void load()} title={t('records.refresh')} aria-label={t('records.refresh')}><RefreshCw size={17} className={loading ? 'spinning' : ''} /></button>
+    </div>}
+
+    <nav className="memory-layer-grid" aria-label={t('records.memoryCategories')}>
+      {TABS.map((tab) => <button key={tab.key} type="button" className={`memory-layer-card ${layer === tab.key ? 'active' : ''}`} aria-pressed={layer === tab.key} onClick={() => setLayer(tab.key)}>
+        <span className="memory-layer-icon"><tab.icon size={19} strokeWidth={1.7} /></span>
+        <span className="memory-layer-copy"><strong>{localize(tab.title)}</strong><small>{localize(tab.subtitle)}</small></span>
+        <span className="memory-layer-count">{tab.key === 'profile' ? '↗' : counts[tab.key]}</span>
+      </button>)}
+    </nav>
+
+    {layer === 'profile' ? <div className="memory-profile-panel">{CHARACTER_IDS.map(owner => <section className={`memory-profile-perspective memory-profile-perspective-${owner}`} key={owner} aria-labelledby={`memory-profile-${owner}`}><h3 id={`memory-profile-${owner}`} className="memory-profile-heading">{t('records.memoryProfileUnderstanding', { name: characterName(owner) })}</h3><UserProfilePage characterId={owner} embedded /></section>)}</div> : <><div className="memory-list-toolbar">
+      <div className="memory-list-heading"><activeTab.icon size={17} /><strong>{localize(activeTab.title)}</strong><span>{counts[layer]} {layer === 'recent' ? t('records.memoryGroup') : t('records.memoryItem')}</span></div>
+      <label className="memory-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('records.memorySearchPlaceholder')} aria-label={t('records.memorySearch')} /></label>
+    </div>
+    {layer === 'recent' && <p className="memory-list-note">{t('records.memoryRecentNote')}</p>}
+    {layer === 'episodes' && <p className="memory-list-note">{t('records.memoryEventNote')}</p>}
+    {error && <p className="memory-error" role="alert">{error}</p>}
+    {notice && <p className="memory-list-note" role="status">{notice}</p>}
+    {loading ? <div className="memory-empty">{t('records.memoryLoading')}</div> : (layer === 'recent' ? visibleThreads.length === 0 : layer === 'episodes' ? visibleEvents.length === 0 : visible.length === 0) ? <div className="memory-empty"><Clock3 size={24} /><strong>{query ? t('records.memoryNoMatch') : t('records.memoryEmpty', { name: localize(activeTab.title) })}</strong><span>{query ? t('records.memoryTryKeywords') : layer === 'episodes' ? t('records.memoryEmptyEvents') : t('records.memoryEmptyHint')}</span></div> : layer === 'episodes' ? <div className="memory-event-list">
+      {visibleEvents.map((event) => <article key={event.id} className="memory-event-card">
+        <div className="record-history-stamp"><span>{t('records.sharedExperience')}</span>{event.time > 0 && <time>{dateText(event.time)}</time>}</div>
+        <div className="memory-thread-header"><span className="memory-thread-title"><BookOpen size={15} /><SearchHighlightedText text={event.title} query={query} /></span><span className="memory-thread-count">{t('records.memoryEventCounts', { conversations: event.conversationIds.length, progress: event.progress.length })}</span></div>
+        <ol className="memory-event-progress">{event.progress.map((progress) => <li key={progress.source_message_id}>
+          <div className="memory-entry-top"><span className={`memory-event-phase phase-${progress.phase}`}>{({ planned: t('records.memoryPlanned'), started: t('records.memoryStarted'), progressed: t('records.memoryProgress'), completed: t('records.memoryComplete'), cancelled: t('records.memoryCancel') })[progress.phase]}</span><time>{t('records.memoryRecorded')}{dateText(progress.recorded_at)}</time></div>
+          <p className="memory-entry-content"><SearchHighlightedText text={progress.detail} query={query} /></p>
+          <details className="memory-entry-evidence"><summary>{t('records.memoryEvidence')}</summary><p>「<SearchHighlightedText text={progress.source_quote} query={query} />」</p><button className="memory-evidence-link" type="button" onClick={() => showOriginal(progress.conversationId)}>{t('records.memorySource')}<ArrowUpRight size={13} /></button></details>
+        </li>)}</ol>
+      </article>)}
+    </div> : layer === 'recent' ? <div className="memory-thread-list">
+      {visibleThreads.map((thread) => <article className={`memory-thread${focused === thread.id ? ' memory-thread-focused' : ''}`} id={`memory-conversation-${encodeURIComponent(thread.id)}`} key={thread.id}>
+        <div className="memory-thread-header"><span className="memory-thread-title"><MessageCircle size={15} />{thread.title}</span><span className="memory-thread-count">{t('records.memoryMessages', { n: thread.turns.length })}</span><time>{dateText(thread.startedAt ?? thread.time)}{thread.startedAt !== thread.time && thread.startedAt ? ` — ${dateText(thread.time)}` : ''}</time></div>
+        {cardViews.has(`${thread.owner}:thread:${thread.id}`) && summaries.get(thread.id)?.content ? <p className="memory-entry-content"><SearchHighlightedText text={summaries.get(thread.id)!.content} query={query} /></p> : <div className="memory-thread-turns">{(expanded.has(thread.id) || query.trim() ? thread.turns : thread.turns.slice(0, 6)).map((turn, index) => {
+          const imagePath = turn.image?.path;
+          return <div className={`memory-thread-turn${turn.speaker ? '' : ' memory-thread-turn-plain'}`} key={turn.id ?? `${thread.id}-${index}`}>
+            {turn.speaker && <span className="memory-thread-speaker" title={turn.audience ? t('records.audience', { name: displaySpeaker(turn.audience) }) : undefined}>{displaySpeaker(turn.speaker)}</span>}
+            <div>
+              <p><DialogueHighlightedText text={turn.text} query={query} /></p>
+              {imagePath && <button type="button" className="memory-thread-image" onClick={() => void openStoredImage(imagePath)}>
+                <ImageIcon size={14} />{t('records.memoryViewImage')}
+              </button>}
+              {turn.sticker && <StickerImage sticker={turn.sticker} size={96} />}
+            </div>
+          </div>;
+        })}</div>}
+        <div className="memory-session-actions">
+          {!cardViews.has(`${thread.owner}:thread:${thread.id}`) && thread.turns.length > 6 && !query.trim() && <button type="button" onClick={() => setExpanded((value) => {
+            const next = new Set(value); if (next.has(thread.id)) next.delete(thread.id); else next.add(thread.id); return next;
+          })}>{expanded.has(thread.id) ? t('records.memoryCollapse') : t('records.memoryExpandMessages', { n: thread.turns.length })}</button>}
+          {thread.canonical && <button type="button" disabled={!!organizing} onClick={() => void organize(thread.id, thread.owner)}><Sparkles size={14} />{organizing === `${thread.owner}:${thread.id}` ? t('records.memoryOrganizing') : summaries.get(thread.id)?.metadata?.summary_status === 'partial' ? t('records.memoryContinue') : summaries.has(thread.id) ? t('records.memoryUpdateSummary') : t('records.memoryOrganize')}</button>}
+          {summaries.get(thread.id)?.content && <button type="button" onClick={() => toggleCardView(`${thread.owner}:thread:${thread.id}`)}>{cardViews.has(`${thread.owner}:thread:${thread.id}`) ? t('records.memoryOriginal') : t('records.memoryViewSummary')}<ArrowUpRight size={13} /></button>}
+        </div>
+      </article>)}
+    </div> : <div className="memory-entry-grid">
+      {visible.map((item, index) => {
+        const owner = ownerOf(item);
+        const ongoing = ongoingTaskOf(item);
+        const taskLabel = (value: string) => ongoingLabel(value, i18n.resolvedLanguage ?? i18n.language);
+        const rawQuote = typeof item.metadata?.source_quote === 'string' ? item.metadata.source_quote : '';
+        const quote = rawQuote;
+        const hooks = (item.open_hooks ?? []).filter((hook) => hook.closed_at == null);
+        const body = ongoing?.goal ?? item.content;
+        const conversationId = String(item.metadata?.conversation_id ?? '');
+        const hasOriginal = recentThreads.some((thread) => thread.sourceIds.includes(conversationId) && thread.canonical);
+        const topics = Array.isArray(item.metadata?.topics) ? item.metadata.topics.filter((topic): topic is string => typeof topic === 'string').slice(0, 5) : [];
+        const evidence = Array.isArray(item.metadata?.evidence_sources) ? item.metadata.evidence_sources.filter((source): source is { quote: string; conversation_id?: string } =>
+          typeof source === 'object' && source !== null && typeof source.quote === 'string' && source.quote !== rawQuote) : [];
+        return <article key={item.id} className={`memory-entry memory-entry-${layer}${index === 0 ? ' memory-opening-panel' : ''}`}>
+
+          <div className="memory-narration-body">
+          <div className="memory-entry-top"><span className="memory-entry-kind">{ongoing ? `${taskLabel('ongoing')} · ${taskLabel(ongoing.status)}` : localize(categoryName(item))}</span><span className={`memory-entry-owner is-${owner}`}>{ownerName(owner)}</span><time>{dateText(ongoing?.updated_at ?? (typeof item.metadata?.started_at === 'number' ? item.metadata.started_at : item.created_at))}</time></div>
+          {ongoing && <h3 className="memory-session-title"><SearchHighlightedText text={ongoing.title} query={query} /></h3>}
+          {typeof item.metadata?.title === 'string' && <h3 className="memory-session-title">{item.metadata.title}</h3>}
+          <p className="memory-entry-content"><SearchHighlightedText text={body} query={query} /></p>
+          {ongoing && ongoing.entries.length > 0 && <details className="memory-entry-evidence memory-ongoing-collection" open={!!query.trim()}>
+            <summary>{taskLabel('collection')} · {ongoing.entries.length}</summary>
+            <ul>{ongoing.entries.map(entry => {
+              const source = recentThreads.find(thread => thread.owner === owner && thread.turns.some(turn => turn.id === entry.evidence.source_id));
+              return <li key={entry.key}><strong><SearchHighlightedText text={entry.label} query={query} /></strong> · {taskLabel(entry.state)}
+                {entry.detail && <p><SearchHighlightedText text={entry.detail} query={query} /></p>}
+                <p>「<SearchHighlightedText text={entry.evidence.quote} query={query} />」
+                  {source && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.id)}>{t('records.memoryView')}</button>}</p>
+              </li>;
+            })}</ul>
+          </details>}
+          {topics.length > 0 && <div className="memory-topic-tags">{topics.map((topic) => <span key={topic}>{topicName(topic) === topic ? topic : localize(topicName(topic))}</span>)}</div>}
+          {quote && quote !== body && <div className="memory-entry-evidence"><span>{t('records.memoryQuote')}</span>「<SearchHighlightedText text={quote} query={query} />」</div>}
+          {hooks.map((hook, index) => <div className="memory-entry-hook" key={index}><span>{t('records.memoryFollowUp')}</span><SearchHighlightedText text={hook.condition} query={query} /></div>)}
+          {evidence.length > 0 && <details className="memory-entry-evidence"><summary>{t('records.memoryMoreEvidence', { n: evidence.length })}</summary>{evidence.map((source, index) => <p key={index}>「<SearchHighlightedText text={source.quote} query={query} />」{recentThreads.some((thread) => !!source.conversation_id && thread.sourceIds.includes(source.conversation_id) && thread.canonical) && <button className="memory-evidence-link" type="button" onClick={() => showOriginal(source.conversation_id!)}>{t('records.memoryView')}</button>}</p>)}</details>}
+          <div className="memory-session-actions">
+            {hasOriginal ? <button type="button" onClick={() => showOriginal(conversationId)}>{t('records.memoryOriginal')}<ArrowUpRight size={13} /></button>
+              : <span>{quote ? t('records.memoryExtracted') : t('records.memoryNoEvidence')}</span>}
+            {item.metadata?.summary_status === 'partial' && <span>{t('records.memoryPartialCount', { done: String(item.metadata.completed_parts), total: String(item.metadata.total_parts) })}</span>}
+            {isMemorySummary(item) && Array.isArray(item.metadata?.source_message_ids) && <span>{t('records.memoryCoverage', { n: item.metadata.source_message_ids.length })}</span>}
+            {item.metadata?.important_event === true && <span>{t('records.memoryImportant')}</span>}
+          </div>
+          </div>
+        </article>;
+      })}
+    </div>}</>}
+    </div>
+    <ImageViewer src={viewerSrc} onClose={() => setViewerSrc(null)} />
+  </section>;
+};
+
+export default MemoryPage;

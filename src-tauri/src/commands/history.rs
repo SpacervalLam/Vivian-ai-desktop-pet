@@ -1,0 +1,286 @@
+//! 历史命令 - 聊天历史查询与清空
+
+use std::sync::Arc;
+
+use serde_json::Value;
+use tauri::State;
+
+use crate::dialogue::DialogueManager;
+use crate::state::AppState;
+
+// Mode transitions remain in the pets' context, but are not chat messages.
+// Filter by source as older entries may have inherited a chat channel.
+fn visible_in_chat(metadata: &Value) -> bool {
+    !matches!(
+        metadata.get("source").and_then(Value::as_str),
+        Some("quiet_control") | Some("bystander_observation")
+    )
+}
+
+/// 聊天窗口「查找聊天记录」的渠道白名单：私聊 `wechat`（含无 channel 标签的旧数据）
+/// 与群聊 `wechat_group`——即聊天窗口主页两个会话入口覆盖的范围。
+/// `proactive`（桌宠气泡）/ `presence` / `direct` / `cross_character` 等渠道的消息
+/// 不属于任何会话视图，搜索命中后点击也无法跳转到对应消息，必须排除。
+fn visible_in_chat_search(metadata: &Value) -> bool {
+    matches!(
+        metadata.get("channel").and_then(Value::as_str),
+        None | Some("wechat") | Some("wechat_group")
+    )
+}
+
+#[tauri::command]
+pub async fn get_chat_history(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+    limit: Option<usize>, before_id: Option<String>, channel: Option<String>,
+) -> Result<Vec<Value>, String> {
+    // 普通角色取 brain.dialogue；聊天窗口专属角色取自己的轻量会话
+    let (dialogue, _, _) = crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
+    let entries = tokio::task::spawn_blocking(move || if let Some(limit) = limit {
+        dialogue.history_page_before(before_id.as_deref(), limit, channel.as_deref()).map(|(rows, _)| rows)
+    } else { dialogue.get_all_history() })
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))?
+        .map_err(|e| e.to_string())?;
+    let values: Vec<Value> = entries
+        .into_iter()
+        .filter(|e| visible_in_chat(&e.metadata))
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "role": e.role,
+                "content": e.content,
+                "timestamp": e.timestamp,
+                "session_id": e.session_id,
+                "metadata": e.metadata,
+            })
+        })
+        .collect();
+    Ok(values)
+}
+
+#[tauri::command]
+pub async fn clear_chat_history(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+) -> Result<(), String> {
+    let target = character_id.clone().unwrap_or_else(|| state.active_character_id.read().clone());
+    if let Some(partner) = crate::chat_partner::get(&target) {
+        return partner.clear_history().await;
+    }
+    let (dialogue, char_id, _) =
+        crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
+    dialogue.clear_history_file().map_err(|e| e.to_string())?;
+    state.world_provider.environment.clear_topic_context(&char_id);
+    tracing::info!("[{}] 聊天历史已清空", char_id);
+    Ok(())
+}
+
+/// 获取所有在线角色的聊天历史（综合视图）
+///
+/// 合并所有在线角色的聊天历史，每条标注 `character_id` 和 `character_name`，
+/// 按时间戳升序排列（时间线视图）。
+#[tauri::command]
+pub async fn get_chat_history_all(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Value>, String> {
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
+    let mut all_entries = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        let mut entries: Vec<Value> = Vec::new();
+        for (dialogue, cid, cname) in chars {
+            let history = dialogue.get_all_history().map_err(|e| e.to_string())?;
+            for e in history {
+                if !visible_in_chat(&e.metadata) { continue; }
+                entries.push(serde_json::json!({
+                    "id": e.id,
+                    "role": e.role,
+                    "content": e.content,
+                    "timestamp": e.timestamp,
+                    "session_id": e.session_id,
+                    "metadata": e.metadata,
+                    "character_id": cid,
+                    "character_name": cname,
+                }));
+            }
+        }
+        Ok(entries)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))??;
+
+    all_entries.sort_by(|a, b| {
+        let ta = a
+            .get("timestamp")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let tb = b
+            .get("timestamp")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(all_entries)
+}
+
+/// 轻量预览：仅返回每个会话（私聊角色 / 群聊）的最新一条消息 + 未读计数，供主页列表展示。
+///
+/// 相比 `get_chat_history_all` 全量传输后在前端过滤，本命令在 Rust 端完成聚合，
+/// 避免大历史文件场景下的序列化与 IPC 传输开销。
+/// `last_seen` 为前端传入的各会话已读水位线（key: 角色ID 或 "group"，value: 时间戳毫秒），
+/// 据此统计新于水位线的 assistant 消息数作为未读计数。
+#[tauri::command]
+pub async fn search_chat_history(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> Result<Vec<Value>, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    const MAX_RESULTS: usize = 50;
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, String> {
+        let mut groups: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut order: Vec<(f64, String)> = Vec::new();
+        for (dialogue, cid, cname) in chars {
+            let entries = dialogue.get_all_history().map_err(|e| e.to_string())?;
+            for e in entries {
+                if e.role == "system" || !visible_in_chat(&e.metadata) || !visible_in_chat_search(&e.metadata) {
+                    continue;
+                }
+                let content = e.content.as_str();
+                if !content.to_lowercase().contains(&q) {
+                    continue;
+                }
+                let channel = e.metadata.get("channel").and_then(Value::as_str).unwrap_or_default();
+                let ts = e.timestamp as f64;
+                let key = format!("{}|{}|{}", channel, content, ts);
+                if let Some(existing) = groups.get_mut(&key) {
+                    if let Some(chars) = existing.get_mut("matched_chars") {
+                        if let Some(arr) = chars.as_array_mut() {
+                            if !arr.iter().any(|v| v.as_str() == Some(&cid)) {
+                                arr.push(serde_json::Value::String(cid.clone()));
+                            }
+                        }
+                    }
+                } else {
+                    let mut arr = Vec::new();
+                    arr.push(serde_json::Value::String(cid.clone()));
+                    let value = serde_json::json!({
+                        "id": e.id,
+                        "content": content,
+                        "role": e.role,
+                        "timestamp": e.timestamp,
+                        "character_id": cid,
+                        "character_name": cname,
+                        "source": if channel == "wechat_group" { "group" } else { "private" },
+                        "matched_chars": arr,
+                    });
+                    groups.insert(key.clone(), value);
+                    order.push((ts, key));
+                }
+            }
+        }
+        order.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let result: Vec<Value> = order
+            .into_iter()
+            .take(MAX_RESULTS)
+            .filter_map(|(_, k)| {
+                let mut v = groups.remove(&k)?;
+                // 群聊来源：显式 channel 标记优先；无 channel 标签的旧数据退回多角色命中推断
+                let is_group = v.get("source").and_then(Value::as_str) == Some("group")
+                    || v
+                        .get("matched_chars")
+                        .and_then(|c| c.as_array())
+                        .map(|a| a.len() > 1)
+                        .unwrap_or(false);
+                v["source"] = if is_group {
+                    serde_json::Value::String("group".to_string())
+                } else {
+                    serde_json::Value::String("private".to_string())
+                };
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("matched_chars");
+                }
+                Some(v)
+            })
+            .collect();
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))??;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_latest_previews(
+    state: State<'_, Arc<AppState>>,
+    last_seen: Option<std::collections::HashMap<String, f64>>,
+) -> Result<Value, String> {
+    let chars: Vec<(Arc<DialogueManager>, String, String)> =
+        crate::chat_partner::online_dialogues(state.inner());
+    let is_first_load = last_seen.is_none();
+    let seen = last_seen.unwrap_or_default();
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let mut private_latest: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut group_latest: Option<Value> = None;
+        let mut group_latest_ts: f64 = 0.0;
+        let mut unread: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+
+        for (dialogue, cid, cname) in chars {
+            let to_value = |e: crate::dialogue::HistoryEntry| serde_json::json!({
+                "id": e.id, "role": e.role, "content": e.content, "timestamp": e.timestamp,
+                "metadata": e.metadata, "character_id": cid, "character_name": cname,
+            });
+            let watermark = if is_first_load { None } else { Some(seen.get(&cid).copied().unwrap_or(0.0)) };
+            let (latest, count) = dialogue.history_preview("wechat", watermark).map_err(|e| e.to_string())?;
+            if let Some(latest) = latest { private_latest.insert(cid.clone(), to_value(latest)); }
+            if count > 0 { *unread.entry(cid.clone()).or_insert(0) += count.min(u32::MAX as usize) as u32; }
+            let watermark = if is_first_load { None } else { Some(seen.get("group").copied().unwrap_or(0.0)) };
+            let (latest, count) = dialogue.history_preview("wechat_group", watermark).map_err(|e| e.to_string())?;
+            if let Some(latest) = latest {
+                if latest.timestamp > group_latest_ts { group_latest_ts = latest.timestamp; group_latest = Some(to_value(latest)); }
+            }
+            if count > 0 { *unread.entry("group".into()).or_insert(0) += count.min(u32::MAX as usize) as u32; }
+        }
+        let mut previews: Vec<Value> = private_latest.into_values().collect();
+        if let Some(g) = group_latest {
+            previews.push(g);
+        }
+        Ok(serde_json::json!({
+            "previews": previews,
+            "unread": unread,
+        }))
+    })
+    .await
+    .map_err(|e| format!("任务执行失败: {}", e))??;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod search_scope_tests {
+    use super::*;
+
+    fn searchable(channel: Option<&str>) -> bool {
+        let metadata = match channel {
+            Some(channel) => serde_json::json!({ "channel": channel }),
+            None => serde_json::json!({ "utterance_id": "legacy" }),
+        };
+        visible_in_chat_search(&metadata)
+    }
+
+    #[test]
+    fn search_scope_covers_chat_window_conversations_only() {
+        // 聊天窗口的两个会话入口：私聊 wechat 与群聊 wechat_group
+        assert!(searchable(Some("wechat")));
+        assert!(searchable(Some("wechat_group")));
+        // 无 channel 标签的旧数据按私聊兼容（与 get_chat_history 的 wechat scope 一致）
+        assert!(searchable(None));
+        // 桌宠气泡 / 在场状态 / 直连管道 / 跨角色传话等渠道不属于任何会话视图
+        for hidden in ["proactive", "presence", "direct", "cross_character", "inner", "broadcast"] {
+            assert!(!searchable(Some(hidden)), "{hidden} must not surface in chat search");
+        }
+    }
+}

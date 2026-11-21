@@ -1,0 +1,50 @@
+.screen-selection { position: fixed; inset: 0; overflow: hidden; cursor: crosshair; user-select: none; touch-action: none; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+.screen-selection-image { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; object-fit: fill; pointer-events: none; }
+.screen-selection-shade { position: absolute; inset: 0; background: rgba(12, 18, 28, .42); pointer-events: none; }
+.screen-selection-hint, .screen-selection-toolbar { position: absolute; display: flex; align-items: center; background: rgba(27, 31, 39, .88); border: 1px solid rgba(255,255,255,.16); border-radius: 15px; box-shadow: 0 8px 32px rgba(0,0,0,.24); backdrop-filter: blur(20px) saturate(140%); cursor: default; }
+.screen-selection-hint { top: 28px; left: 50%; transform: translateX(-50%); gap: 12px; padding: 11px 12px 11px 17px; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.screen-selection-hint > svg { color: #a5c8ff; }
+.screen-selection-hint button { display: flex; align-items: center; padding: 5px 5px 5px 12px; border-left: 1px solid rgba(255,255,255,.18); color: #d1d5dc; }
+.screen-selection-hint button:hover { color: #fff; }
+.screen-selection kbd { font: 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; opacity: .65; }
+.screen-selection-box { position: absolute; border: 1px solid rgba(255,255,255,.95); box-shadow: 0 0 0 99999px rgba(12,18,28,.42), 0 0 0 2px rgba(80,150,255,.35); pointer-events: none; }
+.selection-corner { position: absolute; width: 13px; height: 13px; border: 2px solid #fff; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+.corner-tl { top: -2px; left: -2px; border-right: 0; border-bottom: 0; }
+.corner-tr { top: -2px; right: -2px; border-left: 0; border-bottom: 0; }
+.corner-bl { bottom: -2px; left: -2px; border-right: 0; border-top: 0; }
+.corner-br { bottom: -2px; right: -2px; border-left: 0; border-top: 0; }
+.screen-selection-size { position: absolute; left: 0; padding: 4px 8px; border-radius: 6px; background: rgba(22,27,35,.82); color: rgba(255,255,255,.94); font: 11px "Segoe UI", sans-serif; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.screen-selection-toolbar { width: max-content; max-width: calc(100vw - 32px); box-sizing: border-box; flex-wrap: wrap; justify-content: center; transform: translateX(-50%); gap: 4px; padding: 6px; }
+.selection-text-button { display: flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 11px; border-radius: 9px; color: #ebedf2; font-size: 13px; font-weight: 500; white-space: nowrap; }
+.selection-text-button:hover { background: rgba(255,255,255,.12); }
+.selection-toolbar-divider { height: 19px; width: 1px; margin: 0 5px; background: rgba(255,255,255,.15); }
+.selection-mode-switch, .selection-scope-switch { display: inline-flex; align-items: center; padding: 2px; border-radius: 9px; background: rgba(255,255,255,.07); }
+.selection-mode-switch > button, .selection-scope-switch > button { height: 30px; padding: 0 10px; border-radius: 7px; color: #c8d0da; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.selection-mode-switch > button:hover, .selection-scope-switch > button:hover { color: #fff; }
+.selection-mode-switch > button[aria-pressed="true"], .selection-scope-switch > button[aria-pressed="true"] { background: #007aff; color: #fff; }
+.screen-selection-hover { position: absolute; border: 2px solid #7fb3ff; border-radius: 4px; background: rgba(90,150,255,.08); box-shadow: 0 0 24px rgba(90,150,255,.35), inset 0 0 0 1px rgba(255,255,255,.18); pointer-events: none; }
+.screen-selection-hover > span { position: absolute; left: -2px; bottom: calc(100% + 6px); max-width: 280px; overflow: hidden; text-overflow: ellipsis; padding: 3px 8px; border-radius: 6px; background: rgba(22,27,35,.92); color: #e8f1ff; font-size: 11px; white-space: nowrap; }
+.selection-watch-active { display: inline-flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid rgba(255,255,255,.15); color: #cfe0ff; font-size: 12px; }
+.selection-watch-dot { width: 7px; height: 7px; border-radius: 50%; background: #f0b429; }
+.selection-watch-dot.is-sharing { background: #38d39f; }
+.selection-watch-active button { padding: 4px 7px; border-radius: 6px; background: rgba(255,255,255,.12); color: #fff; font-size: 12px; }
+.selection-scope-label { color: #aeb8c6; font-size: 12px; padding: 0 4px; white-space: nowrap; }
+.selection-confirm { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; background: #007aff; color: #fff; border-radius: 10px; font-size: 13px; font-weight: 600; }
+.selection-confirm:hover { background: #1887ff; }
+.selection-confirm kbd { padding-left: 5px; }
+.selection-split-button { display: inline-flex; align-items: stretch; border-radius: 10px; }
+.selection-split-button > button:first-child { border-radius: 10px 0 0 10px; }
+.selection-drawer-toggle { display: flex; align-items: center; justify-content: center; width: 26px; border-radius: 0 10px 10px 0; color: #ebedf2; border-left: 1px solid #ffffff26; }
+.selection-drawer-toggle:hover, .selection-drawer-toggle[aria-expanded="true"] { background: #ffffff20; }
+.selection-split-primary .selection-drawer-toggle { background: #007aff; }
+.selection-split-primary .selection-drawer-toggle:hover, .selection-split-primary .selection-drawer-toggle[aria-expanded="true"] { background: #1887ff; }
+.selection-character-menu { position: absolute; z-index: 4; width: 280px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; padding: 6px; border: 1px solid #ffffff26; border-radius: 14px; background: rgba(27,31,39,.97); box-shadow: 0 10px 32px #0006; cursor: default; }
+.selection-character-menu > button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 50px; padding: 8px 10px; border-radius: 9px; text-align: left; font-size: 13px; }
+.selection-character-menu > button:hover { background: #ffffff17; }
+.selection-character-avatar { display: grid; place-items: center; flex: 0 0 30px; height: 30px; border-radius: 10px; font-weight: 600; background: #436a91; color: #eef6ff; }
+.selection-character-avatar.avatar-nana { background: #765d89; }
+.selection-character-avatar.avatar-deepseek { background: #357cbb; }
+.selection-character-avatar.avatar-claude { background: #a96745; }
+.screen-selection button:focus-visible { outline: 2px solid #a5c8ff; outline-offset: 2px; }
+.screen-selection button:disabled { opacity: .5; cursor: default; }
+.screen-selection-error { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 11px 16px; border-radius: 12px; background: rgba(60,25,30,.92); font-size: 13px; }

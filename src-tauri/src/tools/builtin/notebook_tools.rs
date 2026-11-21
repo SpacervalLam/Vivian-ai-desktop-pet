@@ -1,0 +1,2079 @@
+//! 笔记本工具 - 智能体创建/修改/分享卡片风格 HTML 笔记
+//!
+//! 四个工具：
+//! - create_notebook：创建新笔记（LLM 输出结构化 JSON，后端渲染 HTML）
+//! - get_notebook_detail：读取已有笔记的完整结构化内容（修改前查看，避免改错）
+//! - update_notebook：修改已有笔记（增量更新字段）
+//! - share_notebook：以链接卡片形式分享到微信 ChatWindow
+//!
+//! 笔记创建/更新时会同步到向量知识库（`MemoryType::Knowledge`），
+//! 供智能体后续通过 `search_memories` 进行 RAG 检索。
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use regex::Regex;
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::messages::{MessageMeta, MessageSource};
+use crate::notebook::{css_guide, doc_style, storage, Block, Cover, Layout, NoteBook, Palette};
+use crate::state::AppState;
+use crate::tools::types::{
+    PermissionResult, Tool, ToolCategory, ToolResult, ToolRiskTier, ToolUseContext, ValidationResult,
+};
+use crate::types::response::ChatMessage as DialogChatMessage;
+
+/// 全局 AppHandle
+static APP_HANDLE: Lazy<RwLock<Option<AppHandle>>> = Lazy::new(|| RwLock::new(None));
+
+pub fn set_app_handle(handle: AppHandle) {
+    *APP_HANDLE.write() = Some(handle);
+}
+
+/// 从 JSON Value 解析 blocks 数组
+pub(crate) fn parse_blocks(value: &Value) -> Result<Vec<Block>, String> {
+    let arr = value
+        .as_array()
+        .ok_or("blocks 必须是数组")?;
+    let mut blocks = Vec::new();
+    for item in arr {
+        let block: Block = serde_json::from_value(item.clone())
+            .map_err(|e| format!("解析内容块失败: {}", e))?;
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
+/// 从 JSON Value 解析封面
+pub(crate) fn parse_cover(value: &Value) -> Result<Option<Cover>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let cover: Cover = serde_json::from_value(value.clone())
+        .map_err(|e| format!("解析封面失败: {}", e))?;
+    Ok(Some(cover))
+}
+
+/// 从字符串解析布局
+pub(crate) fn parse_layout(s: &str) -> Layout {
+    match s {
+        "article" => Layout::Article,
+        "gallery" => Layout::Gallery,
+        "simple" => Layout::Simple,
+        _ => Layout::CoverFlow,
+    }
+}
+
+/// 从字符串解析配色
+pub(crate) fn parse_palette(s: &str) -> Palette {
+    match s {
+        "fresh" => Palette::Fresh,
+        "elegant" => Palette::Elegant,
+        "cute" => Palette::Cute,
+        "cool" => Palette::Cool,
+        "nature" => Palette::Nature,
+        _ => Palette::Warm,
+    }
+}
+
+// ============================================================================
+// CreateNotebookTool
+// ============================================================================
+
+pub struct CreateNotebookTool;
+
+impl CreateNotebookTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CreateNotebookTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for CreateNotebookTool {
+    fn name(&self) -> &str {
+        "create_notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Create a beautifully typeset paper-style HTML note page from collected information. You provide structured content (title, layout, palette, cover, content blocks), and the system renders it into a visually appealing HTML page saved locally. The page can be viewed in the Notebook tab of the memory window and shared to WeChat chat later. Proactively reach for this whenever you are doing data-organizing work — researching a topic, summarizing a travel guide, writing a how-to, compiling recommendations, structuring a report — so the user gets a polished visual artifact instead of a plain chat reply. Don't wait for the user to explicitly ask; if you find yourself gathering and structuring multiple pieces of information worth presenting, this is the natural way to deliver it.\n\nFollow a writing workflow, not just block assembly:\n0. Assess evidence dependence first — decide how much of what this note conveys comes from your own memory vs. the outside world. Timely news, other people's data, and specialized knowledge need a web_search; personal experience and opinion can come straight from memory. When you do search, collect and verify: prefer authoritative sources, cross-check key data across 2+ independent sources, present conflicts honestly instead of picking one side arbitrarily, and flag missing data rather than inventing numbers. Treat search results as material, not as conclusions. Trust P0/P1 sources for firm statements and for chart/table data; soften wording on single-source or low-authority claims (e.g. \"some say...\") rather than asserting them as established fact.\n1. Frame the note — decide its purpose (inform / record / educate / entertain), its reader, and the emotional tone, and keep the tone consistent with who you are.\n6. Do not use emoji anywhere - not in body text, titles, the cover, or block content. Visual hierarchy comes from heading levels, palette, and card structure rather than decorative icons. \n7. Make tags reusable over time - call list_notebooks first to see which tags existing notes already use, and reuse a tag when the meaning matches instead of inventing a synonym (if「热梗」already exists, do not add「网络流行语」or「梗文化」). Only create a new tag when nothing fits; use 2-4 tags naming the topic or domain. The notes page filters by tag, so tag sprawl breaks filtering. \n8. Only write custom_css when you want a look the preset palettes cannot give you - it is mutually exclusive with palette and becomes the single theme source. See the custom_css parameter description for how to write it: adjust CSS variables for the overall color first, then use selectors for layout. Using palette is the default; do not hand-write CSS just to look distinctive.\n2. Choose the right form — pick layout and palette to match the content: a guide or structured data fits cover_flow with tags plus a table/chart; a long reflective piece or travelogue fits article; a collection of recommendations fits gallery; a short memo fits simple.\n3. Shape the content — open with a hook, develop in sections, close with a takeaway. Use heading for sections, paragraph for prose, card/quote/callout for emphasis, list for enumerations, and tags for keywords. Use block types sparingly rather than padding for variety — structure serves the content, not the other way around.\n4. Visualize when it helps — use a chart (bar/line/pie) when there are 3+ comparable data points, a table for discrete comparisons, and a Mermaid diagram for a process or timeline. Grouped data brought back from search fits a table or chart especially well. Every chart must be referenced and explained by the adjacent prose, never left floating; weave visuals into the flow, not as an afterthought.\n5. Write with care — avoid checklist jargon and empty superlatives; keep paragraphs 3-8 sentences with a clear flow; make headings accurate and functional; state a conclusion once and let other sections add new evidence rather than restating it. When you cite facts you looked up, say so naturally instead of pretending you already knew them; separate \"facts retrieved from search\" from \"your own inference\" and \"the user's own words\". Keep the voice natural and consistent with your personality."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "根据搜集到的信息制作排版清晰的纸页风格 HTML 笔记。你只需提供结构化内容（标题、布局、配色、封面、内容块），系统会自动渲染成视觉精美的 HTML 页面并保存在本地。页面可在笔记本窗口的'笔记'tab 中查阅，之后也可分享到微信聊天。当你在做资料整理类工作时——研究某个话题、总结旅行攻略、撰写步骤教程、整理好物推荐、结构化报告等——应主动用此工具，让用户得到一份精美的可视化产物而不是普通聊天回复。不必等用户明确要求；一旦你发现自己在搜集并组织多条值得呈现的信息，就该自然想到用这个方式交付。\n\n请遵循一套撰写工作流，而不是机械地堆砌内容块：\n0. 先判断信息依赖——这篇笔记要传达的事实，多少来自你的既有记忆、多少依赖外部世界？时效新闻、他人数据、专有知识需要检索；个人经历与观点从记忆取材即可。要检索时用 web_search 采集并核验：优先权威来源，关键数据交叉验证（≥2 个独立来源），来源冲突时如实呈现而非任意取舍，数据不足就明确标注缺漏、绝不编造数字。把检索结果当作素材而非结论。P0/P1 来源的数据可放心用于图表和肯定性表述；单来源或低权威的说法要降调措辞（如「有人提到…」），不要写成既定事实。\n1. 构思定位——先想清楚这篇笔记的目的（告知/记录/教学/娱乐）、读者和情绪基调，并与你自己的语气保持一致。\n2. 选对形式——根据内容选择布局与配色：攻略或结构化资料适合 cover_flow（封面+卡片流）并配标签和表格/图表；长文反思或游记适合 article（无封面）；好物推荐适合 gallery；简短备忘适合 simple。\n3. 组织内容——开头抓人、主体分节、结尾有收束。用 heading 分节、paragraph 写正文、card/quote/callout 做强调、list 做罗列、tags 做关键词。块类型按需选用，不为凑数堆砌——结构服务内容，不是为类型齐全而填满。\n4. 善用可视化——3 组以上可比数据用图表（柱状/折线/饼图）；离散数据对比优先用表格；流程或时序用 mermaid 流程图。检索带回的成组数据尤其适合用表格和图表呈现。每个图表都要被相邻正文引用并解释，不孤立放图；把可视化融入行文，而不是事后补图。\n5. 用心写作——避免清单式套话和空泛形容词；段落保持 3-8 句、逻辑连贯；标题准确功能化；一个结论只完整出现一次，其余部分补充新证据而非复述。检索来的事实要自然说明是查到的，不假装本来就知道；区分「搜索到的事实」「你的推断」和「用户原话」。保持语气自然，符合你的性格。\n6. 不要用 emoji——正文、标题、封面、块内容里都不放。视觉层次靠标题层级、配色与卡片结构表达，而不是靠图标装饰。\n7. 标签要能长期复用——创建前先 list_notebooks 看已有标签，语义相同就复用已有标签，不要造同义标签（已有「热梗」就别再新建「网络流行语」「梗文化」）。确实没有可复用的分类才新建，2-4 个，取主题/领域词。笔记页靠标签做分类筛选，标签泛滥会让筛选失效。\n8. 想要预设配色之外的视觉风格时才写 custom_css——它与 palette 互斥，填了就以它为唯一主题来源。写法见 custom_css 参数说明：先改 CSS 变量做整体换色，再用选择器调排版。默认走palette 就够，别为了显得特别而手写 CSS。\n9. 用你的人格写，不是写报告——读者是 vivian / nana 本人，不是外人。title 字段的描述里给了各角色的文风指引，认领属于你那一行照着写。\n涉及检索得来的事实时用「我刚查到」「我翻了两份盘点」这种自然说法带过，不要写成「据检索结果显示」——那是对检索系统的说话方式，不是对熟人的。",
+            "ja" => "集めた情報から読みやすく美しい紙面風HTMLノートページを作成する。構造化コンテンツ（タイトル、レイアウト、配色、カバー、コンテンツブロック）を提供するだけで、システムが視覚的に美しいHTMLページにレンダリングしてローカルに保存する。ページはノートウィンドウの「ノート」タブで閲覧でき、後でWeChatチャットに共有することもできる。資料整理系の作業——テーマのリサーチ、旅行ガイドのまとめ、ハウツーの執筆、おすすめの整理、レポートの構造化など——を行う時は、普通のチャット返信の代わりに美しいビジュアル成果物をユーザーに届けるため、自らこのツールを使うこと。ユーザーに明示的に頼まれるのを待つ必要はない；複数の提示価値のある情報を集めて構造化している自分に気付いたら、自然にこの手段を選ぶ。\n\nブロックを機械的に並べるのではなく、次の書き方ワークフローに従ってください：\n0. まず情報依存を判断する——このノートが伝える事実のうち、どれだけが自分の記憶から来て、どれだけが外部世界に依存するか。時事ニュース、他人のデータ、専門知識は検索が必要；個人的な経験や意見は記憶から直接取材できる。検索する場合は web_search で収集・検証する：権威あるソースを優先し、重要データは 2 つ以上の独立ソースで相互検証し、矛盾があれば好き勝手に選ばず正直に提示し、データ不足なら欠けていることを明記し、数字を捏造しない。検索結果は結論ではなく素材として扱う。P0/P1 ソースのデータはチャートや断定表現に安心して使える；単一ソースや低権威の主張は「〜と言う人もいる」のようにトーンを下げ、確立した事実のように書かない。\n1. 構想を固める——このノートの目的（伝える/記録する/教える/楽しませる）、読者、感情のトーンを決め、あなた自身の口調と一致させる。\n2. 形式を選ぶ——内容に合わせてレイアウトと配色を選ぶ：攻略や構造化データには cover_flow（カバー+カード流）＋タグ＋表/チャート、長文の回想や紀行には article（カバーなし）、おすすめ集には gallery、短いメモには simple。\n3. 内容を組み立てる——冒頭で引き込む、本文で展開、結びで締める。節には heading、散文には paragraph、強調には card/quote/callout、羅列には list、キーワードには tags を使う。ブロックタイプは数合わせではなく必要に応じて選ぶ——構造は内容に仕えるもので、内容が構造に仕えるのではない。\n4. 可視化を活用——3 組以上の比較可能なデータはチャート（棒/折れ線/円）、離散データの比較は表、プロセスや時系列は mermaid フロー図。検索で得たまとまったデータは特に表やチャートに向く。各チャートは隣接する本文で参照・説明され、孤立して置かないこと。後付けではなく、本文の流れに自然に組み込む。\n5. 丁寧に書く——チェックリスト風の決まり文句や飾り形容詞を避け、段落は 3〜8 文で論理的に、見出しは正確かつ機能的に。結論は一度だけ完全に述べ、他の節は言い換えではなく新しい証拠を加える。調べた事実は自然に「調べた」と述べ、元から知っていたように振る舞わない；「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、あなたの性格に合わせる。\n6. emoji は使わない——本文・タイトル・カバー・各ブロックの内容すべてに入れない。視覚的な階層はアイコンではなく、見出しのレベル・配色・カードの構造で表現する。\n7. タグは長期的に再利用できるようにする——まず list_notebooks で既存ノートがどのタグを使っているか確認し、意味が同じなら既存のタグを再利用するのであって、同義のタグを 새로作らない（すでに「熱梗」があるなら「ネットワーク流行語」や「梗文化」は作らない）。本当に該当するものがないときだけ新規作成し、2〜4 個で主題や分野を表す。ノートページはタグで絞り込むため、タグが乱発すると絞り込みが効かなくなる。\n8. Write custom_css ONLY when you need a look the preset palettes cannot give. It is mutually exclusive with palette and becomes the single theme source. The custom_css parameter description explains how to write it: change CSS variables for the overall color first, then use selectors for layout. palette alone is the default - do not hand-write CSS just to look distinctive. \n9. Write in your persona, not as a report - the reader is vivian/nana herself, not an outsider. Use first person throughout, like her own diary or a note to herself: open straight into the content, never 「this article will」 or 「the following」; sentences may carry mood, preference and snark, and need not be strictly neutral. Ask yourself 「how would she write this if she were writing for herself」. For facts you looked up, say it naturally - 「I just found」, 「I went through two roundups」 - never 「according to the search results」, which is how you talk to a search engine, not to someone familiar. \n",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "新建个笔记\n记一下这个\n开个新笔记",
+            "en" => "create a new note\nstart a notebook\njot this down",
+            "ja" => "新しいノートを作って\nメモを新規作成\nノートを追加",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        // custom_css 的描述里要带「自定义范式」（可用变量与选择器清单），
+        // 所以这个 schema 不能是纯字面量 json!，得在运行时把 css_guide 拼进去。
+        // 范式集中维护在 notebook::css_guide，避免工具描述与实际渲染的类名漂移。
+        let palette_desc = "配色方案：warm=暖色珊瑚粉，fresh=清新薄荷绿，elegant=优雅紫罗兰，cute=可爱粉橙，cool=冷色天蓝，nature=自然橄榄绿。「与 custom_css 互斥」：填了 custom_css 就忽略 palette。";
+        let custom_css_desc = format!(
+            "自定义 CSS（纯片段，不要包<style> 标签）。与 palette 互斥，填了就以它为唯一主题来源。\n\n{}",
+            css_guide::CSS_GUIDE
+        );
+        // title 描述里拼入笔记文风人设：title 是必填字段、模型一定会看它的描述，
+        // 是静态 description() 之外唯一可靠的注入点（description_in 返回 &'static str，
+        // 装不下按角色变化的人设）。人设走 all_brief（两个角色并列），
+        // 由模型按当前 char_id 认领属于自己那段。
+        let title_desc = format!(
+            "笔记标题（简洁吸引人，建议15字以内）。\n\n{}",
+            crate::pipeline::prompt_modules::build_notebook_persona_brief_all("zh")
+        );
+        // style 描述承载整个纸面范式的契约（构件清单 + 写作纪律）。放这里而不是
+        // 工具描述正文：这份契约只在工具被语义召回时随 schema 一起进 prompt，
+        // 不用每轮都付；而样式表本身留在 Rust 常量里，一次 token 都不付。
+        let style_desc = format!(
+            "笔记范式。free=你撰写完整自包含 HTML 文档（默认）：版式完全自由，适合数据大屏、精美报告、落地页式笔记；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部的正文片段，适合精读、速查表/对照表、学习材料消化、汇报材料等「事实与判断必须在版面上分开」的分析型文档。填 paper 时 html 字段给的是正文片段而非完整文档。\n\n{}",
+            doc_style::guide("zh")
+        );
+        json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": title_desc },
+                "style": {
+                    "type": "string",
+                    "enum": ["free", "paper"],
+                    "description": style_desc,
+                    "default": "free"
+                },
+                "layout": {
+                    "type": "string",
+                    "enum": ["cover_flow", "article", "gallery", "simple"],
+                    "description": "布局模板：cover_flow=封面+卡片流（经典卡片风格），article=纯文章流（无封面，适合长文），gallery=图文混排，simple=简洁卡片",
+                    "default": "cover_flow"
+                },
+                "palette": {
+                    "type": "string",
+                    "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"],
+                    "description": palette_desc,
+                    "default": "warm"
+                },
+                "custom_css": {
+                    "type": "string",
+                    "description": custom_css_desc
+                },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "分类标签，2-4 个。「创建前先调 list_notebooks 看已有笔记都在用什么标签，能复用就复用」（例如已有「热梗」就别新建「网络流行语」），只有确实没有可复用的分类时才新建。标签用于笔记页的分类筛选，取主题/领域词，不要「待办」「重要」这类状态词，也不要日期。"
+                },
+                "cover": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "封面大标题" },
+                        "subtitle": { "type": "string", "description": "副标题（可选）" },
+                        "background": { "type": "string", "description": "自定义背景CSS（如'#FF6B6B'或'linear-gradient(...)'，留空用配色默认渐变）" }
+                    },
+                    "required": ["title"],
+                    "description": "封面配置（cover_flow/gallery布局需要，article/simple布局忽略）"
+                },
+                "blocks": {
+                    "type": "array",
+                    "description": "内容块列表，按顺序排列。每个块有type字段和对应内容",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["heading", "paragraph", "card", "quote", "list", "tags", "image", "divider", "callout", "table", "chart", "mermaid", "custom"],
+                                "description": "块类型"
+                            }
+                        }
+                    }
+                }
+            },
+            "required": ["title", "blocks"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["cover_flow", "article", "gallery", "simple"],
+                        "description": "布局模板：cover_flow=封面+卡片流（经典卡片风格），article=纯文章流（无封面，适合长文），gallery=图文混排，simple=简洁卡片",
+                        "default": "cover_flow"
+                    },
+                    "palette": {
+                        "type": "string",
+                        "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"],
+                        "description": "配色方案：warm=暖色珊瑚粉，fresh=清新薄荷绿，elegant=优雅紫罗兰，cute=可爱粉橙，cool=冷色天蓝，nature=自然橄榄绿",
+                        "default": "warm"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "分类标签，2-4 个。「创建前先调 list_notebooks 看已有笔记都在用什么标签，能复用就复用」（例如已有「热梗」就别新建「网络流行语」），只有确实没有可复用的分类时才新建。标签用于笔记页的分类筛选，取主题/领域词，不要「待办」「重要」这类状态词，也不要日期。"
+                    },
+                    "cover": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "封面大标题" },
+                            "subtitle": { "type": "string", "description": "副标题（可选）" },
+                                "background": { "type": "string", "description": "自定义背景CSS（如'#FF6B6B'或'linear-gradient(...)'，留空用配色默认渐变）" }
+                        },
+                        "required": ["title"],
+                        "description": "封面配置（cover_flow/gallery布局需要，article/simple布局忽略）"
+                    },
+                    "blocks": {
+                        "type": "array",
+                        "description": "内容块列表，按顺序排列，构成一篇有起承转合的笔记。建议按“开头点题—主体分节—结尾收束”组织：heading 分节、paragraph 写正文、card/quote/callout 做强调、list 罗列要点。3 组以上可比数据用 chart 可视化，离散数据对比优先 table，流程/时序用 mermaid。每个块用type字段指定类型，其余字段为内容。\n可用块类型：\n- heading: {type,text,level(1-3)} 标题\n- paragraph: {type,text} 段落\n- card: {type,title?,body} 卡片\n- quote: {type,text,author?} 引用\n- list: {type,items[],ordered?} 列表\n- tags: {type,items[]} 标签云\n- image: {type,url,caption?} 图片\n- divider: {type} 分割线\n- callout: {type,text} 提示框\n- table: {type,headers[],rows[][],caption?} 数据表格（headers为列头，rows为二维数据）\n- chart: {type,chart_type('bar'柱状/'line'折线/'pie'饼图),categories[],series[{name,data[]}]} 图表\n- mermaid: {type,code,caption?} 流程图（code为Mermaid源码，如```graph TD\\n A-->B```）\n- custom: {type,html} 自定义HTML片段
+- meta: {type,key,text} 「不渲染的元数据」（存进笔记文件、能被知识库检索到，但页面上看不到）。数据来源说明、检索可靠性评估这类「给自己看、不给读者看」的内容写到这里。",
+                        "items": { "type": "object" }
+                    }
+                },
+                "required": ["title", "blocks"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "ノートタイトル（簡潔で魅力的、15文字以内推奨）" },
+                    "layout": {
+                        "type": "string",
+                        "enum": ["cover_flow", "article", "gallery", "simple"],
+                        "description": "レイアウト：cover_flow=カバー+カード流、article=記事流（カバーなし）、gallery=画像テキスト混在、simple=シンプルカード",
+                        "default": "cover_flow"
+                    },
+                    "palette": {
+                        "type": "string",
+                        "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"],
+                        "description": "配色：warm=暖色コーラルピンク、fresh=ミントグリーン、elegant=エレガント紫、cute=キュートピンクオレンジ、cool=クールブルー、nature=ナチュラルオリーブ",
+                        "default": "warm"
+                    },
+                    "custom_css": {
+                        "type": "string",
+                        "description": "カスタム CSS（<style> タグなしでstylesheet の断片だけ）。palette と排他。"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "ノートタグ（3-5個のキーワード）"
+                    },
+                    "cover": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "カバー大タイトル" },
+                            "subtitle": { "type": "string", "description": "サブタイトル（任意）" },
+                            "background": { "type": "string", "description": "カスタム背景CSS" }
+                        },
+                        "required": ["title"],
+                        "description": "カバー設定（cover_flow/galleryレイアウトで必要）"
+                    },
+                    "blocks": {
+                        "type": "array",
+                        "description": "コンテンツブロックリスト。各ブロックはtypeフィールドで種類を指定。\n利用可能ブロック：heading/paragraph/card/quote/list/tags/image/divider/callout/custom",
+                        "items": { "type": "object" }
+                    }
+                },
+                "required": ["title", "blocks"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let title = input.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if title.is_empty() {
+            return ValidationResult::failure("title 不能为空", 2);
+        }
+        let blocks = input.get("blocks").and_then(|v| v.as_array());
+        if blocks.map(|a| a.is_empty()).unwrap_or(true) {
+            return ValidationResult::failure("blocks 不能为空（至少需要一个内容块）", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let layout = args.get("layout").and_then(|v| v.as_str()).map(parse_layout).unwrap_or_default();
+        let palette = args.get("palette").and_then(|v| v.as_str()).map(parse_palette).unwrap_or_default();
+        // 空白串等同未提供：避免空 CSS 被NoteBook::theme 当成自定义主题
+        let custom_css = args
+            .get("custom_css")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
+        let tags: Vec<String> = args.get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let cover = match args.get("cover") {
+            Some(c) => match parse_cover(c) {
+                Ok(c) => c,
+                Err(e) => return ToolResult::standard_error(&e, None, None),
+            },
+            None => None,
+        };
+        let blocks = match parse_blocks(args.get("blocks").unwrap_or(&Value::Null)) {
+            Ok(b) => b,
+            Err(e) => return ToolResult::standard_error(&e, None, None),
+        };
+
+        let now = chrono::Local::now().timestamp() as f64;
+        let note = NoteBook {
+            id: NoteBook::generate_id(),
+            title: title.clone(),
+            char_id: char_id.clone(),
+            created_at: now,
+            updated_at: now,
+            tags,
+            layout,
+            palette,
+            custom_css,
+            cover,
+            blocks,
+        };
+
+        if let Err(e) = storage::save(&note) {
+            return ToolResult::standard_error(&format!("保存笔记失败: {}", e), None, None);
+        }
+
+        // emit 事件通知前端刷新笔记列表
+        let handle_opt = APP_HANDLE.read().clone();
+        if let Some(handle) = handle_opt {
+            let _ = handle.emit("notebook:created", json!({
+                "note_id": &note.id,
+                "char_id": &char_id,
+                "title": &title,
+            }));
+
+            // 同步到向量知识库，供后续 RAG 检索
+            sync_notebook_to_knowledge(&handle, &note).await;
+        }
+
+        ToolResult::standard_success(
+            &format!("已创建笔记「{}」，可在记忆窗口的笔记 tab 中查阅", title),
+            Some(json!({
+                "note_id": &note.id,
+                "title": &title,
+                "char_id": &char_id,
+                "block_count": note.blocks.len(),
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    fn search_hint(&self) -> &str {
+        "create notebook note page html xiaohongshu red style beautiful card"
+    }
+
+    fn anti_use_cases(&self) -> &[&str] {
+        &[
+            "Creating notes for trivial content that doesn't need visual presentation",
+            "Using it when the user just wants a quick fact or short answer and you are not actually organizing multiple pieces of information",
+            "Recreating a note that already exists — if the user asks you to share or edit a note you already made, use list_notebooks to find its note_id and share_notebook / update_notebook instead of calling create_notebook again",
+        ]
+    }
+}
+
+// ============================================================================
+// GetNotebookDetailTool
+// ============================================================================
+
+pub struct GetNotebookDetailTool;
+
+impl GetNotebookDetailTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GetNotebookDetailTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for GetNotebookDetailTool {
+    fn name(&self) -> &str {
+        "get_notebook_detail"
+    }
+
+    fn description(&self) -> &str {
+        "Read the full structured content of an existing notebook note. Returns the note's title, layout, palette, tags, cover, and all content blocks as JSON. Always call this BEFORE update_notebook to see the current content and avoid accidentally overwriting or losing existing blocks."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "读取已有笔记的完整结构化内容（标题、布局、配色、标签、封面、全部内容块）。修改笔记前务必先调用此工具查看原内容，避免覆盖或丢失已有内容块。",
+            "ja" => "既存ノートの完全な構造化内容（タイトル、レイアウト、配色、タグ、カバー、全コンテンツブロック）を読み取る。ノートを更新する前に必ずこのツールを呼び出して元の内容を確認し、既存ブロックの上書きや消失を防ぐこと。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "看看那个笔记\n打开笔记内容\n那条笔记写了什么",
+            "en" => "show me that note\nopen the notebook\nwhat's in that note",
+            "ja" => "あのノートを見せて\nノートを開いて\nそのメモの内容は",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "note_id": { "type": "string", "description": "要查看的笔记 ID" }
+            },
+            "required": ["note_id"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "note_id": { "type": "string", "description": "要查看的笔记 ID" }
+                },
+                "required": ["note_id"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "note_id": { "type": "string", "description": "確認するノート ID" }
+                },
+                "required": ["note_id"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let note_id = input.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if note_id.is_empty() {
+            return ValidationResult::failure("note_id 不能为空", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+        let note_id = args.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+        let note = match storage::load(&char_id, &note_id) {
+            Ok(n) => n,
+            Err(e) => return ToolResult::standard_error(&format!("读取笔记失败: {}", e), None, None),
+        };
+
+        let detail = serde_json::to_value(&note)
+            .map_err(|e| format!("序列化失败: {}", e))
+            .unwrap_or_else(|_| json!({}));
+
+        ToolResult::standard_success(
+            &format!("已读取笔记「{}」的完整内容（{} 个内容块）", note.title, note.blocks.len()),
+            Some(detail),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "read notebook note detail content blocks view"
+    }
+}
+
+// ============================================================================
+// UpdateNotebookTool
+// ============================================================================
+
+pub struct UpdateNotebookTool;
+
+impl UpdateNotebookTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for UpdateNotebookTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for UpdateNotebookTool {
+    fn name(&self) -> &str {
+        "update_notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Update an existing notebook note. You can modify the title, layout, palette, tags, cover, or replace content blocks. Only provided fields are updated; omitted fields keep their original values. IMPORTANT: blocks field replaces ALL content blocks — always call get_notebook_detail first to see the current content, then provide the complete updated blocks list (original blocks + your changes) to avoid losing existing content."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "修改已有笔记。可以更新标题、布局、配色、标签、封面或替换内容块，只更新提供的字段，未提供的字段保持原值。重要：blocks 字段会替换全部内容块——修改前务必先调用 get_notebook_detail 查看原内容，然后提供完整的更新后 blocks 列表（原有内容块 + 你的修改），避免丢失已有内容。",
+            "ja" => "既存のノートを更新する。タイトル、レイアウト、配色、タグ、カバー、コンテンツブロックを変更できる。提供されたフィールドのみ更新される。重要：blocksフィールドは全コンテンツブロックを置換する——更新前に必ず get_notebook_detail で元の内容を確認し、更新後の完全なblocksリスト（元のブロック + 変更内容）を提供して、既存内容の消失を防ぐこと。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "改一下笔记\n更新笔记内容\n补充到笔记里",
+            "en" => "update that note\nedit the notebook\nadd to the note",
+            "ja" => "ノートを更新して\nメモを修正して\nノートに追記",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "note_id": { "type": "string", "description": "要修改的笔记 ID（create_notebook 返回的 note_id）" },
+                "title": { "type": "string", "description": "新标题（可选）" },
+                "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "新布局（可选）" },
+                "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "新配色（可选）" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "新标签列表（可选，替换原标签）" },
+                "cover": { "type": "object", "description": "新封面配置（可选，替换原封面）" },
+                "blocks": { "type": "array", "description": "新内容块列表（可选，替换原全部内容块）" }
+            },
+            "required": ["note_id"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "note_id": { "type": "string", "description": "要修改的笔记 ID（create_notebook 返回的 note_id）" },
+                    "title": { "type": "string", "description": "新标题（可选）" },
+                    "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "新布局（可选）" },
+                    "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "新配色（可选）" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "新标签列表（可选，替换原标签）" },
+                    "cover": { "type": "object", "description": "新封面配置（可选，替换原封面）" },
+                    "blocks": { "type": "array", "description": "新内容块列表（可选，替换原全部内容块）" }
+                },
+                "required": ["note_id"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let note_id = input.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if note_id.is_empty() {
+            return ValidationResult::failure("note_id 不能为空", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+        let note_id = args.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+        let mut note = match storage::load(&char_id, &note_id) {
+            Ok(n) => n,
+            Err(e) => return ToolResult::standard_error(&format!("读取笔记失败: {}", e), None, None),
+        };
+
+        if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+            note.title = title.trim().to_string();
+        }
+        if let Some(layout) = args.get("layout").and_then(|v| v.as_str()) {
+            note.layout = parse_layout(layout);
+        }
+        if let Some(palette) = args.get("palette").and_then(|v| v.as_str()) {
+            note.palette = parse_palette(palette);
+        }
+        if let Some(tags) = args.get("tags").and_then(|v| v.as_array()) {
+            note.tags = tags.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+        }
+        if let Some(cover_val) = args.get("cover") {
+            match parse_cover(cover_val) {
+                Ok(c) => note.cover = c,
+                Err(e) => return ToolResult::standard_error(&e, None, None),
+            }
+        }
+        if let Some(blocks_val) = args.get("blocks") {
+            match parse_blocks(blocks_val) {
+                Ok(b) => note.blocks = b,
+                Err(e) => return ToolResult::standard_error(&e, None, None),
+            }
+        }
+
+        note.updated_at = chrono::Local::now().timestamp() as f64;
+
+        if let Err(e) = storage::save(&note) {
+            return ToolResult::standard_error(&format!("保存笔记失败: {}", e), None, None);
+        }
+
+        let handle_opt = APP_HANDLE.read().clone();
+        if let Some(handle) = handle_opt {
+            let _ = handle.emit("notebook:updated", json!({
+                "note_id": &note.id,
+                "char_id": &char_id,
+                "title": &note.title,
+            }));
+
+            // 重新同步到向量知识库（内部会先删旧条目再入库新内容）
+            sync_notebook_to_knowledge(&handle, &note).await;
+        }
+
+        ToolResult::standard_success(
+            &format!("已更新笔记「{}」", note.title),
+            Some(json!({
+                "note_id": &note.id,
+                "title": &note.title,
+                "block_count": note.blocks.len(),
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    fn search_hint(&self) -> &str {
+        "update notebook note edit modify revise restyle"
+    }
+}
+
+// ============================================================================
+// ListNotebooksTool
+// ============================================================================
+
+pub struct ListNotebooksTool;
+
+impl ListNotebooksTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ListNotebooksTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ListNotebooksTool {
+    fn name(&self) -> &str {
+        "list_notebooks"
+    }
+
+    fn description(&self) -> &str {
+        "List all notebook notes you have already created, with each note's id, title, tags, layout and last-updated time. Use this to find the note_id of an EXISTING note before sharing or editing it. When the user asks you to share 'the note you wrote' / 'a previous note' / 'that note about <topic>', you MUST look up the existing note via list_notebooks (or reuse a note_id already known from context) and then call share_notebook with that id — do NOT create a new note just to share it."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "列出你已创建的所有笔记，包含每条笔记的 id、标题、标签、布局和最后修改时间。用于在分享或修改已有笔记前，先找到对应笔记的 note_id。当用户要求分享「你写的那篇笔记」「以前那篇笔记」「关于某主题的那篇笔记」时，你必须先通过 list_notebooks 查到已有笔记的 note_id（或直接复用上下文中已知的 note_id），再调用 share_notebook 用该 id 分享——不要为了分享而重新创建一篇新笔记。",
+            "ja" => "すでに作成したすべてのノートを、各ノートの id・タイトル・タグ・レイアウト・最終更新時刻とともに一覧表示する。既存ノートを共有・編集する前に note_id を見つけるために使用する。ユーザーが「あなたが書いたノート」「以前のノート」「あるテーマのノート」を共有してほしいと言った場合は、必ず list_notebooks で既存ノートの note_id を調べ（またはコンテキストで既知の note_id を再利用し）、その id で share_notebook を呼び出すこと。共有のために新しいノートを作成してはならない。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我有哪些笔记\n列一下笔记\n看看笔记列表",
+            "en" => "what notes do I have\nlist my notebooks\nshow me the notes",
+            "ja" => "ノート一覧を見せて\nメモをリストして\nどんなノートがある",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "keyword": { "type": "string", "description": "可选：按标题/标签模糊过滤，只返回匹配的笔记（留空返回全部）" }
+            },
+            "required": []
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "keyword": { "type": "string", "description": "可选：按标题/标签模糊过滤，只返回匹配的笔记（留空返回全部）" }
+                },
+                "required": []
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "keyword": { "type": "string", "description": "任意：タイトル/タグで曖昧絞り込み（空なら全件）" }
+                },
+                "required": []
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, _input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+        let keyword = args
+            .get("keyword")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_lowercase());
+
+        let notes = match storage::list(&char_id) {
+            Ok(n) => n,
+            Err(e) => return ToolResult::standard_error(&format!("读取笔记列表失败: {}", e), None, None),
+        };
+
+        let filtered: Vec<Value> = notes
+            .into_iter()
+            .filter(|n| match &keyword {
+                Some(k) => {
+                    n.title.to_lowercase().contains(k)
+                        || n.tags.iter().any(|t| t.to_lowercase().contains(k))
+                }
+                None => true,
+            })
+            .map(|n| {
+                let updated = chrono::DateTime::from_timestamp(n.updated_at as i64, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| n.updated_at.to_string());
+                json!({
+                    "note_id": n.id,
+                    "title": n.title,
+                    "tags": n.tags,
+                    "layout": n.layout,
+                    "last_updated": updated,
+                })
+            })
+            .collect();
+
+        if filtered.is_empty() {
+            return ToolResult::standard_success("没有找到匹配的笔记", Some(json!({ "notes": [] })));
+        }
+
+        ToolResult::standard_success(
+            &format!("共 {} 篇笔记", filtered.len()),
+            Some(json!({ "notes": filtered })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    fn search_hint(&self) -> &str {
+        "list notebooks note find existing id share"
+    }
+}
+
+// ============================================================================
+// ShareNotebookTool
+// ============================================================================
+
+pub struct ShareNotebookTool;
+
+impl ShareNotebookTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ShareNotebookTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ShareNotebookTool {
+    fn name(&self) -> &str {
+        "share_notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Share an EXISTING notebook note to the WeChat chat window as a link card. The card shows the note title and a preview, and clicking it opens the note in the memory window's Notebook tab. Use this when the user asks you to share a note you already made. IMPORTANT: when the user says 'share the note you wrote' / 'a previous note' / 'that note about <topic>', find the existing note_id via list_notebooks (or reuse a note_id already known from context) and share THAT note — do NOT call create_notebook to make a new note just for sharing. Include a brief follow-up comment."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "将一篇已有的笔记以链接卡片形式分享到微信聊天窗口。卡片显示笔记标题和预览，点击后在记忆窗口的笔记 tab 中打开完整内容。当用户要求你把做好的笔记分享给他时使用。重要：当用户说「分享你写的那篇笔记」「以前那篇」「关于某主题那篇」时，请先通过 list_notebooks 找到已有笔记的 note_id（或复用上下文中已知的 note_id）并分享那篇——不要调用 create_notebook 为了分享而重新生成新笔记。需附带一句简短的跟进评论。",
+            "ja" => "既存のノートをリンクカードとしてWeChatチャットウィンドウに共有する。カードにはノートタイトルとプレビューが表示され、クリックするとメモリウィンドウのノートタブで完全な内容が開く。ユーザーが作成済みノートの共有を求めた時に使用する。重要：ユーザーが「あなたが書いたノート」「以前のノート」「あるテーマのノート」を共有してほしいと言った場合、list_notebooks で既存ノートの note_id を見つけ（またはコンテキストで既知の note_id を再利用）、そのノートを共有すること。共有のために create_notebook で新しいノートを作成してはならない。短いフォローアップコメントを添えること。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "把这个笔记分享出去\n分享笔记\n生成分享链接",
+            "en" => "share this notebook\nshare the note\nmake a share link",
+            "ja" => "このノートを共有して\nメモをシェアして\n共有リンクを作って",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "note_id": { "type": "string", "description": "要分享的笔记 ID" },
+                "follow_up": { "type": "string", "description": "分享后的简短跟进评论（如'给你整理了一份早餐食谱～'），语气自然随意，1-2句" }
+            },
+            "required": ["note_id", "follow_up"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "note_id": { "type": "string", "description": "要分享的笔记 ID" },
+                    "follow_up": { "type": "string", "description": "分享后的简短跟进评论（如'给你整理了一份早餐食谱～'），语气自然随意，1-2句" }
+                },
+                "required": ["note_id", "follow_up"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let note_id = input.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if note_id.is_empty() {
+            return ValidationResult::failure("note_id 不能为空", 2);
+        }
+        let follow_up = input.get("follow_up").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if follow_up.is_empty() {
+            return ValidationResult::failure("follow_up 不能为空", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+        let note_id = args.get("note_id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let follow_up = args.get("follow_up").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+        let note = match storage::load(&char_id, &note_id) {
+            Ok(n) => n,
+            Err(e) => return ToolResult::standard_error(&format!("读取笔记失败: {}", e), None, None),
+        };
+
+        let app_handle = match APP_HANDLE.read().clone() {
+            Some(h) => h,
+            None => return ToolResult::standard_error("AppHandle 未初始化", None, None),
+        };
+
+        share_notebook_to_wechat(&app_handle, &char_id, &note, &follow_up).await;
+
+        ToolResult::standard_success(
+            &format!("已分享笔记「{}」到微信聊天", note.title),
+            Some(json!({
+                "shared": true,
+                "note_id": &note.id,
+                "title": &note.title,
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::Safe
+    }
+
+    fn search_hint(&self) -> &str {
+        "share notebook note wechat chat send card"
+    }
+}
+
+/// 分享笔记到微信聊天面板（复用 share_link 的链接卡片样式）
+async fn share_notebook_to_wechat(
+    app_handle: &AppHandle,
+    char_id: &str,
+    note: &NoteBook,
+    follow_up: &str,
+) {
+    let now = chrono::Local::now().to_rfc3339();
+    let now_ts = chrono::Local::now().timestamp() as f64;
+
+    // 笔记链接用 vivian://notebook/<char_id>/<note_id> 协议，前端识别后跳转
+    let note_url = format!("vivian://notebook/{}/{}", char_id, note.id);
+    let preview: String = note.blocks.iter()
+        .filter_map(|b| match b {
+            Block::Paragraph { text, .. } | Block::Card { body: text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .next()
+        .map(|s| s.chars().take(80).collect())
+        .unwrap_or_else(|| format!("{}个内容块", note.blocks.len()));
+
+    // 写入对话历史
+    if let Some(state) = app_handle.try_state::<Arc<AppState>>() {
+        let characters = state.characters.read();
+        if let Some(instance) = characters.get(char_id) {
+            let card_content = format!("{}\n{}", note.title, note_url);
+            let card_msg = DialogChatMessage {
+                role: "assistant".to_string(),
+                content: card_content,
+                timestamp: Some(chrono::Local::now()),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning: None,
+                images: None,
+                meta: Some(MessageMeta {
+                    communication: None,
+                    sticker: None,
+                    source: MessageSource::Assistant,
+                    is_memory_disabled: false,
+                    mirror_kind: None,
+                    channel: Some("wechat".to_string()),
+                    kind: None,
+                }),
+            };
+            let _ = instance.brain.dialogue.add_message_with_metadata(card_msg, json!({
+                "kind": "notebook_link",
+                "link_card": {
+                    "url": note_url,
+                    "title": note.title,
+                    "description": preview,
+                    "source": "notebook",
+                    "note_id": note.id,
+                    "char_id": char_id,
+                    "palette": format!("{:?}", note.palette).to_lowercase(),
+                }
+            }));
+
+            if !follow_up.is_empty() {
+                let follow_msg = DialogChatMessage {
+                    role: "assistant".to_string(),
+                    content: follow_up.to_string(),
+                    timestamp: Some(chrono::Local::now()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    reasoning: None,
+                    images: None,
+                    meta: Some(MessageMeta {
+                    communication: None,
+                    sticker: None,
+                        source: MessageSource::Assistant,
+                        is_memory_disabled: false,
+                        mirror_kind: None,
+                        channel: Some("wechat".to_string()),
+                        kind: None,
+                    }),
+                };
+                let _ = instance.brain.dialogue.add_message_with_metadata(follow_msg, json!({}));
+            }
+        }
+    }
+
+    crate::commands::chat::emit_channel_activity(app_handle, char_id, "wechat");
+    // emit 链接卡片事件
+    let _ = app_handle.emit(
+        "chat:link_card",
+        json!({
+            "url": note_url,
+            "title": note.title,
+            "description": preview,
+            "source": "notebook",
+            "note_id": note.id,
+            "char_id": char_id,
+            "palette": format!("{:?}", note.palette).to_lowercase(),
+            "timestamp": now,
+            "channel": "wechat",
+            "is_notebook": true,
+        }),
+    );
+
+    // 横幅提示
+    let need_banner = match app_handle.get_webview_window("chat") {
+        Some(win) => !win.is_visible().ok().unwrap_or(false),
+        None => true,
+    };
+    if need_banner {
+        let banner_preview = if !follow_up.is_empty() {
+            format!("{}: {}", note.title, follow_up)
+        } else {
+            note.title.clone()
+        };
+        // 走统一出口：横幅窗口空闲时被冻结，emit 前需先解冻
+        crate::commands::window::emit_message_banner(
+            app_handle,
+            json!({
+                "character_id": char_id,
+                "preview": banner_preview,
+                "kind": "notebook_link",
+                "timestamp": now_ts,
+            }),
+        );
+    }
+
+    // emit 跟进评论
+    if !follow_up.is_empty() {
+        let _ = app_handle.emit(
+            "chat:assistant_message",
+            json!({
+                "content": follow_up,
+                "timestamp": now,
+                "character_id": char_id,
+                "channel": "wechat",
+            }),
+        );
+    }
+}
+
+// ============================================================================
+// 知识库同步 - 笔记内容写入向量知识库供 RAG 检索
+// ============================================================================
+
+/// 把笔记内容块拼接成可被检索的纯文本
+fn note_to_searchable_text(note: &NoteBook) -> String {
+    let mut parts = Vec::new();
+    parts.push(note.title.clone());
+    if let Some(cover) = &note.cover {
+        if let Some(sub) = &cover.subtitle {
+            parts.push(sub.clone());
+        }
+    }
+    for block in &note.blocks {
+        match block {
+            Block::Heading { text, .. } | Block::Paragraph { text, .. } | Block::Callout { text, .. } => {
+                parts.push(text.clone());
+            }
+            Block::Card { title, body, .. } => {
+                if let Some(t) = title {
+                    parts.push(t.clone());
+                }
+                parts.push(body.clone());
+            }
+            Block::Quote { text, author, .. } => {
+                parts.push(text.clone());
+                if let Some(a) = author {
+                    parts.push(a.clone());
+                }
+            }
+            Block::List { items, .. } | Block::Tags { items } => {
+                parts.extend(items.iter().cloned());
+            }
+            Block::Image { caption, .. } => {
+                if let Some(c) = caption {
+                    parts.push(c.clone());
+                }
+            }
+            Block::Divider { .. } => {}
+            Block::Table { headers, rows, caption } => {
+                parts.extend(headers.iter().cloned());
+                if let Some(c) = caption {
+                    parts.push(c.clone());
+                }
+                for row in rows {
+                    parts.extend(row.iter().cloned());
+                }
+            }
+            Block::Chart { chart_type, title, categories, series } => {
+                parts.push(chart_type.clone());
+                if let Some(t) = title {
+                    parts.push(t.clone());
+                }
+                parts.extend(categories.iter().cloned());
+                for s in series {
+                    parts.push(s.name.clone());
+                    for v in &s.data {
+                        parts.push(v.to_string());
+                    }
+                }
+            }
+            Block::Mermaid { code, caption } => {
+                if let Some(c) = caption {
+                    parts.push(c.clone());
+                }
+                // 提取 Mermaid 定义中的节点文案（去掉语法符号）
+                let text: String = code
+                    .lines()
+                    .filter_map(|line| {
+                        // 去掉 --> 箭头、[|(]{} 等语法，保留可读文本
+                        let cleaned = line
+                            .replace("-->", " ")
+                            .replace("---", " ")
+                            .replace(['[', ']', '(', ')', '{', '}', '|', '>', '<'], " ");
+                        let t = cleaned.trim();
+                        if t.is_empty() { None } else { Some(t.to_string()) }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+            Block::Custom { html, .. } => {
+                // 粗略剥离 HTML 标签，保留文本
+                let text: String = html
+                    .chars()
+                    .scan(false, |in_tag, c| {
+                        match c {
+                            '<' => {
+                                *in_tag = true;
+                                Some(None)
+                            }
+                            '>' => {
+                                *in_tag = false;
+                                Some(None)
+                            }
+                            _ if !*in_tag => Some(Some(c)),
+                            _ => Some(None),
+                        }
+                    })
+                    .flatten()
+                    .collect();
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+            }
+            // Meta 块不渲染但**必须参与检索**——这正是它存在的意义：
+            // 数据来源说明、检索可靠性评估等内容供后续问答/RAG 召回，
+            // 若这里漏掉，存了也等于没存。
+            Block::Meta { key, text } => {
+                parts.push(format!("{key}: {text}"));
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// 同步笔记到向量知识库（创建/更新时调用）
+///
+/// 以 `MemoryType::Knowledge` 入库，metadata 中存 note_id 关联，
+/// source="notebook"，ttl_days=Some(-1) 永不过期。
+/// 嵌入失败只记日志不阻断主流程（笔记文件已保存）。
+pub(crate) async fn sync_notebook_to_knowledge(app_handle: &AppHandle, note: &NoteBook) {
+    let state = match app_handle.try_state::<Arc<AppState>>() {
+        Some(s) => s,
+        None => {
+            tracing::warn!("[Notebook] AppState 未注入，跳过知识库同步");
+            return;
+        }
+    };
+    let memory = match state.get_character(Some(&note.char_id)) {
+        Ok(inst) => inst.brain.memory.clone(),
+        Err(e) => {
+            tracing::warn!("[Notebook] 获取角色 {} 的 MemoryManager 失败: {}", note.char_id, e);
+            return;
+        }
+    };
+
+    // 先删除该 note_id 的旧知识条目，避免重复
+    remove_notebook_from_knowledge(&memory, &note.id).await;
+
+    let content = note_to_searchable_text(note);
+    if content.trim().is_empty() {
+        tracing::warn!("[Notebook] 笔记 {} 内容为空，跳过知识库同步", note.id);
+        return;
+    }
+
+    let mut tags = note.tags.clone();
+    tags.push("notebook".to_string());
+    tags.sort();
+    tags.dedup();
+
+    match memory
+        .add_knowledge_document(&note.title, &content, tags, "notebook", Some(-1))
+        .await
+    {
+        Ok(item) => {
+            // 回写 memory_id 到笔记的 note_id 关联（通过 metadata）
+            // 这里我们把 memory_id 记到笔记的 index 里方便后续更新时查找
+            tracing::info!(
+                "[Notebook] 笔记「{}」已同步到知识库，memory_id={}",
+                note.title,
+                item.id
+            );
+            // 把关联关系写入笔记目录的 .memory_ref 文件
+            let ref_path = storage::note_memory_ref_path(&note.char_id, &note.id);
+            let _ = std::fs::write(&ref_path, &item.id);
+        }
+        Err(e) => {
+            tracing::warn!("[Notebook] 笔记同步到知识库失败: {}", e);
+        }
+    }
+}
+
+/// 从知识库删除指定笔记的旧条目（更新前调用）
+async fn remove_notebook_from_knowledge(memory: &Arc<crate::memory::MemoryManager>, note_id: &str) {
+    let ref_path = storage::note_memory_ref_path(memory.char_id(), note_id);
+    if let Ok(memory_id) = std::fs::read_to_string(&ref_path) {
+        let memory_id = memory_id.trim();
+        if !memory_id.is_empty() {
+            if let Err(e) = memory.delete_knowledge_document(memory_id).await {
+                tracing::warn!("[Notebook] 删除旧知识条目 {} 失败: {}", memory_id, e);
+            }
+        }
+        let _ = std::fs::remove_file(&ref_path);
+    }
+}
+
+// ============================================================================
+// CreateHtmlNoteTool
+// ============================================================================
+
+/// `create_html_note` 的成文范式。
+///
+/// 收敛成一个枚举而不是在 `call` 里散落 `if style == "paper"`：范式同时决定
+/// 「html 字段装的是整份文档还是正文片段」与「样式表由谁负责」——判定点只能有一个，
+/// 多一处判定就会出现「校验按 free、渲染按 paper」的错配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HtmlNoteStyle {
+    /// 模型撰写完整 HTML 文档，系统原样保存
+    Free,
+    /// 系统注入整份文档与样式表，模型只写 `.wrap` 内部片段
+    Paper,
+}
+
+/// 从入参解析范式。缺省与不认识的值都退回 `Free`——历史调用没有这个字段。
+fn parse_html_note_style(args: &Value) -> HtmlNoteStyle {
+    match args.get("style").and_then(|v| v.as_str()) {
+        Some("paper") => HtmlNoteStyle::Paper,
+        _ => HtmlNoteStyle::Free,
+    }
+}
+
+/// 让 LLM 直接撰写完整自包含 HTML 笔记（不经过结构化内容块渲染引擎）
+///
+/// 与 create_notebook（结构化 blocks → 预设主题渲染）互补：当内容需要完全自由的
+/// 版式、配色与可视化控制时（数据大屏、精美报告、落地页式笔记、复杂图文混排等），
+/// 由 LLM 直接产出完整 HTML 文档，系统原样保存。渲染链路由前端 iframe（asset 协议
+/// URL，跨源隔离）承接，`:root` / `body` 选择器天然生效，但脚本不执行——图表库
+/// 在这里不可用，数据可视化走表格与内联 SVG。
+///
+/// `style="paper"` 是同一工具的第二条路径：**样式表由后端持有**，模型只写正文片段，
+/// 由 `doc_style` 合成整份文档。分析型文档（精读、速查表、对照表、汇报材料）用它——
+/// 既省掉每次重写 7KB 样式表的 token，也保证几十篇笔记长得是同一套版式。
+pub struct CreateHtmlNoteTool;
+
+impl CreateHtmlNoteTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CreateHtmlNoteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for CreateHtmlNoteTool {
+    fn name(&self) -> &str {
+        "create_html_note"
+    }
+
+    fn description(&self) -> &str {
+        "Create an HTML note rendered in the Notebook tab, in one of two modes selected by the `style` parameter. style=\"free\" (default): YOU write the complete HTML document (with <style>) and the system saves it as-is — ideal when the content needs full layout and visual freedom: data dashboards, polished reports, landing-page style notes, complex mixed media. style=\"paper\": the system injects the whole document and the stylesheet, and you write only the fragment that goes inside .wrap — the paradigm for analysis-type documents where facts and judgement must be separated on the page: close readings, quick-reference and comparison sheets, digesting study material, briefing notes. The component vocabulary and authoring discipline for each mode are in the style parameter's description. In free mode, reuse the same authoring discipline as a polished HTML report: design a coherent visual system via CSS variables on :root (colors, fonts, spacing); use font-size/weight/whitespace for hierarchy, not font families; keep layouts responsive; ensure ink-on-bg contrast ≥ 4.5:1; structure with proper headings; write the page background on body — the note is loaded as a complete document in its own iframe (cross-origin from the app), so :root / body / html selectors work normally. Never use <script>, on* event attributes, nested <iframe>, or javascript: URLs — scripts do not run, they are stripped when the note is saved, and the note document itself runs in a scripts-disabled sandbox, so chart libraries are unavailable here: express data with tables and inline SVG, and reach for create_notebook's table/chart blocks when you need an actually rendered bar/line/pie chart. Use tables wrapped in a scrollable container for discrete comparisons. Cite sources when facts come from search. Keep the tone natural and consistent with your personality. Write in first person like your own diary, not as a report: open straight into the content, no 「this document will」 phrasing, sentences may carry mood and preference, and say looked-up facts naturally (「I just found」). Do not use emoji anywhere - not in text, headings, or decorative markup. For tags, call list_notebooks first and reuse an existing tag whenever the meaning matches; only create a new one when nothing fits. \nPrefer this tool over create_notebook when you need fine-grained visual control; use create_notebook for simpler card-style notes."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "制作一篇在笔记 tab 中渲染的 HTML 笔记。按 style 参数分两种模式：style=\"free\"（默认）由你撰写完整的 HTML/CSS 文档、系统原样保存——适合需要完全自由版式与视觉控制的场景：数据大屏、精美报告、落地页式笔记、复杂图文混排等；style=\"paper\" 由系统注入整份文档与样式表，你只写 .wrap 内部的正文片段——这是分析型文档的范式，适合「事实与判断必须在版面上物理分开」的材料：精读、速查表/对照表、学习材料消化、汇报材料。两种模式各自可用的构件与写作纪律都写在 style 参数的描述里。\n\nfree 模式请遵循与精美 HTML 报告一致的撰写纪律：用 :root 上的 CSS 变量（颜色/字体/间距）建立统一视觉系统；用字号粗细与留白建立层级，而非换字体家族；保持响应式布局；正文与背景对比度 ≥ 4.5:1；用规范标题组织结构。笔记以完整文档在独立 iframe 中加载（与应用窗口跨源隔离），:root / body / html 选择器正常生效。禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会在保存时被移除，笔记文档本身也跑在禁用脚本的沙箱里，图表库在这里不可用：数据用表格与内联 SVG 表达，需要真正渲染出来的柱状/折线/饼图就用 create_notebook 的 table/chart 块。宽表格请套一层可横向滚动的容器。检索得来的事实要自然说明是查到的，不假装本来就知道，并区分「搜索事实」「你的推断」「用户原话」。保持语气自然，符合你的性格。像写自己的日记那样用第一人称，不要写成报告——开头直接切进内容，别用「本文将」「以下是」；句子可以有情绪和偏好，不必客观中立；检索来的事实用「我刚查到」这类自然说法带过。\n不要用 emoji——正文、标题与装饰标记里都不放。标签同样先 list_notebooks 看已有标签、能复用就复用，确实无匹配才新建。需要精细视觉控制时优先用本工具；简单卡片风格笔记用 create_notebook。",
+            "ja" => "ノートタブでレンダリングされるHTMLノートを作成する。style パラメータで二つのモードに分かれる：style=\"free\"（既定）は完全なHTML/CSS文書をあなたが書き、システムがそのまま保存する——自由なレイアウトと視覚制御が必要な場面（データダッシュボード、洗練されたレポート、ランディングページ風ノート、複雑なメディア混在）に最適；style=\"paper\" は文書全体とスタイルシートをシステムが注入し、あなたは .wrap 内部の本文断片だけを書く——「事実と判断を紙面上で分ける」分析型文書（精読、速査表・対照表、学習資料の消化、報告資料）のためのパラダイム。両モードで使える部品と執筆規律は style パラメータの説明に書いてある。\n\nfree モードでは洗練されたHTMLレポートと同じ執筆規律に従うこと：:root上のCSS変数（色/フォント/間隔）で一貫したビジュアルシステムを確立；フォントファミリーではなくフォントサイズ/太さ/空白で階層を作る；レスポンシブレイアウトを維持；本文と背景のコントラスト比は4.5:1以上；見出しで構造化する。ノートは独立したiframe内で完全な文書として読み込まれる（アプリウィンドウとはクロスオリジンで隔離）ため、:root / body / html セレクタはそのまま機能する。<script>、on* イベント属性、ネストした <iframe>、javascript: プロトコルは禁止——スクリプトは実行されず保存時に除去され、ノート文書自体もスクリプト無効のサンドボックスで動くためチャートライブラリは使えない：データは表とインラインSVGで表現し、実際に描画される棒/折れ線/円グラフが必要なら create_notebook の table/chart ブロックを使うこと。横長の表は横スクロール可能なコンテナで包むこと。検索で得た事実は自然に「調べた」と述べ、元から知っていたように振る舞わない。「検索で得た事実」「自分の推測」「ユーザーの言葉」を区別する。口調は自然に、性格に合わせる。\nemoji は使わない——本文・見出し・装飾マークアップすべてに入れない。タグもまず list_notebooks で既存タグを確認し、意味が同じなら再利用する——本当に該当するものがないときだけ新規作成する。\n細かい視覚制御が必要な場合は本ツールを、簡単なカード風ノートはcreate_notebookを使うこと。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "做个好看的笔记\n生成个网页笔记\n排版一下\n精读一下这份材料\n整理成速查表\n这堆笔记帮我理一理",
+            "en" => "make a formatted note\ncreate an html note\nlay it out nicely\nclose-read this paper\nmake a quick reference sheet\ndigest these notes",
+            "ja" => "見栄えの良いノートを\nHTMLノートを作って\nレイアウトして\nこの資料を精読して\n速査表にまとめて\nノートを整理して",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
+                "html": { "type": "string", "description": "style=free 时必填：完整的自包含 HTML 文档（含 <style>），系统原样保存。style=paper 时必填：只含 .wrap 内部内容的正文片段（不要写 <!DOCTYPE>/<html>/<head>/<body>/<style>，样式表由系统注入；误传整份文档时系统会取 <body> 内部内容）。两种模式都禁止 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会在保存时被移除，笔记内图表库不可用，数据用表格与内联 SVG 表达。" },
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "分类标签，2-4 个。先调 list_notebooks 看已有标签，能复用就复用，确实没有可复用的分类时才新建。用于笔记页分类筛选，取主题/领域词，不要状态词与日期。"
+                }
+            },
+            "required": ["title", "html"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "笔记标题（简洁吸引人，建议15字以内）" },
+                    "style": {
+                        "type": "string",
+                        "enum": ["free", "paper"],
+                        "description": format!("笔记范式。free=你撰写完整自包含 HTML 文档（默认）；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部正文片段。\n\n{}", doc_style::guide("zh")),
+                        "default": "free"
+                    },
+                    "html": { "type": "string", "description": "style=free 时必填：完整自包含 HTML 文档（含 <style>），系统原样保存。style=paper 时必填：只含 .wrap 内部内容的正文片段（不要写 <!DOCTYPE>/<html>/<head>/<body>/<style>；误传整份文档时系统会取 <body> 内部内容）。样式用 CSS 变量统一；禁用 <script>、on* 事件属性、嵌套 <iframe> 与 javascript: 协议——脚本不执行且会被移除，笔记内图表库不可用，数据用表格与内联 SVG 表达。" },
+                    "meta_note": { "type": "string", "description": "数据来源说明等「不渲染但参与检索」的元数据：会存进笔记目录供后续 RAG 召回，但页面上看不到。把「整理自哪几个来源」「可靠性如何」「哪些结果没收录」这类交代写在这里，不要写进正文。" },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "分类标签，2-4 个。先调 list_notebooks 看已有标签，能复用就复用，确实没有可复用的分类时才新建。用于笔记页分类筛选，取主题/领域词，不要状态词与日期。"
+                    }
+                },
+                "required": ["title", "html"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "ノートタイトル（簡潔で魅力的、15文字以内推奨）" },
+                    "style": {
+                        "type": "string",
+                        "enum": ["free", "paper"],
+                        "description": format!("ノートのパラダイム。free=完全なHTML文書をあなたが書く（既定）；paper=紙面パラダイム：文書全体とスタイルシートはシステムが注入し、あなたは .wrap 内部の本文断片だけを書く。\n\n{}", doc_style::guide("ja")),
+                        "default": "free"
+                    },
+                    "html": { "type": "string", "description": "style=free なら必須：完全自己完結のHTML文書（<style>含む）。style=paper なら必須：.wrap 内部の本文断片のみ（<!DOCTYPE>/<html>/<head>/<body>/<style> は書かないこと；文書全体を渡した場合は <body> 内部が使われる）。<script>タグは書かないこと——実行されず保存時に除去される。ノート内ではチャートライブラリが使えないため、データは表とインラインSVGで表現する。" },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "ノートタグ（3-5個のキーワード）"
+                    }
+                },
+                "required": ["title", "html"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let title = input.get("title").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if title.is_empty() {
+            return ValidationResult::failure("title 不能为空", 2);
+        }
+        let style = parse_html_note_style(input);
+        let html = input.get("html").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if html.is_empty() {
+            let hint = if style == HtmlNoteStyle::Paper {
+                "html 不能为空（paper 模式需要 .wrap 内部的正文片段）"
+            } else {
+                "html 不能为空（需要提供完整的 HTML 文档）"
+            };
+            return ValidationResult::failure(hint, 2);
+        }
+        // 危险内容检查：sanitize 前后不一致说明含脚本/事件/iframe/javascript: 协议，
+        // 直接拒绝给模型明确反馈（save_raw_html 仍会兜底 sanitize，双保险）。
+        if storage::sanitize_html(html) != html {
+            return ValidationResult::failure("html 中不允许包含 <script>、on* 事件属性、嵌套 <iframe> 或 javascript: 协议——脚本不会执行且会被移除，数据请用表格或内联 SVG 表达", 2);
+        }
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let char_id = if ctx.char_id.is_empty() {
+            "vivian".to_string()
+        } else {
+            ctx.char_id.clone()
+        };
+
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let style = parse_html_note_style(&args);
+        let content = args.get("html").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        // paper 模式的样式表归后端：模型给的是正文片段，这里合成整份文档。
+        // 归一化容忍「误传整份文档」（取 <body> 内部），见 doc_style::normalize_fragment。
+        let html = match style {
+            HtmlNoteStyle::Paper => {
+                doc_style::compose_document(&title, &doc_style::normalize_fragment(&content))
+            }
+            HtmlNoteStyle::Free => content,
+        };
+        let tags: Vec<String> = args.get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+
+        // 侧车元数据：数据来源说明等，存进笔记目录但不渲染，只参与 RAG 检索
+        let meta_note = args
+            .get("meta_note")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+
+        let note_id = NoteBook::generate_id();
+        if let Err(e) = storage::save_raw_html(&char_id, &note_id, &title, &tags, &html) {
+            return ToolResult::standard_error(&format!("保存笔记失败: {}", e), None, None);
+        }
+        if let Err(e) = storage::save_raw_html_meta(&char_id, &note_id, meta_note.as_deref()) {
+            tracing::warn!("[Notebook] 写入侧车元数据失败: {e}");
+        }
+
+        // emit 事件通知前端刷新笔记列表并定位
+        let handle_opt = APP_HANDLE.read().clone();
+        if let Some(handle) = handle_opt {
+            let _ = handle.emit("notebook:created", json!({
+                "note_id": &note_id,
+                "char_id": &char_id,
+                "title": &title,
+            }));
+            // 同步到向量知识库供后续 RAG 检索（raw_html 笔记从中提取纯文本）
+            sync_raw_html_to_knowledge(&handle, &char_id, &note_id, &title, &tags, &html).await;
+        }
+
+        ToolResult::standard_success(
+            &format!("已创建 HTML 笔记「{}」，可在记忆窗口的笔记 tab 中查阅", title),
+            Some(json!({
+                "note_id": &note_id,
+                "title": &title,
+                "char_id": &char_id,
+                "render_type": "raw_html",
+                "style": match style {
+                    HtmlNoteStyle::Paper => "paper",
+                    HtmlNoteStyle::Free => "free",
+                },
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    fn search_hint(&self) -> &str {
+        "create html note page self-contained dashboard report custom html css paper paradigm close reading quick reference comparison sheet study digest"
+    }
+
+    fn anti_use_cases(&self) -> &[&str] {
+        &[
+            "Using it for simple card-style notes that create_notebook can handle — prefer that tool for basic content",
+            "Choosing style=paper for a casual or diary-style note — paper separates facts from judgement and is meant for analysis (close reading, comparison sheets, briefings), not for telling a story",
+            "Including <script> tags — they do not execute and are stripped; chart libraries are unavailable inside a note, so use tables or inline SVG (create_notebook's chart blocks for rendered charts)",
+            "Recreating a note that already exists — use list_notebooks to find note_id and share_notebook instead",
+        ]
+    }
+}
+
+// ============================================================================
+// notebook —— 查看 / 修改 / 分享 / HTML 笔记的统一入口
+// ============================================================================
+
+/// 合并五个笔记工具后的动作解析（旧工具都没有 action 参数）。
+///
+/// 旧参数形状：`html` → create_html；`note_id` + `follow_up` → share；
+/// `note_id` + 任一可更新字段 → update；只有 `note_id` → get；空参数 → list。
+pub(crate) fn effective_notebook_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_ascii_lowercase();
+    }
+    if args.get("html").is_some() {
+        return "create_html".to_string();
+    }
+    if args.get("note_id").is_some() {
+        if args.get("follow_up").is_some() {
+            return "share".to_string();
+        }
+        let updatable = ["title", "layout", "palette", "tags", "cover", "blocks"]
+            .iter()
+            .any(|key| args.get(*key).is_some());
+        return if updatable {
+            "update".to_string()
+        } else {
+            "get".to_string()
+        };
+    }
+    "list".to_string()
+}
+
+const NOTEBOOK_ACTIONS: &[&str] = &["list", "get", "update", "share", "create_html"];
+
+fn notebook_action_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": NOTEBOOK_ACTIONS,
+                "description": "list: notes with ids/tags/layout; get: full structured content; update: change fields; \
+                                share: link card to the WeChat chat; create_html: author an HTML note page."
+            },
+            "note_id": { "type": "string", "description": "Target note id (get / update / share)." },
+            "keyword": { "type": "string", "description": "For action=list: fuzzy filter over title/tags." },
+            "title": { "type": "string", "description": "New title (update) or page title (create_html)." },
+            "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "New layout for action=update." },
+            "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "New palette for action=update." },
+            "tags": { "type": "array", "items": { "type": "string" }, "description": "Tags (update replaces the list; create_html uses 2-4 topic tags)." },
+            "cover": { "type": "object", "description": "New cover config for action=update." },
+            "blocks": { "type": "array", "description": "Replacement content blocks for action=update. Replaces ALL blocks — read action=get first." },
+            "follow_up": { "type": "string", "description": "For action=share: one or two natural sentences to say when sharing." },
+            "style": {
+                "type": "string",
+                "enum": ["free", "paper"],
+                "description": "For action=create_html: free = you write the complete self-contained HTML document; \
+                                paper = the system injects the document and stylesheet, you write only the fragment inside .wrap."
+            },
+            "html": {
+                "type": "string",
+                "description": "For action=create_html: complete HTML document (style=free) or the .wrap fragment (style=paper). \
+                                Never include <script>, on* attributes, nested <iframe> or javascript: URLs; chart libraries do not run — use tables or inline SVG."
+            },
+            "meta_note": {
+                "type": "string",
+                "description": "For action=create_html: provenance/reliability notes stored beside the note for retrieval but not rendered."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+pub struct NotebookTool;
+
+impl NotebookTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NotebookTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for NotebookTool {
+    fn name(&self) -> &str {
+        "notebook"
+    }
+
+    fn description(&self) -> &str {
+        "Work with existing notebook notes and author HTML note pages. Actions: \
+         list (note ids, titles, tags, layout, last-updated; fuzzy keyword filter), \
+         get (full structured content as JSON — always do this before update so you do not lose blocks), \
+         update (title / layout / palette / tags / cover, or replace ALL blocks; omitted fields keep their value), \
+         share (send an existing note to the WeChat chat as a link card under a short natural follow-up; \
+         find the note_id via list — never create a new note just to share one), \
+         create_html (author a note rendered in the Notebook tab).\n\
+         create_html has two modes via style: free = you write the complete self-contained HTML document \
+         (CSS variables on :root, hierarchy by size/weight/whitespace, contrast ≥ 4.5:1, responsive, \
+         :root/body/html work because the note loads in its own iframe); paper = the system injects the \
+         document and stylesheet and you write only the fragment inside .wrap (facts and judgement stay \
+         physically separate: close reading, quick-reference/comparison sheets, study digests, briefings). \
+         Never use <script>, on* handlers, nested <iframe> or javascript: URLs — they are stripped and chart \
+         libraries do not run; express data with tables and inline SVG (use create_notebook table/chart blocks \
+         when an actually rendered chart is required). Write in first person like your own diary, not as a report; \
+         open straight into the content and do not use emoji anywhere. Reuse an existing tag via action=list when \
+         the meaning matches. Prefer create_notebook for simple card-style notes; use create_html when you need \
+         fine-grained visual control."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "处理已有笔记与撰写 HTML 笔记页。action 取值：\
+                     list（笔记 id、标题、标签、布局、最后修改时间，可按 keyword 模糊过滤）、\
+                     get（完整结构化内容 JSON；修改前务必先看，避免丢内容块）、\
+                     update（改标题/布局/配色/标签/封面，或替换全部 blocks；未提供的字段保持原值）、\
+                     share（把已有笔记以链接卡片分享到微信聊天，附一句自然的跟进；先用 list 找 note_id，不要为分享新建笔记）、\
+                     create_html（撰写在笔记 tab 中渲染的 HTML 笔记）。\n\
+                     create_html 由 style 分两种模式：free＝你写完整自包含 HTML 文档（:root CSS 变量、用字号粗细与留白建立层级、\
+                     对比度 ≥ 4.5:1、响应式；笔记在独立 iframe 中加载，:root/body/html 正常生效）；\
+                     paper＝系统注入整份文档与样式表，你只写 .wrap 内部正文片段（事实与判断在版面上分开：精读、速查/对照表、\
+                     学习材料消化、汇报）。禁止 <script>、on* 事件、嵌套 <iframe> 与 javascript: 协议——脚本会被移除，\
+                     图表库不可用；数据用表格与内联 SVG 表达，确实要渲染柱状/折线/饼图时用 create_notebook 的 table/chart 块。\
+                     像写自己的日记那样用第一人称，开头直接切进内容，不要写成报告；全文不用 emoji。\
+                     标签先 list 看已有标签，能复用就复用。简单卡片笔记用 create_notebook，需要精细视觉控制时用 create_html。",
+            "ja" => "既存ノートの操作とHTMLノートの作成。action：list（id・タイトル・タグ・レイアウト・更新時刻、keyword絞り込み）、\
+                     get（完全な構造化内容。更新前に必ず確認してブロック消失を防ぐ）、update（タイトル/レイアウト/配色/タグ/カバー、\
+                     または全blocksの置換）、share（既存ノートをリンクカードとしてWeChatに共有。共有のためだけに新規作成しない）、\
+                     create_html（ノートタブで描画されるHTMLノート）。\n\
+                     create_html は style で二模式：free＝完全な自己完結HTML文書を自分で書く；paper＝文書とスタイルシートはシステムが注入し、\
+                     .wrap 内部の本文断片だけを書く。`<script>`・on* 属性・ネストiframe・javascript: は禁止（除去され、チャートライブラリも動かない）。\
+                     データは表とインラインSVGで表現する。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我有哪些笔记\n看看那篇笔记\n改一下笔记\n分享笔记\n做个好看的网页笔记\n整理成速查表",
+            "en" => "what notes do I have\nshow me that note\nupdate the note\nshare the notebook\nmake a formatted html note\nquick reference sheet",
+            "ja" => "ノート一覧\nあのノートを見せて\nノートを更新\nノートを共有\nHTMLノートを作って\n速査表にまとめて",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        notebook_action_schema()
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        if lang != "zh" {
+            return self.parameters_schema();
+        }
+        let style_guide = doc_style::guide("zh");
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": NOTEBOOK_ACTIONS,
+                    "description": "list 列笔记；get 读取完整内容；update 修改字段；share 分享到微信；create_html 撰写 HTML 笔记。"
+                },
+                "note_id": { "type": "string", "description": "目标笔记 ID（get / update / share）。" },
+                "keyword": { "type": "string", "description": "action=list 时按标题/标签模糊过滤；留空返回全部。" },
+                "title": { "type": "string", "description": "update 的新标题；create_html 的页面标题（简洁，建议 15 字以内）。" },
+                "layout": { "type": "string", "enum": ["cover_flow", "article", "gallery", "simple"], "description": "action=update 的新布局。" },
+                "palette": { "type": "string", "enum": ["warm", "fresh", "elegant", "cute", "cool", "nature"], "description": "action=update 的新配色。" },
+                "tags": { "type": "array", "items": { "type": "string" }, "description": "标签。update 会替换原标签；create_html 取 2-4 个主题词。先 list 看已有标签，能复用就复用。" },
+                "cover": { "type": "object", "description": "action=update 的新封面配置。" },
+                "blocks": { "type": "array", "description": "action=update 的新内容块，会替换全部 blocks——先 get 看原内容，再给完整列表。" },
+                "follow_up": { "type": "string", "description": "action=share 时附带的 1-2 句自然跟进评论。" },
+                "style": {
+                    "type": "string",
+                    "enum": ["free", "paper"],
+                    "description": format!("笔记范式。free=你撰写完整自包含 HTML 文档（默认）；paper=纸面范式：系统注入整份文档与样式表，你只写 .wrap 内部正文片段。\n\n{}", style_guide),
+                    "default": "free"
+                },
+                "html": { "type": "string", "description": "action=create_html 必填。style=free 给完整自包含 HTML 文档（含 <style>）；style=paper 只给 .wrap 内部正文片段（不要 <!DOCTYPE>/<html>/<head>/<body>/<style>）。禁止 <script>、on* 事件、嵌套 <iframe> 与 javascript: 协议；图表库不可用，数据用表格与内联 SVG。" },
+                "meta_note": { "type": "string", "description": "action=create_html 的来源说明（存进笔记目录供检索、页面不渲染）：整理自哪些来源、可靠性、哪些没收录。" }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_notebook_action(input);
+        if !NOTEBOOK_ACTIONS.contains(&action.as_str()) {
+            return ValidationResult::failure(
+                &format!(
+                    "不支持的 action: {action}（可选：{}）",
+                    NOTEBOOK_ACTIONS.join(" / ")
+                ),
+                2,
+            );
+        }
+        match action.as_str() {
+            "list" => ListNotebooksTool.validate_input(input, ctx).await,
+            "get" => GetNotebookDetailTool.validate_input(input, ctx).await,
+            "update" => UpdateNotebookTool.validate_input(input, ctx).await,
+            "share" => ShareNotebookTool.validate_input(input, ctx).await,
+            "create_html" => CreateHtmlNoteTool.validate_input(input, ctx).await,
+            _ => ValidationResult::success(Some(input.clone())),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_notebook_action(input).as_str() {
+            "share" => ShareNotebookTool.check_permissions(input, ctx).await,
+            "create_html" => CreateHtmlNoteTool.check_permissions(input, ctx).await,
+            _ => PermissionResult::allow(),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        match effective_notebook_action(&args).as_str() {
+            "list" => ListNotebooksTool.call(args, ctx).await,
+            "get" => GetNotebookDetailTool.call(args, ctx).await,
+            "update" => UpdateNotebookTool.call(args, ctx).await,
+            "share" => ShareNotebookTool.call(args, ctx).await,
+            "create_html" => CreateHtmlNoteTool.call(args, ctx).await,
+            other => ToolResult::standard_error(
+                &format!("不支持的 action: {other}"),
+                Some("InvalidAction"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    fn search_hint(&self) -> &str {
+        "notebook note list read update share html page 笔记 列表 查看 修改 分享 网页笔记 速查表"
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_notebook_arguments_infer_actions() {
+        assert_eq!(effective_notebook_action(&json!({})), "list");
+        assert_eq!(effective_notebook_action(&json!({"keyword": "食谱"})), "list");
+        assert_eq!(effective_notebook_action(&json!({"note_id": "n1"})), "get");
+        assert_eq!(
+            effective_notebook_action(&json!({"note_id": "n1", "blocks": []})),
+            "update"
+        );
+        assert_eq!(
+            effective_notebook_action(&json!({"note_id": "n1", "follow_up": "给你写好啦"})),
+            "share"
+        );
+        assert_eq!(
+            effective_notebook_action(&json!({"title": "热梗", "html": "<div>x</div>"})),
+            "create_html"
+        );
+        assert_eq!(effective_notebook_action(&json!({"action": "LIST"})), "list");
+    }
+
+    #[test]
+    fn unknown_notebook_action_is_rejected() {
+        let ctx = ToolUseContext::default();
+        let verdict =
+            futures::executor::block_on(NotebookTool.validate_input(&json!({"action": "delete"}), &ctx));
+        assert!(!verdict.result, "笔记工具没有删除动作");
+    }
+}
+
+/// raw_html 笔记里「不是正文、却会被朴素去标签法当成正文」的块。
+///
+/// `<style>` 是最大的一头：自由 HTML 笔记常自带整份样式表，paper 范式的更是约 7KB——
+/// 不剥掉的话，每篇笔记入库的检索文本九成是 CSS，既稀释语义相似度又白付嵌入开销。
+/// `<script>` 在保存时已被 `sanitize_html` 移除，这里再拦一次是因为知识库同步拿到的
+/// 是消毒前的原文（`regex` 不支持反向引用，两个标签用非捕获组并列匹配即可）。
+static RAW_HTML_NOISE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?is)<(?:style|script)\b[^>]*>.*?</(?:style|script)\s*>").unwrap()
+});
+
+/// 将 raw_html 笔记中的可见文本提取出来，供知识库 RAG 检索
+fn raw_html_to_searchable_text(html: &str) -> String {
+    // 粗略剥离 HTML 标签，保留文本；先摘掉样式/脚本块，再逐字符去标签
+    let body = RAW_HTML_NOISE_RE.replace_all(html, " ");
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in body.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => {
+                text.push(c);
+            }
+            _ => {}
+        }
+    }
+    // 压缩空白，逐行保留有意义文本
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 同步 raw_html 笔记到向量知识库
+pub(crate) async fn sync_raw_html_to_knowledge(
+    app_handle: &AppHandle,
+    char_id: &str,
+    note_id: &str,
+    title: &str,
+    tags: &[String],
+    html: &str,
+) {
+    let state = match app_handle.try_state::<Arc<AppState>>() {
+        Some(s) => s,
+        None => {
+            tracing::warn!("[Notebook] AppState 未注入，跳过知识库同步");
+            return;
+        }
+    };
+    let memory = match state.get_character(Some(char_id)) {
+        Ok(inst) => inst.brain.memory.clone(),
+        Err(e) => {
+            tracing::warn!("[Notebook] 获取角色 {} 的 MemoryManager 失败: {}", char_id, e);
+            return;
+        }
+    };
+
+    // 侧车里的来源说明不渲染但要参与检索——否则「存了」等于没存
+    let mut content = raw_html_to_searchable_text(html);
+    if let Some(meta) = storage::load_raw_html_meta(char_id, note_id) {
+        content.push_str("\nprovenance: ");
+        content.push_str(&meta);
+    }
+    if content.trim().is_empty() {
+        tracing::warn!("[Notebook] HTML 笔记 {} 无可检索文本，跳过知识库同步", note_id);
+        return;
+    }
+
+    let mut tag_vec = tags.to_vec();
+    tag_vec.push("notebook".to_string());
+    tag_vec.sort();
+    tag_vec.dedup();
+
+    match memory
+        .add_knowledge_document(title, &content, tag_vec, "notebook", Some(-1))
+        .await
+    {
+        Ok(item) => {
+            let ref_path = storage::note_memory_ref_path(char_id, note_id);
+            let _ = std::fs::write(&ref_path, &item.id);
+        }
+        Err(e) => {
+            tracing::warn!("[Notebook] HTML 笔记同步到知识库失败: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::notebook::{Cover, Layout, Palette};
+
+    fn note_with_meta() -> NoteBook {
+        NoteBook {
+            id: "note_meta_test".into(),
+            title: "热梗速览".into(),
+            char_id: "vivian".into(),
+            created_at: 1_780_000_000.0,
+            updated_at: 1_780_000_000.0,
+            tags: vec!["知识采集".into()],
+            layout: Layout::CoverFlow,
+            palette: Palette::Warm,
+            custom_css: None,
+            cover: None,
+            blocks: vec![
+                Block::Meta {
+                    key: "provenance".into(),
+                    text: "整理自两份聚合盘点，可靠性中等；抖音站内结果未收录。".into(),
+                },
+                Block::Paragraph {
+                    text: "1. 班味：打工人语境里的高频词。".into(),
+                    style: None,
+                },
+            ],
+        }
+    }
+
+    /// Meta 块**必须**进入检索文本——它不渲染，存了却不能被召回就毫无意义。
+    #[test]
+    fn meta_block_takes_part_in_retrieval() {
+        let text = note_to_searchable_text(&note_with_meta());
+        assert!(
+            text.contains("provenance") && text.contains("可靠性中等"),
+            "Meta 内容应进入检索文本，实际: {text}"
+        );
+        assert!(text.contains("班味"), "正文也应进入检索文本");
+    }
+
+    /// 反面对照：正文块照常提取，Meta 不应污染成可见内容。
+    #[test]
+    fn meta_block_is_not_rendered() {
+        let html = crate::notebook::renderer::render_html(&note_with_meta());
+        assert!(!html.contains("可靠性中等"), "Meta 不该出现在 HTML 里");
+        assert!(html.contains("班味"), "正文应渲染");
+    }
+
+    /// 样式表不能被当成正文入库：paper 范式的 CSS 约 7KB，混进检索文本会把
+    /// 真正的语义淹掉（向量被 CSS 术语主导，笔记就等于搜不到了）。
+    #[test]
+    fn stylesheets_stay_out_of_the_retrieval_text() {
+        let html = doc_style::compose_document(
+            "速查表",
+            "<h2>口径</h2><p>相对方案 A 提升 13.6</p>",
+        );
+        let text = raw_html_to_searchable_text(&html);
+        assert!(text.contains("相对方案 A 提升 13.6"), "正文应留下");
+        assert!(!text.contains("--accent"), "CSS 变量不该进检索文本");
+        assert!(!text.contains("border-collapse"), "CSS 规则不该进检索文本");
+    }
+}

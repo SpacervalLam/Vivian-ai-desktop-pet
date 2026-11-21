@@ -1,0 +1,1 @@
+Based on the tool results, continue the authorized task or give an accurate result in the character’s ordinary voice. If more tools are necessary and available, output valid tool call JSON.

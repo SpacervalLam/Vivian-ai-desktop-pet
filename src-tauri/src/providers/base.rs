@@ -1,0 +1,1360 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{VivianError, VivianResult};
+use crate::network::http_client::get_global_client;
+use crate::providers::reasoning::ReasoningPreference;
+use crate::resilience::{register_circuit_breaker, CircuitBreaker};
+use crate::types::response::ChatMessage;
+
+const CACHE_TTL: Duration = Duration::from_secs(300);
+const CACHE_MAX_ENTRIES: usize = 256;
+const CB_FAILURE_THRESHOLD: u32 = 5;
+const CB_FAILURE_RATE: f64 = 0.5;
+const CB_RESET_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One logical work step shares its deadline and attempt count across transport
+/// retries, route fallback and non-streaming recovery.
+#[derive(Debug)]
+pub struct RequestBudget {
+    deadline: Instant,
+    attempts: std::sync::atomic::AtomicUsize,
+    limit: usize,
+}
+impl RequestBudget {
+    pub fn new(duration: Duration, limit: usize) -> Self {
+        Self { deadline: Instant::now() + duration, attempts: 0.into(), limit }
+    }
+    pub fn deadline(&self) -> tokio::time::Instant { self.deadline.into() }
+    pub fn exhausted(&self) -> bool { Instant::now() >= self.deadline || self.attempts.load(Ordering::Relaxed) >= self.limit }
+    pub fn claim(&self) -> VivianResult<()> {
+        if Instant::now() >= self.deadline { return Err(VivianError::Timeout("Work request deadline exhausted".into())); }
+        self.attempts.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| if n < self.limit { Some(n + 1) } else { None })
+            .map(|_| ()).map_err(|_| VivianError::Timeout("Work request attempt budget exhausted".into()))
+    }
+}
+
+/// 单次 LLM 调用的不可变参数。
+///
+/// 通过 Tokio task-local 作用域传递，避免并发请求通过 provider 上的 Atomic/RwLock
+/// 相互覆盖。`None` 表示沿用 provider 配置或外层作用域。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCallOptions {
+    pub request_budget: Option<Arc<RequestBudget>>,
+    /// 请求级隔离；None 沿用配置，Some(false) 不向执行代理注入桌宠框架。
+    pub include_framework_instructions: Option<bool>,
+    pub enable_search: Option<bool>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    /// Omit output-token limits for this call, including provider defaults and body overrides.
+    pub omit_output_limit: bool,
+    /// 存在惩罚：对本轮已出现过的 token 施加固定惩罚，抑制"同一句话/同一个词反复出现"。
+    ///
+    /// **协议支持面是不完整的**，因此按 provider 分别决定是否写入请求体：
+    /// - 支持：OpenAI Chat Completions（`/chat/completions`）、Gemini `generationConfig`
+    /// - **不支持**：OpenAI Responses API（`/responses` 对未知参数直接 400）、
+    ///   Anthropic Messages（协议无此字段）
+    ///
+    /// `None` 或 `0.0` 表示不发送该字段（不发送 == 服务端默认 == 0）。
+    /// 由 `ModelRouter::call_options` 按任务类型注入，只有真正支持该参数的 provider
+    /// 才会读取（见 `ProviderBase::apply_sampling_penalties`）。
+    pub presence_penalty: Option<f64>,
+    /// 频率惩罚：按 token 出现次数成比例惩罚，比存在惩罚更激进地压制高频复读。
+    ///
+    /// 协议支持面与 `presence_penalty` 完全一致（同上）。
+    pub frequency_penalty: Option<f64>,
+    pub reasoning: Option<ReasoningPreference>,
+    /// 本次调用要求的结构化输出 schema。使用 Arc 避免嵌套作用域重复复制大对象。
+    pub json_schema: Option<Arc<Value>>,
+    /// Explicitly clear an outer schema when a provider cannot accept it.
+    pub disable_json_schema: bool,
+    /// schema、工具定义等不直接进入 messages 的请求参数摘要。
+    pub request_fingerprint: Option<u64>,
+    /// 工具调用等具副作用/结构化语义的请求禁止复用纯文本答案缓存。
+    pub response_cache_allowed: Option<bool>,
+}
+
+impl ProviderCallOptions {
+    fn merged(self, inner: Self) -> Self {
+        Self {
+            request_budget: inner.request_budget.or(self.request_budget),
+            include_framework_instructions: inner
+                .include_framework_instructions
+                .or(self.include_framework_instructions),
+            enable_search: inner.enable_search.or(self.enable_search),
+            temperature: inner.temperature.or(self.temperature),
+            max_tokens: inner.max_tokens.or(self.max_tokens),
+            omit_output_limit: inner.omit_output_limit || self.omit_output_limit,
+            presence_penalty: inner.presence_penalty.or(self.presence_penalty),
+            frequency_penalty: inner.frequency_penalty.or(self.frequency_penalty),
+            reasoning: inner.reasoning.or(self.reasoning),
+            json_schema: inner.json_schema.or(self.json_schema),
+            disable_json_schema: inner.disable_json_schema || self.disable_json_schema,
+            request_fingerprint: inner.request_fingerprint.or(self.request_fingerprint),
+            response_cache_allowed: inner.response_cache_allowed.or(self.response_cache_allowed),
+        }
+    }
+
+    pub fn current() -> Self {
+        PROVIDER_CALL_OPTIONS
+            .try_with(Clone::clone)
+            .unwrap_or_default()
+    }
+
+    pub fn current_json_schema() -> Option<Value> {
+        let options = Self::current();
+        if options.disable_json_schema {
+            None
+        } else {
+            options.json_schema.as_deref().cloned()
+        }
+    }
+}
+
+/// 所有协议在构造请求体时使用本函数；task-local 避免并发桌宠请求受执行请求影响。
+pub fn effective_instructions(configured: &Option<String>) -> Option<String> {
+    if ProviderCallOptions::current().include_framework_instructions == Some(false) {
+        None
+    } else {
+        configured.clone()
+    }
+}
+
+tokio::task_local! {
+    static PROVIDER_CALL_OPTIONS: ProviderCallOptions;
+}
+
+/// 在单次异步调用范围内应用 provider 参数；退出和错误返回时自动恢复。
+pub async fn scope_provider_call<F, T>(options: ProviderCallOptions, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let merged = ProviderCallOptions::current().merged(options);
+    PROVIDER_CALL_OPTIONS.scope(merged, future).await
+}
+
+/// 结构化工具调用（来自 LLM 的原生 function calling 响应）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredToolCall {
+    /// 原生 tool_call_id（用于多轮工具调用上下文关联）
+    pub id: String,
+    /// 工具名
+    pub name: String,
+    /// 工具参数（JSON）
+    pub arguments: serde_json::Value,
+}
+
+/// LLM 对话响应的结构化表示
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatResponse {
+    /// 文本部分
+    pub content: String,
+    /// 结构化工具调用列表（若模型支持原生 function calling）
+    pub tool_calls: Vec<StructuredToolCall>,
+    /// 结束原因（stop / tool_calls / length / content_filter 等）
+    pub finish_reason: Option<String>,
+    /// 推理/思维链内容
+    ///
+    /// 由 provider 从响应中提取，字段来源因服务商而异：
+    /// - OpenAI 兼容端点：`message.reasoning_content`（DeepSeek / Qwen / GLM / 火山）
+    ///   或 `message.reasoning_details[].summary`（部分 o 系列兼容端点）
+    /// - Anthropic：`content[].type=="thinking"` 块的 `thinking` 字段
+    ///
+    /// 不入可见输出流，仅用于多轮回传与持久化。
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// 原始响应（兜底，用于调试或额外字段提取）
+    pub raw: serde_json::Value,
+}
+
+impl ChatResponse {
+    /// 从纯文本构造（无工具调用）
+    pub fn from_text(text: String) -> Self {
+        Self {
+            content: text,
+            tool_calls: Vec::new(),
+            finish_reason: None,
+            reasoning: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    /// 是否包含工具调用
+    pub fn has_tool_calls(&self) -> bool {
+        !self.tool_calls.is_empty()
+    }
+}
+
+/// 工具定义（用于 bind_tools）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// 统一 LLM 请求结构（Brain → ModelRouter 的标准入口）
+///
+/// 把原本散落的 `task_type` / `messages` / `tools` / `stream` / `enable_search`
+/// 等参数打包成单一结构,让 Brain 无需关心底层是 Responses API / Chat Completions
+/// / Anthropic Messages / Gemini GenerateContent 中的哪一种。
+///
+/// 设计原则:
+/// - Brain 永远只构造 `LLMRequest`,不直接调用 provider 特定方法
+/// - ModelRouter 根据 `task_type` 路由到对应 provider,内部转调 BaseProvider 方法
+/// - `tools` 为空表示走文本路径;非空且 provider 支持时走原生 function calling
+/// - temperature / max_tokens 运行时覆盖优先使用请求级字段,无则沿用 ModelRouter setter
+///   (保持现有 emotion→temperature 机制)
+///
+/// Character dialogue keeps its voice model even for long inputs and tool calls.
+/// Missing routes fall back to the main provider, including existing configurations.
+pub const TASK_COMPANION: &str = "companion";
+
+/// Complex workspace execution. Work-model overrides apply only to this task;
+/// companion speech and read-only reasoning plans keep their own routes.
+pub const TASK_WORK_AGENT: &str = "work_agent";
+
+/// 不包含 `previous_response_id`:Vivian 已有完整记忆架构(MemoryManager +
+/// TimeStampedMemory + ConsolidationPipeline),Brain 每轮传完整 messages,
+/// 不依赖服务端 Conversation State,避免双 Context 问题。Responses API 始终当 Stateless 用。
+#[derive(Debug, Clone)]
+pub struct LLMRequest {
+    /// Local audit correlation only; never sent to the provider.
+    pub audit_request_id: Option<String>,
+    pub include_framework_instructions: Option<bool>,
+    /// 任务类型(路由 key):chat / reasoning / reflection / consolidation /
+    /// inner_monologue / vision_describe 等
+    pub task_type: String,
+    /// Cost attribution only; never changes provider routing.
+    pub usage_tag: Option<String>,
+    /// 对话消息数组(含 system / user / assistant / tool 角色)
+    pub messages: Vec<ChatMessage>,
+    /// 工具定义列表(空 = 不启用原生 function calling,走文本路径)
+    pub tools: Vec<ToolDefinition>,
+    /// 是否流式响应
+    pub stream: bool,
+    /// 是否启用联网搜索(部分 provider 支持)
+    pub enable_search: bool,
+    /// 请求级 temperature 覆盖(None 表示沿用 ModelRouter 默认值)
+    pub temperature_override: Option<f64>,
+    /// 请求级 max_tokens 覆盖(None 表示沿用 ModelRouter 默认值)
+    pub max_tokens_override: Option<u32>,
+    /// Let the service choose the output length instead of sending an application limit.
+    pub omit_output_limit: bool,
+    /// 请求级存在惩罚覆盖（None 表示沿用 `ModelRouter` 按任务类型给出的默认值）。
+    ///
+    /// 协议支持面见 `ProviderCallOptions::presence_penalty`：只有 Chat Completions
+    /// 与 Gemini 路径会真正下发，Responses / Anthropic 路径静默忽略。
+    pub presence_penalty: Option<f64>,
+    /// 请求级频率惩罚覆盖（None 表示沿用 `ModelRouter` 默认值）。
+    pub frequency_penalty: Option<f64>,
+    /// JSON Schema 结构化输出约束(None 表示不启用)
+    pub json_schema: Option<serde_json::Value>,
+    /// 推理/思维链偏好(模式 + 档位，按模型能力映射为各家 wire 字段)
+    pub reasoning: ReasoningPreference,
+    /// 发起本次 LLM 调用的角色 ID（None = 无归属/全局任务）。
+    ///
+    /// 用于错误通知（llm:error / chat:route_fallback）的角色路由，以及从该角色
+    /// 已保存的用户画像补全提示词称呼。无归属时不读取其他角色的画像。
+    ///
+    /// 注意：`LLMRequest` 不参与序列化（wire 层由各 provider 自建请求体），
+    /// 因此这里不能挂 `#[serde(default)]` —— 该结构体没有 serde derive。
+    pub character_id: Option<String>,
+}
+
+impl LLMRequest {
+    /// 构造基础请求(无工具、非流式、不联网、默认参数)
+    pub fn new(task_type: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
+        Self {
+            include_framework_instructions: None,
+            audit_request_id: None,
+            task_type: task_type.into(),
+            usage_tag: None,
+            messages,
+            tools: Vec::new(),
+            stream: false,
+            enable_search: false,
+            temperature_override: None,
+            max_tokens_override: None,
+            omit_output_limit: false,
+            presence_penalty: None,
+            frequency_penalty: None,
+            json_schema: None,
+            reasoning: ReasoningPreference::AUTO,
+            character_id: None,
+        }
+    }
+
+    /// 仅抑制本次请求的框架注入，不更改共享 provider 或后续角色请求。
+    pub fn without_framework_instructions(mut self) -> Self {
+        self.include_framework_instructions = Some(false);
+        self
+    }
+
+    /// 设置工具定义(启用原生 function calling 路径)
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    pub fn with_usage_tag(mut self, tag: impl Into<String>) -> Self {
+        self.usage_tag = Some(tag.into());
+        self
+    }
+
+    /// 启用流式响应
+    pub fn with_stream(mut self, stream: bool) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    /// 启用联网搜索
+    pub fn with_search(mut self, enable: bool) -> Self {
+        self.enable_search = enable;
+        self
+    }
+
+    /// 设置请求级 temperature
+    pub fn with_temperature(mut self, temp: f64) -> Self {
+        self.temperature_override = Some(temp);
+        self
+    }
+
+    /// 设置请求级 max_tokens
+    pub fn with_max_tokens(mut self, tokens: u32) -> Self {
+        self.max_tokens_override = Some(tokens);
+        self.omit_output_limit = false;
+        self
+    }
+
+    pub fn without_output_limit(mut self) -> Self {
+        self.max_tokens_override = None;
+        self.omit_output_limit = true;
+        self
+    }
+
+    /// 设置请求级惩罚参数（覆盖 `ModelRouter` 按任务类型给出的默认值）。
+    ///
+    /// 传 `0.0` 等价于"该请求不发送此字段"（见 `ProviderBase::sanitize_penalty`），
+    /// 因此可以用 `with_penalties(0.0, 0.0)` 在某个具体请求上关掉惩罚
+    /// ——例如要求逐字复述的任务不该被惩罚参数干扰。
+    pub fn with_penalties(mut self, presence: f64, frequency: f64) -> Self {
+        self.presence_penalty = Some(presence);
+        self.frequency_penalty = Some(frequency);
+        self
+    }
+
+    /// 设置 JSON Schema 约束
+    pub fn with_json_schema(mut self, schema: serde_json::Value) -> Self {
+        self.json_schema = Some(schema);
+        self
+    }
+
+    /// 启用推理/思维链（true = On 无指定档位，false = Auto 不干预）
+    pub fn with_reasoning(mut self, enable: bool) -> Self {
+        self.reasoning = if enable {
+            ReasoningPreference::on(None)
+        } else {
+            ReasoningPreference::AUTO
+        };
+        self
+    }
+
+    /// 设置推理偏好（模式 + 档位）
+    pub fn with_reasoning_pref(mut self, pref: ReasoningPreference) -> Self {
+        self.reasoning = pref;
+        self
+    }
+
+    /// 设置路线：发起本次调用的角色 ID（None = 无归属/全局任务）。
+    ///
+    /// 错误通知（llm:error / chat:route_fallback）按此路由 toast 归属；
+    /// 调用方在其作用域存在角色上下文时应显式传入。
+    pub fn with_character_id(mut self, char_id: impl Into<String>) -> Self {
+        self.character_id = Some(char_id.into());
+        self
+    }
+
+    /// 是否请求原生 function calling 路径(tools 非空)
+    pub fn wants_tools(&self) -> bool {
+        !self.tools.is_empty()
+    }
+
+    /// 是否启用结构化 JSON 输出
+    pub fn wants_json(&self) -> bool {
+        self.json_schema.is_some()
+    }
+}
+
+#[async_trait]
+pub trait BaseProvider: Send + Sync {
+    async fn call_chat(&self, messages: Vec<ChatMessage>) -> VivianResult<String>;
+    async fn call_stream_chat(
+        &self,
+        messages: Vec<ChatMessage>,
+        json_schema: Option<Value>,
+    ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>>;
+    fn get_model(&self) -> &str;
+    fn get_endpoint(&self) -> &str {
+        ""
+    }
+    /// strict 熔断与诊断使用的稳定身份。默认至少按模型隔离。
+    fn provider_identity(&self) -> String {
+        self.get_model().to_string()
+    }
+    fn get_circuit_breaker_stats(&self) -> serde_json::Value;
+
+    /// 设置该 provider 是否启用联网搜索（运行时可切换）
+    ///
+    /// 默认空实现，由具体 provider 覆盖。使用 `&self` + 内部可变性（AtomicBool）。
+    fn set_enable_search(&self, _enable: bool) {}
+
+    /// 设置 temperature 运行时覆盖。
+    ///
+    /// 默认空实现，由持有 `ProviderBase` 的具体 provider 覆盖。
+    /// 传入 None 清除覆盖（恢复配置默认值）；Some(t) 设置覆盖温度。
+    /// 由 emotion→temperature 映射在每轮对话前调用。
+    fn set_temperature_override(&self, _temp: Option<f64>) {}
+
+    /// 设置是否在请求体中省略 temperature 字段（工作智能体模型用）。
+    ///
+    /// 默认空实现，由持有 `ProviderBase` 的具体 provider 覆盖。
+    /// ModelRouter 在构建工作智能体覆盖 provider 时设置为 true，
+    /// provider 构造请求体后按厂商路径移除 temperature（服务端默认）。
+    fn set_omit_temperature(&self, _omit: bool) {}
+
+    fn set_request_parameters(&self, _temperature: bool, _max_tokens: bool) {}
+    fn set_request_customization(
+        &self,
+        _customization: crate::providers::reasoning_profiles::RequestCustomization,
+    ) {
+    }
+
+    /// 设置推理偏好运行时覆盖（请求级）。
+    ///
+    /// 默认空实现，由持有 `ProviderBase` 的具体 provider 覆盖。
+    /// ModelRouter 在每次请求前按 LLMRequest.reasoning 设置、请求后恢复为
+    /// None（不干预），provider 构造请求体时读取并映射为各家 wire 字段。
+    fn set_reasoning_pref(&self, _pref: Option<ReasoningPreference>) {}
+
+    /// 带联网搜索参数的对话查询
+    ///
+    /// `enable_search` 控制本次调用是否注入联网搜索字段：
+    /// - DeepSeek/Qwen/通用：顶层 `enable_search=true`
+    /// - GPT-4o: `web_search_options={"search_context_size": "high"}`
+    /// - Gemini: `tools=[{"google_search": {}}]`（REST 注入）
+    ///
+    /// 默认实现忽略 `enable_search`，回退到普通 `call_chat`，保证向后兼容。
+    async fn call_chat_with_search(
+        &self,
+        messages: Vec<ChatMessage>,
+        enable_search: bool,
+        json_schema: Option<Value>,
+    ) -> VivianResult<String> {
+        let _ = (enable_search, json_schema);
+        self.call_chat(messages).await
+    }
+
+    /// 结构化对话调用
+    ///
+    /// 默认实现回退到 `call_chat`，把文本包装成不含 tool_calls 的 ChatResponse。
+    /// 支持原生 function calling 的 provider 应覆盖此方法以返回结构化 tool_calls。
+    async fn invoke(&self, messages: Vec<ChatMessage>) -> VivianResult<ChatResponse> {
+        let content = self.call_chat(messages).await?;
+        Ok(ChatResponse::from_text(content))
+    }
+
+    /// 绑定工具列表
+    ///
+    /// 返回一个新的 provider 实例，该实例在后续调用中会向 LLM 透传工具 schema。
+    /// 默认实现返回 `NotImplemented` 错误，表示当前 provider 不支持原生 function calling。
+    /// 支持的 provider（如 OpenAiCompatProvider）应覆盖此方法。
+    fn bind_tools(&self, _tools: Vec<ToolDefinition>) -> VivianResult<Box<dyn BaseProvider>> {
+        Err(VivianError::NotImplemented(format!(
+            "bind_tools 未实现: provider {} 不支持原生 function calling",
+            self.get_model()
+        )))
+    }
+
+    /// 是否支持原生 function calling
+    ///
+    /// 返回 true 时调用方应优先走 `bind_tools` + `invoke` 路径，以获得：
+    /// - 结构化 tool_calls 响应（无非法 JSON 风险）
+    /// - 节省 prompt token（schema 走 API 专用通道，部分服务商可缓存）
+    /// - 更高的调用准确率（模型经训练识别 schema）
+    ///
+    /// 默认 false，由支持原生 function calling 的 provider 覆盖。
+    /// 配置层可通过 `enable_native_function_calling=false` 全局禁用，绕过此能力。
+    fn supports_native_function_calling(&self) -> bool {
+        false
+    }
+
+    /// 是否支持 Structured Outputs（JSON Schema 约束）
+    ///
+    /// 返回 true 时调用方可以通过请求级 `json_schema` 参数传入 schema，
+    /// provider 会把 schema 转成对应协议的字段注入请求：
+    /// - OpenAI Responses：`text.format.type=json_schema`
+    /// - 豆包 Responses：`response_format.type=json_schema`
+    /// - Gemini：`generationConfig.responseSchema`
+    /// - Anthropic：包装成 `emit_response` 伪工具（tool_use 通道）
+    ///
+    /// 与 `supports_native_function_calling` 是叠加关系：FC 走工具调用通道，
+    /// schema 走结构化字段通道，两者可以同时启用。
+    ///
+    /// 默认 false，由支持 Structured Outputs 的 provider 覆盖。
+    fn supports_structured_output(&self) -> bool {
+        false
+    }
+
+    /// 是否支持 JSON Mode（仅保证返回合法 JSON，不约束字段）
+    ///
+    /// 返回 true 时即使请求级 `json_schema` 被传入，provider 也只能退化为
+    /// `response_format.type=json_object`（OpenAI 兼容）或同等语义。
+    /// 后端需自行做 schema 校验（失败回退到 JsonParser 兜底）。
+    ///
+    /// 默认 false。DeepSeek / Qwen 等 OpenAI 兼容端点覆盖为 true。
+    fn supports_json_mode(&self) -> bool {
+        false
+    }
+
+    /// 流式 + 原生 function calling 路径
+    ///
+    /// 与 `invoke` 的区别：返回 `StreamEvent` 流而非一次性 `ChatResponse`。
+    /// 调用方应在 `supports_native_function_calling` 返回 true 时使用此方法。
+    ///
+    /// 流式工具调用的事件序列（OpenAI 风格）：
+    /// 1. 多个 `StreamEvent::Text(chunk)` —— 模型生成的文本增量
+    /// 2. 多个 `StreamEvent::ToolCallDelta { index, id?, name?, arguments_delta? }`
+    ///    —— 工具调用增量，调用方需按 `index` 累积 `id`/`name`/`arguments`
+    /// 3. `StreamEvent::Done` —— 流结束
+    ///
+    /// Anthropic 风格的差异：通过 `content_block_start` 给出完整的 `id` 和 `name`，
+    /// 后续 `input_json_delta` 仅推送 arguments 增量。`StreamEvent::ToolCallDelta`
+    /// 统一封装两种风格，调用方无需区分。
+    ///
+    /// 默认实现返回 `NotImplemented`，由支持的 provider 覆盖。
+    async fn stream_with_tools(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> VivianResult<tokio::sync::mpsc::Receiver<StreamEvent>> {
+        Err(VivianError::NotImplemented(format!(
+            "stream_with_tools 未实现: provider {} 不支持流式原生 function calling",
+            self.get_model()
+        )))
+    }
+}
+
+/// 流式 + 原生 function calling 的事件类型
+///
+/// 调用方按以下规则累积工具调用：
+/// - 收到 `ToolCallDelta` 时按 `index` 分组
+/// - `id` 和 `name` 仅在首个 delta 中出现（OpenAI 风格）或 `content_block_start` 中给出（Anthropic 风格）
+/// - `arguments_delta` 是字符串增量，需拼接后 JSON.parse 得到最终参数
+/// - `Done` 标志流结束，此时所有工具调用应已完整
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum StreamEvent {
+    /// Native search citations travel separately from JSON/text deltas.
+    WebSources {
+        sources: Vec<crate::providers::web_citations::WebSource>,
+    },
+    /// 文本增量（模型生成的自然语言片段）
+    Text { content: String },
+    /// 推理/思维链增量
+    ///
+    /// 不入可见输出流。来源：
+    /// - OpenAI 兼容：`delta.reasoning_content`（DeepSeek / Qwen / GLM / 火山）
+    /// - Anthropic：`thinking_delta` 事件（Claude extended thinking）
+    Thinking { content: String },
+    /// 工具调用增量
+    ToolCallDelta {
+        /// 工具调用索引（用于多工具并发调用时区分）
+        index: usize,
+        /// 工具调用 ID（仅首个 delta 携带）
+        id: Option<String>,
+        /// 工具名（仅首个 delta 携带）
+        name: Option<String>,
+        /// 参数 JSON 字符串增量（多次累积后 JSON.parse）
+        arguments_delta: Option<String>,
+    },
+    /// 流结束
+    Done {
+        /// 结束原因（stop / tool_calls / length / content_filter）
+        finish_reason: Option<String>,
+    },
+    /// Token 用量（部分 provider 在流末尾返回，如 DeepSeek 缓存命中统计）
+    ///
+    /// 语义：input_tokens 是**未命中缓存**的输入，缓存读取/写入单独计（计费输入 = 三者之和）。
+    Usage {
+        /// 未命中缓存的输入 token
+        input_tokens: u64,
+        /// 输出 token
+        output_tokens: u64,
+        /// 前缀缓存命中 token（DeepSeek prompt_cache_hit_tokens / OpenAI cached_tokens）
+        #[serde(default)]
+        cache_read_tokens: u64,
+        /// 缓存写入 token（Anthropic 风格；其余 provider 为 0）
+        #[serde(default)]
+        cache_write_tokens: u64,
+    },
+    /// 错误事件（流中断）
+    Error { message: String },
+}
+
+/// 从流式响应末尾的 usage 对象解析 token 用量（兼容 OpenAI / DeepSeek / Anthropic 字段名）。
+///
+/// - 总输入：`input_tokens`（Responses API）/ `prompt_tokens`（Chat Completions）
+/// - 缓存命中：`input_tokens_details.cached_tokens`（OpenAI）/ `prompt_cache_hit_tokens`（DeepSeek）
+/// - 返回的 `input_tokens` 已折算为**未命中缓存**的输入（总输入 − 缓存命中）
+pub fn parse_stream_usage(usage: &serde_json::Value) -> Option<StreamEvent> {
+    if !usage.is_object() {
+        return None;
+    }
+    let total_input = usage["input_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens"].as_u64())
+        .or_else(|| usage["promptTokenCount"].as_u64())?;
+    let output = usage["output_tokens"]
+        .as_u64()
+        .or_else(|| usage["completion_tokens"].as_u64())
+        .or_else(|| usage["candidatesTokenCount"].as_u64())
+        .unwrap_or(0);
+    let anthropic_cache_read = usage["cache_read_input_tokens"].as_u64();
+    let cache_read = usage["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+        .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+        .or_else(|| usage["cachedContentTokenCount"].as_u64())
+        .or(anthropic_cache_read)
+        .unwrap_or(0);
+    // Anthropic reports uncached input separately; cached input may exceed it.
+    let cache_read = if anthropic_cache_read.is_some() {
+        cache_read
+    } else {
+        cache_read.min(total_input)
+    };
+    let cache_write = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+    Some(StreamEvent::Usage {
+        input_tokens: if anthropic_cache_read.is_some() {
+            total_input
+        } else {
+            total_input - cache_read
+        },
+        output_tokens: output,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+    })
+}
+
+/// 从各协议的非流式响应中提取并持久化 token 用量。
+pub fn record_response_usage(model: &str, response: &Value) {
+    let usage = response
+        .get("usage")
+        .or_else(|| response.get("usageMetadata"))
+        .or_else(|| response.pointer("/payload/usage/text"));
+    if let Some(StreamEvent::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    }) = usage.and_then(parse_stream_usage)
+    {
+        crate::brain::coding_event_log::current_record("model_usage", serde_json::json!({
+            "model":model,"input_tokens":input_tokens,"output_tokens":output_tokens,
+            "cache_read_tokens":cache_read_tokens,"cache_write_tokens":cache_write_tokens,
+        }));
+        crate::providers::usage_store::record_usage(
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderStats {
+    pub model: String,
+    pub total_calls: u64,
+    pub successful_calls: u64,
+    pub failed_calls: u64,
+}
+
+/// 惩罚参数在请求体中的字段名。各厂商命名不同，由调用方按协议选择。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PenaltyKeys {
+    pub presence: &'static str,
+    pub frequency: &'static str,
+}
+
+/// 蛇形命名：OpenAI Chat Completions / 智谱 / 火山方舟等 OpenAI 兼容协议。
+pub const PENALTY_KEYS_SNAKE: PenaltyKeys = PenaltyKeys {
+    presence: "presence_penalty",
+    frequency: "frequency_penalty",
+};
+
+/// 驼峰命名：Gemini `generationConfig` 内的 `presencePenalty` / `frequencyPenalty`。
+pub const PENALTY_KEYS_CAMEL: PenaltyKeys = PenaltyKeys {
+    presence: "presencePenalty",
+    frequency: "frequencyPenalty",
+};
+
+pub struct ProviderBase {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    pub temperature: f64,
+    pub max_tokens: u32,
+    pub circuit_breaker: Arc<RwLock<CircuitBreaker>>,
+    pub request_cache: Mutex<HashMap<String, (String, Instant)>>,
+    /// 联网搜索开关（运行时可切换）
+    pub enable_search: AtomicBool,
+    /// 代理地址（None 表示直连）
+    pub proxy: Option<String>,
+    /// 专属 HTTP 客户端（带代理配置时创建，None 时回退到全局客户端）
+    pub client: Option<reqwest::Client>,
+    /// temperature 运行时覆盖（存储 f64::to_bits()；0 表示无覆盖，用配置默认值）。
+    /// 由 emotion→temperature 映射在每轮对话前设置，让 LLM 输出温度随情绪变化。
+    pub temperature_override: AtomicU64,
+    /// 工作智能体模式：true 时请求体省略 temperature 字段（交服务端默认）。
+    /// 编程任务对确定性要求高，且推理模型对非默认温度敏感
+    /// （OpenAI o 系列仅接受默认值，reasoner 忽略该参数），
+    /// 故工作智能体模型统一不发送 temperature。
+    pub omit_temperature: AtomicBool,
+    pub send_temperature: AtomicBool,
+    pub send_max_tokens: AtomicBool,
+    pub request_customization: RwLock<crate::providers::reasoning_profiles::RequestCustomization>,
+    /// 推理偏好运行时覆盖（None 表示不干预，交由服务端默认）。
+    /// ModelRouter 按请求设置 / 恢复，provider 构造请求体时读取。
+    pub reasoning_pref: RwLock<Option<ReasoningPreference>>,
+}
+
+impl ProviderBase {
+    /// Bind tools without registering another breaker or baking task-local
+    /// overrides into persistent defaults (which would apply extra tokens twice).
+    pub fn fork(&self) -> Self {
+        Self {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            circuit_breaker: self.circuit_breaker.clone(),
+            request_cache: Mutex::new(HashMap::new()),
+            enable_search: AtomicBool::new(self.enable_search.load(Ordering::Relaxed)),
+            proxy: self.proxy.clone(),
+            client: self.client.clone(),
+            temperature_override: AtomicU64::new(self.temperature_override.load(Ordering::Relaxed)),
+            omit_temperature: AtomicBool::new(self.omit_temperature.load(Ordering::Relaxed)),
+            send_temperature: AtomicBool::new(self.send_temperature.load(Ordering::Relaxed)),
+            send_max_tokens: AtomicBool::new(self.send_max_tokens.load(Ordering::Relaxed)),
+            reasoning_pref: RwLock::new(*self.reasoning_pref.read()),
+            request_customization: RwLock::new(self.request_customization.read().clone()),
+        }
+    }
+
+    pub fn new(
+        api_key: String,
+        base_url: String,
+        model: String,
+        temperature: f64,
+        max_tokens: u32,
+    ) -> Self {
+        let model = model.trim().to_string();
+        let breaker_name = format!("provider:{}", model);
+        let circuit_breaker = register_circuit_breaker(
+            breaker_name,
+            CB_FAILURE_THRESHOLD,
+            CB_FAILURE_RATE,
+            CB_RESET_TIMEOUT,
+        );
+        Self {
+            api_key,
+            base_url,
+            model,
+            temperature,
+            max_tokens,
+            circuit_breaker,
+            request_cache: Mutex::new(HashMap::new()),
+            enable_search: AtomicBool::new(false),
+            proxy: None,
+            client: None,
+            temperature_override: AtomicU64::new(0),
+            omit_temperature: AtomicBool::new(false),
+            send_temperature: AtomicBool::new(true),
+            send_max_tokens: AtomicBool::new(true),
+            request_customization: RwLock::new(Default::default()),
+            reasoning_pref: RwLock::new(None),
+        }
+    }
+
+    /// 设置联网搜索开关（运行时可切换）
+    pub fn set_enable_search(&self, enable: bool) {
+        self.enable_search.store(enable, Ordering::Relaxed);
+    }
+
+    /// 返回当前生效的 max_tokens：请求级覆盖优先，否则用配置默认值。
+    pub fn effective_max_tokens(&self) -> u32 {
+        ProviderCallOptions::current().max_tokens.unwrap_or(self.max_tokens)
+    }
+
+    /// 设置 temperature 运行时覆盖。
+    /// 传入 None 清除覆盖（恢复配置默认值）；传入 Some(t) 设置覆盖温度。
+    pub fn set_temperature_override(&self, temp: Option<f64>) {
+        match temp {
+            Some(t) if t.is_finite() => {
+                // 加一编码让 0 专用于 None；有限 f64 不会编码成 0。
+                self.temperature_override
+                    .store(t.to_bits().wrapping_add(1), Ordering::Relaxed);
+            }
+            Some(_) | None => {
+                self.temperature_override.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// 返回当前生效的 temperature：有覆盖时用覆盖值，否则用配置默认值。
+    pub fn effective_temperature(&self) -> f64 {
+        if let Some(temp) = ProviderCallOptions::current().temperature {
+            return temp;
+        }
+        let stored = self.temperature_override.load(Ordering::Relaxed);
+        if stored == 0 {
+            self.temperature
+        } else {
+            f64::from_bits(stored.wrapping_sub(1))
+        }
+    }
+
+    /// 设置是否在请求体中省略 temperature 字段（工作智能体模型用）。
+    pub fn set_omit_temperature(&self, omit: bool) {
+        self.omit_temperature.store(omit, Ordering::Relaxed);
+    }
+
+    /// 是否处于省略 temperature 模式。
+    pub fn should_omit_temperature(&self) -> bool {
+        self.omit_temperature.load(Ordering::Relaxed)
+    }
+
+    /// 若处于省略模式，按各厂商请求体路径移除 temperature 字段。
+    ///
+    /// 同时按用户配置省略最大输出预算；不根据模型名称强制改变开关。
+    /// 路径覆盖：
+    /// - 顶层 `temperature`：OpenAI 兼容 / Responses / Anthropic / 文心 / 豆包 / 智谱 等
+    /// - `generationConfig.temperature`：Gemini
+    /// - `parameter.chat.temperature`：讯飞星火
+    ///
+    /// 不做递归移除：消息内容 / 工具 JSON Schema 中可能出现名为
+    /// temperature 的业务字段（如天气工具的参数定义），递归删除会破坏语义。
+    pub fn strip_temperature(&self, body: &mut serde_json::Value) {
+        let sampling = self.request_customization.read().sampling();
+        crate::providers::reasoning_profiles::apply_sampling_switches(
+            body,
+            !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
+            self.send_max_tokens.load(Ordering::Relaxed) && !ProviderCallOptions::current().omit_output_limit,
+            &sampling,
+        );
+    }
+
+    /// Final reasoning mappings and user patches run immediately before transport.
+    /// Legacy parameter patches obey sampling switches; full-body customization runs last.
+    pub fn finalize_body(&self, body: Value) -> Value {
+        let customization = self.request_customization.read();
+        let mut body = customization.finalize(body, self.effective_reasoning(), &self.model,
+            !self.should_omit_temperature() && self.send_temperature.load(Ordering::Relaxed),
+            self.send_max_tokens.load(Ordering::Relaxed));
+        // Explicitly unlimited calls must also override limits introduced by full-body patches.
+        if ProviderCallOptions::current().omit_output_limit {
+            crate::providers::reasoning_profiles::apply_sampling_switches(
+                &mut body, true, false, &customization.sampling(),
+            );
+            if let Some(agent) = body.get_mut("agent") {
+                crate::providers::reasoning_profiles::apply_sampling_switches(
+                    agent, true, false, &customization.sampling(),
+                );
+            }
+        }
+        body
+    }
+
+    /// 惩罚参数的合法化：`None` / 非有限值 / `0.0` 一律视为"不发送"。
+    ///
+    /// `0.0` 与"不发送"在语义上完全等价（都是服务端默认的 0 惩罚），
+    /// 而省略字段能避免严格校验的服务端因未知参数报 400。
+    fn sanitize_penalty(value: Option<f64>) -> Option<f64> {
+        value.filter(|v| v.is_finite() && *v != 0.0)
+    }
+
+    /// 当前生效的存在惩罚（`None` = 本次请求不发送该字段）。
+    pub fn effective_presence_penalty(&self) -> Option<f64> {
+        Self::sanitize_penalty(ProviderCallOptions::current().presence_penalty)
+    }
+
+    /// 当前生效的频率惩罚（`None` = 本次请求不发送该字段）。
+    pub fn effective_frequency_penalty(&self) -> Option<f64> {
+        Self::sanitize_penalty(ProviderCallOptions::current().frequency_penalty)
+    }
+
+    /// 把惩罚参数写进一个 JSON 对象（键名由 `keys` 决定）。
+    ///
+    /// 拆成"对象版"是为了让 Gemini 复用：它的采样参数在嵌套的
+    /// `generationConfig` 里，且键名是驼峰，无法走顶层版。
+    pub fn apply_sampling_penalties_to(
+        &self,
+        obj: &mut serde_json::Map<String, serde_json::Value>,
+        keys: PenaltyKeys,
+    ) {
+        if let Some(p) = self.effective_presence_penalty() {
+            obj.insert(keys.presence.to_string(), serde_json::json!(p));
+        }
+        if let Some(f) = self.effective_frequency_penalty() {
+            obj.insert(keys.frequency.to_string(), serde_json::json!(f));
+        }
+    }
+
+    /// 把惩罚参数写进请求体顶层（OpenAI Chat Completions 家族的形状）。
+    ///
+    /// **只在真正支持该参数的 provider 里调用**。Responses API（`/responses`）
+    /// 与 Anthropic Messages 都不接受这两个字段，写入会被服务端以 400 拒绝，
+    /// 因此那两条路径必须保持不调用——这不是遗漏，见 `ProviderCallOptions` 的文档。
+    pub fn apply_sampling_penalties(&self, body: &mut serde_json::Value, keys: PenaltyKeys) {
+        if let Some(obj) = body.as_object_mut() {
+            self.apply_sampling_penalties_to(obj, keys);
+        }
+    }
+
+    /// 设置推理偏好运行时覆盖（None 表示不干预，交由服务端默认）。
+    pub fn set_reasoning_pref(&self, pref: Option<ReasoningPreference>) {
+        *self.reasoning_pref.write() = pref;
+    }
+
+    /// 返回当前生效的推理偏好：无覆盖时为 Auto（不干预）。
+    pub fn effective_reasoning(&self) -> ReasoningPreference {
+        ProviderCallOptions::current().reasoning.unwrap_or_else(|| {
+            self.reasoning_pref
+                .read()
+                .unwrap_or(ReasoningPreference::AUTO)
+        })
+    }
+
+    /// 读取联网搜索开关
+    pub fn is_enable_search(&self) -> bool {
+        ProviderCallOptions::current()
+            .enable_search
+            .unwrap_or_else(|| self.enable_search.load(Ordering::Relaxed))
+    }
+
+    /// 获取 HTTP 客户端：优先使用专属客户端（带代理），否则回退到全局客户端
+    pub fn get_client(&self) -> reqwest::Client {
+        self.client.clone().unwrap_or_else(get_global_client)
+    }
+
+    pub fn get_cache_key(&self, prompt: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(
+            format!(
+                "{}\0{}\0{}\0{:?}",
+                self.base_url,
+                self.model,
+                prompt,
+                ProviderCallOptions::current()
+            )
+            .as_bytes(),
+        );
+        format!("{:x}", digest)
+    }
+
+    pub fn get_cached_response(&self, prompt: &str) -> Option<String> {
+        if ProviderCallOptions::current().response_cache_allowed == Some(false) {
+            return None;
+        }
+        let key = self.get_cache_key(prompt);
+        let cache = self.request_cache.lock();
+        if let Some((response, timestamp)) = cache.get(&key) {
+            if timestamp.elapsed() < CACHE_TTL && !response.trim().is_empty() {
+                return Some(response.clone());
+            }
+        }
+        None
+    }
+
+    pub fn cache_response(&self, prompt: &str, response: &str) {
+        // 空文本不是可复用的成功结果；缓存它会让空响应重试永远无法到达提供商。
+        if response.trim().is_empty() || ProviderCallOptions::current().response_cache_allowed == Some(false) {
+            return;
+        }
+        let key = self.get_cache_key(prompt);
+        let mut cache = self.request_cache.lock();
+        if cache.len() >= CACHE_MAX_ENTRIES {
+            cache.retain(|_, (_, ts)| ts.elapsed() < CACHE_TTL);
+            while cache.len() >= CACHE_MAX_ENTRIES {
+                let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, (_, timestamp))| *timestamp)
+                    .map(|(key, _)| key.clone())
+                else {
+                    break;
+                };
+                cache.remove(&oldest_key);
+            }
+        }
+        cache.insert(key, (response.to_string(), Instant::now()));
+    }
+
+    pub fn check_circuit(&self) -> VivianResult<()> {
+        let mut breaker = self.circuit_breaker.write();
+        if !breaker.allow_request() {
+            return Err(VivianError::CircuitBreaker(format!(
+                "熔断器已打开: {}",
+                breaker.name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn record_success(&self) {
+        self.circuit_breaker.write().record_success();
+    }
+
+    pub fn record_failure(&self) {
+        self.circuit_breaker.write().record_failure();
+    }
+
+    pub fn get_stats(&self) -> ProviderStats {
+        let breaker = self.circuit_breaker.read();
+        ProviderStats {
+            model: self.model.clone(),
+            total_calls: breaker.success_count as u64 + breaker.failure_count as u64,
+            successful_calls: breaker.success_count as u64,
+            failed_calls: breaker.failure_count as u64,
+        }
+    }
+}
+
+#[cfg(test)]
+mod sampling_penalty_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn framework_isolation_is_request_local_and_restored_after_error() {
+        let configured = Some("companion framework".to_string());
+        let isolated = scope_provider_call(
+            ProviderCallOptions {
+                include_framework_instructions: Some(false),
+                ..Default::default()
+            },
+            async {
+                tokio::task::yield_now().await;
+                assert!(effective_instructions(&configured).is_none());
+                let messages =
+                    crate::providers::chat_completions::ChatCompletionsProvider::build_messages(
+                        &[ChatMessage::system("isolated executor")],
+                        &configured,
+                    );
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0]["content"], "isolated executor");
+                Err::<(), &str>("executor error")
+            },
+        );
+        let companion = async {
+            tokio::task::yield_now().await;
+            assert_eq!(effective_instructions(&configured), configured);
+        };
+        let (result, _) = tokio::join!(isolated, companion);
+        assert!(result.is_err());
+        assert_eq!(effective_instructions(&configured), configured);
+    }
+
+    #[test]
+    fn provider_model_trims_config_whitespace() {
+        let base = ProviderBase::new(
+            "test-key".into(),
+            "https://example.invalid/v1".into(),
+            " deepseek-flash \n".into(),
+            0.7,
+            256,
+        );
+        assert_eq!(base.model, "deepseek-flash");
+    }
+
+    fn test_base() -> ProviderBase {
+        ProviderBase::new(
+            "test-key".to_string(),
+            "https://example.invalid/v1".to_string(),
+            "test-model".to_string(),
+            0.7,
+            256,
+        )
+    }
+
+    #[test]
+    fn empty_response_does_not_poison_retries_or_replace_a_valid_cache_entry() {
+        let base = test_base();
+        base.cache_response("request", "  ");
+        assert!(base.get_cached_response("request").is_none());
+        base.cache_response("request", "嗯？");
+        assert_eq!(base.get_cached_response("request").as_deref(), Some("嗯？"));
+        base.cache_response("request", "");
+        assert_eq!(base.get_cached_response("request").as_deref(), Some("嗯？"));
+        // 兼容改动前同一进程内已经存在的空缓存。
+        let key = base.get_cache_key("old request");
+        base.request_cache.lock().insert(key, (String::new(), Instant::now()));
+        assert!(base.get_cached_response("old request").is_none());
+    }
+
+    /// `0.0` / 非有限值必须折叠成"不发送"。
+    ///
+    /// 这不是美化：Responses API 对未知参数直接 400，而"发送 0.0"与
+    /// "不发送"在语义上完全等价（服务端默认就是 0 惩罚），所以没有任何理由冒险。
+    #[test]
+    fn sanitize_penalty_folds_zero_and_non_finite() {
+        assert_eq!(ProviderBase::sanitize_penalty(None), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(0.0)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(f64::NAN)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(f64::INFINITY)), None);
+        assert_eq!(ProviderBase::sanitize_penalty(Some(0.3)), Some(0.3));
+        assert_eq!(ProviderBase::sanitize_penalty(Some(-0.5)), Some(-0.5));
+    }
+
+    /// 作用域外不得写入任何惩罚字段——provider 默认值来自请求级作用域，
+    /// 不能因为进程里别的请求设过就泄漏进来。
+    #[test]
+    fn penalties_absent_outside_call_scope() {
+        let base = test_base();
+        let mut body = serde_json::json!({"model": "test-model"});
+        base.apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
+        assert!(
+            body.get("presence_penalty").is_none(),
+            "无作用域时不应写入 presence_penalty"
+        );
+        assert!(
+            body.get("frequency_penalty").is_none(),
+            "无作用域时不应写入 frequency_penalty"
+        );
+        assert_eq!(base.effective_presence_penalty(), None);
+        assert_eq!(base.effective_frequency_penalty(), None);
+    }
+
+    /// 作用域内写入，且蛇形 / 驼峰两套键名各自正确（Gemini 走嵌套驼峰）。
+    #[tokio::test]
+    async fn penalties_written_inside_scope_with_per_protocol_keys() {
+        let base = test_base();
+        let options = ProviderCallOptions {
+            presence_penalty: Some(0.3),
+            frequency_penalty: Some(0.2),
+            ..ProviderCallOptions::default()
+        };
+        scope_provider_call(options, async {
+            let mut openai_style = serde_json::json!({"model": "m"});
+            base.apply_sampling_penalties(&mut openai_style, PENALTY_KEYS_SNAKE);
+            assert_eq!(openai_style["presence_penalty"], serde_json::json!(0.3));
+            assert_eq!(openai_style["frequency_penalty"], serde_json::json!(0.2));
+
+            let mut gemini_style = serde_json::json!({"generationConfig": {}});
+            if let Some(cfg) = gemini_style
+                .get_mut("generationConfig")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                base.apply_sampling_penalties_to(cfg, PENALTY_KEYS_CAMEL);
+            }
+            assert_eq!(
+                gemini_style["generationConfig"]["presencePenalty"],
+                serde_json::json!(0.3)
+            );
+            assert_eq!(
+                gemini_style["generationConfig"]["frequencyPenalty"],
+                serde_json::json!(0.2)
+            );
+            // 驼峰路径不得污染顶层（反之亦然）
+            assert!(gemini_style.get("presence_penalty").is_none());
+        })
+        .await;
+    }
+
+    /// 作用域内显式传 0.0 等价于"本请求关闭惩罚"，请求体保持干净。
+    #[tokio::test]
+    async fn zero_penalty_inside_scope_omits_field() {
+        let base = test_base();
+        let options = ProviderCallOptions {
+            presence_penalty: Some(0.0),
+            frequency_penalty: Some(0.0),
+            ..ProviderCallOptions::default()
+        };
+        scope_provider_call(options, async {
+            let mut body = serde_json::json!({});
+            base.apply_sampling_penalties(&mut body, PENALTY_KEYS_SNAKE);
+            assert_eq!(body, serde_json::json!({}), "0.0 必须折叠为不发送");
+        })
+        .await;
+    }
+}
+
+#[cfg(test)]
+mod usage_reporting_tests {
+    use super::*;
+
+    #[test]
+    fn usage_reporting_anthropic_cache_is_separate_from_uncached_input() {
+        let event = parse_stream_usage(&serde_json::json!({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 20})).unwrap();
+        match event {
+            StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            } => {
+                assert_eq!(
+                    (
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens,
+                        cache_write_tokens
+                    ),
+                    (10, 5, 1000, 20)
+                );
+            }
+            _ => panic!("Expected usage"),
+        }
+    }
+
+    #[test]
+    fn usage_reporting_openai_cached_input_is_counted_once() {
+        let event = parse_stream_usage(&serde_json::json!({"prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": {"cached_tokens": 80}})).unwrap();
+        match event {
+            StreamEvent::Usage {
+                input_tokens,
+                cache_read_tokens,
+                ..
+            } => assert_eq!((input_tokens, cache_read_tokens), (20, 80)),
+            _ => panic!("Expected usage"),
+        }
+        assert!(parse_stream_usage(&serde_json::json!({"model": "no-usage"})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod request_parameter_switch_tests {
+    use super::*;
+    #[tokio::test]
+    async fn unlimited_output_removes_default_and_override_limits_only_for_this_call() {
+        let base = ProviderBase::new("dummy".into(), "https://example.test".into(),
+            "test-model".into(), 0.7, 1400);
+        base.request_customization.write().overrides = Some(serde_json::json!({
+            "$request":{"mode":"merge","body":{"max_tokens":1400,"max_output_tokens":2048}}
+        }));
+        let body = serde_json::json!({
+            "temperature":0.7,"max_tokens":1400,"max_output_tokens":1400,"max_completion_tokens":1400,
+            "generationConfig":{"maxOutputTokens":1400},
+            "parameter":{"chat":{"max_tokens":1400}},
+            "agent":{"max_output_tokens":1400},
+            "tools":[{"parameters":{"properties":{"max_tokens":{"type":"integer"}}}}]
+        });
+        let request = LLMRequest::new(TASK_WORK_AGENT, vec![]).with_max_tokens(1400).without_output_limit();
+        assert!(request.omit_output_limit);
+        assert!(request.max_tokens_override.is_none());
+        scope_provider_call(ProviderCallOptions { omit_output_limit: request.omit_output_limit,
+            ..Default::default() }, async {
+            // Nested route/schema scopes must not restore the configured limit.
+            scope_provider_call(ProviderCallOptions::default(), async {
+                let sent = base.finalize_body(body.clone());
+                for path in ["/max_tokens", "/max_output_tokens", "/max_completion_tokens",
+                    "/generationConfig/maxOutputTokens", "/parameter/chat/max_tokens", "/agent/max_output_tokens"] {
+                    assert!(sent.pointer(path).is_none(), "{path}");
+                }
+                assert_eq!(sent["temperature"], 0.7);
+                assert_eq!(sent["tools"][0]["parameters"]["properties"]["max_tokens"]["type"], "integer");
+            }).await;
+        }).await;
+        assert!(!ProviderCallOptions::current().omit_output_limit);
+        assert_eq!(base.finalize_body(body)["max_tokens"], 1400);
+        assert!(!LLMRequest::new(TASK_WORK_AGENT, vec![]).without_output_limit().with_max_tokens(64).omit_output_limit);
+    }
+
+    #[tokio::test]
+    async fn bound_provider_shares_health_but_does_not_capture_request_overrides() {
+        let base = ProviderBase::new(
+            "dummy".into(),
+            "https://example.test".into(),
+            "fork-test".into(),
+            0.7,
+            100,
+        );
+        let bound = scope_provider_call(
+            ProviderCallOptions {
+                max_tokens: Some(150),
+                temperature: Some(0.2),
+                ..Default::default()
+            },
+            async {
+                let bound = base.fork();
+                assert_eq!(bound.effective_max_tokens(), 150);
+                assert_eq!(bound.effective_temperature(), 0.2);
+                bound
+            },
+        )
+        .await;
+        assert!(Arc::ptr_eq(&base.circuit_breaker, &bound.circuit_breaker));
+        assert_eq!(bound.effective_max_tokens(), 100);
+        assert_eq!(bound.effective_temperature(), 0.7);
+    }
+
+    #[test]
+    fn switches_control_wire_fields_and_preserve_tool_schemas() {
+        for (temperature, tokens) in [(true, true), (true, false), (false, true), (false, false)] {
+            let base = ProviderBase::new(
+                "dummy".into(),
+                "https://example.test".into(),
+                "unknown-model".into(),
+                0.7,
+                256,
+            );
+            base.send_temperature.store(temperature, Ordering::Relaxed);
+            base.send_max_tokens.store(tokens, Ordering::Relaxed);
+            let mut body = serde_json::json!({
+                "temperature":0.7,"max_tokens":256,"max_output_tokens":256,"max_completion_tokens":256,
+                "generationConfig":{"temperature":0.7,"maxOutputTokens":256},
+                "parameter":{"chat":{"temperature":0.7,"max_tokens":256}},
+                "tools":[{"parameters":{"properties":{"temperature":{"type":"number"},"max_tokens":{"type":"integer"}}}}]
+            });
+            base.strip_temperature(&mut body);
+            assert_eq!(body.get("temperature").is_some(), temperature);
+            assert_eq!(
+                body["generationConfig"].get("temperature").is_some(),
+                temperature
+            );
+            assert_eq!(
+                body["parameter"]["chat"].get("temperature").is_some(),
+                temperature
+            );
+            for field in ["max_tokens", "max_output_tokens", "max_completion_tokens"] {
+                assert_eq!(body.get(field).is_some(), tokens);
+            }
+            assert_eq!(
+                body["generationConfig"].get("maxOutputTokens").is_some(),
+                tokens
+            );
+            assert_eq!(
+                body["parameter"]["chat"].get("max_tokens").is_some(),
+                tokens
+            );
+            assert_eq!(
+                body["tools"][0]["parameters"]["properties"]["temperature"]["type"],
+                "number"
+            );
+            assert_eq!(
+                body["tools"][0]["parameters"]["properties"]["max_tokens"]["type"],
+                "integer"
+            );
+        }
+    }
+}

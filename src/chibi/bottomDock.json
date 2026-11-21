@@ -1,0 +1,18 @@
+{
+  "note": "底边贴边（edge-bottom）保留 idle 尺寸并校准脸部接触线。由 scripts/calibrate-chibi-bottom-dock.mjs 依据 public/ 的保持帧与 defaultSize.json 实测生成。",
+  "originPercent": 90,
+  "target": {
+    "width": 272.1847,
+    "bottom": 259
+  },
+  "characters": {
+    "vivian": {
+      "scale": 1,
+      "translateY": -3.384909
+    },
+    "nana": {
+      "scale": 1,
+      "translateY": -1.124555
+    }
+  }
+}

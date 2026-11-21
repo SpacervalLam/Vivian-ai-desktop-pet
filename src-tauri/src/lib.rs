@@ -1,0 +1,2171 @@
+#![recursion_limit = "512"]
+
+pub mod asset_crypto;
+pub mod audio_react;
+pub mod borderless;
+pub mod brain;
+pub mod browser_bridge;
+pub mod embedded_browser;
+pub mod bundle_reader;
+pub mod character_behavior;
+pub mod character_registry;
+pub mod character_packages;
+pub mod character_residency;
+pub mod chat_partner;
+pub mod chat_partner_memory;
+pub mod sns_store;
+pub mod sns_runtime;
+pub mod chat_partner_policy;
+pub mod commands;
+pub(crate) mod spoken_turn;
+pub mod config;
+pub mod companion_policy;
+pub mod companion_runtime;
+pub mod game_policy;
+pub mod game_companion;
+pub mod desktop_clipboard;
+pub mod dock;
+pub mod drag_motion;
+pub mod desktop_terrain;
+pub mod screen_interest;
+pub mod media_focus;
+pub mod shortcut;
+pub mod screen_capture;
+mod capture_exclusion;
+pub mod screen_selection;
+pub mod screen_freeze;
+pub mod visual_stream;
+mod screen_watch_native;
+pub mod screen_watch;
+mod screen_freeze_geometry;
+pub mod visual_evidence;
+pub mod edge_menu;
+pub mod desktop_menu_policy;
+pub mod companion_quiet;
+pub mod vision;
+pub mod voice_diagnostics;
+pub mod stickers;
+pub mod conversation;
+pub mod cordis;
+pub mod cross_character;
+pub mod diary;
+pub mod discovery;
+pub mod dialogue;
+pub mod emotion;
+pub mod engine;
+pub mod error;
+pub mod feature_flags;
+pub mod hooks;
+pub mod i18n;
+pub mod lsp;
+pub mod memory;
+pub mod messages;
+pub mod mind;
+pub mod metrics;
+pub mod music;
+pub mod network;
+pub mod notebook;
+pub mod user_quick_notes;
+pub mod persona;
+pub mod self_state;
+pub mod pet_controller;
+pub mod pipeline;
+pub mod plugins;
+pub mod plugin_contract;
+pub mod plugin_advisor_contract;
+pub mod plugin_advisor;
+pub mod provider_preset_updates;
+pub mod desktop_contract;
+pub mod desktop_native;
+pub mod plugin_contributions;
+pub mod presence;
+pub mod proactive;
+pub mod providers;
+pub mod psychology;
+pub mod remote;
+pub mod research;
+pub mod resilience;
+pub mod skills;
+pub mod speech;
+pub mod startup;
+pub mod state;
+pub mod storage;
+pub mod tools;
+pub mod translation;
+pub mod types;
+pub mod utils;
+pub mod video_animation;
+pub mod world;
+
+use std::str::FromStr;
+use std::sync::Arc;
+
+use tauri::{Emitter, Manager};
+
+use crate::state::AppState;
+use serde_json::json;
+
+/// URL percent-decoding（处理中文文件名等非 ASCII 字符）
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &bytes[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(hex).unwrap_or("00"),
+                16,
+            ) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+pub fn run() {
+    init_logging();
+
+    // Hold a shared runtime lease before any manager opens user data. A queued
+    // export first waits exclusively for the preceding process and browser to exit.
+    let _data_lease = match crate::storage::export::startup(
+        &crate::utils::path::get_user_data_dir(), crate::utils::pid_file::is_process_alive,
+    ) {
+        Ok(lease)=>lease,
+        Err(error)=>{
+            eprintln!("无法建立用户数据写入屏障: {error}");
+            #[cfg(windows)] {
+                use windows::core::PCWSTR;
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW,MB_ICONERROR,MB_OK};
+                let text:Vec<u16>=format!("无法完成备份：{error}").encode_utf16().chain(Some(0)).collect();
+                let title:Vec<u16>="Vivian".encode_utf16().chain(Some(0)).collect();
+                unsafe{MessageBoxW(None,PCWSTR(text.as_ptr()),PCWSTR(title.as_ptr()),MB_ICONERROR|MB_OK);}
+            }
+            return;
+        }
+    };
+
+    // 恢复出厂清扫：必须在 AppState::new()（及任何数据模块打开文件）之前执行，
+    // 此时 vectors.db 等尚未被 SQLite 打开，可无锁删除。
+    if let Err(e) = commands::system::factory_reset_sweep_if_pending() {
+        tracing::error!("[factory_reset] {e}");
+        eprintln!("{e}");
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::PCWSTR;
+            use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+            let message: Vec<u16> = e.encode_utf16().chain(std::iter::once(0)).collect();
+            let title: Vec<u16> = "恢复出厂未完成".encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe { MessageBoxW(None, PCWSTR(message.as_ptr()), PCWSTR(title.as_ptr()), MB_OK | MB_ICONERROR); }
+        }
+        return;
+    }
+
+    // 备份恢复：同样必须在 AppState::new() 之前执行（清空当前数据并回填备份，
+    // 此时数据文件未被打开，可无锁覆盖）
+    commands::backup::restore_pending_if_any();
+
+    // 种子时间锚点改为按批次按需创建：角色首次初始化时才建立该批次的时钟，
+    // 后加入的角色不会继承旧批次的首次启动时间（见 seed::load_or_create_anchor_for）。
+    // 备份恢复出来的旧版全局 seed_clock.json 只作为 original 组的迁移来源。
+
+    let app_state = AppState::new();
+    companion_quiet::restore(app_state.config.read().get_all().companion.do_not_disturb);
+
+    tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("model", |_app, request, responder| {
+            use tauri::http::{Response, StatusCode};
+
+            let uri = request.uri();
+            let raw_path = uri.path().trim_start_matches('/').to_string();
+
+            // URL 解码（处理中文文件名，如表情 / 动作资源）
+            let path = percent_decode(&raw_path);
+
+            if path.is_empty() {
+                responder.respond(
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(b"empty path".to_vec())
+                        .unwrap(),
+                );
+                return;
+            }
+
+            // 从已解密解压的 Bundle 内存缓存中按路径取资源
+            match crate::bundle_reader::get(&path) {
+                Some(plaintext) => {
+                    let ct = crate::bundle_reader::content_type(&path);
+                    responder.respond(
+                        Response::builder()
+                            .header("Content-Type", ct)
+                            .header("Cache-Control", "no-cache")
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(plaintext)
+                            .unwrap(),
+                    );
+                }
+                None => {
+                    tracing::warn!("[model://] resource not found: {} (raw: {})", path, raw_path);
+                    responder.respond(
+                        Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(format!("not found: {}", path).into_bytes())
+                            .unwrap(),
+                    );
+                }
+            }
+        })
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 已有实例运行时优先聚焦在线的活跃角色，其次选择任一在线角色。全部离线时尊重用户的离线设置。
+            let target_window = {
+                let state = app.state::<std::sync::Arc<AppState>>();
+                let chars = state.characters.read();
+                let active_id = state.active_character_id.read().clone();
+                chars
+                    .get(&active_id)
+                    .filter(|c| *c.online.read())
+                    .map(|c| c.id.clone())
+                    .or_else(|| {
+                        chars
+                            .values()
+                            .find(|c| *c.online.read())
+                            .map(|c| c.id.clone())
+                    })
+            };
+            if let Some(label) = target_window.as_deref() {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    let state = match app.try_state::<std::sync::Arc<AppState>>() {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    let pressed = event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed;
+
+                    // 文字快捷键：短按立即触发文本输入，长按 400ms 触发语音输入
+                    // 互斥：任一角色快捷键按住期间，其他角色快捷键按下事件被忽略，
+                    // 避免 voice_shortcut_timer 单槽位被覆盖导致旧计时器无法 abort。
+                    let text_map = state.text_shortcuts.lock().clone();
+                    for (role, sc) in &text_map {
+                        if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(&crate::shortcut::normalize(sc)) {
+                            if shortcut == &parsed {
+                                if pressed && !crate::shortcut::physical_modifiers_match(sc) {
+                                    return;
+                                }
+                                if pressed {
+                                    // 互斥检查：已有其他角色按住则忽略本次按下
+                                    {
+                                        let mut active = state.active_shortcut_role.lock();
+                                        if let Some(active_role) = active.as_ref() {
+                                            if active_role != role {
+                                                return;
+                                            }
+                                        } else {
+                                            *active = Some(role.clone());
+                                        }
+                                    }
+                                    // 短按立即触发文本输入
+                                    let input_app = app.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        if let Err(error) = crate::edge_menu::open_quick_input(input_app, None, Some(true), Some(false)).await {
+                                            tracing::warn!("打开输入框失败: {}", error);
+                                        }
+                                    });
+                                    // 所有角色快捷键启动长按计时器，满 400ms 触发语音输入
+                                    let app_handle = app.clone();
+                                    // 当前回调运行在全局快捷键 hook 线程，非 Tokio runtime 上下文
+                                    let handle = tauri::async_runtime::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                        if let Err(error) = crate::edge_menu::open_quick_input(app_handle, None, Some(true), Some(true)).await {
+                                            tracing::warn!("打开语音输入失败: {}", error);
+                                        }
+                                    });
+                                    *state.voice_shortcut_timer.lock() = Some(handle);
+                                } else {
+                                    // 松开时取消长按计时器，并释放互斥锁
+                                    // 仅当松开的角色 == 当前按住的角色时才释放，
+                                    // 防止被忽略的角色的松开事件误释放他人持有的锁
+                                    let mut active = state.active_shortcut_role.lock();
+                                    let is_owner = active.as_deref() == Some(role.as_str());
+                                    if is_owner {
+                                        if let Some(h) = state.voice_shortcut_timer.lock().take() {
+                                            h.abort();
+                                        }
+                                        *active = None;
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    // 窗口快捷键：按下直接 emit 对应事件，无长按/互斥逻辑
+                    if pressed {
+                        let win_map = state.window_shortcuts.lock().clone();
+                        for (action, sc) in &win_map {
+                            if let Ok(parsed) = tauri_plugin_global_shortcut::Shortcut::from_str(&crate::shortcut::normalize(sc)) {
+                                if shortcut == &parsed && crate::shortcut::physical_modifiers_match(sc) {
+                                    if action == "screen_analyze" {
+                                        let app = app.clone();
+                                        let state = state.inner().clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            let character_id = state.active_character_id.read().clone();
+                                            let result = crate::commands::desktop_assistant::analyze_screen(&app, &state, &character_id).await;
+                                            let _ = app.emit("screen:analysis", serde_json::json!({"character_id":character_id,"result":result.as_ref().ok(),"error":result.as_ref().err()}));
+                                        });
+                                        return;
+                                    }
+                                    let _ = app.emit(
+                                        "window:shortcut",
+                                        serde_json::json!({ "action": action }),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                })
+                .build()
+        )
+        .plugin(tauri_plugin_os::init())
+        .manage(Arc::new(app_state))
+        .invoke_handler(tauri::generate_handler![
+            embedded_browser::embedded_browser_request,
+            embedded_browser::embedded_browser_layout,
+            embedded_browser::embedded_browser_capture,
+            commands::characters::list_characters,
+            commands::character_packages::character_package_status,
+            commands::character_packages::import_character_package,
+            commands::characters::list_chat_partners,
+            commands::sns::sns_save_contact,
+            commands::sns::sns_get_contact,
+            commands::sns::sns_delete_contact,
+            commands::sns::sns_list_groups,
+            commands::sns::sns_save_group,
+            commands::sns::sns_delete_group,
+            commands::sns::sns_group_history,
+            commands::sns::sns_send_group_message,
+            commands::characters::get_chat_partner_model,
+            commands::characters::set_chat_partner_model,
+            desktop_terrain::get_desktop_terrain,
+            screen_interest::find_screen_interest_points,
+            commands::characters::set_character_online,
+            commands::characters::set_character_offline,
+            commands::characters::set_active_character,
+            commands::characters::get_active_character,
+            commands::chat::send_message,
+            commands::chat::is_main_api_configured,
+            commands::chat::send_message_stream,
+            commands::chat::send_spoken_message,
+            commands::chat::stop_generation,
+            commands::chat::send_image_message,
+            commands::chat::save_temp_image,
+            commands::chat::save_voice_audio,
+            commands::chat::extract_file_text,
+            commands::chat::save_shared_file,
+            commands::chat::wake_from_presence,
+            commands::memory::get_memories,
+            commands::memory::create_agreement,
+            commands::memory::set_agreement_state,
+            commands::memory::get_memory_conversations,
+            commands::memory::summarize_memory_conversation,
+            commands::memory::get_memory_summary,
+            commands::memory::search_memories,
+            commands::memory::get_memories_all,
+            commands::memory::get_common_memories,
+            commands::memory::add_common_memory,
+            commands::memory::delete_common_memory,
+            commands::memory::clear_common_memories,
+            commands::memory::list_unified_events,
+            commands::memory::list_world_facts,
+            commands::memory::list_relationship_facts,
+            commands::memory::get_social_state_snapshot,
+            commands::memory::rebuild_memory_embeddings,
+            commands::memory::get_embedding_models,
+            commands::memory::get_embedding_provider_presets,
+            commands::mind::get_mind_state,
+            commands::mind::get_world_snapshot,
+            commands::mind::list_beliefs,
+            commands::mind::get_memory_health,
+            commands::mind_inspector::get_recent_reasoning_traces,
+            commands::mind_inspector::get_last_prompt_breakdown,
+            commands::mind_inspector::get_usage_prompt_snapshots,
+            commands::mind_inspector::get_prompt_template_preview,
+            commands::mind_inspector::get_sessions,
+            commands::mind_inspector::get_prompt_section_schema,
+            commands::user_facts::get_user_facts,
+            commands::user_facts::set_user_fact,
+            commands::user_facts::pin_user_fact,
+            commands::user_facts::delete_user_fact,
+            commands::user_facts::get_user_fact_types,
+            commands::discovery::get_discovery_profile,
+            commands::discovery::update_discovery_interest_weight,
+            commands::discovery::remove_discovery_interest,
+            commands::discovery::remove_discovery_dislike,
+            commands::discovery::add_discovery_dislike,
+            commands::discovery::respond_interest_probe,
+            commands::discovery::bootstrap_from_bangumi,
+            commands::discovery::get_discovery_duty,
+            commands::discovery::set_discovery_duty_quota,
+            commands::discovery::run_discovery_duty,
+            commands::browser::get_browser_platforms,
+            commands::browser::verify_browser_page,
+            commands::browser::open_embedded_browser,
+            commands::browser::browser_site_icon,
+            commands::tools::list_tools,
+            commands::tools::get_tool_history,
+            commands::tools::confirm_tool_execution,
+            commands::tools::get_pending_tool_confirmations,
+            commands::tools::respond_question,
+            commands::tools::plan_decision,
+            commands::tools::list_mcp_servers,
+            commands::tools::list_mcp_server_configs,
+            commands::tools::add_mcp_server,
+            commands::tools::remove_mcp_server,
+            commands::tools::test_mcp_server,
+            commands::tools::reconnect_mcp_server,
+            commands::tools::reset_mcp_server_override,
+            commands::config::get_config,
+            commands::config::set_config,
+            commands::config::report_effective_theme,
+            commands::config::get_all_config,
+            commands::config_transfer::export_settings_share,
+            commands::config_transfer::inspect_settings_share,
+            commands::config_transfer::import_settings_share,
+            commands::config_transfer::restart_after_settings_import,
+            commands::config::save_config,
+            commands::config::reload_config,
+            commands::config::diagnose_network,
+            commands::config::test_llm_route,
+            commands::config::get_token_usage,
+            commands::config::clear_token_usage,
+            commands::config::get_image_data_url,
+            commands::config::get_audio_data_url,
+            commands::emotion::get_current_mood,
+            commands::emotion::get_mood_history,
+            commands::emotion::get_recent_events,
+            commands::emotion::get_psychology_state,
+            commands::emotion::apply_user_interaction,
+            commands::emotion::psychology_micro_tick,
+            commands::emotion::mood_expression_tick,
+            commands::emotion::auto_expression_tick,
+            commands::emotion::trigger_system_event,
+            commands::emotion::set_emotion_expression,
+            commands::emotion::analyze_emotion_deep,
+            commands::emotion::analyze_emotion_batch,
+            commands::emotion::analyze_emotion_instant,
+            commands::engine::play_motion,
+            commands::engine::set_expression,
+            commands::engine::get_model_info,
+            commands::engine::get_display_scale,
+            commands::engine::get_avatar_url,
+            commands::engine::trigger_idle_action,
+            commands::engine::drain_pet_actions,
+            commands::engine::set_avoid_mouse,
+            commands::engine::try_wake_greeting,
+            commands::engine::list_available_models,
+            commands::engine::get_current_model,
+            commands::speech::start_recognition,
+            commands::speech::stop_recognition,
+            commands::speech::get_recognition_status,
+            commands::speech::transcribe_audio,
+            commands::speech::update_asr_config,
+            commands::speech::polish_asr_text,
+            commands::speech::update_text_shortcuts,
+            commands::speech::start_whisper_service,
+            commands::speech::stop_whisper_service,
+            commands::speech::get_whisper_service_status,
+            commands::system::is_initialized,
+            commands::system::get_startup_progress,
+            commands::system::exit_app,
+            commands::system::factory_reset,
+            commands::system::reinitialize,
+            commands::backup::backup_user_data,
+            commands::backup::take_backup_result,
+            commands::backup::restore_user_data,
+            commands::storage::get_storage_usage,
+            commands::storage::open_storage_folder,
+            commands::storage::clear_storage_cache,
+            commands::storage::clear_browser_cache,
+            commands::system::get_system_info,
+            commands::system::get_system_input_idle_seconds,
+            commands::system::get_system_mute,
+            commands::system::list_gallery_images,
+            commands::system::import_gallery_images,
+            commands::system::get_running_processes,
+            commands::system::open_application,
+            commands::system::close_application,
+            commands::system::set_system_flashlight,
+            commands::proactive::get_proactive_status,
+            commands::proactive::retry_interaction_message,
+            commands::diary::get_diary_entries,
+            commands::diary::get_diary_range,
+            commands::diary::generate_diary,
+            commands::diary::generate_diary_intelligent,
+            commands::diary::get_diary_entry,
+            commands::diary::delete_diary_entry,
+            commands::diary::get_diary_config,
+            commands::diary::set_diary_config,
+            commands::diary::get_diary_stats,
+            commands::diary::update_diary_entry,
+            commands::diary::check_missed_diaries,
+            commands::diary::export_diaries_markdown,
+            commands::diary::should_trigger_diary,
+            commands::diary::get_diary_entries_all,
+            commands::diary::get_common_diary_entries,
+            commands::diary::add_common_diary_entry,
+            commands::diary::delete_common_diary_entry,
+            commands::diary::clear_common_diary_entries,
+            commands::metrics::get_metrics_summary,
+            commands::metrics::persist_metrics,
+            commands::metrics::reset_metrics,
+            commands::metrics::increment_metric,
+            commands::metrics::set_gauge_metric,
+            commands::metrics::observe_companion_latency,
+            commands::history::get_chat_history,
+            commands::history::clear_chat_history,
+            commands::history::get_chat_history_all,
+            commands::history::get_latest_previews,
+            commands::history::search_chat_history,
+            commands::chat::update_last_assistant_timestamp,
+            commands::pet_reaction::generate_pet_reaction,
+            commands::window::set_window_position,
+            commands::window::set_pet_dock_position,
+            commands::window::settle_pet_dock,
+            commands::window::clear_pet_dock_clip,
+            commands::window::set_dock_walk_position,
+            commands::window::get_window_position,
+            commands::window::get_cursor_position,
+            commands::window::start_cursor_tracking,
+            commands::window::stop_cursor_tracking,
+            commands::window::start_window_drag,
+            commands::window::stop_window_drag,
+            commands::window::start_edge_menu_watcher,
+            commands::coding_agent::coding_new_session,
+            commands::coding_agent::coding_default_workspace,
+            commands::coding_agent::coding_set_mode,
+            commands::coding_agent::coding_list_workspaces,
+            commands::coding_agent::coding_set_workspace,
+            commands::coding_agent::coding_add_workspace,
+            commands::coding_agent::coding_remove_workspace,
+            commands::coding_agent::coding_set_workspace_read_only,
+            commands::coding_agent::coding_set_permission,
+            commands::coding_agent::coding_permission_status,
+            commands::coding_agent::coding_set_model,
+            commands::coding_agent::coding_set_reasoning_level,
+            commands::coding_agent::coding_memory_snapshot,
+            commands::coding_agent::coding_memory_settings,
+            commands::coding_agent::coding_memory_save,
+            commands::coding_agent::coding_memory_action,
+            commands::coding_agent::coding_list_available_models,
+            commands::coding_agent::coding_list_sessions,
+            commands::coding_agent::coding_workflow_list,
+            commands::coding_agent::coding_workflow_detail,
+            commands::coding_agent::coding_delete_session,
+            commands::coding_agent::coding_rename_session,
+            commands::coding_agent::coding_cancel_session,
+            commands::coding_agent::coding_send_message,
+            commands::coding_agent::coding_input_queue,
+            commands::coding_agent::coding_resume_session,
+            commands::coding_agent::coding_list_dir_tree,
+            commands::workspace_watch::coding_watch_directories,
+            commands::workspace_watch::coding_unwatch_directories,
+            commands::coding_agent::coding_read_file,
+            commands::coding_agent::coding_read_file_lines,
+            commands::coding_agent::coding_write_file,
+            commands::coding_agent::coding_reveal_in_explorer,
+            commands::coding_agent::coding_copy_file_to,
+            commands::coding_agent::rewrite_preview_selection,
+            commands::coding_agent::coding_set_message_feedback,
+            commands::coding_agent::coding_fork_session,
+            commands::coding_agent::coding_get_work_todos,
+            commands::work_task::work_task_attention,
+            commands::work_task::work_task_list,
+            commands::work_task::work_task_accept,
+            commands::work_task::work_task_reject,
+            commands::work_task::work_task_cancel,
+            commands::work_task::work_task_provide_input,
+            commands::work_facts::work_facts_list,
+            commands::work_facts::work_facts_save,
+            commands::work_facts::work_facts_remove,
+            commands::work_facts::work_facts_clear,
+            commands::work_loops::work_loop_list,
+            commands::work_loops::work_loop_upsert,
+            commands::work_loops::work_loop_set_enabled,
+            commands::work_loops::work_loop_remove,
+            commands::work_routes::work_route_report,
+            commands::work_routes::work_route_apply,
+            commands::coding_agent::coding_respond_question,
+            commands::coding_agent::coding_pending_question,
+            commands::tasks::list_agent_tasks,
+            commands::tasks::get_agent_task,
+            commands::tasks::cancel_agent_task,
+            commands::plugins::list_plugins,
+            commands::apartment::apartment_plugin_status,
+            commands::optional_resources::optional_resource_status,
+            commands::optional_resources::install_optional_resource,
+            commands::plugins::plugin_paths,
+            commands::plugins::plugin_diagnostics,
+            commands::plugins::list_skills,
+            commands::plugins::read_skill_detail,
+            commands::plugins::save_skill,
+            commands::plugins::delete_skill,
+            commands::plugins::validate_skill,
+            commands::plugins::list_provider_presets,
+            commands::provider_presets::provider_preset_update_info,
+            commands::provider_presets::provider_preset_update_status,
+            commands::provider_presets::start_provider_preset_update,
+            commands::provider_presets::stop_provider_preset_update,
+            stickers::list_stickers,
+            stickers::set_sticker_frequency,
+            stickers::get_sticker_data_url,
+            stickers::import_sticker,
+            commands::plugins::preview_reasoning_config,
+            commands::plugins::trust_plugin,
+            commands::plugins::reload_plugin,
+            commands::plugins::unload_plugin,
+            commands::plugins::set_plugin_enabled,
+            commands::plugins::inspect_plugin_package,
+            commands::plugins::install_plugin_package,
+            commands::plugins::delete_plugin,
+            commands::git::git_repo_status,
+            commands::git::git_changed_files,
+            commands::git::git_file_diff,
+            commands::git::git_list_branches,
+            commands::git::git_branch_diff,
+            commands::git::git_commit_push,
+            commands::git::git_worktree_list,
+            commands::git::git_worktree_add,
+            commands::git::git_worktree_remove,
+            commands::terminal::terminal_create,
+            commands::terminal::terminal_write,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_kill,
+            commands::terminal::terminal_list,
+            commands::terminal::terminal_update_screen,
+            commands::terminal::terminal_bind_session,
+            commands::window::ensure_chat_interactive,
+            commands::window::freeze_window_webview,
+            commands::apartment_host::set_room_mode,
+            commands::apartment_host::watch_room_escape,
+            commands::apartment_host::stop_room_escape_watcher,
+            commands::apartment_host::set_room_escape_suppressed,
+            commands::window::show_chat_animated,
+            edge_menu::edge_menu_ready,
+            edge_menu::edge_menu_status,
+            edge_menu::edge_menu_action,
+            edge_menu::hide_edge_menu,
+            edge_menu::open_chat_window,
+            edge_menu::open_quick_input,
+            edge_menu::quick_input_ready,
+            edge_menu::chat_window_ready,
+            edge_menu::set_chat_close_policy,
+            companion_quiet::set_companion_quiet,
+            companion_quiet::companion_quiet_status,
+            commands::window::close_chat_window,
+            commands::window::start_chat_outside_click_hook,
+            commands::toast_hit::set_toast_hit_regions,
+            commands::window::toggle_always_on_top,
+            commands::window::set_window_size,
+            commands::window::set_window_rect,
+            commands::window::get_window_size,
+            commands::window::set_window_opacity,
+            commands::window::show_window,
+            commands::window::hide_window,
+            commands::window::toggle_window_visibility,
+            commands::window::minimize_to_tray,
+            commands::window::restore_from_tray,
+            commands::window::focus_window,
+            commands::window::open_child_window,
+            commands::window::guard_borderless_window,
+            commands::window::close_child_window,
+            commands::window::list_child_windows,
+            commands::window::set_window_resizable,
+            commands::window::set_skip_taskbar,
+            commands::window::center_window,
+            commands::window::is_foreground_fullscreen,
+            commands::window::dock_for_fullscreen,
+            commands::window::restore_fullscreen_dock,
+            commands::window::find_safe_position,
+            commands::window::debug_log,
+            commands::inspector::report_inspector_attention,
+            commands::inspector::lock_inspector_fullscreen,
+            commands::system_tray::set_tray_tooltip,
+            commands::system_tray::update_tray_icon,
+            commands::system_tray::show_tray_message,
+            commands::system_tray::is_tray_visible,
+            commands::system_tray::set_tray_visible,
+            commands::system_tray::set_tray_menu_check,
+            commands::system_tray::destroy_tray,
+            commands::relationship::get_relationship,
+            commands::relationship::get_relationship_stage,
+            commands::relationship::get_milestones,
+            commands::relationship::reset_relationship,
+            commands::persona::get_persona,
+            commands::persona::get_persona_name,
+            commands::persona::get_persona_tagline,
+            commands::persona::get_persona_sections,
+            commands::persona::set_persona_section,
+            commands::persona::reset_persona_section,
+            commands::persona::get_style_prompt,
+            commands::persona::list_persona_cards,
+            commands::persona::get_active_persona_card,
+            commands::persona::create_persona_card,
+            commands::persona::update_persona_card,
+            commands::persona::switch_persona_card,
+            commands::persona::archive_persona_card,
+            commands::persona::delete_persona_card,
+            commands::persona::get_persona_events,
+            commands::persona::get_persona_card_cooldowns,
+            commands::persona::get_persona_evolution,
+            commands::persona::reset_persona_evolution,
+            commands::proactive::start_proactive,
+            commands::proactive::stop_proactive,
+            commands::proactive::proactive_tick,
+            commands::proactive::proactive_heartbeat,
+            commands::proactive::drain_proactive_messages,
+            commands::proactive::mark_proactive_ignored,
+            commands::proactive::update_proactive_config,
+            commands::proactive::update_world_config,
+            commands::proactive::auto_detect_location,
+            commands::presence::get_presence_state,
+            commands::presence::get_all_presence_states,
+            commands::presence::set_presence_state,
+            commands::tts::get_tts_config,
+            commands::tts::set_tts_config,
+            commands::tts::set_tts_enabled_all,
+            commands::tts::speak_text,
+            commands::tts::stop_speaking,
+            commands::tts::get_speaking_status,
+            commands::tts::prewarm_tts,
+            commands::tts::prefetch_tts,
+            commands::tts::list_tts_voices,
+            commands::tts::test_tts,
+            commands::tts::start_gpt_sovits_service,
+            commands::tts::stop_gpt_sovits_service,
+            commands::tts::get_gpt_sovits_service_status,
+            commands::tts::start_fish_speech_service,
+            commands::tts::stop_fish_speech_service,
+            commands::tts::get_fish_speech_service_status,
+            commands::tts::test_translation,
+            commands::tts::list_gpt_sovits_models,
+            commands::ollama::start_ollama,
+            commands::ollama::stop_ollama,
+            commands::ollama::get_ollama_status,
+            commands::ollama::pull_ollama_model,
+            commands::ollama::fix_ollama_permission,
+            commands::ollama::list_ollama_models,
+            commands::realtime_voice::get_realtime_status,
+            commands::realtime_voice::start_realtime_call,
+            commands::realtime_voice::stop_realtime_call,
+            commands::realtime_voice::get_realtime_config,
+            commands::realtime_voice::set_realtime_config,
+            commands::realtime_voice::send_realtime_text,
+            commands::rag::add_rag_document,
+            commands::rag::delete_rag_document,
+            commands::rag::list_rag_documents,
+            commands::rag::search_rag,
+            commands::rag::clear_rag,
+            commands::environment::get_environment_info,
+            commands::environment::get_current_state,
+            commands::environment::get_user_activity,
+            commands::environment::update_environment,
+            commands::environment::get_startup_greeting,
+            commands::config::save_user_avatar,
+            commands::config::get_user_avatar_data_url,
+            commands::config::clear_user_avatar,
+            commands::config::get_settings_catalog,
+            commands::config::get_desktop_settings,
+            commands::config::get_work_models,
+            commands::config::select_work_model,
+            commands::config::clear_work_model,
+            commands::todo::acknowledge_reminder_delivery,
+            companion_runtime::companion_status,
+            commands::desktop_assistant::companion_desktop_context,
+            commands::desktop_assistant::user_quick_notes_list,
+            commands::desktop_assistant::user_quick_notes_save,
+            commands::desktop_assistant::user_quick_notes_delete,
+            commands::desktop_assistant::companion_save_shortcuts,
+            commands::desktop_assistant::companion_shortcut_icon,
+            commands::desktop_assistant::companion_launch_shortcut,
+            commands::desktop_assistant::companion_screen_analyze,
+            screen_watch::screen_watch_status,
+            screen_watch::screen_watch_control,
+            screen_watch::screen_watch_active,
+            screen_watch::screen_watch_switch_desktop,
+            screen_watch::screen_watch_dismiss,
+            screen_selection::screen_selection_frame,
+            screen_selection::screen_selection_ready,
+            screen_selection::screen_selection_present,
+            screen_selection::screen_selection_window_at,
+            screen_selection::screen_selection_finish,
+            screen_freeze::screen_freeze_frame,
+            screen_freeze::screen_freeze_present,
+            screen_freeze::screen_freeze_resize,
+            screen_freeze::screen_freeze_save,
+            screen_freeze::screen_freeze_analyze,
+            commands::desktop_assistant::companion_read_clipboard,
+            commands::media::companion_now_playing,
+            commands::media::companion_focus_media_source,
+            commands::todo::pending_reminder_notices,
+            commands::todo::acknowledge_reminder_notice,
+            commands::todo::list_todos,
+            commands::todo::add_todo_item,
+            commands::todo::update_todo_item,
+            commands::todo::complete_todo_item,
+            commands::todo::delete_todo_item,
+            commands::todo::list_scheduled_tasks,
+            commands::todo::add_scheduled_reminder,
+            commands::todo::cancel_scheduled_task,
+            commands::todo::pause_scheduled_task,
+            commands::todo::resume_scheduled_task,
+            commands::notebook::list_notebooks,
+            commands::notebook::get_notebook_html,
+            commands::notebook::render_notebook_preview,
+            commands::notebook::get_notebook_detail,
+            commands::notebook::create_notebook,
+            commands::notebook::update_notebook,
+            commands::notebook::delete_notebook,
+            commands::notebook::import_html_note,
+            audio_react::set_music_reactive,
+            audio_react::get_music_reactive,
+            video_animation::play_video_animation,
+            video_animation::stop_video_animation,
+            video_animation::list_video_animations,
+            video_animation::video_animation_auto_tick,
+        ])
+        .setup(|app| {
+            if crate::utils::path::get_user_data_dir().join(".backup.result.json").exists() {
+                crate::startup::open_config_after_backup(app.handle());
+            }
+            // 初始化 Windows Job Object（KILL_ON_JOB_CLOSE 兜底）
+            // 必须在任何子进程启动前完成，确保所有子进程都能被绑定
+            crate::utils::job_object::init();
+            crate::memory::git_history::start_runtime(crate::utils::path::get_user_data_dir());
+
+            // 完整性级别自检：宿主一旦被拖成 Low IL（沙箱派生逻辑曾经误改主令牌），
+            // 进程自己升不回去，写 %APPDATA%\vivian 全部 ACCESS_DENIED——配置保存、
+            // 记忆、日志、心理状态静默失败，而读取一切正常，用户只会看到
+            // "右侧边栏某个按钮点了没反应"。这里在启动时把话说明白。
+            // 走系统通知而不是只写日志：此刻日志文件本身也可能写不进去。
+            #[cfg(windows)]
+            {
+                let level = crate::utils::sandbox::current_integrity_level();
+                tracing::info!("[sandbox] 宿主完整性级别: {}", level.as_str());
+                if !level.can_write_user_data() {
+                    tracing::error!(
+                        "[sandbox] 宿主完整性级别为 {}，用户数据目录不可写——\
+                         设置与记忆都不会落盘。请完全退出 Vivian（含托盘），\
+                         再从开始菜单或资源管理器重新启动。",
+                        level.as_str()
+                    );
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("Vivian 运行权限异常")
+                        .body("当前以低完整性级别运行，设置与记忆无法保存。请完全退出 Vivian，再从开始菜单重新启动。")
+                        .show();
+                }
+            }
+
+            // 初始化全局 HTTP 客户端（注入代理配置，影响天气/Edge TTS/URL 抓取等境外请求）
+            // 必须在任何外部网络请求发生前完成
+            {
+                let cfg = app.state::<Arc<AppState>>().inner().clone();
+                let pc = crate::network::proxy::ProxyConfig::from_app_config(&cfg.config.read().get_all());
+                crate::network::http_client::init_global_client(pc);
+            }
+
+            // 初始化系统托盘
+            if let Err(e) = commands::system_tray::setup_tray(app.handle()) {
+                tracing::warn!("系统托盘创建失败: {e}");
+            }
+
+            // 按配置同步开机自动启动状态（当前用户启动项）
+            {
+                let state = app.state::<Arc<AppState>>();
+                let auto_start = state.config.read().get_all().base.auto_start;
+                if let Err(e) = crate::utils::autostart::set_auto_start(auto_start) {
+                    tracing::warn!("[AutoStart] 启动时同步开机自动启动状态失败: {e}");
+                }
+            }
+
+            // 初始化 Bundle（release 模式：加载索引段，资源按需解密解压）
+            if !cfg!(debug_assertions) {
+                let bundle_path = crate::utils::path::get_bundle_path();
+                if let Err(e) = crate::bundle_reader::init(&bundle_path) {
+                    tracing::error!("[bundle] 初始化失败: {}", e);
+                }
+            }
+
+            // Inject AppHandle into shared tool system (not dependent on character instances)
+            {
+                let state = app.state::<Arc<AppState>>();
+                state.tool_system.set_app_handle(app.handle().clone());
+                crate::tools::builtin::todo_tools::set_app_handle(app.handle().clone());
+                let feedback_app = app.handle().clone();
+                state.scheduler.set_heartbeat(Arc::new(move || crate::companion_runtime::tick(&feedback_app)));
+                let gate_app = app.handle().clone();
+                state.scheduler.set_dispatch_gate(Arc::new(move |task| {
+                    task.task_type != crate::brain::scheduler::TaskType::Reminder
+                        || task.priority == crate::brain::scheduler::Priority::Urgent
+                        || crate::companion_runtime::quiet_reason(&gate_app.state::<Arc<AppState>>()).is_none()
+                }));
+                crate::brain::work_notices::set_app_handle(app.handle().clone());
+                let inbox_app = app.handle().clone();
+                crate::brain::work_notices::set_message_sink(Arc::new(move |character, id, session, title, body| {
+                    crate::brain::interaction_runtime::receive_work(&inbox_app, character, id, session, title, body);
+                }));
+                crate::tools::builtin::work_todo_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::work_facts_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::work_loops_tools::set_app_handle(app.handle().clone());
+                // 值守 tick：只在应用运行时工作，静默时零模型调用。
+                crate::brain::work_loops_tick::spawn_tick(app.handle().clone());
+                crate::brain::work_jobs::set_task_changed_hook(
+                    crate::tools::builtin::work_todo_tools::emit_work_task_changed,
+                );
+                crate::tools::builtin::work_question_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::work_subagent_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::pet_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::presence_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::dock_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::question_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::plan_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::work_agent_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::subagent_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::workflow_tools::set_app_handle(app.handle().clone());
+                crate::remote::set_app_handle(app.handle().clone());
+                crate::startup::set_app_handle(app.handle().clone());
+                // 延迟创建窗口：应用快速重启（开发热重启/崩溃后重启）时，上一实例的
+                // WebView2 子进程可能仍持有 user data folder 锁，立即创建会触发
+                // ERROR_BUSY 导致 WebView 创建失败，延迟 800ms 避开锁残留窗口，
+                // 各创建函数内部带失败重试。
+                // 角色窗口优先创建：不等 state.initialize()（约需 1 分钟），桌宠
+                // 模型立即可见，预加载期间用户有视觉反馈；启动进度 toast 次之。
+                {
+                    let handle = app.handle().clone();
+                    let state = app.state::<Arc<AppState>>().inner().clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        crate::create_character_windows_early(&handle, &state);
+                        crate::startup::ensure_startup_toast();
+                    });
+                }
+                crate::network::web::set_app_handle(app.handle().clone());
+                crate::tools::builtin::share_link_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::send_image_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::send_chat_message_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::show_widget_tool::set_app_handle(app.handle().clone());
+                crate::tools::builtin::notebook_tools::set_app_handle(app.handle().clone());
+                crate::tools::builtin::weather_tools::set_app_handle(app.handle().clone());
+                crate::discovery::set_app_handle(app.handle().clone());
+                crate::tools::builtin::system_ops::set_app_handle(app.handle().clone());
+                crate::tools::builtin::extended_system_ops::set_app_handle(app.handle().clone());
+                crate::proactive::set_app_handle(app.handle().clone());
+                crate::mind::reasoning_trace::set_app_handle(app.handle().clone());
+                crate::memory::ollama_service::set_app_handle(app.handle().clone());
+                crate::cross_character::CROSS_CHARACTER_BUS.initialize(
+                    app.handle().clone(),
+                );
+                crate::tools::services::TodoService::load();
+                commands::proactive::load_arbitration_state();
+                commands::speech::start_asr_event_forwarder(
+                    app.handle().clone(),
+                    state.asr.clone(),
+                );
+                commands::speech::register_text_shortcuts(app.handle().clone(), &state);
+            }
+
+            // 内嵌浏览器直接提供工具及登录态检测，无扩展和本地监听端口。
+            {
+                let bridge = app.state::<Arc<AppState>>().browser_bridge.clone();
+                bridge.start(app.handle().clone());
+            }
+
+            // 异步初始化所有角色实例（不阻塞 setup）
+            // 完成后 emit `app:ready`，前端据此触发启动问候等依赖 Brain 的流程
+            {
+                let handle = app.handle().clone();
+                let state = app.state::<Arc<AppState>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::startup::begin_startup();
+                    // 周期性重发最新进度快照：startup:progress 事件可能先于前端监听
+                    // 注册发出（WebView2 加载慢），快照拉取 + 周期重发双保险，
+                    // 确保 toast 窗口任意时刻就绪都能显示当前进度
+                    {
+                        let handle = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            while crate::startup::is_startup_in_progress() {
+                                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                                crate::startup::resend_last_progress(&handle);
+                            }
+                        });
+                    }
+                    // 启动预检立即执行（不等 toast 窗口就绪）：预检内含外部服务
+                    // 启动（本地 Ollama 等），尽快拉起可缩短整体启动时间；进度
+                    // 事件由快照拉取 + 周期重发补齐，toast 窗口任意时刻挂载
+                    // 都能显示当前进度。show_startup_toast 为后端兜底（窗口
+                    // 未创建时为 no-op，前端收到进度后自行 show）。
+                    crate::startup::show_startup_toast();
+                    // 启动预检：先确认主 LLM / 嵌入服务已配置（未配置立即弹
+                    // 设置引导并阻断初始化），本地 Ollama 先启动服务并等待
+                    // API 就绪，全部就绪后才允许初始化角色、开放 API。
+                    if !crate::startup::preflight(&handle, &state).await {
+                        tracing::info!("[Startup] 启动预检未通过，等待用户完成配置");
+                        crate::startup::finish_startup();
+                        // 关闭提前创建的角色窗口：无后端支撑的窗口只会报错，
+                        // 配置引导由设置窗口承接
+                        crate::close_uninitialized_character_windows(&handle, &state);
+                        let _ = handle.emit("app:ready", ());
+                        return;
+                    }
+
+                    crate::startup::emit_progress(45, 100, "正在初始化模型路由与工具系统…");
+
+                    match state.initialize().await {
+                        Ok(()) => {
+                            // 启动所有在线角色的 PetController（空闲定时器等需在 tokio runtime 内）
+                            {
+                                let chars = state.characters.read();
+                                for instance in chars.values() {
+                                    if *instance.online.read() {
+                                        let pc = instance.pet_controller.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            pc.start();
+                                        });
+                                    }
+                                }
+                            }
+
+                            // 注入 AppHandle，启用路由回退事件发送
+                            if let Some(router) = state.model_router.read().as_ref() {
+                                router.set_app_handle(handle.clone());
+                            }
+                            // 注入 AppHandle + Router 到全局事件账本（启用前端通知 + LLM 摘要压缩）
+                            state.world_provider.environment.set_app_handle(handle.clone());
+                            {
+                                let ledger = crate::memory::unified_event_ledger();
+                                ledger.set_app_handle(handle.clone());
+                                if let Some(router) = state.model_router.read().as_ref() {
+                                    ledger.set_router(Arc::new(router.clone()));
+                                }
+                            }
+
+                            // 崩溃恢复补偿：
+                            // 启动 45s 后补跑一次记忆巩固——Stage 1 的空闲触发会捕获
+                            // 上次进程退出前未摘要的 ShortTerm 残留；无残留时各阶段
+                            // 条件门控自动跳过，不产生 LLM 调用。
+                            {
+                                let consolidators: Vec<_> = state
+                                    .characters
+                                    .read()
+                                    .values()
+                                    .filter_map(|i| i.brain.consolidator.clone())
+                                    .collect();
+                                if !consolidators.is_empty() {
+                                    tauri::async_runtime::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                                        for c in consolidators {
+                                            let _ = c.recover().await;
+                                        }
+                                    });
+                                }
+                            }
+
+                            // Idempotent: the native actor owns cold start and restored deadlines.
+                            crate::brain::resident::ensure_started(&handle, &state);
+
+                            // 注册所有角色的 TtsManager 到全局 SpeechPlanner,并启动 pump 循环
+                            {
+                                // 角色实例的注册统一由 AppState::sync_tts_managers 负责
+                                // （state.initialize() 末尾已调用一次，此处再调一次是幂等的），
+                                // 避免"启动注册一次、reinitialize 后不再注册"的实例过期问题。
+                                state.sync_tts_managers().await;
+
+                                let planner = crate::speech::get_planner().await;
+
+                                // 设置 Planner 事件回调:将 PlannerEvent 转成 tauri 事件发射给前端
+                                // presentation:start / presentation:stop 统一表情/动作/气泡/视线时序
+                                let app_for_planner = handle.clone();
+                                planner.set_event_callback(std::sync::Arc::new(move |event| {
+                                    use crate::speech::PlannerEvent;
+                                    use tauri::Emitter;
+                                    match event {
+                                        PlannerEvent::Start {
+                                            speaker_id,
+                                            presentation,
+                                            text,
+                                        } => {
+                                            let _ = app_for_planner.emit(
+                                                "presentation:start",
+                                                serde_json::json!({
+                                                    "speaker_id": speaker_id,
+                                                    "presentation": presentation,
+                                                    "text": text,
+                                                }),
+                                            );
+                                        }
+                                        PlannerEvent::Stop { speaker_id } => {
+                                            let _ = app_for_planner.emit(
+                                                "presentation:stop",
+                                                serde_json::json!({
+                                                    "speaker_id": speaker_id,
+                                                }),
+                                            );
+                                        }
+                                    }
+                                }));
+
+                                crate::speech::start_pump_loop().await;
+                                tracing::info!("[SpeechPlanner] pump 循环已启动");
+                            }
+
+                            // 注册 presence 后台任务分发钩子
+                            // - Busy 进入时 spawn 知识采集任务（LLM 决定查什么 → network::web 搜索缝隙 → 写入 Knowledge）
+                            // - Rest 进入时 spawn 记忆沉淀任务（跑 ConsolidationPipeline 三阶段）
+                            // 任务进行中用户唤醒会被延迟，等任务结束自动切回 Online（见 PresenceManager::transition）
+                            for instance in state.characters.read().values(){start_character_services(&handle,instance);}
+
+                            // 后台循环看门狗：监控各常驻循环心跳，停摆时报错（有重启回调则重启）
+                            crate::utils::watchdog::spawn_daemon(std::time::Duration::from_secs(60));
+
+                            // 系统睡眠/唤醒感知：睡前强制落账"用户离开"，唤醒后回归摘要才能正确涵盖睡眠时长
+                            crate::utils::power_events::spawn_power_event_listener(state.clone());
+
+                            crate::startup::emit_progress(85, 100, "正在创建角色窗口…");
+
+                            // 为每个在线角色创建独立窗口
+                            crate::create_character_windows(&handle, &state);
+
+                            crate::startup::emit_progress(100, 100, "启动完成 ✓");
+                            crate::startup::finish_startup();
+
+                            tracing::info!("所有角色初始化完成，发送 app:ready 事件");
+                            // 语音开关的勾选态以角色实际加载完的 TTS 配置为准
+                            // （setup_tray 阶段角色尚未就绪，只能先用默认值）
+                            commands::system_tray::sync_voice_check_from_state(&state);
+                            let _ = handle.emit("app:ready", ());
+
+                            // 启动远程访问 HTTP 服务（按配置启停，支持自定义端口）
+                            crate::remote::sync_remote_server(state.clone());
+
+                            // 启动时打印当前 web_search provider，便于调试
+                            let web_search_cfg = state.config.read().get_all().web_search;
+                            tracing::info!(
+                                "[WebSearch] 启动 provider={}, max_results={} (0=自动: 聊天10/工作15), timeout={}s",
+                                web_search_cfg.provider,
+                                web_search_cfg.max_results,
+                                web_search_cfg.timeout_secs
+                            );
+
+                            // 启动时预取天气：若经纬度已配置，立即刷新全局天气缓存
+                            // 这样不必等到 proactive tick 才有天气数据
+                            {
+                                let world_cfg_for_weather =
+                                    state.config.read().get_all().world.clone();
+                                if world_cfg_for_weather.enable_weather
+                                    && world_cfg_for_weather.latitude.is_some()
+                                    && world_cfg_for_weather.longitude.is_some()
+                                {
+                                    let wp = state.world_provider.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        tracing::info!("[Startup] 启动天气预取开始");
+                                        wp.refresh_weather().await;
+                                        tracing::info!("[Startup] 启动天气预取完成");
+                                    });
+                                }
+                            }
+
+                            // 启动时预取音乐：读取系统当前播放状态
+                            // 音乐检测不依赖经纬度，始终在启动时执行
+                            // 同时启动后台轮询（3s 间隔），让歌曲切换能被及时感知
+                            {
+                                if state.world_provider.has_music_source() {
+                                    // 启动后台 3s 轮询循环（幂等，全局只启动一次）
+                                    state.world_provider.start_music_polling();
+
+                                    let wp = state.world_provider.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        tracing::info!("[Startup] 启动音乐预取开始");
+                                        wp.refresh_music().await;
+                                        tracing::info!("[Startup] 启动音乐预取完成");
+                                    });
+                                }
+                            }
+
+                            // 启动后台系统指标轮询（CPU/内存/网速/音量/前台窗口/网络状态）
+                            // 全局共享：跨角色只启动一份 Windows Hook 与轮询循环
+                            {
+                                state.world_provider.start_system_polling();
+                                state.world_provider.start_volume_events(handle.clone());
+                                state.world_provider.start_foreground_events();
+                                state.world_provider.start_network_events();
+                            }
+
+                            // 启动时自动定位：若世界感知已启用且缺坐标或缺城市名
+                            let world_cfg = state.config.read().get_all().world;
+                            let need_coords =
+                                world_cfg.latitude.is_none() || world_cfg.longitude.is_none();
+                            let need_city = world_cfg.city.is_none();
+                            if world_cfg.enable && (need_coords || need_city) {
+                                let cfg = state.config.clone();
+                                let wp_for_geo = state.world_provider.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    if let Some(info) =
+                                        crate::world::geolocation::detect_location().await
+                                    {
+                                        {
+                                            let cm = cfg.read();
+                                            let _ = cm.set("world.latitude", json!(info.latitude));
+                                            let _ = cm.set("world.longitude", json!(info.longitude));
+                                            let _ = cm.set("world.city", json!(info.city));
+                                            let _ = cm.set("world.region", json!(info.region));
+                                            let _ = cm.set("world.country", json!(info.country));
+                                        }
+                                        // 更新全局 WorldStateProvider
+                                        let c = cfg.read().get_all().world.clone();
+                                        wp_for_geo.update_config(c);
+                                        wp_for_geo.set_location(crate::world::LocationSnapshot {
+                                            latitude: info.latitude,
+                                            longitude: info.longitude,
+                                            city: info.city.clone(),
+                                            region: info.region.clone(),
+                                            country: info.country.clone(),
+                                        });
+                                        // 定位成功后立即预取天气
+                                        tracing::info!("[Startup] 自动定位后天气预取开始");
+                                        wp_for_geo.refresh_weather().await;
+                                        tracing::info!(
+                                            "启动时自动定位成功: ({:.4}, {:.4}) 城市: {}",
+                                            info.latitude,
+                                            info.longitude,
+                                            info.city.as_deref().unwrap_or("未知")
+                                        );
+                                    } else {
+                                        tracing::info!("启动时自动定位失败，用户可手动设置经纬度");
+                                    }
+                                });
+                            }
+
+                            // 网络连通性监听：网络变化时重新定位（换 WiFi / 断线重连等）
+                            {
+                                let cfg = state.config.clone();
+                                let wp_for_net = state.world_provider.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tracing::info!("[NetworkWatch] 网络连通性监听已启动");
+                                    let cancel = crate::utils::cancel_token::cancel_token();
+                                    loop {
+                                        if cancel.is_cancelled() {
+                                            tracing::info!("[NetworkWatch] 收到取消信号，退出");
+                                            return;
+                                        }
+                                        let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+
+                                        let _guard = tokio::task::spawn_blocking({
+                                            let n = notify.clone();
+                                            move || crate::world::network_watch::subscribe_network_events(n)
+                                        })
+                                        .await
+                                        .unwrap_or(None);
+
+                                        // 等待网络变化事件；若订阅失败则 60s 后重试
+                                        if _guard.is_some() {
+                                            tokio::select! {
+                                                _ = notify.notified() => {}
+                                                _ = cancel.cancelled() => return,
+                                            }
+                                            // 去抖：网络切换瞬间可能连续触发多次事件，等 5s 让连接稳定
+                                            tokio::select! {
+                                                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                                                _ = cancel.cancelled() => return,
+                                            }
+                                        } else {
+                                            tokio::select! {
+                                                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                                                _ = cancel.cancelled() => return,
+                                            }
+                                            continue;
+                                        }
+
+                                        tracing::info!("[NetworkWatch] 检测到网络变化，重新定位...");
+                                        if let Some(info) = crate::world::geolocation::detect_location().await {
+                                            let old_city = {
+                                                let cm = cfg.read();
+                                                cm.get_all().world.city.clone()
+                                            };
+                                            // 城市未变则跳过更新
+                                            if old_city == info.city {
+                                                tracing::info!("[NetworkWatch] 城市未变化({:?})，跳过", info.city);
+                                                continue;
+                                            }
+                                            tracing::info!(
+                                                "[NetworkWatch] 城市变化: {:?} -> {:?}，更新配置",
+                                                old_city, info.city
+                                            );
+                                            {
+                                                let cm = cfg.read();
+                                                let _ = cm.set("world.latitude", json!(info.latitude));
+                                                let _ = cm.set("world.longitude", json!(info.longitude));
+                                                let _ = cm.set("world.city", json!(info.city));
+                                                let _ = cm.set("world.region", json!(info.region));
+                                                let _ = cm.set("world.country", json!(info.country));
+                                            }
+                                            let c = cfg.read().get_all().world.clone();
+                                            wp_for_net.update_config(c);
+                                            wp_for_net.set_location(crate::world::LocationSnapshot {
+                                                latitude: info.latitude,
+                                                longitude: info.longitude,
+                                                city: info.city.clone(),
+                                                region: info.region.clone(),
+                                                country: info.country.clone(),
+                                            });
+                                            wp_for_net.refresh_weather().await;
+                                        } else {
+                                            tracing::warn!("[NetworkWatch] 网络变化后重新定位失败");
+                                        }
+                                    }
+                                });
+                            }
+
+                            // 定期 IP 定位检查（30 分钟）：补充 NetworkWatch 无法覆盖的场景
+                            // （VPN 切换、路由器重启等公网 IP 变化但本地网卡状态不变的情况）
+                            {
+                                let cfg = state.config.clone();
+                                let wp_for_ip = state.world_provider.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let cancel = crate::utils::cancel_token::cancel_token();
+                                    loop {
+                                        if cancel.is_cancelled() {
+                                            tracing::info!("[IPCheck] 收到取消信号，退出");
+                                            return;
+                                        }
+                                        tokio::select! {
+                                            _ = tokio::time::sleep(std::time::Duration::from_secs(1800)) => {}
+                                            _ = cancel.cancelled() => return,
+                                        }
+                                        let world_enabled = cfg.read().get_all().world.enable;
+                                        if !world_enabled {
+                                            continue;
+                                        }
+                                        tracing::debug!("[IPCheck] 定期 IP 定位检查...");
+                                        if let Some(info) = crate::world::geolocation::detect_location().await {
+                                            let old_city = {
+                                                let cm = cfg.read();
+                                                cm.get_all().world.city.clone()
+                                            };
+                                            if old_city == info.city {
+                                                continue;
+                                            }
+                                            tracing::info!(
+                                                "[IPCheck] 城市变化: {:?} -> {:?}，更新配置",
+                                                old_city, info.city
+                                            );
+                                            {
+                                                let cm = cfg.read();
+                                                let _ = cm.set("world.latitude", json!(info.latitude));
+                                                let _ = cm.set("world.longitude", json!(info.longitude));
+                                                let _ = cm.set("world.city", json!(info.city));
+                                                let _ = cm.set("world.region", json!(info.region));
+                                                let _ = cm.set("world.country", json!(info.country));
+                                            }
+                                            let c = cfg.read().get_all().world.clone();
+                                            wp_for_ip.update_config(c);
+                                            wp_for_ip.set_location(crate::world::LocationSnapshot {
+                                                latitude: info.latitude,
+                                                longitude: info.longitude,
+                                                city: info.city.clone(),
+                                                region: info.region.clone(),
+                                                country: info.country.clone(),
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+
+                            // GPT-SoVITS 服务自动启动：仅为已启用且当前选择 GPT-SoVITS
+                            // 的角色拉起本地模型。配置残留但 TTS 已关闭时不能继续占用数 GB 内存。
+                            // start() 本身快速返回（健康检查后台进行），不阻塞主流程。
+                            {
+                                let state_for_tts = state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let target_cfg = {
+                                        let chars = state_for_tts.characters.read();
+                                        chars.values()
+                                            .map(|c| c.brain.tts.get_config())
+                                            .find(|c| c.should_auto_start_gpt_sovits())
+                                    };
+                                    let Some(tts_config) = target_cfg else {
+                                        return;
+                                    };
+                                    let svc = crate::speech::gpt_sovits_service().await;
+                                    match svc.start(&tts_config).await {
+                                        Ok(s) => tracing::info!(
+                                            "[lib] GPT-SoVITS 自动启动已触发: {:?}",
+                                            s.status
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "[lib] GPT-SoVITS 自动启动失败: {e}"
+                                        ),
+                                    }
+                                });
+                            }
+
+                            // Whisper 本地 ASR 服务自动启动：engine=whisper 且 service_auto_start=true 时触发
+                            {
+                                let state_for_whisper = state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let asr_cfg = {
+                                        let cfg = state_for_whisper.config.read();
+                                        cfg.get_all().speech_recognition.clone()
+                                    };
+                                    if asr_cfg.engine == "whisper" && asr_cfg.whisper.service_auto_start {
+                                        crate::commands::speech::maybe_autostart_whisper_service(&state_for_whisper).await;
+                                    }
+                                });
+                            }
+
+                            // Fish Speech 本地 TTS 服务自动启动：engine=fishspeech 且 fish_speech_auto_start=true 时触发
+                            {
+                                let state_for_fish = state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let target_cfg = {
+                                        let chars = state_for_fish.characters.read();
+                                        chars.values()
+                                            .map(|c| c.brain.tts.get_config())
+                                            .find(|c| c.should_auto_start_fish_speech())
+                                    };
+                                    let Some(tts_config) = target_cfg else {
+                                        return;
+                                    };
+                                    let svc = crate::speech::fish_speech_service().await;
+                                    match svc.start(&tts_config).await {
+                                        Ok(s) => tracing::info!(
+                                            "[lib] Fish Speech 自动启动已触发: {:?}",
+                                            s.status
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "[lib] Fish Speech 自动启动失败: {e}"
+                                        ),
+                                    }
+                                });
+                            }
+
+                            // Ollama 嵌入服务自动启动：source=local 且 ollama_auto_start=true 时触发
+                            {
+                                let state_for_ollama = state.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let emb_cfg = {
+                                        let cfg = state_for_ollama.config.read();
+                                        cfg.get_all().memory.embedding.clone()
+                                    };
+                                    if emb_cfg.source == "local"
+                                        && emb_cfg.ollama_auto_start
+                                        && !emb_cfg.ollama_path.trim().is_empty()
+                                    {
+                                        let svc = crate::memory::ollama_service::ollama_service().await;
+                                        match svc.start(&emb_cfg.ollama_path).await {
+                                            Ok(s) => {
+                                                tracing::info!(
+                                                    "[lib] Ollama 自动启动已触发: {:?}",
+                                                    s.status
+                                                );
+                                                // 服务就绪后确保目标模型已安装：未安装则自动拉取，
+                                                // 权限不足时自动触发 UAC 修复并重试
+                                                let target_model = emb_cfg.ollama_model.clone();
+                                                if !target_model.is_empty() {
+                                                    let ok = crate::memory::ollama_service::OllamaServiceManager::ensure_model_installed(&target_model, &emb_cfg.ollama_path).await;
+                                                    if ok {
+                                                        tracing::info!(
+                                                            "[lib] Ollama 模型 {} 已就绪",
+                                                            target_model
+                                                        );
+                                                    } else {
+                                                        tracing::warn!(
+                                                            "[lib] Ollama 模型 {} 自动拉取未完成，需手动处理",
+                                                            target_model
+                                                        );
+                                                    }
+                                                }
+                                                // ensure_model_installed 完成后统一 emit，
+                                                // 前端收到时模型状态已是最终结果（不会再误报"未安装"）
+                                                crate::memory::ollama_service::emit_ollama_ready_with_model_check().await;
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                "[lib] Ollama 自动启动失败: {e}"
+                                            ),
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("角色初始化失败: {e}");
+                            crate::startup::emit_progress(100, 100, "初始化失败，请检查配置");
+                            crate::startup::finish_startup();
+                            // 关闭提前创建的角色窗口，配置引导由设置窗口承接
+                            crate::close_uninitialized_character_windows(&handle, &state);
+                            let _ = handle.emit("app:ready", ());
+                            // 初始化失败通常与主 LLM / 嵌入服务配置或本地服务有关，
+                            // 直接打开设置窗口并展示配置说明。
+                            crate::startup::open_config_with_guide(&handle);
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
+        .on_window_event({
+            // 全局窗口事件处理：用于管理光标追踪线程的生命周期。
+            //
+            // 设计原则：光标追踪线程是应用级单例，由"是否存在任何在线角色窗口"
+            // 决定其运行/停止，不再由前端 桌宠Canvas 的 mount/unmount 控制
+            // （桌宠Canvas 的 cleanup 误杀全局线程是历史 bug 的根因）。
+            //
+            // 触发停止的时机：任一角色窗口 CloseRequested 后检查是否还有其他
+            // 在线角色窗口；若全部关闭才停线程。
+            move |window, event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) { commands::workspace_watch::window_destroyed(window.label()); }
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) { embedded_browser::window_destroyed(window.label()); }
+                commands::inspector::enforce_inspector_fullscreen(window, event);
+                // 公寓窗口关闭：兜底退出房间模式，把角色窗口和心智观察器放回来。
+                //
+                // 前端 RoomWindow 卸载时会 invoke set_room_mode(false)，但那条路径
+                // 不一定跑得完——直接 close、进程被系统收掉、webview 崩溃都会跳过它。
+                // 这里兜底保证无论怎么关，桌面桌宠都能恢复。两条路径都调同一个
+                // 幂等实现，先到先执行，后到的被 ROOM_MODE_ACTIVE 挡掉。
+                if window.label() == commands::apartment_host::ROOM_WINDOW_LABEL {
+                    match event {
+                        tauri::WindowEvent::CloseRequested { .. } => {
+                            let app = window.app_handle();
+                            // 恢复角色窗口与心智观察器。这里不碰 room 窗口本身——
+                            // 在 CloseRequested 里调 hide() 会干扰关闭流程，导致窗口关不掉。
+                            if let Some(state) =
+                                app.try_state::<std::sync::Arc<crate::state::AppState>>()
+                            {
+                                commands::apartment_host::set_room_mode_internal(
+                                    app,
+                                    state.inner(),
+                                    false,
+                                );
+                            }
+                            return;
+                        }
+                        tauri::WindowEvent::Destroyed => {
+                            let app = window.app_handle();
+                            if let Some(state) =
+                                app.try_state::<std::sync::Arc<crate::state::AppState>>()
+                            {
+                                commands::apartment_host::set_room_mode_internal(
+                                    app,
+                                    state.inner(),
+                                    false,
+                                );
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    let app = window.app_handle();
+                    if let Some(state) =
+                        app.try_state::<std::sync::Arc<crate::state::AppState>>()
+                    {
+                        commands::window::stop_cursor_tracking_if_no_windows(
+                            app,
+                            state.inner(),
+                        );
+                    }
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                tracing::info!("[exit] 收到退出请求，开始清理资源");
+                // 置退出标志，光标追踪线程在下一轮循环（≤60ms）内退出
+                commands::window::APP_EXITING
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                // 触发全局 CancellationToken，通知所有后台 tokio 任务优雅停止
+                crate::utils::cancel_token::cancel_token().cancel();
+                // 带超时的清理逻辑 + yield_now 让在途任务完成
+                let _ = tauri::async_runtime::block_on(async {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        async {
+                            // 退出前落盘 token 用量（防抖期间未写入的当日数据）
+                            crate::providers::usage_store::flush();
+                            if let Some(agent) = once_cell::sync::Lazy::get(&crate::commands::coding_agent::CODING_AGENT) {
+                                if let Err(error) = agent.flush_for_backup() {
+                                    tracing::error!("[exit] Work persistence flush failed: {error}");
+                                }
+                            }
+                            // 应用退出前强制落盘所有角色的记忆脏数据（5s 节流期间未写入的数据）
+                            if let Some(state) = app_handle
+                                .try_state::<std::sync::Arc<crate::state::AppState>>()
+                            {
+                                crate::commands::backup::flush_pending_on_exit(state.inner());
+                                {
+                                    let chars = state.characters.read();
+                                    for (id, instance) in chars.iter() {
+                                        if let Err(e) = instance.brain.memory.flush() {
+                                            tracing::warn!(
+                                                "[lib] 退出时 flush 角色 {} 记忆脏数据失败: {e}",
+                                                id
+                                            );
+                                        }
+                                    }
+                                }
+                                // 停止光标追踪线程，避免访问已销毁的窗口句柄
+                                commands::window::stop_cursor_tracking_internal(
+                                    app_handle,
+                                    state.inner(),
+                                );
+                                // 停止 聊天窗口 边缘检测线程
+                                commands::window::stop_edge_menu_watcher_internal();
+                                // 停止 聊天窗口 全局鼠标 Hook 线程
+                                commands::window::stop_chat_outside_click_hook_internal();
+                                // 停止 room 窗口的 ESC 看护线程
+                                commands::apartment_host::stop_room_escape_watcher();
+                            }
+                            // Ollama 刻意不停止：作为常驻服务跨应用生命周期存活，
+                            // 下次启动直接复用（start 内 check_port 检测），避免
+                            // 每次启动冷启动等待嵌入服务就绪
+                            // 停止 GPT-SoVITS 子进程，避免主程序退出后变成孤儿进程
+                            // 占用端口导致下次启动失败
+                            {
+                                let svc = crate::speech::gpt_sovits_service::service().await;
+                                let _ = svc.stop().await;
+                            }
+                            // 停止 Fish Speech 子进程
+                            {
+                                let svc = crate::speech::fish_speech_service().await;
+                                let _ = svc.stop().await;
+                            }
+                            // 停止 Whisper 子进程
+                            {
+                                let svc = crate::speech::whisper_service().await;
+                                let _ = svc.stop().await;
+                            }
+                            // 停止 WASAPI 回环音频捕获线程（音乐驱动 桌宠 律动）
+                            // set_enabled(false) 同步置 stop 标志，线程在 ≤50ms 内退出
+                            // 注意：app_handle 在 run 回调里是 &AppHandle，直接 .clone() 会得到
+                            // &AppHandle（<&T as Clone>::clone），必须先解引用
+                            if let Err(e) =
+                                crate::audio_react::set_enabled((*app_handle).clone(), false)
+                            {
+                                tracing::warn!("[exit] 停止音频回环捕获失败: {e}");
+                            }
+                            // 终止所有 PTY 终端会话：句柄确定性释放 + terminal:exit 事件广播
+                            // 即使本调用被遗漏，spawn_pty 已把 powershell.exe 绑定到全局 Job Object，
+                            // OS 关闭 Job 句柄时会自动连带终止子进程及其子孙
+                            crate::commands::terminal::kill_all_sessions(app_handle);
+                            if let Err(error) = crate::brain::coding_io::flush() {
+                                tracing::error!("[exit] Work journal flush failed: {error}");
+                            }
+                            // 注销所有系统级全局快捷键，避免进程退出后插件残留监听
+                            {
+                                use tauri_plugin_global_shortcut::GlobalShortcutExt;
+                                if let Err(e) = app_handle.global_shortcut().unregister_all() {
+                                    tracing::warn!("[exit] 注销全局快捷键失败: {e}");
+                                }
+                            }
+                            // yield 几次让在途 fire-and-forget 任务有机会完成关键写入
+                            for _ in 0..3 {
+                                tokio::task::yield_now().await;
+                            }
+                        },
+                    )
+                    .await;
+                });
+                tracing::info!("[exit] 资源清理完成");
+            }
+        });
+}
+
+/// 为所有在线角色创建独立桌面宠物窗口。
+///
+/// 启动流程和 `reinitialize` 成功后的首次初始化共用，避免启动预检未通过、
+/// 用户配置完成后重试初始化时出现“角色已初始化但没有窗口”的状态。
+/// 提前创建角色窗口的失败重试剩余次数（WebView2 锁残留时退避重试）。
+static EARLY_WINDOW_RETRY_LEFT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(10);
+
+/// 取消提前创建角色窗口（预检失败 / 初始化失败后置位，阻止延迟重试任务再建窗）。
+static EARLY_WINDOWS_CANCELLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Q 版角色共享前端的尺寸基准，避免首帧建窗与资源加载完成后的尺寸不同。
+fn character_window_size(_char_id: &str) -> (f64, f64) {
+    static SIZE: once_cell::sync::Lazy<(f64, f64)> = once_cell::sync::Lazy::new(|| {
+        #[derive(serde::Deserialize)]
+        struct WindowSize { w: f64, h: f64 }
+        let size: WindowSize = serde_json::from_str(include_str!("../../src/chibi/windowSize.json"))
+            .expect("valid desktop pet window size");
+        (size.w, size.h)
+    });
+    *SIZE
+}
+
+/// 提前创建角色窗口：不等 `state.initialize()` 完成，直接按配置角色列表
+/// 创建窗口，让 桌宠 模型在预加载期间立即可见。
+///
+/// 前端 App.tsx 的 `waitForAppReady` 机制保证 UI 在后端就绪前正常渲染
+/// （Brain 相关流程等 `app:ready` 事件触发），角色窗口按 chibi 动作词汇表预加载，
+/// 模型资源由构建期嵌入的词表与加密 bundle 提供。PetController 绑定与 presence 离线隐藏由初始化
+/// 完成后的 `create_character_windows` 对已存在窗口补齐。
+/// 创建失败（WebView2 ERROR_BUSY）时延迟重试。
+pub(crate) fn create_character_windows_early(
+    handle: &tauri::AppHandle,
+    state: &Arc<AppState>,
+) {
+    use std::sync::atomic::Ordering;
+
+    if EARLY_WINDOWS_CANCELLED.load(Ordering::SeqCst) {
+        return;
+    }
+    const WIN_GAP: f64 = 15.0; // 窗口间距
+    let chars_cfg = state.config.read().get_all().characters;
+    let mut offset_x = 0.0f64;
+    let mut any_failed = false;
+    for entry in chars_cfg.list.iter() {
+        let (win_w, win_h) = character_window_size(&entry.id);
+        if !entry.default_online {
+            continue;
+        }
+        if handle.get_webview_window(&entry.id).is_some() {
+            offset_x += win_w + WIN_GAP;
+            continue;
+        }
+        // 前端无 view 参数，label 即 character_id（main.tsx 依此绑定角色上下文）
+        let builder = tauri::WebviewWindowBuilder::new(
+            handle,
+            &entry.id,
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title(&entry.name)
+        .inner_size(win_w, win_h)
+        .position(offset_x, 100.0)
+        .transparent(true)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        // 先隐藏创建：装好非客户区绘制保护后再显示，避免透明窗口把标题栏像素留在表面
+        .visible(false);
+        // 诊断用：VIVIAN_CDP_PORT=9333 时给 WebView2 开调试端口。wry 自己总会传
+        // additional_browser_args（默认关掉 mini menu / smart screen），所以
+        // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS 环境变量是无效的，只能从这里注入。
+        // 第一个 webview 建的 CoreWebView2Environment 会被后续窗口复用，所以只需要
+        // 在角色窗口（最早创建的那批）上设置。不设该环境变量时行为与原来完全一致。
+        let builder = match std::env::var("VIVIAN_CDP_PORT") {
+            Ok(port) if !port.trim().is_empty() => builder.additional_browser_args(&format!(
+                "--remote-debugging-port={} --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
+                port.trim()
+            )),
+            _ => builder,
+        };
+
+        match builder.build() {
+            Ok(win) => {
+                // 桌宠窗口不做点击穿透：创建即显式置为非穿透，整窗响应鼠标。
+                // （幂等：样式已正确时该调用不会触发重绘）
+                crate::borderless::guard(&win);
+                let _ = win.set_ignore_cursor_events(false);
+                let _ = win.show();
+                tracing::info!("[lib] 已提前创建角色窗口: {}", entry.id);
+            }
+            Err(e) => {
+                tracing::error!("[lib] 提前创建角色窗口 {} 失败: {}", entry.id, e);
+                any_failed = true;
+            }
+        }
+        offset_x += win_w + WIN_GAP;
+    }
+    if any_failed {
+        let left = EARLY_WINDOW_RETRY_LEFT.fetch_sub(1, Ordering::SeqCst);
+        if left > 0 {
+            let handle = handle.clone();
+            let state = state.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                create_character_windows_early(&handle, &state);
+            });
+        }
+    }
+}
+
+/// 关闭“提前创建但最终未成功初始化”的角色窗口：
+/// 遍历配置角色列表，`state.characters` 中无对应实例的已存在窗口即关闭。
+/// 用于预检失败 / 整体初始化失败 / 单角色初始化失败后的清理，
+/// 同时置位取消标志阻止仍在延迟重试的提前建窗任务继续执行。
+pub(crate) fn close_uninitialized_character_windows(
+    handle: &tauri::AppHandle,
+    state: &Arc<AppState>,
+) {
+    use std::sync::atomic::Ordering;
+
+    EARLY_WINDOWS_CANCELLED.store(true, Ordering::SeqCst);
+    let chars_cfg = state.config.read().get_all().characters;
+    let initialized_ids: std::collections::HashSet<String> =
+        state.characters.read().keys().cloned().collect();
+    for entry in chars_cfg.list.iter() {
+        if initialized_ids.contains(&entry.id) {
+            continue;
+        }
+        if let Some(win) = handle.get_webview_window(&entry.id) {
+            let _ = win.close();
+            tracing::info!(
+                "[lib] 角色 {} 未完成初始化，已关闭提前创建的窗口",
+                entry.id
+            );
+        }
+    }
+}
+
+pub(crate) fn create_character_windows(handle: &tauri::AppHandle, state: &Arc<AppState>) {
+    // 窗口间距
+    const WIN_GAP: f64 = 15.0;
+    let chars = state.characters.read();
+    let mut offset_x = 0.0f64;
+    for instance in chars.values() {
+        if !*instance.online.read() {
+            continue;
+        }
+        let label = instance.id.clone();
+        // 按角色决定窗口尺寸
+        let (win_w, _win_h) = character_window_size(&label);
+        // 窗口已存在（create_character_windows_early 提前创建 / 热重载）：
+        // 补绑 PetController 与可见性控制，跳过重复创建
+        if let Some(existing) = handle.get_webview_window(&label) {
+            // 桌宠窗口不做点击穿透：复用已有窗口时同样显式置为非穿透（幂等）
+            crate::borderless::guard(&existing);
+            let _ = existing.set_ignore_cursor_events(false);
+            instance.pet_controller.set_main_window(existing.clone());
+            #[cfg(debug_assertions)]
+            existing.open_devtools();
+            let current = instance.brain.presence.current();
+            if matches!(current, crate::presence::PresenceState::Offline) {
+                let _ = existing.hide();
+                tracing::info!("[lib] 角色 {} presence=Offline，已隐藏窗口", label);
+            }
+            offset_x += win_w + WIN_GAP;
+            continue;
+        }
+        let builder = tauri::WebviewWindowBuilder::new(
+            handle,
+            &label,
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title(&instance.name)
+        .inner_size(win_w, _win_h)
+        .position(offset_x, 100.0)
+        .transparent(true)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        // 先隐藏创建：装好非客户区绘制保护后再按 presence 决定是否显示
+        .visible(false);
+
+        match builder.build() {
+            Ok(win) => {
+                // 桌宠窗口不做点击穿透：创建即显式置为非穿透，整窗响应鼠标。
+                // （幂等：样式已正确时该调用不会触发重绘）
+                crate::borderless::guard(&win);
+                let _ = win.set_ignore_cursor_events(false);
+                instance.pet_controller.set_main_window(win.clone());
+                #[cfg(debug_assertions)]
+                win.open_devtools();
+                tracing::info!("[lib] 已创建角色窗口: {} ({})", label, win.label());
+
+                // 按 presence 状态控制初始可见性：
+                // 若 PresenceManager 从持久化恢复为 Offline，
+                // 后端直接 hide 窗口，避免依赖前端 useEffect 时序。
+                // 与 App.tsx 的 hideForOffline 形成双保险。
+                let presence = &instance.brain.presence;
+                let current = presence.current();
+                if matches!(current, crate::presence::PresenceState::Offline) {
+                    let _ = win.hide();
+                    tracing::info!(
+                        "[lib] 角色 {} presence=Offline，已隐藏窗口",
+                        label
+                    );
+                } else {
+                    let _ = win.show();
+                }
+            }
+            Err(e) => {
+                tracing::error!("[lib] 创建角色窗口 {} 失败: {}", label, e);
+            }
+        }
+        // 累加偏移：当前窗口宽度 + 间距
+        offset_x += win_w + WIN_GAP;
+    }
+    // 关闭提前创建但初始化失败的角色窗口（failed_ids 场景）
+    drop(chars);
+    close_uninitialized_character_windows(handle, state);
+}
+
+/// 启动时清理过期日志文件（保留最近 `keep_days` 天）
+fn cleanup_old_logs(log_dir: &std::path::Path, keep_days: u32) {
+    use chrono::Local;
+    let cutoff = Local::now()
+        .date_naive()
+        .checked_sub_signed(chrono::Duration::days(keep_days as i64));
+    let Some(cutoff) = cutoff else { return };
+
+    let mut cleaned = 0u32;
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // 匹配 vivian_YYYY-MM-DD.log
+        if !name_str.starts_with("vivian_") || !name_str.ends_with(".log") {
+            continue;
+        }
+        let date_str = &name_str["vivian_".len()..name_str.len() - ".log".len()];
+        let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
+            continue;
+        };
+        if date < cutoff {
+            let _ = std::fs::remove_file(entry.path());
+            cleaned += 1;
+        }
+    }
+    if cleaned > 0 {
+        eprintln!("[日志清理] 已删除 {} 个过期日志文件（保留最近 {} 天）", cleaned, keep_days);
+    }
+}
+
+/// 待写日志的行数上限。
+///
+/// `tracing_appender::non_blocking` 的默认值是 128000 行，磁盘繁忙时这些
+/// 待写日志会全部堆积在内存里（实测可达数十 MB）。桌宠日志只服务于事后排查，
+/// 超限丢弃远比撑大常驻内存划算。4096 行足以覆盖秒级突发。
+const LOG_BUFFERED_LINES_LIMIT: usize = 4096;
+
+/// panic hook 只记录异常。Tokio 会把任务 panic 转为 JoinError，进程可能继续运行；
+/// 此时发出全局退出信号会让拖动、toast 和侧栏线程永久停止。
+/// 全局取消与 APP_EXITING 仅由真正的 ExitRequested 路径触发。
+fn install_panic_log_hook(panic_log_path: std::path::PathBuf) {
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let msg = format!("[PANIC] {}\nBacktrace:\n{}", info, backtrace);
+        eprintln!("{}", msg);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&panic_log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", msg);
+        }
+    }));
+}
+
+#[cfg(test)]
+mod panic_hook_tests {
+    #[test]
+    fn background_panic_is_logged_without_shutdown() {
+        const CHILD_LOG: &str = "VIVIAN_PANIC_HOOK_TEST_LOG";
+        if let Some(path) = std::env::var_os(CHILD_LOG) {
+            // 在独立测试进程安装真正的 hook，避免影响并行运行的其他测试。
+            super::install_panic_log_hook(path.into());
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                // 持有取消订阅者，保证旧 hook 的 cancel() 确实能送达。
+                let waiter = tokio::spawn(crate::utils::cancel_token::cancel_token().cancelled());
+                tokio::task::yield_now().await;
+                let result = tokio::spawn(async { panic!("background-panic-regression") }).await;
+                assert!(result.unwrap_err().is_panic());
+                assert!(!crate::commands::window::APP_EXITING.load(std::sync::atomic::Ordering::SeqCst));
+                assert!(!crate::utils::cancel_token::cancel_token().is_cancelled());
+                assert_eq!(tokio::spawn(async { 42 }).await.unwrap(), 42);
+                waiter.abort();
+            });
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("panic.log");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "panic_hook_tests::background_panic_is_logged_without_shutdown", "--nocapture"])
+            .env(CHILD_LOG, &path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "子进程失败: {}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let log = std::fs::read_to_string(path).unwrap();
+        assert!(log.contains("background-panic-regression"));
+        assert!(log.contains("Backtrace:"));
+    }
+}
+
+fn init_logging() {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+    let log_dir = crate::utils::path::get_user_data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // 启动时清理过期日志（保留最近 7 天）
+    cleanup_old_logs(&log_dir, 7);
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,vivian=debug"));
+
+    // 使用简单的按日文件名（vivian_YYYY-MM-DD.log）
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let log_path = log_dir.join(format!("vivian_{}.log", today));
+
+    // panic hook：将 panic 信息和调用栈同步写入日志文件 + stderr
+    // 不依赖 tracing 的 non-blocking writer（panic 后进程可能立即退出，缓冲区未刷新）
+    install_panic_log_hook(log_path.clone());
+
+    // 先用 File::create 确保文件存在（create(true).append(true) 在某些 Windows 环境会失败）
+    let file_writer = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&log_path)
+        .or_else(|_| {
+            // 回退：先创建再以追加模式打开
+            std::fs::File::create(&log_path)?;
+            std::fs::OpenOptions::new().append(true).open(&log_path)
+        });
+
+    match file_writer {
+        Ok(file) => {
+            // 显式限制待写日志的行数上限：默认值是 128000 行，磁盘繁忙时
+            // 待写队列会在内存里堆积到数十 MB。桌宠日志只是排查用，
+            // 超限丢日志远比撑大常驻内存划算。
+            let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+                .buffered_lines_limit(LOG_BUFFERED_LINES_LIMIT)
+                .finish(file);
+            // guard 必须在应用整个生命周期内存活，此处泄漏以避免被 drop
+            std::mem::forget(guard);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .with_writer(std::io::stdout)
+                        .with_target(false),
+                )
+                .with(
+                    fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false)
+                        .with_target(true),
+                )
+                .init();
+        }
+        Err(e) => {
+            eprintln!("警告：文件日志初始化失败（{e}），仅使用 stdout");
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .with_writer(std::io::stdout)
+                        .with_target(false),
+                )
+                .init();
+        }
+    }
+}
+
+pub(crate) fn start_character_services(handle: &tauri::AppHandle, instance: &crate::state::CharacterInstance) {
+    instance.brain.dialogue.set_app_handle(handle.clone());
+    instance.brain.memory.set_app_handle(handle.clone());
+    if let Some(classifier) = &instance.brain.embedding_classifier {
+        let emit_handle = handle.clone();
+        classifier.set_progress_callback(Arc::new(move |completed, total| {
+            let _ = emit_handle.emit("embedding:progress", serde_json::json!({
+                "current": completed, "total": total,
+            }));
+        }));
+    }
+    let brain = instance.brain.clone();
+    let char_id = brain.char_id.clone();
+    let presence = brain.presence.clone();
+    let app = handle.clone();
+    let router = brain.router.clone();
+    let memory = brain.memory.clone();
+    let pipeline = brain.chat_chain.as_ref().map(|c| c.pipeline.clone());
+
+    // Busy 钩子：知识采集
+    let presence_for_busy = presence.clone();
+    let app_for_busy = app.clone();
+    let router_for_busy = router.clone();
+    let memory_for_busy = memory.clone();
+    let char_id_for_busy = char_id.clone();
+    let proactive_for_busy = brain.proactive.clone();
+    presence.set_busy_task_spawner(std::sync::Arc::new(move || {
+        crate::presence::spawn_knowledge_acquisition(
+            char_id_for_busy.clone(),
+            app_for_busy.clone(),
+            presence_for_busy.clone(),
+            router_for_busy.clone(),
+            memory_for_busy.clone(),
+            proactive_for_busy.clone(),
+        );
+    }));
+
+    // Rest 钩子：记忆沉淀 + 用户认知整理
+    if let Some(pipeline) = pipeline.clone() {
+        let presence_for_rest = presence.clone();
+        let app_for_rest = app.clone();
+        let memory_for_rest = memory.clone();
+        let char_id_for_rest = char_id.clone();
+        let router_for_rest = router.clone();
+        let mind_for_rest = brain.mind.clone();
+        let world_state_for_rest = brain.world_state.clone();
+        presence.set_rest_task_spawner(std::sync::Arc::new(move || {
+            crate::presence::spawn_memory_consolidation(
+                char_id_for_rest.clone(),
+                app_for_rest.clone(),
+                presence_for_rest.clone(),
+                pipeline.clone(),
+                memory_for_rest.clone(),
+            );
+            // 用户认知整理：从行为日志提炼习惯 Belief（独立任务，不阻塞记忆沉淀）
+            crate::presence::spawn_user_cognition_consolidation(
+                char_id_for_rest.clone(),
+                app_for_rest.clone(),
+                router_for_rest.clone(),
+                mind_for_rest.clone(),
+                world_state_for_rest.clone(),
+                30,
+            );
+        }));
+    }
+
+ crate::presence::spawn_meme_acquisition_loop(instance.id.clone(),handle.clone(),instance.brain.router.clone(),instance.brain.memory.clone());
+}

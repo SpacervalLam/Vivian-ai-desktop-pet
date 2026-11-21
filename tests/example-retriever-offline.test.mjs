@@ -1,0 +1,169 @@
+// Compile the production example_retriever (with its own unit tests) without the desktop runtime.
+// Verifies the offline lexical-fallback channel: paraphrase recovery, literal priority,
+// single-fallback cap, thin-input rejection, continuation threshold, score band.
+import { mkdir, readFile, writeFile, mkdtemp } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const dir = path.join(root, 'tmp', 'example-retriever-tests');
+const persona = path.join(root, 'src-tauri', 'src', 'persona');
+const messageContext = path.join(root, 'src-tauri', 'src', 'pipeline', 'message_context.rs');
+await mkdir(path.join(dir, 'src'), { recursive: true });
+const rustPath = value => value.replaceAll('\\', '/');
+
+// is_short_followup is self-contained (no crate deps): extract it verbatim from production
+// so the continuation path exercises the real predicate, not a stub approximation.
+const source = (await readFile(messageContext, 'utf8')).replaceAll('\r\n', '\n');
+const start = source.indexOf('pub fn is_short_followup');
+const end = source.indexOf('\n}\n', start) + 3;
+if (start < 0 || end < 3) throw new Error('is_short_followup slice not found');
+const followup = source.slice(start, end);
+const promptSource = (await readFile(path.join(root, 'src-tauri/src/pipeline/prompt_modules.rs'), 'utf8')).replaceAll('\r\n', '\n');
+const normalizeStart = promptSource.indexOf('pub fn normalize_lang');
+const normalizeEnd = promptSource.indexOf('\n}\n', normalizeStart) + 3;
+if (normalizeStart < 0 || normalizeEnd < 3) throw new Error('normalize_lang slice not found');
+const normalize = promptSource.slice(normalizeStart, normalizeEnd);
+const isolatedData = await mkdtemp(path.join(dir, 'voice-corpus-'));
+
+
+await writeFile(path.join(dir, 'Cargo.toml'), `[package]
+name="vivian-example-retriever-tests"
+version="0.1.0"
+edition="2021"
+[dependencies]
+serde={version="1",features=["derive"]}
+serde_json="1"
+parking_lot="0.12"
+tracing="0.1"
+once_cell="1"
+sha2="0.10"
+uuid={version="1",features=["v4"]}
+tempfile="3"
+windows={version="0.61",features=["Win32_Storage_FileSystem"]}
+`);
+
+await writeFile(path.join(dir, 'src', 'lib.rs'), `#![allow(dead_code)]
+pub mod types { pub mod response {
+    #[derive(Clone, Debug, serde::Deserialize)]
+    pub struct ChatMessage { pub role: String, pub content: String }
+}}
+pub mod memory {
+    pub mod embedding {
+        use std::sync::Arc;
+        pub type VivianResult<T> = Result<T, String>;
+        pub trait MemoryEmbeddingProvider: Send + Sync {
+            fn dimension(&self) -> usize;
+            fn model_id(&self) -> &str { "fixture" }
+            fn index_identity(&self) -> String { self.model_id().into() }
+            fn embed(&self, text: &str) -> VivianResult<Vec<f32>>;
+            fn embed_batch(&self, texts: &[String]) -> VivianResult<Vec<Vec<f32>>> {
+                texts.iter().map(|t| self.embed(t)).collect()
+            }
+            fn is_remote(&self) -> bool { false }
+        }
+        pub struct HashEmbedding;
+        impl MemoryEmbeddingProvider for HashEmbedding {
+            fn dimension(&self) -> usize { 64 }
+            fn embed(&self, _text: &str) -> VivianResult<Vec<f32>> { Ok(vec![0.0; 64]) }
+        }
+        pub fn default_embedding() -> Arc<dyn MemoryEmbeddingProvider> { Arc::new(HashEmbedding) }
+    }
+    pub mod vector_search {
+        pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+            let n = a.len().min(b.len());
+            if n == 0 { return 0.0; }
+            let (mut dot, mut na, mut nb) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for i in 0..n { dot += a[i] as f64 * b[i] as f64; na += (a[i] as f64).powi(2); nb += (b[i] as f64).powi(2); }
+            if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
+        }
+    }
+}
+pub mod error { pub type VivianResult<T> = Result<T, String>; }
+pub mod character_packages {
+    pub struct Package { pub id: String }
+    pub static RAW: parking_lot::RwLock<&'static str> = parking_lot::RwLock::new("");
+    pub fn active() -> Vec<Package> {
+        if RAW.read().is_empty() { vec![] } else { vec![Package { id: "hot-fixture".into() }] }
+    }
+    pub fn text(id: &str, _: &str) -> &'static str {
+        if id == "hot-fixture" { *RAW.read() } else { "" }
+    }
+}
+// Compilation-only stubs for one pre-existing integration test
+// (modern_net_examples_reach_companion_prompt_without_remote_embeddings) that
+// exercises the real CompanionPrompt; it is skipped below because a stub here
+// could only test the stub. Full-crate cargo test covers it.
+pub mod pipeline { #[path="${rustPath(path.join(root,'src-tauri/src/pipeline/prompt_templates.rs'))}"] pub mod prompt_templates; pub mod prompt_modules {
+${normalize}
+    #[derive(Default)]
+    pub struct PromptParts {
+        pub char_id: String,
+        pub channel: String,
+        pub examples_block: Option<String>,
+    }
+}
+pub mod companion_prompt {
+    use crate::types::response::ChatMessage;
+    #[derive(Default)]
+    pub struct CompanionPrompt { examples: Option<String> }
+    impl CompanionPrompt {
+        pub fn build(parts: &crate::pipeline::prompt_modules::PromptParts, _history: &[ChatMessage]) -> Self {
+            Self { examples: parts.examples_block.clone() }
+        }
+        pub fn messages(&self, _history: &[ChatMessage], _input: &str, _internal: bool, _status: Option<&str>) -> Vec<ChatMessage> {
+            match &self.examples {
+                Some(examples) => vec![ChatMessage { role: "system".into(), content: examples.clone() }],
+                None => Vec::new(),
+            }
+        }
+    }
+}
+pub mod message_context {
+${followup}
+}}
+pub mod utils {
+    #[path="${rustPath(path.join(root, 'src-tauri/src/utils/fs.rs'))}"] pub mod fs;
+    pub mod path {
+        pub fn get_user_data_dir() -> std::path::PathBuf {
+            std::env::var_os("VIVIAN_TEST_DATA_DIR").expect("isolated test data").into()
+        }
+        pub fn get_character_data_dir(id: &str) -> std::path::PathBuf { get_user_data_dir().join("characters").join(id) }
+    }
+}
+pub mod emotion {
+    #[path="${rustPath(path.join(root, 'src-tauri/src/emotion/corpus_cache.rs'))}"] pub mod corpus_cache;
+}
+#[path="${rustPath(path.join(persona, 'example_library.rs'))}"] pub mod example_library;
+#[path="${rustPath(path.join(persona, 'embedding_snapshot.rs'))}"] mod embedding_snapshot;
+#[path="${rustPath(path.join(persona, 'example_retriever.rs'))}"] pub mod example_retriever;
+#[test]
+fn live_factory_corpus_replaces_cached_retrieval_and_can_roll_back() {
+    use std::sync::Arc;
+    fn publish(wording: &str) {
+        let raw = serde_json::json!([{"id":"hot-greeting","scope":"general","cues":["greeting"],
+            "situation":"greeting","user":"greeting","response":{"intent":"reply","text":wording}}]).to_string();
+        *character_packages::RAW.write() = Box::leak(raw.into_boxed_str());
+    }
+    publish("Original package wording.");
+    let retriever = example_retriever::ExampleRetriever::new("hot-fixture", Arc::new(memory::embedding::HashEmbedding));
+    let original = retriever.retrieve("greeting", &[], None, &[], "en").unwrap();
+    assert!(original.contains("Original package wording."));
+    publish("Updated package wording.");
+    let updated = retriever.retrieve("greeting", &[], None, &[], "en").unwrap();
+    assert!(updated.contains("Updated package wording."));
+    assert!(!updated.contains("Original package wording."));
+    publish("Original package wording.");
+    assert!(retriever.retrieve("greeting", &[], None, &[], "en").unwrap().contains("Original package wording."));
+    *character_packages::RAW.write() = "";
+}
+`);
+
+const result = spawnSync('cargo', ['test', '--offline', '--manifest-path', path.join(dir, 'Cargo.toml'), '--lib', '-j', '1', '--',
+  '--test-threads=1', '--skip', 'modern_net_examples_reach_companion_prompt_without_remote_embeddings'], {
+  cwd: root, stdio: 'inherit', timeout:180_000,
+  env: { ...process.env, TEMP:isolatedData, TMP:isolatedData, VIVIAN_TEST_DATA_DIR: isolatedData, CARGO_INCREMENTAL: '0', CARGO_PROFILE_DEV_DEBUG: '0' },
+});
+if (result.error) throw result.error;
+process.exitCode = result.status ?? 1;

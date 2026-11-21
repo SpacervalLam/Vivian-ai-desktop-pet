@@ -1,0 +1,4333 @@
+{
+  "format": 1,
+  "id": "claude",
+  "name": "Claude",
+  "version": "1.0.16",
+  "files": {
+    "assets/chibi/claude-atlas.webp": "dfe5c35d67d199f521a17790f5cb92fb4ee2f91af2f2fc31a824c520cf12bb2a",
+    "assets/chibi/motion/claude/claude-angry-sheet.webp": "56c30fd3182640274dba1e8738fcba41dc464640650394cf7111c84be6165cb1",
+    "assets/chibi/motion/claude/claude-blink-sheet.webp": "5fd0017b97a574c3fb139dc0bd3c55ea587ab3e1ca0c980c279410fe7514e9f6",
+    "assets/chibi/motion/claude/claude-busy-in-sheet.webp": "6249ca1f4131b6215d7b71714b27cd51bea6a708682cea3cf8744ee3b460d33d",
+    "assets/chibi/motion/claude/claude-busy-loop-sheet.webp": "968dd1918158951f7185c1f3f019d3a44a6530006eaf38bd6eb5ece3c952e0a6",
+    "assets/chibi/motion/claude/claude-cast-sheet.webp": "00ea53f9eda61a1a96c033bfe65f1c99e1704829bebc6a9f203d93bc18c53947",
+    "assets/chibi/motion/claude/claude-clipboard-sheet.webp": "42689de208d439e5ffd061c2423994f6ada955bbafabb9b26d0cf027fc697e5a",
+    "assets/chibi/motion/claude/claude-edge-bottom-sheet.webp": "131f388e101338f1b6807ac3865fb819e31cfd09de1877f71b2e7abb40b95c6f",
+    "assets/chibi/motion/claude/claude-edge-peek-left-sheet.webp": "306d6e4917d54c6bf6cbecff83ca69e4996d83d4677d547908f800ce9334cd16",
+    "assets/chibi/motion/claude/claude-edge-peek-right-sheet.webp": "f75f737f155db5b97a7d5884c92572364c4f941d013e42ea7ccdbf28aadb8222",
+    "assets/chibi/motion/claude/claude-edge-peek-sheet.webp": "f6fca5d33f102fa695e0266227735b4c9851eca5b24fa1753f98df7fd2b38d45",
+    "assets/chibi/motion/claude/claude-edge-sheet.webp": "640aa8f6f64a68da036cd22b9d63f080371d324237ff003af3f5e7a4e925e37d",
+    "assets/chibi/motion/claude/claude-float-sheet.webp": "037a38c8cf00bf666bc9a6c941e461e3583c126d4adc6ecbf7cafe7f4bd30154",
+    "assets/chibi/motion/claude/claude-happy-sheet.webp": "8037957356222547e5b9a81a907320e08244b980e7e551e1d34496b61bf7c1ab",
+    "assets/chibi/motion/claude/claude-idle-sheet.webp": "c3e5490f1a030693db74350582debf8d185382cc13ca364bb1bba1e786cb0caf",
+    "assets/chibi/motion/claude/claude-lean-book-left-sheet.webp": "6ac2ef719cb5f58b35158721ee643b463d41b60018916615134db5eebc41de10",
+    "assets/chibi/motion/claude/claude-lean-book-right-sheet.webp": "080d1d88a22559416159934a935350a4dc8451557154a90f4e56ebcf11bddab2",
+    "assets/chibi/motion/claude/claude-look-sheet.webp": "732bfeb3abf20fa576aa455aa459aa9990e72f976fba9db71f067a0a7c3b0b84",
+    "assets/chibi/motion/claude/claude-music-sheet.webp": "b5a015210e9a1674396bac49354490db38209c53b02d479a29cc383f5fcd9262",
+    "assets/chibi/motion/claude/claude-remind-sheet.webp": "0cc0f84609d20b6f9832580f5c3250c157a6ad339f813ee533919520f5644a64",
+    "assets/chibi/motion/claude/claude-sleep-sheet.webp": "84ed53d17271f054c27d5b413a41d8d954a8a84a2050aa2a44964235f1ce0326",
+    "assets/chibi/motion/claude/claude-smug-sheet.webp": "aabe25229199dffe33f48741fa719904eba89be070ffedd62ca3077f01f56fd2",
+    "assets/chibi/motion/claude/claude-think-sheet.webp": "237a40ad3a8b77127e57d31538e4f98b97c5be456234243c8fbcdfe6e4f8d7e5",
+    "assets/chibi/motion/claude/claude-tired-sheet.webp": "0ea36f4f8bceba9ff71bccc2018117639fbcc51d9df6b42d76efb4dec0860b8b",
+    "assets/chibi/motion/claude/claude-turn-left-sheet.webp": "1b9f2ba924e5642e104e0a22d509a44138f84f233ae1e74ec6dfb88b3d4508df",
+    "assets/chibi/motion/claude/claude-turn-right-sheet.webp": "c2b68a85eaecb5416023aae090a1fdf767a39b0fde9e3d44c6f344d7d1cee187",
+    "assets/chibi/motion/claude/claude-umbrella-sheet.webp": "dc1ea467deb3548cc84e0421b3b78a89dd5f8bf8e815124b6fca24f6db5e4b31",
+    "assets/chibi/motion/claude/claude-wake-sheet.webp": "be0e25d4791d6622dbe70cf1a0f0daad8422921608d3aec8e36dc4826b31420c",
+    "assets/chibi/walk/claude/claude-walk-left-sheet.webp": "5465b0786a01c837584dcd49a8a6168ae9afac0774b6172e3f0dc7b8172201d3",
+    "assets/chibi/walk/claude/claude-walk-right-sheet.webp": "c12ef687f96e089ca563bb6edd32f26526177af3e7df993f243dba5b9548d1e4",
+    "assets/icons/charaters/claude.webp": "1e2333391c86ae9ad0adceaa6fbab330c711000c0c30e57d5ef8e6574848273c",
+    "assets/record-art/claude-window-letter-v1.webp": "670c16ab94b8cf2397a09d8d8516fb899299ac6e8632d051e6ae83b54aa9d7a3",
+    "prompts/appearance.en.md": "abee2e18fb7fa9eb822ab7cd5bd575e5db53d8fea793fd26c6f6da323ef8bf08",
+    "prompts/appearance.ja.md": "a5fa933a26ae9a66b1bfe621d73820832b95a9f088c30bb44fe139ff82de4ac7",
+    "prompts/appearance.md": "6ed005a3b603061304897f3bb47c73707f7391c43b6b87b47c2056f6de71a5f8",
+    "prompts/augment_voice.md": "6e11a6e36b531d68c17681a616c71cc2df5561402f9d1c8b0d09814e215e9913",
+    "prompts/background.en.md": "1c60ecd1b2fddea9e64b48950c8d61984f063fdc3ed74802c88d880963b2f605",
+    "prompts/background.ja.md": "902fffc899ae27ae7a5dbeee5e7dd5a97670178da6f7c859d9d4fea8f724efc5",
+    "prompts/background.md": "d26bdcaff0ceb1aa5d65deb10b8598247933d995dbcd87b5b92e702bdc651dad",
+    "prompts/behavior.json": "5a75b7254d8d60646751c6226154b3168688c923ca3f5ea236387d01ede92bb6",
+    "prompts/canon_quotes.en.md": "e322e114728d0bc4182f90a55f91ebef49f35548bb17892578c54e81b0c83413",
+    "prompts/canon_quotes.ja.md": "b820375b724fd835685c57fc6570b6c33b3f9fc7a60a357547a42e3bb7db7011",
+    "prompts/canon_quotes.md": "c41fab2381ec8171b33d3563ae1f32d165408f8abc5a675cae4a6aac631bf6cf",
+    "prompts/coding_voice.md": "f749512e4dcdc38c90018b4ab9757ddd2d743780c5d25e0af138ce3f37f664fc",
+    "prompts/diary_voice.en.md": "b164a8a2e4cb05084aaa91e87c3a0cd86fe9359841600a1dd7a155718b85f4cf",
+    "prompts/diary_voice.ja.md": "aaff0ed208e33a6b741dc2d76adb5b881d5a1362e95cd9aa96de0804ccf09aa7",
+    "prompts/diary_voice.zh.md": "574c454790dc4a7552d15e690c6c4a79f8143f4f481e36af47dd8cc05e66e481",
+    "prompts/environment_presets.en.md": "6bf67c8030b020234f05f6c58c30f911d503499c0c692e9f2a9857c5913a090c",
+    "prompts/environment_presets.ja.md": "b316a5bd4b562f61114b6b00de808e71e40e11587ebb3d696010cee3e10ee2a8",
+    "prompts/environment_presets.md": "ec757d9198cac42083a7da703c1f3dae43fe440de6822785ed5edc0917dbf2e1",
+    "prompts/examples.en.md": "45bdbde91560c02e660f9c7122de7192754bf5a3e4a9da8452969ccb58fe66e5",
+    "prompts/examples.ja.md": "fd50b0f886353ce38a5791f69a5c3fa0eb534c400a6cf1d2ff806721b10d3922",
+    "prompts/examples.md": "a739e8cfd41cba5c9753c900aff163efe17875cda392df9e43427cc8224a722e",
+    "prompts/flags.json": "e66b20c10b089a72d23eaa3261676f5af56bf9635a1cc0b781304ff32a39eb57",
+    "prompts/identity.en.md": "d19c1588d7b8d4236f991601c6d4c2c4fc6afa5b516d36ad5202dcd16ed5d635",
+    "prompts/identity.ja.md": "28e89bd540a26c5446f152dba203dd9728ed4b5aaa296053d3c5f68434183add",
+    "prompts/identity.md": "782f3cd1070ac2c0c546c7f554a1900f135fd3959bbce1fc0413139ee98aff8b",
+    "prompts/interests.en.md": "d12fb04210d82d9e79121f309c119cbe0d9e98770aa6b69dbea3ef3ecffbf7da",
+    "prompts/interests.ja.md": "c130dafa1259ba916308d0afd91270e313a2c365b64a9dc32f2071000d1703f1",
+    "prompts/interests.md": "27813393e9fbc53fe9a9cb0669d40a70341e9898bda5ca454930b731025d7cf1",
+    "prompts/meme_voice.md": "fb6189649c9fa4edbb772b3f0bcfa56cce3dd4099e53c1fba5cf0ac12fb3f7ac",
+    "prompts/mood.json": "0e62510bf5010a6f8ff783071625919d6ed6d2095e514ba7075e86c08478269c",
+    "prompts/persona_config.en.md": "85c149b423fc59e6d886cad80e64ce15d071a0e99889b29e91f936b6f1cace2b",
+    "prompts/persona_config.ja.md": "24e90069304e35f735378ccb3277ef4b21e4a57a3adf1440b18e46ea732b7b6e",
+    "prompts/persona_config.md": "7408a706ed03dce5da85d4936eb3bd14d34dc62c3db35d9f738b9f5d8b49c89f",
+    "prompts/personality.en.md": "4c3fcda5413eecaf5b4b21335a283be3b5edd8b3a9fe23912958e749d77ca539",
+    "prompts/personality.ja.md": "f843c5208b6bb1d41d24c1921f42949c799c25a13a31d92aff1f366c30e3c03b",
+    "prompts/personality.md": "93605e9ea4361608da59dad9a4b6172b65deea6ce31c666ec57be6a0f8f5e505",
+    "prompts/platforms.json": "3c17e2ebb5fd70dfd1404f12d4041540b9479f54275c5a809efbe393140171d0",
+    "prompts/relation_links.json": "1412dbce71bd6757ad612b6df7e02d72e0c4fd5845e32e2a5b14d6538ae66da0",
+    "prompts/relationships.en.md": "2794a1840c401c96d70c85925844ac59819bbf785ee653e39decd3e0c44fa02c",
+    "prompts/relationships.ja.md": "82a5d50e256794258937a4a4aa519fff5121126a33ecf3592c25663fa831150a",
+    "prompts/relationships.md": "642568665e62c59650e1b82632fa80e407f7a91bbd4a2a920b1e7a1bf923357c",
+    "prompts/scenes.en.md": "1e2411153514a3db6806b3eddd4ad35676111e21ec5666707d93f68f32fcc8f7",
+    "prompts/scenes.ja.md": "8ededfb7b94aec0c4dea91a2337e03ab7a92397221e06fd70ef516cc04ac4848",
+    "prompts/scenes.md": "65768976d8f7ac047079780d34e7c58cd215439301d8b553e21dbd0590cfdd80",
+    "prompts/seed_group.json": "d7868d7178860d5f62bc53248f2697fa92004e80d71a502e36d905570c68ecf8",
+    "prompts/seed_memories.en.md": "c84acad37243529b095dd1ecd7eb2845c0c6472b6529d0e1c9bac25d33bc01af",
+    "prompts/seed_memories.ja.md": "564528e0806feca8faca2e859751f00aa9e8b2046d966be0e162299f27e6f495",
+    "prompts/seed_memories.md": "d6b393fb36469007b31f3cc897a1b9ce0a2ef71bedb7f70efd2212f32eebf6da",
+    "prompts/speech.en.md": "68dc743a8a5f27a8512680799f4cb7d85952ba495141c0efe066b2a86ce3be9f",
+    "prompts/speech.ja.md": "0d108d5b6f51023d15b62084c2eddf8c416221006980ee594d14a0907b262f31",
+    "prompts/speech.md": "8cf2affa67eb81a2bbddf0a663c73b9a0e4074c169046c98f48854fb548e076d",
+    "prompts/stickers.json": "a5338d955b09046ec0b16f3a9625b7955c763aae07dc722e474e6078745f932f",
+    "prompts/style.json": "2ba5ef424b3826528f1d33f0e5a6f6bf7bc76168ef67c2861a1c93e0b71d8643",
+    "prompts/traits.json": "8edd7a5c308e56835c460a57baf380c3ff2e2728bc3a99fa94b1d37c2e4cccd3",
+    "prompts/voice_fragments.json": "dfc9c3d9f266acd12ec616c2eec3b7a962940b30698b615818b85893abd2f89d"
+  },
+  "anchors": {
+    "/chibi/claude-atlas.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-angry-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-blink-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-busy-in-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-busy-loop-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-cast-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-clipboard-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-bottom-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-float-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-happy-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-idle-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-lean-book-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-lean-book-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-look-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-music-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-remind-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-sleep-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-smug-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-think-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-tired-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-turn-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-turn-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-umbrella-sheet.webp": [
+      [
+        2.166877,
+        -2.480935
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.480935
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.480935
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.248743
+      ],
+      [
+        2.166877,
+        -2.480935
+      ],
+      [
+        2.166877,
+        -2.248743
+      ]
+    ],
+    "/chibi/motion/claude/claude-wake-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/walk/claude/claude-walk-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.390625
+      ],
+      [
+        0,
+        -0.390625
+      ],
+      [
+        0,
+        -0.390625
+      ],
+      [
+        0,
+        -0.390625
+      ],
+      [
+        0,
+        -0.1953125
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.390625
+      ]
+    ],
+    "/chibi/walk/claude/claude-walk-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.9765625
+      ],
+      [
+        0,
+        -0.9765625
+      ],
+      [
+        0,
+        -0.78125
+      ],
+      [
+        0,
+        -0.78125
+      ],
+      [
+        0,
+        -0.1953125
+      ],
+      [
+        0,
+        -0.390625
+      ],
+      [
+        0,
+        -0.9765625
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  "scales": {
+    "/chibi/claude-atlas.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-angry-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-blink-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-busy-in-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-busy-loop-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-cast-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-clipboard-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-bottom-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-float-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-happy-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-idle-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-lean-book-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-lean-book-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-look-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-music-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-remind-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-sleep-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-smug-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-think-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-tired-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-turn-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-turn-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-umbrella-sheet.webp": [
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ],
+      [
+        1.188821,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-wake-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/claude/claude-walk-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/claude/claude-walk-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/claude/claude-edge-peek-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ]
+  },
+  "presentation": {
+    "defaultSize": {
+      "scale": 0.904893,
+      "translateY": -0.350296
+    },
+    "bottomDock": {
+      "scale": 1,
+      "translateY": -2.337836
+    },
+    "bubbleTheme": {
+      "background": "linear-gradient(135deg, rgba(156, 72, 50, 0.95) 0%, rgba(161, 78, 51, 0.92) 100%)",
+      "textColor": "#FFFAF5",
+      "tailColor": "#9C4832",
+      "shadow": "0 6px 20px rgba(200, 130, 94, 0.38)",
+      "crossBorderColor": "rgba(200, 130, 94, 0.7)"
+    },
+    "accent": "#c8825e",
+    "notificationNotes": [
+      784,
+      1047
+    ],
+    "diaryArt": "claude-window-letter-v1.webp"
+  },
+  "independent_directions": true,
+  "animations": {
+    "float": {
+      "name": "float",
+      "label": "升降悬浮",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-float-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "walk": {
+      "name": "walk",
+      "label": "走动",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/walk/claude/claude-walk-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": true,
+      "durations": [
+        136,
+        136,
+        136,
+        136,
+        136,
+        136,
+        136,
+        138
+      ],
+      "mirrorRight": false
+    },
+    "turn": {
+      "name": "turn",
+      "label": "转身",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-turn-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": false,
+      "durations": [
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        27
+      ],
+      "mirrorRight": false
+    },
+    "blink": {
+      "name": "blink",
+      "label": "眨眼",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-blink-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 15,
+      "loop": false,
+      "durations": [
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "cast": {
+      "name": "cast",
+      "label": "施法",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-cast-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "happy": {
+      "name": "happy",
+      "label": "开心",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-happy-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "angry": {
+      "name": "angry",
+      "label": "生气",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-angry-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "thinking": {
+      "name": "thinking",
+      "label": "思考中",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-think-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145,
+        145
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "think": {
+      "name": "think",
+      "label": "思考",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-think-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "smug": {
+      "name": "smug",
+      "label": "得意",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-smug-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        63,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "sleep": {
+      "name": "sleep",
+      "label": "入睡",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-sleep-sheet.webp",
+      "cols": 4,
+      "rows": 8,
+      "frames": 32,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        111,
+        109
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-in": {
+      "name": "busy-in",
+      "label": "忙碌-掏出手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-busy-in-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        64,
+        65
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-loop": {
+      "name": "busy-loop",
+      "label": "忙碌-看手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-busy-loop-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "wake": {
+      "name": "wake",
+      "label": "睡醒起身",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-wake-sheet.webp",
+      "cols": 4,
+      "rows": 8,
+      "frames": 32,
+      "loop": false,
+      "durations": [
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        53,
+        57
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "remind": {
+      "name": "remind",
+      "label": "温和提醒",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-remind-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        101,
+        105
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "tired": {
+      "name": "tired",
+      "label": "吃力擦汗",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-tired-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 15,
+      "loop": true,
+      "durations": [
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "umbrella": {
+      "name": "umbrella",
+      "label": "撑伞",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-umbrella-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "music": {
+      "name": "music",
+      "label": "听歌打拍子",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-music-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "clipboard": {
+      "name": "clipboard",
+      "label": "好奇看纸条",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-clipboard-sheet.webp",
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        120
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "look": {
+      "name": "look",
+      "label": "四处张望",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-look-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 15,
+      "loop": true,
+      "durations": [
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164,
+        164
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "edge": {
+      "name": "edge",
+      "label": "贴边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-edge-peek-{direction}-sheet.webp",
+      "cols": 3,
+      "rows": 2,
+      "frames": 6,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        85,
+        100,
+        135,
+        250,
+        140,
+        255
+      ],
+      "directions": [
+        "left",
+        "right"
+      ],
+      "mirrorLeft": false,
+      "mirrorRight": false,
+      "wallContact": {
+        "left": [
+          205,
+          230
+        ],
+        "right": [
+          190,
+          248
+        ]
+      },
+      "dockedFrame": 4
+    },
+    "lean": {
+      "name": "lean",
+      "label": "倚靠",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/claude/claude-lean-book-{direction}-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "hold": false,
+      "durations": [
+        85,
+        85,
+        85,
+        85,
+        85,
+        85,
+        100,
+        110,
+        130,
+        150,
+        170,
+        230
+      ],
+      "directions": [
+        "left",
+        "right"
+      ],
+      "mirrorLeft": false,
+      "mirrorRight": false,
+      "wallContact": {
+        "left": [
+          118,
+          282
+        ],
+        "right": [
+          411,
+          284
+        ]
+      }
+    },
+    "edge-bottom": {
+      "name": "edge-bottom",
+      "label": "下沿扒边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/claude/claude-edge-bottom-sheet.webp",
+      "cols": 4,
+      "rows": 8,
+      "frames": 32,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        56,
+        64
+      ],
+      "directions": null,
+      "mirrorRight": false
+    }
+  }
+}

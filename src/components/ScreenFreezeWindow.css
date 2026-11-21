@@ -1,0 +1,19 @@
+.screen-freeze { position: fixed; inset: 0; overflow: hidden; background: #181c24; color: #f3f5f8; cursor: move; user-select: none; touch-action: none; }
+.screen-freeze > img { width: 100%; height: 100%; max-width: none; object-fit: contain; pointer-events: none; }
+.screen-freeze-edge { position: absolute; z-index: 1; touch-action: none; }
+.screen-freeze-edge.edge-n, .screen-freeze-edge.edge-s { left: 10px; right: 10px; height: 6px; cursor: ns-resize; }
+.screen-freeze-edge.edge-n { top: 0; }
+.screen-freeze-edge.edge-s { bottom: 0; }
+.screen-freeze-edge.edge-e, .screen-freeze-edge.edge-w { top: 10px; bottom: 10px; width: 6px; cursor: ew-resize; }
+.screen-freeze-edge.edge-e { right: 0; }
+.screen-freeze-edge.edge-w { left: 0; }
+.screen-freeze-edge.edge-ne, .screen-freeze-edge.edge-nw, .screen-freeze-edge.edge-se, .screen-freeze-edge.edge-sw { width: 10px; height: 10px; }
+.screen-freeze-edge.edge-ne { top: 0; right: 0; cursor: nesw-resize; }
+.screen-freeze-edge.edge-nw { top: 0; left: 0; cursor: nwse-resize; }
+.screen-freeze-edge.edge-se { bottom: 0; right: 0; cursor: nwse-resize; }
+.screen-freeze-edge.edge-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.screen-freeze-menu { position: absolute; z-index: 2; width: 148px; padding: 5px; background: rgba(27,31,39,.96); border: 1px solid #ffffff30; border-radius: 10px; box-shadow: 0 5px 20px #0005; cursor: default; }
+.screen-freeze-menu button { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 10px; border-radius: 6px; font-size: 13px; text-align: left; }
+.screen-freeze-menu button:hover, .screen-freeze-menu button:focus-visible { background: #ffffff20; outline: none; }
+.screen-freeze-menu button:disabled { opacity: .45; cursor: wait; }
+.screen-freeze-message { position: absolute; bottom: 6px; left: 6px; right: 6px; max-height: 50%; overflow: auto; padding: 8px 10px; border-radius: 8px; background: #181c24ed; font-size: 12px; overflow-wrap: anywhere; cursor: default; user-select: text; }

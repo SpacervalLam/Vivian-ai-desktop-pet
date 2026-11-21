@@ -1,0 +1,59 @@
+import assert from 'node:assert/strict';
+import sharp from 'sharp';
+import { readFile, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { releaseSheets, releaseArtwork, calibratedSheets, validateReleaseImage,
+  downscaleSource, RELEASE_CELL, MASTER_CELL } from '../scripts/compress-chibi.mjs';
+
+// Catch a regression that changes silhouettes or silently scales the atlas.
+const pixels = Buffer.from([220, 204, 237, 255, 242, 232, 245, 127, 0, 0, 0, 0, 45, 30, 60, 255]);
+const source = await sharp(pixels, { raw: { width: 2, height: 2, channels: 4 } }).png().toBuffer();
+await validateReleaseImage(source, source);
+const alphaChanged = Buffer.from(pixels); alphaChanged[7] = 128;
+await assert.rejects(validateReleaseImage(source, await sharp(alphaChanged, { raw: { width: 2, height: 2, channels: 4 } }).png().toBuffer()), /alpha changed/);
+await assert.rejects(validateReleaseImage(source, await sharp(source).resize(4, 4).png().toBuffer()), /dimensions changed/);
+const darker = Buffer.from(pixels); darker[0] -= 20; darker[1] -= 20; darker[2] -= 20;
+await assert.rejects(validateReleaseImage(source, await sharp(darker, { raw: { width: 2, height: 2, channels: 4 } }).png().toBuffer()), /colour error/);
+assert.ok(releaseSheets.length > 12);
+assert.equal(new Set(releaseSheets).size, releaseSheets.length);
+assert.ok(calibratedSheets.every(path => releaseSheets.includes(path)));
+// Default expression atlases must ride the same release profile as the sheets.
+assert.ok(releaseArtwork.length > releaseSheets.length, 'atlases must be part of the release artwork corpus');
+assert.ok(releaseArtwork.some(path => path.endsWith('-atlas.webp')));
+
+if (process.argv.includes('--dist')) {
+  let before = 0, after = 0, calibratedBefore = 0, calibratedAfter = 0;
+  for (const path of releaseArtwork) {
+    const original = await readFile(join('public/chibi', path));
+    const compressed = await readFile(join('dist/chibi', path));
+    // 发布图集按 RELEASE_CELL 降分辨率；画质与透明度契约相对降采样后的基准校验，
+    // 母版仍保持 MASTER_CELL，前端逻辑坐标系不变。
+    const baseline = await downscaleSource(original);
+    const material = /claude|deepseek/.test(path) ? 'cream' : 'lavender';
+    await validateReleaseImage(original, compressed, baseline, material);
+    const meta = await sharp(compressed).metadata();
+    assert.equal(meta.width, baseline.info.width, `${path}: release grid width`);
+    assert.equal(meta.height, baseline.info.height, `${path}: release grid height`);
+    assert.ok(compressed.length <= original.length, `${path}: no size increase`);
+    if (!compressed.equals(original)) {
+      assert.ok(compressed.length < original.length * .95, `${path}: changed sheets must meet the release profile's 5% minimum saving`);
+    }
+    before += original.length; after += compressed.length;
+    if (calibratedSheets.includes(path)) { calibratedBefore += original.length; calibratedAfter += compressed.length; }
+  }
+  assert.ok(calibratedAfter < calibratedBefore * .35, 'Calibrated release sheets must save at least 65%');
+  // The discovered corpus grows and may contain already-lossy artwork that must
+  // remain unchanged to preserve colour. Keep the fixed calibrated savings
+  // budget above and enforce the encoder's per-file policy for every new sheet.
+  assert.ok(after < before, 'Release compression must reduce the overall animation payload');
+  async function verifyOtherFiles(directory, relative = '') {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = [relative, entry.name].filter(Boolean).join('/');
+      if (entry.isDirectory()) await verifyOtherFiles(join(directory, entry.name), path);
+      else if (!releaseArtwork.includes(path)) assert.deepEqual(await readFile(join('dist/chibi', path)), await readFile(join('public/chibi', path)), `${path}: other artwork preserved`);
+    }
+  }
+  await verifyOtherFiles('dist/chibi');
+  console.log(`Release sheets: ${(before/1048576).toFixed(2)} -> ${(after/1048576).toFixed(2)} MiB @ ${RELEASE_CELL}px cells (master ${MASTER_CELL}); dimensions, alpha, colour budget and other artwork verified.`);
+}
+console.log('Chibi release compression guards passed.');

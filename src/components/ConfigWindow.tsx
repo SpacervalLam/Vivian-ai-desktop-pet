@@ -1,0 +1,7383 @@
+import { useGlobalTheme } from '../hooks/useGlobalTheme';
+import ResourceLibrarySettings from './settings/ResourceLibrarySettings';
+import CharacterPackageSettings from './settings/CharacterPackageSettings';
+import { TextField, BrowseTextField, SelectField, NumberField, SliderField, ToggleField, subsectionTitleStyle, fieldStyle, labelStyle, inputStyle, sectionTitleStyle } from './settings/SettingsFields';
+import { ROUTING_TASKS, ROUTING_TIERS, NON_LLM_TASKS, normalizeEmbeddingEndpoint, presetMatches, useProviderPresets, invalidateProviderPresetsCache, needsSecretFor, needsAppIdFor, ProviderSelector, WorkModelProviderSelector, type ConfigValue, type ConfigObject, type EmbeddingProviderPreset } from './settings/ModelSettings';
+export { PROVIDER_PRESETS, invalidateProviderPresetsCache } from './settings/ModelSettings';
+import StickerSettings from './stickers/StickerSettings';
+import ReasoningPrefField, { type ReasoningPref } from './settings/ReasoningConfigField';
+import LlmProbeResults from './settings/LlmProbeResults';
+import ProviderPresetUpdater, { type UpdateJob } from './settings/ProviderPresetUpdater';
+import { runProbeBatch, type ProbeResult } from './settings/llmProbe';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
+import { platform, version as osVersion, arch } from '@tauri-apps/plugin-os';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { emit, listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
+import { open as openShell } from '@tauri-apps/plugin-shell';
+import { useTranslation } from 'react-i18next';
+import { changeLanguage } from '../i18n';
+import { getCharacterId } from '../characterContext';
+import TtsHelpDialog, { TtsBackendKey } from './TtsHelpDialog';
+import AsrHelpDialog, { AsrBackendKey } from './AsrHelpDialog';
+import './settings/SpeechSettings.css';
+import ShortcutRecorder, { type ConflictResult, formatForDisplay } from './ShortcutRecorder';
+import ClearConfirmDialog from './ClearConfirmDialog';
+import NetworkDiagnosisDialog from './NetworkDiagnosisDialog';
+import SetupGuideModal from './SetupGuideModal';
+import type { FishSpeechServiceState, GptSoVitsServiceState, OllamaServiceState, WhisperServiceState } from '../types';
+import PluginsPanel from './plugins/PluginsPanel';
+import ConnectionsPanel from './ConnectionsPanel';
+import TokenUsagePanel from './TokenUsagePanel';
+import { Search, X, Minus, Trash2, Sparkles, ExternalLink, Activity, Download, Upload, RotateCcw } from 'lucide-react';
+import { settingsPages as tabs, settingsGroups, settingsCopy, findSettingsPages, type SettingsPageKey as TabKey } from './settings/navigation';
+import SettingsSections from './settings/SettingsSections';
+import SchemaSettings from './settings/SchemaSettings';
+import CompanionSettings from './settings/CompanionSettings';
+import './settings/SettingsWindow.css';
+import WeatherKitPrivateKeyField from './settings/WeatherKitPrivateKeyField';
+import StorageSettings from './settings/StorageSettings';
+import ConfigTransferSettings from './settings/ConfigTransferSettings';
+import PersonalInstructionsSettings from './settings/PersonalInstructionsSettings';
+
+interface TtsConfigState {
+  enabled: boolean;
+  rate: number;
+  volume: number;
+  voice_id: string | null;
+  engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo' | 'elevenlabs';
+  fallback_engine: 'none' | 'edgetts' | 'azure' | 'gptsovits' | 'fishspeech' | 'bertvits2' | 'minimax' | 'doubao' | 'mimo' | 'elevenlabs' | null;
+  retry_count: number;
+  // Azure
+  azure_key: string | null;
+  azure_region: string | null;
+  azure_style: string | null;
+  azure_style_degree: number | null;
+  azure_role: string | null;
+  azure_pitch: number | null;
+  azure_output_format: string | null;
+  // GPT-SoVITS
+  gpt_sovits_url: string | null;
+  gpt_sovits_install_path: string | null;
+  gpt_sovits_config_path: string | null;
+  gpt_sovits_gpt_model: string | null;
+  gpt_sovits_sovits_model: string | null;
+  gpt_sovits_gpu: number | null;
+  gpt_sovits_port: number | null;
+  gpt_sovits_python_path: string | null;
+  gpt_sovits_ref_audio: string | null;
+  gpt_sovits_prompt_text: string | null;
+  gpt_sovits_prompt_lang: string | null;
+  gpt_sovits_aux_ref_audios: string[] | null;
+  gpt_sovits_parallel_infer: boolean | null;
+  gpt_sovits_text_split_method: string | null;
+  gpt_sovits_top_k: number | null;
+  gpt_sovits_top_p: number | null;
+  gpt_sovits_temperature: number | null;
+  gpt_sovits_timeout_secs: number | null;
+  gpt_sovits_format: string | null;
+  gpt_sovits_auto_start: boolean;
+  gpt_sovits_dual_instance: boolean;
+  gpt_sovits_second_port: number | null;
+  // 跨语言 TTS
+  display_language: string | null;
+  tts_language: string | null;
+  translation_provider: string | null;
+  translation_api_key: string | null;
+  translation_endpoint: string | null;
+  // Fish Speech
+  fish_speech_url: string | null;
+  fish_speech_key: string | null;
+  fish_speech_character: string | null;
+  fish_speech_format: string | null;
+  fish_speech_ref_audio: string | null;
+  fish_speech_ref_text: string | null;
+  // Fish Speech 本地服务管理（一键启动）
+  fish_speech_install_path: string | null;
+  fish_speech_python_path: string | null;
+  fish_speech_port: number | null;
+  fish_speech_auto_start: boolean;
+  fish_speech_llama_checkpoint_path: string | null;
+  fish_speech_decoder_checkpoint_path: string | null;
+  fish_speech_half: boolean;
+  fish_speech_compile: boolean;
+  // MiniMax
+  minimax_key: string | null;
+  minimax_voice_id: string | null;
+  minimax_model: string | null;
+  minimax_format: string | null;
+  minimax_sample_rate: number | null;
+  // 豆包(火山引擎)
+  doubao_appid: string | null;
+  doubao_access_token: string | null;
+  doubao_cluster: string | null;
+  doubao_voice_type: string | null;
+  doubao_format: string | null;
+  doubao_sample_rate: number | null;
+  // 小米 MiMo（语音克隆）
+  mimo_key: string | null;
+  mimo_voice_audio_path: string | null;
+  mimo_model: string | null;
+  mimo_endpoint: string | null;
+  mimo_style_prompt: string | null;
+  // ElevenLabs（云端音色库/克隆）
+  elevenlabs_key: string | null;
+  elevenlabs_voice_id: string | null;
+  elevenlabs_model: string | null;
+  elevenlabs_output_format: string | null;
+  elevenlabs_endpoint: string | null;
+  elevenlabs_stability: number | null;
+  elevenlabs_similarity_boost: number | null;
+  elevenlabs_style: number | null;
+  elevenlabs_speaker_boost: boolean | null;
+}
+
+/**
+ * 日记配置状态 - 对齐后端 `diary::DiaryConfig`
+ * 字段：enable_auto_diary / min_interaction_threshold / max_diary_length
+ */
+interface DiaryConfigState {
+  enable_auto_diary: boolean;
+  min_interaction_threshold: number;
+  max_diary_length: number;
+}
+
+/**
+ * 推理偏好控件 —— 三态选择（自动 / 关闭 / 开启）+ 档位下拉
+ *
+ * 值结构（与后端 ReasoningPreference 对齐）：
+ *   { mode: 'auto' | 'off' | 'on', effort?: 'minimal'|'low'|'medium'|'high'|'xhigh'|'max' }
+ *
+ * - mode=auto：不干预，交由服务端默认（思考爆炸防护模型会映射到安全档位）
+ * - mode=off：关闭思考（不支持关闭的模型由后端折叠为开启）
+ * - mode=on：开启思考，可选档位（档位经后端按模型能力校验，不支持时回退默认档）
+ */
+/**
+ * 云端服务商"获取 API Key"按钮 —— 用系统默认浏览器打开对应控制台的密钥页面
+ * 用于 TTS / ASR 云端引擎配置区（LLM 区域走 ProviderSelector 的 consoleUrl 逻辑）
+ */
+const GetApiKeyButton: React.FC<{ url: string }> = ({ url }) => {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void openShell(url).catch(() => window.open(url, '_blank', 'noopener,noreferrer'));
+      }}
+      title={url}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '4px 10px',
+        borderRadius: 8,
+        border: '1px solid var(--panel-border)',
+        background: 'transparent',
+        color: 'var(--panel-accent)',
+        fontSize: 11,
+        fontWeight: 600,
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        transition: 'border-color 0.15s ease, background 0.15s ease',
+        flexShrink: 0,
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--panel-accent)'; e.currentTarget.style.background = 'var(--panel-bg-hover)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.background = 'transparent'; }}
+    >
+      <ExternalLink size={11} strokeWidth={2} />
+      {t('config.get_api_key')}
+    </button>
+  );
+};
+
+// 已知 Ollama 嵌入模型 → 向量维度映射（选择预设模型时自动填充 dimension 字段）
+const OLLAMA_MODEL_DIMS: Record<string, number> = {
+  'bge-m3': 1024,
+  'nomic-embed-text': 768,
+};
+
+/**
+ * 工具开关卡片 —— 设置-工具页的工具级启用/禁用开关
+ *
+ * 卡片布局：工具名 + 类别徽标 + 描述 + 右侧胶囊开关；
+ * 禁用态整体降为半透明。开关状态写入**该侧**的
+ * `config.tools.disabled_tools.<side>`（陪伴侧 / 工作侧各自独立），
+ * 保存后由后端同步到 ToolSystem 即时生效。
+ *
+ * `locked` 为真时（如工作侧的 read_file / list_dir / grep_search）不渲染开关，
+ * 改为展示锁定徽标——它们是工作智能体的只读基座工具，禁用后任何编程任务
+ * 都会立即失败，故不允许关闭。
+ */
+const ToolSwitchCard: React.FC<{
+  name: string;
+  description: string;
+  categoryLabel: string;
+  enabled: boolean;
+  custom: boolean;
+  customBadge: string;
+  onToggle: () => void;
+  locked?: boolean;
+  lockedLabel?: string;
+}> = ({ name, description, categoryLabel, enabled, custom, customBadge, onToggle, locked, lockedLabel }) => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      minWidth: 0,
+      padding: '10px 12px',
+      borderRadius: 10,
+      border: custom
+        ? '1.5px dashed var(--panel-accent)'
+        : '1px solid var(--panel-border)',
+      background: custom
+        ? 'linear-gradient(135deg, rgba(124, 92, 255, 0.08), transparent 55%)'
+        : 'var(--panel-card)',
+      opacity: enabled ? 1 : 0.55,
+      transition: 'opacity 0.2s ease, border-color 0.2s ease',
+    }}
+  >
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+        {custom && (
+          <Sparkles
+            size={12}
+            strokeWidth={2}
+            style={{ flexShrink: 0, color: 'var(--panel-accent)' }}
+          />
+        )}
+        <span
+          style={{
+            fontSize: 12.5,
+            fontWeight: 600,
+            color: custom ? 'var(--panel-accent)' : 'var(--panel-text)',
+            overflow: 'hidden',
+            whiteSpace: 'nowrap',
+            textOverflow: 'ellipsis',
+            fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
+          }}
+        >
+          {name}
+        </span>
+        {custom ? (
+          <span
+            style={{
+              flexShrink: 0,
+              padding: '1px 7px',
+              fontSize: 10,
+              fontWeight: 600,
+              color: 'var(--panel-accent)',
+              background: 'rgba(124, 92, 255, 0.12)',
+              border: '1px solid var(--panel-accent)',
+              borderRadius: 999,
+            }}
+          >
+            {customBadge}
+          </span>
+        ) : (
+          <span
+            style={{
+              flexShrink: 0,
+              padding: '1px 7px',
+              fontSize: 10,
+              fontWeight: 500,
+              color: 'var(--panel-text-tertiary)',
+              background: 'var(--panel-bg-hover)',
+              border: '1px solid var(--panel-border)',
+              borderRadius: 999,
+            }}
+          >
+            {categoryLabel}
+          </span>
+        )}
+      </div>
+      <div
+        title={description}
+        style={{
+          marginTop: 3,
+          fontSize: 11,
+          lineHeight: 1.45,
+          color: 'var(--panel-text-tertiary)',
+          overflow: 'hidden',
+          display: '-webkit-box',
+          WebkitBoxOrient: 'vertical',
+          WebkitLineClamp: 2,
+          wordBreak: 'break-word',
+        }}
+      >
+        {description || '—'}
+      </div>
+    </div>
+    {locked ? (
+      <span
+        title={lockedLabel}
+        style={{
+          flexShrink: 0,
+          padding: '2px 8px',
+          fontSize: 10,
+          fontWeight: 500,
+          color: 'var(--panel-text-tertiary)',
+          background: 'var(--panel-bg-hover)',
+          border: '1px solid var(--panel-border)',
+          borderRadius: 999,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {lockedLabel}
+      </span>
+    ) : (
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        onClick={onToggle}
+        style={{
+          flexShrink: 0,
+          width: 36,
+          height: 20,
+          borderRadius: 10,
+          border: 'none',
+          background: enabled ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
+          position: 'relative',
+          cursor: 'pointer',
+          transition: 'background 0.2s ease',
+          padding: 0,
+        }}
+      >
+        <span
+          style={{
+            position: 'absolute',
+            top: 2,
+            left: enabled ? 18 : 2,
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: 'var(--panel-surface)',
+            transition: 'left 0.2s ease',
+            boxShadow: 'var(--panel-shadow-subtle)',
+          }}
+        />
+      </button>
+    )}
+  </div>
+);
+
+/// 高级设置折叠按钮 — 可复用的"展开/收起"切换器
+///
+/// - `open`：当前是否展开
+/// - `onToggle`：切换回调
+/// - `label`：按钮文字（通常为"高级设置"）
+const AdvancedToggle: React.FC<{
+  open: boolean;
+  onToggle: () => void;
+  label: string;
+}> = ({ open, onToggle, label }) => (
+  <button
+    type="button"
+    onClick={onToggle}
+    style={{
+      width: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 8,
+      padding: '8px 0',
+      background: 'transparent',
+      border: 'none',
+      borderTop: '1px solid var(--panel-border)',
+      cursor: 'pointer',
+      fontFamily: 'inherit',
+      color: 'var(--panel-text-secondary)',
+      fontSize: 12,
+      marginTop: 8,
+    }}
+  >
+    <span
+      style={{
+        display: 'inline-block',
+        transition: 'transform 0.15s',
+        transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
+        color: 'var(--panel-text-tertiary)',
+        fontSize: 10,
+      }}
+    >
+      ▸
+    </span>
+    <span>{label}</span>
+  </button>
+);
+
+/// 多选字段（checkbox 组）—— 用于"多引擎混用"等需要同时启用多个选项的场景
+///
+/// - `values`：当前已选中的值列表
+/// - `options`：所有可选项目
+/// - `minSelected`：最少需选中数量（达到时不允许取消最后一项）
+const MultiCheckboxField: React.FC<{
+  label: string;
+  values: string[];
+  options: { value: string; label: string }[];
+  onChange: (next: string[]) => void;
+  help?: string;
+  minSelected?: number;
+}> = ({ label, values, options, onChange, help, minSelected = 0 }) => {
+  const { t } = useTranslation();
+  const toggle = (val: string) => {
+    if (values.includes(val)) {
+      // 取消选中 —— 受 minSelected 约束
+      if (values.length <= minSelected) return;
+      onChange(values.filter((v) => v !== val));
+    } else {
+      // 选中 —— 追加到末尾以保留用户优先级顺序
+      onChange([...values, val]);
+    }
+  };
+
+  return (
+    <div className="settings-field" style={fieldStyle}>
+      <div style={{ ...labelStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span>{label}</span>
+      </div>
+      {help && (
+        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', lineHeight: 1.4, marginBottom: 8, display: 'block' }}>
+          {help}
+        </span>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {options.map((opt) => {
+          const checked = values.includes(opt.value);
+          const atMin = values.length <= minSelected;
+          return (
+            <label
+              key={opt.value}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 10px',
+                border: `1.5px solid ${checked ? 'var(--panel-border-strong)' : 'var(--panel-border)'}`,
+                borderRadius: 8,
+                background: checked ? 'var(--panel-tag-bg)' : 'var(--panel-surface)',
+                cursor: 'pointer',
+                opacity: checked && atMin ? 0.65 : 1,
+                transition: 'all 0.15s ease',
+                fontSize: 13,
+                color: 'var(--panel-text)',
+              }}
+              onMouseEnter={(e) => {
+                if (!checked) {
+                  e.currentTarget.style.borderColor = 'var(--panel-border-hover)';
+                  e.currentTarget.style.background = 'var(--panel-tag-bg)';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!checked) {
+                  e.currentTarget.style.borderColor = 'var(--panel-border)';
+                  e.currentTarget.style.background = 'var(--panel-surface)';
+                }
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(opt.value)}
+                disabled={checked && atMin}
+                title={checked && atMin ? t('config.web_search_min_required') : undefined}
+                style={{
+                  width: 16,
+                  height: 16,
+                  accentColor: 'var(--panel-accent)',
+                  cursor: 'pointer',
+                  margin: 0,
+                }}
+              />
+              <span>{opt.label}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+/** 可折叠分组容器 - 用于路由矩阵按任务折叠 */
+const CollapsibleSection: React.FC<{
+  title: string;
+  subtitle?: string;
+  defaultOpen?: boolean;
+  tone?: 'default' | 'danger';
+  /** 标题行右侧的附件区域（如已配置模型名），固定单行、过长时水平滚动 */
+  titleAccessory?: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ title, subtitle, defaultOpen = false, tone = 'default', titleAccessory, children }) => {
+  const [open, setOpen] = useState(defaultOpen);
+  const isDanger = tone === 'danger';
+  const accent = isDanger ? '#E53935' : 'var(--panel-border)';
+  return (
+    <div
+      style={{
+        marginBottom: 10,
+      }}
+    >
+      <div
+        style={{
+          border: `1.5px solid ${accent}`,
+          borderRadius: open ? '10px 10px 0 0' : 10,
+          overflow: 'hidden',
+          background: isDanger ? 'rgba(229, 57, 53, 0.04)' : 'var(--panel-surface)',
+        }}
+      >
+        <button
+          onClick={() => setOpen((v) => !v)}
+          style={{
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            padding: '10px 14px',
+            background: 'transparent',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            textAlign: 'left' as const,
+          }}
+        >
+          <span style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: isDanger ? accent : 'var(--panel-text)', whiteSpace: 'nowrap', flexShrink: 0 }}>{title}</span>
+            {titleAccessory && (
+              <span
+                style={{
+                  flex: '1 1 auto',
+                  minWidth: 0,
+                  overflowX: 'auto',
+                  overflowY: 'hidden',
+                  whiteSpace: 'nowrap',
+                  textAlign: 'right',
+                  scrollbarWidth: 'none',
+                  msOverflowStyle: 'none',
+                }}
+                className="title-accessory-scroll"
+              >
+                {titleAccessory}
+              </span>
+            )}
+            <span style={{ flex: '0 0 auto', fontSize: 12, color: isDanger ? accent : 'var(--panel-text-tertiary)' }}>{open ? '▾' : '▸'}</span>
+          </span>
+          {subtitle && (
+            <span style={{
+              fontSize: 11,
+              color: 'var(--panel-text-tertiary)',
+              whiteSpace: open ? 'pre-wrap' : 'nowrap',
+              overflow: 'hidden',
+              textOverflow: open ? undefined : 'ellipsis',
+              lineHeight: 1.5,
+            }}>{subtitle}</span>
+          )}
+        </button>
+      </div>
+      {open && (
+        <div
+          style={{
+            border: `1.5px solid ${accent}`,
+            borderTop: 'none',
+            borderRadius: '0 0 10px 10px',
+            padding: '12px 14px',
+            overflow: 'visible',
+            background: 'var(--panel-surface)',
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/// 辅助参考音频抽屉 — 可折叠展开/收缩列表，收缩时只显示标题和数量徽章
+const AuxRefAudiosDrawer: React.FC<{
+  value: string[] | null;
+  onChange: (arr: string[]) => void;
+  label: string;
+  addLabel: string;
+}> = ({ value, onChange, label, addLabel }) => {
+  const [expanded, setExpanded] = useState(false);
+  const items = value ?? [];
+  const count = items.length;
+
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '8px 0',
+          background: 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          fontFamily: 'inherit',
+          color: 'var(--panel-text)',
+          fontSize: 13,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span
+            style={{
+              display: 'inline-block',
+              transition: 'transform 0.15s',
+              transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+              color: 'var(--panel-text-tertiary)',
+              fontSize: 10,
+            }}
+          >
+            ▸
+          </span>
+          <span style={{ opacity: 0.85 }}>{label}</span>
+          {count > 0 && (
+            <span
+              style={{
+                padding: '1px 8px',
+                borderRadius: 10,
+                background: 'var(--panel-tag-bg)',
+                color: 'var(--panel-text-secondary)',
+                fontSize: 10,
+                minWidth: 18,
+                textAlign: 'center',
+              }}
+            >
+              {count}
+            </span>
+          )}
+        </span>
+      </button>
+      {expanded && (
+        <div style={{ marginTop: 4 }}>
+          {items.map((p, i) => (
+            // 无唯一 ID 且无重排，用 index 作 key
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, color: 'var(--panel-text-tertiary)', minWidth: 20 }}>
+                #{i + 1}
+              </span>
+              <input
+                type="text"
+                value={p}
+                onChange={(e) => {
+                  const arr = [...items];
+                  arr[i] = e.target.value;
+                  onChange(arr);
+                }}
+                style={{
+                  flex: 1,
+                  padding: '6px 8px',
+                  border: '1.5px solid var(--panel-border)',
+                  borderRadius: 6,
+                  background: 'var(--panel-surface)',
+                  color: 'var(--panel-text)',
+                  fontSize: 11,
+                  fontFamily: 'inherit',
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const arr = [...items];
+                  arr.splice(i, 1);
+                  onChange(arr);
+                }}
+                style={{
+                  padding: '4px 8px',
+                  border: '1.5px solid var(--panel-border)',
+                  borderRadius: 6,
+                  background: 'var(--panel-surface)',
+                  color: '#E53935',
+                  fontSize: 10,
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={async () => {
+              const selected = await open({
+                multiple: true,
+                filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'flac'] }],
+              });
+              if (selected) {
+                const paths = Array.isArray(selected) ? selected : [selected];
+                onChange([...items, ...paths]);
+              }
+            }}
+            style={{
+              padding: '4px 10px',
+              border: '1.5px dashed var(--panel-border)',
+              borderRadius: 6,
+              background: 'transparent',
+              color: 'var(--panel-text-secondary)',
+              fontSize: 10,
+              cursor: 'pointer',
+              fontFamily: 'inherit',
+            }}
+          >
+            + {addLabel}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/// 快捷键配置抽屉 — 收纳通用页的 7 个快捷键录制器，折叠时只显示标题与已配置数量徽章
+const ShortcutsDrawer: React.FC<{
+  label: string;
+  expanded: boolean;
+  onToggle: () => void;
+  configuredCount: number;
+  children: React.ReactNode;
+}> = ({ label, expanded, onToggle, configuredCount, children }) => (
+  <div style={{ marginBottom: 18 }}>
+    <button
+      type="button"
+      onClick={onToggle}
+      style={{
+        width: '100%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '8px 0',
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        fontFamily: 'inherit',
+        color: 'var(--panel-text)',
+        fontSize: 13,
+      }}
+    >
+      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span
+          style={{
+            display: 'inline-block',
+            transition: 'transform 0.15s',
+            transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+            color: 'var(--panel-text-tertiary)',
+            fontSize: 10,
+          }}
+        >
+          ▸
+        </span>
+        <span style={{ opacity: 0.85 }}>{label}</span>
+        {configuredCount > 0 && (
+          <span
+            style={{
+              padding: '1px 8px',
+              borderRadius: 10,
+              background: 'var(--panel-tag-bg)',
+              color: 'var(--panel-text-secondary)',
+              fontSize: 10,
+              minWidth: 18,
+              textAlign: 'center',
+            }}
+          >
+            {configuredCount}
+          </span>
+        )}
+      </span>
+    </button>
+    {expanded && <div style={{ marginTop: 4 }}>{children}</div>}
+  </div>
+);
+
+const ConfigWindow: React.FC = () => {
+  const { t, i18n } = useTranslation();
+  const [activeTab, setActiveTab] = useState<TabKey>('general');
+  const [settingsQuery, setSettingsQuery] = useState('');
+  const contentRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const copy = settingsCopy[i18n.language.startsWith('zh') ? 'zh' : i18n.language.startsWith('ja') ? 'ja' : 'en'];
+  const currentPage = tabs.find((page) => page.key === activeTab)!;
+  const visiblePages = useMemo(() => findSettingsPages(settingsQuery, copy, (key) => t(key)), [settingsQuery, copy, t]);
+  useEffect(() => { contentRef.current?.scrollTo({ top: 0 }); }, [activeTab]);
+  // 供应商预设（模型名 datalist 建议）：内置兜底 + llm-providers 插件贡献合并
+  const allProviderPresets = useProviderPresets();
+  useEffect(() => {
+    let alive = true;
+    let refreshed = '';
+    const subscription = listen<UpdateJob>('provider-presets:update', ({ payload }) => {
+      const completed = payload.items.filter(item => item.status === 'updated' || item.status === 'verified');
+      const signature = `${payload.id}:${completed.map(item => item.id).join('|')}`;
+      // Keep suggestions current on routing/work-model pages while the LLM page is unmounted.
+      if (alive && completed.length && signature !== refreshed) {
+        refreshed = signature;
+        invalidateProviderPresetsCache();
+      }
+    }).catch(() => undefined);
+    return () => { alive = false; void subscription.then(unlisten => unlisten?.()); };
+  }, []);
+  // 主 LLM 未配置时显示初始配置引导弹窗
+  const [setupGuideOpen, setSetupGuideOpen] = useState(false);
+  const [config, setConfig] = useState<ConfigObject>({});
+  const [apartmentInstalled, setApartmentInstalled] = useState(false);
+  useEffect(() => {
+    void invoke<{ installed: boolean }>('apartment_plugin_status')
+      .then((status) => setApartmentInstalled(status.installed))
+      .catch(() => setApartmentInstalled(false));
+  }, []);
+  // 应用版本号（来自 tauri.conf.json 的 version）
+  const [appVersion, setAppVersion] = useState<string>('');
+  // 操作系统信息（platform + version + arch）
+  const [osInfo, setOsInfo] = useState<string>('');
+  const [saving, setSaving] = useState(false);
+  const [importingSettings, setImportingSettings] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // 快捷键配置抽屉展开状态
+  const [shortcutsExpanded, setShortcutsExpanded] = useState(false);
+  const [ttsConfig, setTtsConfig] = useState<TtsConfigState | null>(null);
+  // 语音页签当前正在编辑的角色 ID（默认为窗口所属角色）
+  // 允许在同一配置窗口内切换编辑 Vivian / Nana 的 TTS 配置
+  const [ttsEditCharId, setTtsEditCharId] = useState<string | null>(null);
+  // 所有角色列表（用于语音页签的角色切换器）
+  const [characters, setCharacters] = useState<Array<{ id: string; name: string; online: boolean }>>([]);
+  // 所有角色的 TTS 引擎（用于判断双实例开关是否显示）
+  const [charTtsEngines, setCharTtsEngines] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let disposed = false;
+    const refreshResidents = () => {
+      void invoke<{ characters: Array<{ id: string; name: string; online: boolean }> }>('list_characters')
+        .then(async response => {
+          const list = response.characters ?? [];
+          const engines = await Promise.all(list.map(async character => {
+            const cfg = await invoke<TtsConfigState>('get_tts_config', { characterId: character.id }).catch(() => null);
+            return [character.id, cfg?.engine ?? 'none'] as const;
+          }));
+          if (!disposed) {
+            setCharacters(list);
+            setCharTtsEngines(Object.fromEntries(engines));
+          }
+        }).catch(error => console.warn('刷新入住角色失败:', error));
+    };
+    window.addEventListener('character-packages:changed', refreshResidents);
+    return () => {
+      disposed = true;
+      window.removeEventListener('character-packages:changed', refreshResidents);
+    };
+  }, []);
+  // 未保存的 TTS 配置草稿（切换角色时保留编辑中内容，不丢失）
+  const [ttsDrafts, setTtsDrafts] = useState<Record<string, TtsConfigState>>({});
+  // GPT-SoVITS 服务子进程状态(一键启动/停止)
+  const [gptsovitsService, setGptsovitsService] = useState<GptSoVitsServiceState | null>(null);
+  const [gptsovitsServiceBusy, setGptsovitsServiceBusy] = useState(false);
+  // Fish Speech 服务子进程状态(一键启动/停止)
+  const [fishSpeechService, setFishSpeechService] = useState<FishSpeechServiceState | null>(null);
+  const [fishSpeechServiceBusy, setFishSpeechServiceBusy] = useState(false);
+  // GPT-SoVITS 模型列表(扫描安装目录) + 整合包 runtime 检测
+  const [gptSovitsModels, setGptSovitsModels] = useState<{
+    gpt_models: Array<{ name: string; path: string }>;
+    sovits_models: Array<{ name: string; path: string }>;
+    has_runtime: boolean;
+  }>({ gpt_models: [], sovits_models: [], has_runtime: false });
+  // Ollama 本地嵌入服务状态(一键启动/停止) + 已安装模型列表 + 拉取中标志
+  const [ollamaService, setOllamaService] = useState<OllamaServiceState | null>(null);
+  const [ollamaServiceBusy, setOllamaServiceBusy] = useState(false);
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [ollamaPulling, setOllamaPulling] = useState(false);
+  // 内置嵌入模型注册表（来自后端 embedding_registry，用于云端模型维度自动填充）
+  const [embeddingModels, setEmbeddingModels] = useState<
+    {
+      id: string;
+      dimension: number;
+      source: string;
+      display_name: string;
+      provider?: string | null;
+      endpoint?: string | null;
+      recommended_for?: string | null;
+    }[]
+  >([]);
+  // 厂商级云端嵌入预设（插件 llm-providers 贡献）：服务商下拉 + 选中后自动填充端点
+  const [embeddingPresets, setEmbeddingPresets] = useState<EmbeddingProviderPreset[]>([]);
+  // Whisper 本地 ASR 服务状态(一键启动/停止 faster-whisper-server)
+  const [whisperService, setWhisperService] = useState<WhisperServiceState | null>(null);
+  const [whisperServiceBusy, setWhisperServiceBusy] = useState(false);
+  // Whisper 高级设置折叠
+  const [whisperAdvancedOpen, setWhisperAdvancedOpen] = useState(false);
+  // 各 ASR/TTS provider 高级设置折叠
+  const [azureAsrAdvancedOpen, setAzureAsrAdvancedOpen] = useState(false);
+  const [aliyunAsrAdvancedOpen, setAliyunAsrAdvancedOpen] = useState(false);
+  const [azureTtsAdvancedOpen, setAzureTtsAdvancedOpen] = useState(false);
+  const [fishSpeechAdvancedOpen, setFishSpeechAdvancedOpen] = useState(false);
+  const [minimaxAdvancedOpen, setMinimaxAdvancedOpen] = useState(false);
+  const [doubaoAdvancedOpen, setDoubaoAdvancedOpen] = useState(false);
+  const [elevenlabsAdvancedOpen, setElevenlabsAdvancedOpen] = useState(false);
+  // TTS 帮助说明书抽屉
+  const [ttsHelpOpen, setTtsHelpOpen] = useState(false);
+  const [ttsHelpBackend, setTtsHelpBackend] = useState<TtsBackendKey>('edgetts');
+  // EdgeTTS 语音列表
+  const [edgeTtsVoices, setEdgeTtsVoices] = useState<Array<{ id: string; name: string; language: string }>>([]);
+  // ASR 帮助说明书抽屉
+  const [asrHelpOpen, setAsrHelpOpen] = useState(false);
+  const [asrHelpBackend, setAsrHelpBackend] = useState<AsrBackendKey>('winrt');
+
+  // 日记配置
+  const [diaryConfig, setDiaryConfig] = useState<DiaryConfigState | null>(null);
+  const [diaryLoading, setDiaryLoading] = useState(false);
+
+  // 网络检测弹窗（完整诊断：代理 / Hosts / 连通性 / TCP / 丢包）
+  const [networkDiagnosisOpen, setNetworkDiagnosisOpen] = useState(false);
+
+  // 地理定位自动检测状态
+  const [detectingLocation, setDetectingLocation] = useState(false);
+
+  // 工具页签：全部注册工具清单（后端 list_tools）。
+  // scope 由后端单一真相源推导（companion / work / both），决定卡片归入哪一侧；
+  // locked 标记该侧不可禁用的基座工具（如工作侧 read_file）。
+  const [toolList, setToolList] = useState<Array<{
+    name: string;
+    description: string;
+    category: string;
+    is_custom: boolean;
+    scope: 'companion' | 'work' | 'both';
+    companion_locked: boolean;
+    work_locked: boolean;
+  }>>([]);
+  // 工具页签当前查看的智能体侧别（陪伴侧 / 工作侧开关互相独立）
+  const [toolSideTab, setToolSideTab] = useState<'companion' | 'work'>('companion');
+  // 工具开关卡片的搜索过滤词
+  const [toolSearch, setToolSearch] = useState('');
+  const [keepImportedCharacters, setKeepImportedCharacters] = useState(true);
+  const [clearMemoriesOpen, setClearMemoriesOpen] = useState(false);
+  const [clearingMemories, setClearingMemories] = useState(false);
+
+  // 数据备份与迁移
+  const [backingUp, setBackingUp] = useState(false);
+  const [backupResult, setBackupResult] = useState<{ destination: string; error: string | null } | null>(null);
+  const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
+  const [restoreSource, setRestoreSource] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
+
+  // 路由矩阵：每个任务最近一次请求状态（'ok' 绿色 / 'error' 红色）
+  // 由后端 chat:route_status 事件驱动，仅在路由矩阵开启时有意义
+  const [routeStatus, setRouteStatus] = useState<Record<string, 'ok' | 'error'>>({});
+
+  // LLM 一键检测：主配置 + 各路由的 API 可用性测试结果
+  // key = 'main'（主 LLM 配置）或路由 taskType
+  const [llmTesting, setLlmTesting] = useState(false);
+  const [llmTestResults, setLlmTestResults] = useState<
+    Record<string, ProbeResult>
+  >({});
+
+  const get = <T extends ConfigValue>(path: string, fallback: T): T => {
+    const parts = path.split('.');
+    let cur: ConfigValue = config;
+    for (const p of parts) {
+      if (cur && typeof cur === 'object' && p in cur) {
+        cur = (cur as ConfigObject)[p];
+      } else return fallback;
+    }
+    return (cur as T) ?? fallback;
+  };
+
+  const setNested = (path: string, value: ConfigValue) => {
+    const parts = path.split('.');
+    setConfig((prev) => {
+      const next: ConfigObject = JSON.parse(JSON.stringify(prev));
+      let cur: ConfigObject = next;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const p = parts[i];
+        if (!cur[p] || typeof cur[p] !== 'object') cur[p] = {};
+        cur = cur[p] as ConfigObject;
+      }
+      cur[parts[parts.length - 1]] = value;
+      return next;
+    });
+  };
+
+  // ===== 工作智能体模型预置（编程页列表切换用）=====
+  type WorkModelProfile = {
+    id: string;
+    name: string;
+    provider_type: string;
+    model: string;
+    api_key: string;
+    endpoint: string;
+    api_secret?: string;
+    app_id?: string;
+    send_temperature?: boolean | null;
+    send_max_tokens?: boolean | null;
+    temperature?: number | null;
+    max_tokens?: number | null;
+    context_window?: number | null;
+    reasoning?: ReasoningPref | null;
+    reasoning_overrides?: Record<string, unknown> | null;
+  };
+  const workModels = (get('work_models', []) as WorkModelProfile[]);
+  const workModelsActiveId = (config?.active_work_model ?? null) as string | null;
+  const updateWorkModels = (next: WorkModelProfile[]) =>
+    setNested('work_models', next as unknown as ConfigValue);
+  const patchWorkModel = (idx: number, patch: Partial<WorkModelProfile>) =>
+    // 注意：id 保持稳定（作为激活/移除的标识），但 name（模型别名）必须允许 patch 覆盖
+    updateWorkModels(workModels.map((m, i) => (i === idx ? { ...m, ...patch, id: m.id } : m)));
+  const addWorkModel = () => {
+    updateWorkModels([
+      ...workModels,
+      {
+        id: `wm_${Date.now()}`,
+        name: `模型${workModels.length + 1}`,
+        provider_type: 'openai',
+        model: '',
+        api_key: '',
+        endpoint: '',
+        api_secret: '',
+        app_id: '',
+        temperature: null,
+        max_tokens: null,
+      },
+    ]);
+  };
+  const removeWorkModel = (id: string) => {
+    updateWorkModels(workModels.filter((m) => m.id !== id));
+    if (workModelsActiveId === id) {
+      setNested('active_work_model', null as unknown as ConfigValue);
+      void invoke('clear_work_model').catch((e) => console.warn(e));
+    }
+  };
+
+  // ===== 默认工作区（工作页「新建任务」的默认目录）=====
+  // 后端为 Option<String>：空串统一归一化为 null，避免 yaml 里留下无意义的空字段。
+  const defaultWorkspace = (config?.default_workspace ?? '') as string;
+  const setDefaultWorkspace = (v: string) =>
+    setNested('default_workspace', (v.trim() ? v : null) as unknown as ConfigValue);
+  const handlePickDefaultWorkspace = async () => {
+    try {
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: t('config.section_default_workspace'),
+      });
+      if (typeof dir === 'string' && dir) setDefaultWorkspace(dir);
+    } catch {
+      /* 用户取消或对话框不可用：保持原值 */
+    }
+  };
+
+  // 自动检测地理位置（Windows 系统定位优先，IP 定位兜底）
+  const handleAutoDetectLocation = async () => {
+    setDetectingLocation(true);
+    try {
+      const result = await invoke<[number, number] | null>('auto_detect_location');
+      if (result) {
+        const [lat, lon] = result;
+        setNested('world.latitude', lat);
+        setNested('world.longitude', lon);
+        void emit('toast:show', { message: `(${lat.toFixed(4)}, ${lon.toFixed(4)})`, type: 'success', duration: 4000, key: Date.now() });
+      } else {
+        void emit('toast:show', { message: t('config.world_auto_detect_failed'), type: 'warning', duration: 4000, key: Date.now() });
+      }
+    } catch (e) {
+      console.warn('自动定位失败:', e);
+      void emit('toast:show', { message: t('config.world_auto_detect_failed'), type: 'warning', duration: 4000, key: Date.now() });
+    } finally {
+      setDetectingLocation(false);
+    }
+  };
+
+  const loadConfig = async () => {
+    try {
+      const all = await invoke<ConfigObject>('get_all_config');
+
+      setConfig(all ?? {});
+    } catch (e) {
+      console.warn('加载配置失败:', e);
+    }
+  };
+
+  // 加载指定角色的 TTS 配置（charId 为空时回退到窗口所属角色）
+  const loadTtsConfig = async (charId?: string) => {
+    try {
+      const id = charId ?? getCharacterId() ?? undefined;
+      const tts = await invoke<TtsConfigState>('get_tts_config', {
+        characterId: id,
+      });
+      const normalized = {
+        ...tts,
+        gpt_sovits_dual_instance: tts.gpt_sovits_dual_instance ?? false,
+        gpt_sovits_second_port: tts.gpt_sovits_second_port ?? 9881,
+        fish_speech_auto_start: tts.fish_speech_auto_start ?? false,
+        fish_speech_half: tts.fish_speech_half ?? false,
+        fish_speech_compile: tts.fish_speech_compile ?? false,
+      };
+      setTtsConfig(normalized);
+      // 加载后作为初始草稿存入，确保未编辑时草稿与持久化配置一致
+      if (id) {
+        setTtsDrafts((prev) => ({ ...prev, [id]: normalized }));
+      }
+      // 如果当前引擎是 EdgeTTS，加载语音列表
+      if (tts.engine === 'edgetts') {
+        await loadEdgeTtsVoices(id);
+      }
+    } catch (e) {
+      console.warn('加载 TTS 配置失败:', e);
+      setTtsConfig(null);
+    }
+  };
+
+  const loadEdgeTtsVoices = async (charId?: string) => {
+    try {
+      const voices = await invoke<Array<{ id: string; name: string; language: string }>>(
+        'list_tts_voices',
+        { characterId: charId ?? undefined }
+      );
+      setEdgeTtsVoices(voices ?? []);
+    } catch (e) {
+      console.warn('加载 EdgeTTS 语音列表失败:', e);
+      setEdgeTtsVoices([]);
+    }
+  };
+
+  // 切换语音页签正在编辑的角色：保存当前编辑内容到草稿，优先从草稿恢复目标角色
+  const switchTtsEditChar = useCallback(async (charId: string) => {
+    if (charId === ttsEditCharId) return;
+    // 1. 将当前角色未保存的编辑内容存入草稿
+    if (ttsEditCharId && ttsConfig) {
+      setTtsDrafts((prev) => ({ ...prev, [ttsEditCharId]: ttsConfig }));
+    }
+    setTtsEditCharId(charId);
+    // 2. 优先使用草稿，没有草稿才从后端加载
+    const draft = ttsDrafts[charId];
+    if (draft) {
+      setTtsConfig(draft);
+    } else {
+      await loadTtsConfig(charId);
+    }
+  }, [ttsEditCharId, ttsConfig, ttsDrafts]);
+
+  // 拉取 GPT-SoVITS 服务状态(单次)
+  // 记录上一次的服务状态,用于检测 Running → Crashed 的变化
+  const prevServiceStatusRef = useRef<string | null>(null);
+
+  const refreshGptsovitsService = useCallback(async () => {
+    try {
+      const st = await invoke<GptSoVitsServiceState>('get_gpt_sovits_service_status');
+      setGptsovitsService(st);
+      const prev = prevServiceStatusRef.current;
+      // 启动成功：从 starting 变 running 时提示
+      if (st.status === 'running' && prev === 'starting') {
+        void emit('toast:show', {
+          message: t('config.toast_gptsovits_started'),
+          type: 'success',
+          duration: 3000,
+          key: Date.now(),
+        });
+      }
+      // 启动失败/运行中崩溃：进入 crashed 时显示错误
+      if (st.status === 'crashed' && prev !== 'crashed' && st.error) {
+        void emit('toast:show', {
+          message: `${t('config.toast_gptsovits_crashed')}: ${st.error}`,
+          type: 'error',
+          duration: 8000,
+          key: Date.now(),
+        });
+      }
+      prevServiceStatusRef.current = st.status;
+    } catch (e) {
+      console.warn('查询 GPT-SoVITS 服务状态失败:', e);
+    }
+  }, [t]);
+
+  // 引擎为 gptsovits 时定时轮询服务状态(2s 一次),停止/启动中时也持续轮询直到稳定
+  useEffect(() => {
+    if (ttsConfig?.engine !== 'gptsovits') {
+      setGptsovitsService(null);
+      return;
+    }
+    refreshGptsovitsService();
+    const id = window.setInterval(refreshGptsovitsService, 2000);
+    return () => window.clearInterval(id);
+  }, [ttsConfig?.engine, refreshGptsovitsService]);
+
+  // 同步当前编辑角色的 TTS 引擎到 charTtsEngines，用于双实例开关显示条件判断
+  useEffect(() => {
+    if (ttsEditCharId && ttsConfig) {
+      setCharTtsEngines((prev) => {
+        if (prev[ttsEditCharId] === ttsConfig.engine) return prev;
+        return { ...prev, [ttsEditCharId]: ttsConfig.engine };
+      });
+    }
+  }, [ttsConfig?.engine, ttsEditCharId]);
+
+  // 当不再满足"所有角色都用 GPT-SoVITS"条件时，自动关闭双实例开关
+  useEffect(() => {
+    if (!ttsConfig) return;
+    const allUseGptsovits = characters.length >= 2
+      && characters.every((c) => charTtsEngines[c.id] === 'gptsovits');
+    if (!allUseGptsovits && ttsConfig.gpt_sovits_dual_instance) {
+      setTtsConfig((prev) => prev ? {
+        ...prev,
+        gpt_sovits_dual_instance: false,
+        gpt_sovits_second_port: null,
+      } : prev);
+    }
+  }, [charTtsEngines, characters.length]);
+
+  // 安装路径变化时刷新模型列表，扫描结果为空或缺失 runtime 时通过 toast 提示
+  useEffect(() => {
+    if (ttsConfig?.engine !== 'gptsovits' || !ttsConfig?.gpt_sovits_install_path) {
+      setGptSovitsModels({ gpt_models: [], sovits_models: [], has_runtime: false });
+      return;
+    }
+    let cancelled = false;
+    const installPath = ttsConfig.gpt_sovits_install_path;
+    invoke<{
+      gpt_models: Array<{ name: string; path: string }>;
+      sovits_models: Array<{ name: string; path: string }>;
+      has_runtime: boolean;
+    }>('list_gpt_sovits_models', { installPath })
+      .then((res) => {
+        if (cancelled) return;
+        setGptSovitsModels(res);
+        const total = res.gpt_models.length + res.sovits_models.length;
+        if (total === 0) {
+          void emit('toast:show', {
+            message: t('config.gptsovits_toast_no_models'),
+            type: 'warning',
+            duration: 5000,
+            key: Date.now(),
+          });
+        }
+        if (!res.has_runtime && !ttsConfig.gpt_sovits_python_path) {
+          void emit('toast:show', {
+            message: t('config.gptsovits_toast_no_runtime'),
+            type: 'warning',
+            duration: 5000,
+            key: Date.now() + 1,
+          });
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setGptSovitsModels({ gpt_models: [], sovits_models: [], has_runtime: false });
+        void emit('toast:show', {
+          message: `${t('config.gptsovits_toast_scan_failed')}: ${e}`,
+          type: 'error',
+          duration: 5000,
+          key: Date.now(),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ttsConfig?.engine, ttsConfig?.gpt_sovits_install_path, ttsConfig?.gpt_sovits_python_path]);
+
+  // 一键启动 / 停止 GPT-SoVITS 服务
+  const toggleGptsovitsService = async () => {
+    if (gptsovitsServiceBusy) return;
+    const cur = gptsovitsService?.status;
+    if (cur === 'running' || cur === 'starting') {
+      // 停止
+      setGptsovitsServiceBusy(true);
+      try {
+        const st = await invoke<GptSoVitsServiceState>('stop_gpt_sovits_service');
+        setGptsovitsService(st);
+      } catch (e) {
+        console.error('停止 GPT-SoVITS 服务失败:', e);
+      } finally {
+        setGptsovitsServiceBusy(false);
+      }
+    } else {
+      // 启动前自动补齐字段：python 路径、端口默认值、服务 URL
+      if (ttsConfig) {
+        const port = ttsConfig.gpt_sovits_port ?? 9880;
+        const dualInstance = ttsConfig.gpt_sovits_dual_instance ?? false;
+        const secondPort = ttsConfig.gpt_sovits_second_port ?? 9881;
+        const patched: TtsConfigState = {
+          ...ttsConfig,
+          gpt_sovits_port: port,
+          gpt_sovits_dual_instance: dualInstance,
+          gpt_sovits_second_port: dualInstance ? secondPort : null,
+          // 若用户未填 Python 路径，且安装目录下检测到 runtime/python.exe，则自动补齐
+          gpt_sovits_python_path:
+            ttsConfig.gpt_sovits_python_path ||
+            (gptSovitsModels.has_runtime && ttsConfig.gpt_sovits_install_path
+              ? `${ttsConfig.gpt_sovits_install_path.replace(/\\/g, '/')}/runtime/python.exe`
+              : null),
+          // 服务 URL 自动指向本地端口（仅当用户未填时）
+          gpt_sovits_url:
+            ttsConfig.gpt_sovits_url || `http://127.0.0.1:${port}`,
+        };
+        setTtsConfig(patched);
+        setGptsovitsServiceBusy(true);
+        try {
+          await invoke('set_tts_config', { config: patched, characterId: ttsEditCharId ?? undefined });
+          // 模型列表由 install_path/python_path 变化触发的 useEffect 自动刷新，此处无需重复调用
+          const st = await invoke<GptSoVitsServiceState>('start_gpt_sovits_service', { characterId: ttsEditCharId ?? undefined });
+          setGptsovitsService(st);
+          // 同步 prevServiceStatusRef 为 starting，让后续轮询能正确检测 starting → running 转换并弹 toast
+          prevServiceStatusRef.current = st.status;
+          // 启动是异步的（后端 spawn wait_for_health），立即再刷新一次拉取最新状态
+          await refreshGptsovitsService();
+        } catch (e) {
+          console.error('启动 GPT-SoVITS 服务失败:', e);
+          void emit('toast:show', {
+            message: `${t('config.toast_gptsovits_start_failed')}: ${e}`,
+            type: 'error',
+            duration: 6000,
+            key: Date.now(),
+          });
+          // 立即刷新状态以读取后端 error 信息
+          await refreshGptsovitsService();
+        } finally {
+          setGptsovitsServiceBusy(false);
+        }
+      }
+    }
+  };
+
+  // ── Fish Speech 本地 TTS 服务管理 ─────────────────────────
+  // 拉取 Fish Speech 服务状态(单次)
+  const prevFishServiceStatusRef = useRef<string | null>(null);
+
+  const refreshFishSpeechService = useCallback(async () => {
+    try {
+      const st = await invoke<FishSpeechServiceState>('get_fish_speech_service_status');
+      setFishSpeechService(st);
+      const prev = prevFishServiceStatusRef.current;
+      if (st.status === 'running' && prev === 'starting') {
+        void emit('toast:show', {
+          message: t('config.toast_fishspeech_started'),
+          type: 'success',
+          duration: 3000,
+          key: Date.now(),
+        });
+      }
+      if (st.status === 'crashed' && prev !== 'crashed' && st.error) {
+        void emit('toast:show', {
+          message: `${t('config.toast_fishspeech_crashed')}: ${st.error}`,
+          type: 'error',
+          duration: 8000,
+          key: Date.now(),
+        });
+      }
+      prevFishServiceStatusRef.current = st.status;
+    } catch (e) {
+      console.warn('查询 Fish Speech 服务状态失败:', e);
+    }
+  }, [t]);
+
+  // 引擎为 fishspeech 时定时轮询服务状态(2s 一次)
+  useEffect(() => {
+    if (ttsConfig?.engine !== 'fishspeech') {
+      setFishSpeechService(null);
+      return;
+    }
+    refreshFishSpeechService();
+    const id = window.setInterval(refreshFishSpeechService, 2000);
+    return () => window.clearInterval(id);
+  }, [ttsConfig?.engine, refreshFishSpeechService]);
+
+  // 一键启动 / 停止 Fish Speech 服务
+  const toggleFishSpeechService = async () => {
+    if (fishSpeechServiceBusy) return;
+    const cur = fishSpeechService?.status;
+    if (cur === 'running' || cur === 'starting') {
+      setFishSpeechServiceBusy(true);
+      try {
+        const st = await invoke<FishSpeechServiceState>('stop_fish_speech_service');
+        setFishSpeechService(st);
+      } catch (e) {
+        console.error('停止 Fish Speech 服务失败:', e);
+      } finally {
+        setFishSpeechServiceBusy(false);
+      }
+    } else {
+      if (ttsConfig) {
+        const port = ttsConfig.fish_speech_port ?? 8080;
+        const patched: TtsConfigState = {
+          ...ttsConfig,
+          fish_speech_port: port,
+          // 服务 URL 自动指向本地端口（仅当用户未填时）
+          fish_speech_url:
+            ttsConfig.fish_speech_url || `http://127.0.0.1:${port}`,
+        };
+        setTtsConfig(patched);
+        setFishSpeechServiceBusy(true);
+        try {
+          await invoke('set_tts_config', { config: patched, characterId: ttsEditCharId ?? undefined });
+          const st = await invoke<FishSpeechServiceState>('start_fish_speech_service', { characterId: ttsEditCharId ?? undefined });
+          setFishSpeechService(st);
+          prevFishServiceStatusRef.current = st.status;
+          await refreshFishSpeechService();
+        } catch (e) {
+          console.error('启动 Fish Speech 服务失败:', e);
+          void emit('toast:show', {
+            message: `${t('config.toast_fishspeech_start_failed')}: ${e}`,
+            type: 'error',
+            duration: 6000,
+            key: Date.now(),
+          });
+          await refreshFishSpeechService();
+        } finally {
+          setFishSpeechServiceBusy(false);
+        }
+      }
+    }
+  };
+
+  // ── Ollama 本地嵌入服务管理 ──────────────────────────────
+  // 拉取 Ollama 服务状态(单次)
+  const refreshOllamaService = useCallback(async () => {
+    try {
+      const st = await invoke<OllamaServiceState>('get_ollama_status');
+      setOllamaService(st);
+    } catch (e) {
+      console.warn('查询 Ollama 服务状态失败:', e);
+    }
+  }, []);
+
+  // 刷新已安装的 Ollama 模型列表
+  const refreshOllamaModels = useCallback(async () => {
+    try {
+      const res = await invoke<{ models: string[] }>('list_ollama_models');
+      setOllamaModels(res.models ?? []);
+    } catch (e) {
+      console.warn('查询 Ollama 模型列表失败:', e);
+    }
+  }, []);
+
+  // 拉取内置嵌入模型注册表（用于云端模型选择时自动填充维度）
+  const refreshEmbeddingModels = useCallback(async () => {
+    try {
+      const models = await invoke<
+        {
+          id: string;
+          dimension: number;
+          source: string;
+          display_name: string;
+          provider?: string | null;
+          endpoint?: string | null;
+          recommended_for?: string | null;
+        }[]
+      >('get_embedding_models');
+      setEmbeddingModels(Array.isArray(models) ? models : []);
+    } catch (e) {
+      console.warn('查询嵌入模型注册表失败:', e);
+    }
+    try {
+      const presets = await invoke<EmbeddingProviderPreset[]>('get_embedding_provider_presets');
+      setEmbeddingPresets(Array.isArray(presets) ? presets : []);
+    } catch (e) {
+      console.warn('查询嵌入厂商预设失败:', e);
+    }
+  }, []);
+
+  // 挂载时拉取一次嵌入模型注册表
+  useEffect(() => {
+    refreshEmbeddingModels();
+  }, [refreshEmbeddingModels]);
+
+  // 嵌入来源为 local 且处于记忆页签时定时轮询服务状态(2s 一次)
+  useEffect(() => {
+    const isLocal = get<string>('memory.embedding.source', 'cloud') === 'local';
+    if (activeTab !== 'memory' || !isLocal) {
+      return;
+    }
+    refreshOllamaService();
+    refreshOllamaModels();
+    const id = window.setInterval(refreshOllamaService, 2000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, config, refreshOllamaService, refreshOllamaModels]);
+
+  // 监听 ollama:ready 事件：启动自动拉取完成后刷新模型列表，
+  // 使面板状态从"未加载"更新为"已加载"
+  useEffect(() => {
+    const unlisten = listen<{ model_installed: boolean; model: string | null }>(
+      'ollama:ready',
+      () => {
+        refreshOllamaModels();
+        refreshOllamaService();
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [refreshOllamaModels, refreshOllamaService]);
+
+  // 一键启动 / 停止 Ollama 服务
+  const toggleOllamaService = async () => {
+    if (ollamaServiceBusy) return;
+    const cur = ollamaService?.status;
+    setOllamaServiceBusy(true);
+    try {
+      if (cur === 'running' || cur === 'starting') {
+        const st = await invoke<OllamaServiceState>('stop_ollama');
+        setOllamaService(st);
+      } else {
+        const st = await invoke<OllamaServiceState>('start_ollama');
+        setOllamaService(st);
+        await refreshOllamaService();
+      }
+    } catch (e) {
+      console.error('切换 Ollama 服务失败:', e);
+      void emit('toast:show', {
+        message: `${t('config.toast_ollama_toggle_failed')}: ${e}`,
+        type: 'error',
+        duration: 6000,
+        key: Date.now(),
+      });
+      await refreshOllamaService();
+    } finally {
+      setOllamaServiceBusy(false);
+    }
+  };
+
+  // ── Whisper 本地 ASR 服务管理 ──────────────────────────────
+  // 拉取 Whisper 服务状态(单次)
+  const prevWhisperStatusRef = useRef<string | null>(null);
+  const refreshWhisperService = useCallback(async () => {
+    try {
+      const st = await invoke<WhisperServiceState>('get_whisper_service_status');
+      setWhisperService(st);
+      const prev = prevWhisperStatusRef.current;
+      // starting → running: 启动成功提示
+      if (st.status === 'running' && prev === 'starting') {
+        void emit('toast:show', {
+          message: t('config.toast_whisper_started'),
+          type: 'success',
+          duration: 3000,
+          key: Date.now(),
+        });
+      }
+      // 进入 crashed: 显示错误
+      if (st.status === 'crashed' && prev !== 'crashed' && st.error) {
+        void emit('toast:show', {
+          message: `${t('config.toast_whisper_crashed')}: ${st.error}`,
+          type: 'error',
+          duration: 8000,
+          key: Date.now(),
+        });
+      }
+      prevWhisperStatusRef.current = st.status;
+    } catch (e) {
+      console.warn('查询 Whisper 服务状态失败:', e);
+    }
+  }, [t]);
+
+  // 引擎为 whisper 时定时轮询服务状态(2s 一次)
+  useEffect(() => {
+    if (get<string>('speech_recognition.engine', 'winrt') !== 'whisper') {
+      setWhisperService(null);
+      prevWhisperStatusRef.current = null;
+      return;
+    }
+    refreshWhisperService();
+    const id = window.setInterval(refreshWhisperService, 2000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, refreshWhisperService]);
+
+  // 一键启动 / 停止 Whisper 服务
+  const toggleWhisperService = async () => {
+    if (whisperServiceBusy) return;
+    const cur = whisperService?.status;
+    if (cur === 'installing') return; // 安装中不响应点击
+    if (cur === 'running' || cur === 'starting') {
+      // 停止
+      setWhisperServiceBusy(true);
+      try {
+        const st = await invoke<WhisperServiceState>('stop_whisper_service');
+        setWhisperService(st);
+        prevWhisperStatusRef.current = st.status;
+      } catch (e) {
+        console.error('停止 Whisper 服务失败:', e);
+      } finally {
+        setWhisperServiceBusy(false);
+      }
+    } else {
+      // 启动：仅持久化 whisper service_* 字段，不触发整体保存/重初始化/关闭窗口
+      setWhisperServiceBusy(true);
+      try {
+        await persistWhisperServiceConfig();
+        const st = await invoke<WhisperServiceState>('start_whisper_service');
+        setWhisperService(st);
+        prevWhisperStatusRef.current = st.status;
+        // 启动是异步的（后端 spawn wait_for_health），立即再刷新一次拉取最新状态
+        await refreshWhisperService();
+      } catch (e) {
+        console.error('启动 Whisper 服务失败:', e);
+        void emit('toast:show', {
+          message: `${t('config.toast_whisper_start_failed')}: ${e}`,
+          type: 'error',
+          duration: 6000,
+          key: Date.now(),
+        });
+        await refreshWhisperService();
+      } finally {
+        setWhisperServiceBusy(false);
+      }
+    }
+  };
+
+  // 仅持久化 whisper service_* 配置项到后端（不关闭窗口、不触发 reinitialize、不弹保存 toast）
+  // 目的：让 start_whisper_service 命令读到表单中的最新值，避免触发整体保存副作用
+  const persistWhisperServiceConfig = async () => {
+    const fields: Array<[string, ConfigValue]> = [
+      ['speech_recognition.whisper.service_model', get('speech_recognition.whisper.service_model', 'small')],
+      ['speech_recognition.whisper.service_device', get('speech_recognition.whisper.service_device', 'auto')],
+      ['speech_recognition.whisper.service_compute_type', get('speech_recognition.whisper.service_compute_type', 'auto')],
+      ['speech_recognition.whisper.service_port', get('speech_recognition.whisper.service_port', 8000)],
+      ['speech_recognition.whisper.service_python_path', get('speech_recognition.whisper.service_python_path', '') ?? ''],
+      ['speech_recognition.whisper.service_install_path', get('speech_recognition.whisper.service_install_path', '') ?? ''],
+      ['speech_recognition.whisper.service_auto_start', get('speech_recognition.whisper.service_auto_start', false)],
+    ];
+    for (const [key, value] of fields) {
+      try {
+        await invoke('set_config', { key, value });
+      } catch (e) {
+        console.warn(`写入 ${key} 失败:`, e);
+      }
+    }
+    try {
+      await invoke('save_config');
+    } catch (e) {
+      console.warn('save_config 失败:', e);
+    }
+  };
+
+  // 拉取 Ollama 模型；权限不足时直接触发 UAC 提权修复目录后重试
+  const pullOllamaModel = async () => {
+    const model = get('memory.embedding.ollama_model', 'bge-m3');
+    if (!model.trim() || ollamaPulling) return;
+    setOllamaPulling(true);
+    const doPull = async () =>
+      invoke<{ success: boolean; error: string | null; permission_denied: boolean }>(
+        'pull_ollama_model',
+        { model },
+      );
+    try {
+      const res = await doPull();
+      if (res.success) {
+        void emit('toast:show', {
+          message: t('config.toast_ollama_pull_ok'),
+          type: 'success',
+          duration: 3000,
+          key: Date.now(),
+        });
+        await refreshOllamaModels();
+      } else if (res.permission_denied) {
+        // 权限不足：直接触发 UAC（UAC 本身即权限确认），无需前置 window.confirm
+        void emit('toast:show', {
+          message: t('config.toast_ollama_fix_requesting'),
+          type: 'info',
+          duration: 4000,
+          key: Date.now(),
+        });
+        try {
+          await invoke('fix_ollama_permission');
+          const retry = await doPull();
+          if (retry.success) {
+            void emit('toast:show', {
+              message: t('config.toast_ollama_pull_ok'),
+              type: 'success',
+              duration: 3000,
+              key: Date.now(),
+            });
+            await refreshOllamaModels();
+          } else {
+            void emit('toast:show', {
+              message: `${t('config.toast_ollama_pull_failed')}: ${retry.error ?? ''}`,
+              type: 'error',
+              duration: 6000,
+              key: Date.now(),
+            });
+          }
+        } catch (fe) {
+          // UAC 被取消或修复失败
+          void emit('toast:show', {
+            message: `${t('config.toast_ollama_fix_failed')}: ${fe}`,
+            type: 'error',
+            duration: 6000,
+            key: Date.now(),
+          });
+        }
+      } else {
+        void emit('toast:show', {
+          message: `${t('config.toast_ollama_pull_failed')}: ${res.error ?? ''}`,
+          type: 'error',
+          duration: 6000,
+          key: Date.now(),
+        });
+      }
+    } catch (e) {
+      void emit('toast:show', {
+        message: `${t('config.toast_ollama_pull_failed')}: ${e}`,
+        type: 'error',
+        duration: 6000,
+        key: Date.now(),
+      });
+    } finally {
+      setOllamaPulling(false);
+    }
+  };
+
+  // 选择本地路径(文件夹或文件)
+  const pickPath = async (
+    field: keyof TtsConfigState,
+    isDirectory: boolean,
+    extensions?: string[],
+  ) => {
+    try {
+      const selected = await open({
+        directory: isDirectory,
+        multiple: false,
+        filters: extensions ? [{ name: '', extensions }] : undefined,
+      });
+      if (typeof selected === 'string' && selected) {
+        setTtsConfig((prev) => (prev ? { ...prev, [field]: selected } : prev));
+      }
+    } catch (e) {
+      console.warn('选择路径失败:', e);
+    }
+  };
+
+  // 加载日记配置（通过 get_diary_config 命令读取当前角色的 diary/config.json）
+  const loadDiaryConfig = async () => {
+    setDiaryLoading(true);
+    try {
+      const cfg = await invoke<DiaryConfigState>('get_diary_config', {
+        characterId: getCharacterId() ?? undefined,
+      });
+      setDiaryConfig(cfg);
+    } catch (e) {
+      console.warn('加载日记配置失败:', e);
+    } finally {
+      setDiaryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    // 后端启动预检要求展示配置说明（URL 带 guide=1）
+    if (new URLSearchParams(window.location.search).get('guide') === '1') {
+      setSetupGuideOpen(true);
+    }
+    // 从工作侧"去设置 LLM"等入口直达指定页签（URL 带 tab=xxx）
+    const requestedTab = new URLSearchParams(window.location.search).get('tab');
+    const tabParam = requestedTab === 'search' ? 'network' : requestedTab;
+    if (tabParam && tabs.some((t) => t.key === tabParam)) {
+      setActiveTab(tabParam as TabKey);
+    }
+    // 主 LLM 未配置时作为兜底：即使已看过指引仍弹出
+    void invoke<boolean>('is_main_api_configured')
+      .then((ok) => {
+        if (!ok) setSetupGuideOpen(true);
+      })
+      .catch(() => {});
+    // 加载配置 + 角色列表 + TTS 配置；完成后按需弹出配置指引（等数据就绪，状态徽章才准确）
+    void (async () => {
+      try {
+        await loadConfig();
+        const resp = await invoke<{ characters: Array<{ id: string; name: string; online: boolean }> }>('list_characters');
+        const list = resp?.characters ?? [];
+        setCharacters(list);
+        const winCharId = getCharacterId();
+        const initial = winCharId && list.some(c => c.id === winCharId)
+          ? winCharId
+          : (list[0]?.id ?? null);
+        setTtsEditCharId(initial);
+        await loadTtsConfig(initial ?? undefined);
+        // 加载所有角色的 TTS 引擎（用于判断双实例开关是否显示）
+        const engines: Record<string, string> = {};
+        for (const c of list) {
+          try {
+            const cfg = await invoke<TtsConfigState>('get_tts_config', { characterId: c.id });
+            engines[c.id] = cfg.engine;
+          } catch {
+            engines[c.id] = 'none';
+          }
+        }
+        setCharTtsEngines(engines);
+      } catch (e) {
+        console.warn('加载角色列表失败:', e);
+        await loadTtsConfig();
+      } finally {
+        // 首次打开设置窗口时自动弹出配置指引
+        if (!localStorage.getItem('vivian-setup-guide-seen')) {
+          localStorage.setItem('vivian-setup-guide-seen', '1');
+          setSetupGuideOpen(true);
+        }
+      }
+    })();
+    void loadDiaryConfig();
+    void getVersion().then(setAppVersion).catch(() => { /* 忽略 */ });
+    void Promise.all([platform(), osVersion(), arch()])
+      .then(([p, v, a]) => setOsInfo(`${p} ${v} (${a})`))
+      .catch(() => { /* 忽略 */ });
+  }, []);
+
+  // 后端启动预检未通过时，若设置窗口已打开也立即弹出配置说明
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      unlisten = await listen('setup-guide:show', () => {
+        setSetupGuideOpen(true);
+      });
+    })();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // 工作侧等其它窗口请求跳转到指定页签（设置窗口已存在时热切换）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      unlisten = await listen<{ tab: string }>('config:open-tab', (e) => {
+        const tab = e.payload?.tab === 'search' ? 'network' : e.payload?.tab;
+        if (tab && tabs.some((t) => t.key === tab)) {
+          setActiveTab(tab as TabKey);
+        }
+      });
+    })();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // 切换到工具页签时加载注册工具清单
+  // （MCP server 列表已随「外部连接」页迁走，由 ConnectionsPanel 自行加载）
+  useEffect(() => {
+    if (activeTab === 'tools') {
+      invoke<{ tools: Array<{
+        name: string;
+        description: string;
+        category: string;
+        is_custom: boolean;
+        scope: 'companion' | 'work' | 'both';
+        companion_locked: boolean;
+        work_locked: boolean;
+      }> }>('list_tools')
+        .then((res) => setToolList(res?.tools ?? []))
+        .catch(() => { /* 忽略 */ });
+    }
+  }, [activeTab]);
+
+  // 监听主窗口语言切换事件，实时同步本窗口的 i18n 语言
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ language: string }>('config:language-changed', (e) => {
+          if (e.payload?.language) void changeLanguage(e.payload.language);
+        });
+        if (cancelled) { unlisten(); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useGlobalTheme();
+  useEffect(() => {
+    void invoke('guard_borderless_window', { label: 'config' }).catch(error => console.warn('设置窗口边框保护失败:', error));
+  }, []);
+
+  // 标识本窗口刚刚触发了 config:saved（用于跳过自身保存引发的事件，避免循环重载）
+  const selfSaveRef = useRef(false);
+  // 监听其他窗口（右键菜单 / 系统托盘菜单）保存配置后触发的 config:saved 事件，
+  // 实时同步智能避让开关显示，避免本窗口显示的旧草稿与最新落盘值不一致。
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen('config:saved', async () => {
+          if (selfSaveRef.current) {
+            selfSaveRef.current = false;
+            return;
+          }
+          try {
+            const enabled = await invoke<boolean>('get_config', {
+              key: 'window.smart_positioning_enabled',
+            }).catch(() => true);
+            setNested('window.smart_positioning_enabled', enabled);
+            setNested('window.desktop_physics_enabled', await invoke<boolean>('get_config', { key: 'window.desktop_physics_enabled' }));
+          } catch {
+            /* ignore */
+          }
+        });
+        if (cancelled) { unlisten(); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  // 监听路由矩阵任务状态事件（任务专属 provider 调用成功/失败）
+  // 仅用于 UI 颜色标记：失败时模型名变红，下次成功时恢复绿色
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ task_type: string; status: 'ok' | 'error' }>(
+          'chat:route_status',
+          (event) => {
+            const { task_type: taskType, status } = event.payload ?? {};
+            if (!taskType || !status) return;
+            setRouteStatus((prev) => {
+              if (prev[taskType] === status) return prev;
+              return { ...prev, [taskType]: status };
+            });
+          },
+        );
+        if (cancelled) { unlisten(); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleTestTts = async () => {
+    try {
+      if (!ttsConfig) return;
+      // GPT-SoVITS 引擎:试听前检查服务地址与服务运行状态
+      if (ttsConfig.engine === 'gptsovits') {
+        if (!ttsConfig.gpt_sovits_url) {
+          void emit('toast:show', {
+            message: t('config.toast_gptsovits_test_no_url'),
+            type: 'warning',
+            duration: 4000,
+            key: Date.now(),
+          });
+          return;
+        }
+        if (gptsovitsService?.status !== 'running') {
+          void emit('toast:show', {
+            message: t('config.toast_gptsovits_test_not_running'),
+            type: 'warning',
+            duration: 4000,
+            key: Date.now(),
+          });
+          return;
+        }
+      }
+      // 先持久化当前编辑中的配置，确保后端使用最新选中的引擎而非旧配置
+      await invoke('set_tts_config', { config: ttsConfig, characterId: ttsEditCharId ?? undefined });
+      // 试听文案随界面语言切换，以便检验目标语种语音效果
+      const lang = i18n.language;
+      const charName = characters.find((c) => c.id === ttsEditCharId)?.name ?? 'Vivian';
+      const sampleText =
+        lang?.startsWith('en')
+          ? `Hello, I'm ${charName}. Nice to meet you!`
+          : lang?.startsWith('ja')
+            ? `こんにちは、私は${charName}です。お会いできて嬉しいです〜`
+            : `你好，我是${charName}，很高兴见到你。`;
+      await invoke('speak_text', { text: sampleText, characterId: ttsEditCharId ?? undefined });
+    } catch (e) {
+      console.warn('TTS 测试失败:', e);
+      void emit('toast:show', {
+        message: t('toast.tts_test_failed', { error: String(e) }),
+        type: 'error',
+        duration: 5000,
+        key: Date.now(),
+      });
+    }
+  };
+
+  // 打开 TTS 帮助说明书，并定位到指定后端页签
+  const openTtsHelp = (backend: TtsBackendKey) => {
+    setTtsHelpBackend(backend);
+    setTtsHelpOpen(true);
+  };
+
+  // 打开 ASR 帮助说明书，并定位到指定后端页签
+  const openAsrHelp = (backend: AsrBackendKey) => {
+    setAsrHelpBackend(backend);
+    setAsrHelpOpen(true);
+  };
+
+  const handleLanguageChange = async (lang: string) => {
+    setNested('base.language', lang);
+    void changeLanguage(lang);
+    try {
+      await invoke('set_config', { key: 'base.language', value: lang });
+      await invoke('save_config');
+      await emit('config:language-changed', { language: lang });
+    } catch (e) {
+      console.warn('即时保存语言设置失败:', e);
+    }
+  };
+
+  const handleThemeChange = async (theme: string) => {
+    setNested('base.theme', theme);
+    try {
+      await invoke('set_config', { key: 'base.theme', value: theme });
+      await invoke('save_config');
+      await emit('config:theme-changed', { theme });
+    } catch (e) {
+      console.warn('即时保存主题设置失败:', e);
+    }
+  };
+
+
+  /** 快捷键变化处理：即时保存 + 通知后端重新注册所有文字快捷键
+   *  冲突检测已在 ShortcutRecorder 内部完成（通过 register/unregister 试探），
+   *  此处仅负责持久化与事件通知。返回 ConflictResult 让组件决定是否显示错误。 */
+  const handleShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut', value: shortcut });
+      await invoke('save_config');
+      // 通知后端重新注册所有文字快捷键
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  /** 恢复出厂设置确认：调用后端原子化命令，锁死行为 → 清空数据 → 重启应用 */
+  const handleClearMemoriesConfirm = useCallback(async () => {
+    setClearingMemories(true);
+    try {
+      await invoke('factory_reset', { keepImportedCharacters });
+    } catch (e) {
+      void emit('toast:show', {
+        message: String(e),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      setClearingMemories(false);
+      setClearMemoriesOpen(false);
+    }
+  }, [keepImportedCharacters]);
+
+  useEffect(() => {
+    void invoke<{ destination: string; error: string | null } | null>('take_backup_result').then(result => {
+      if (!result) return;
+      setBackupResult(result);
+      setActiveTab('data');
+      void emit('toast:show', {
+        message: result.error ? `${t('config.backup_failed')}: ${result.error}` : `${t('config.backup_done')}: ${result.destination}`,
+        type: result.error ? 'error' : 'success', duration: 8000, key: Date.now(),
+      });
+    }).catch(error => console.warn('Backup result unavailable', error));
+  }, [t]);
+
+  /** 保存后重启到离线导出阶段；重启后读取真实完成结果。 */
+  const handleBackup = useCallback(async () => {
+    const dest = await open({ directory: true, multiple: false, title: t('config.backup_pick_folder') });
+    if (!dest || typeof dest !== 'string') return;
+    setBackingUp(true);
+    setBackupResult(null);
+    try {
+      const backupPath = await invoke<string>('backup_user_data', { destDir: dest });
+      void emit('toast:show', {
+        message: `${t('config.backup_restarting')}: ${backupPath}`,
+        type: 'info',
+        duration: 6000,
+        key: Date.now(),
+      });
+    } catch (e) {
+      void emit('toast:show', {
+        message: `${t('config.backup_failed')}: ${String(e)}`,
+        type: 'error',
+        duration: 6000,
+        key: Date.now(),
+      });
+    } finally {
+      setBackingUp(false);
+    }
+  }, [t]);
+
+  /** 恢复备份第一步：选择 .altn 备份文件（后端校验），通过后弹确认框 */
+  const handleRestorePick = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      title: t('config.restore_pick_file'),
+      filters: [
+        { name: t('config.backup_file_type'), extensions: ['altn'] },
+        { name: t('config.backup_all_files'), extensions: ['*'] },
+      ],
+    });
+    if (!selected || typeof selected !== 'string') return;
+    setRestoreSource(selected);
+    setRestoreConfirmOpen(true);
+  }, [t]);
+
+  /** 恢复备份确认：后端写入恢复标记并自动重启应用，重启后完成数据回填 */
+  const handleRestoreConfirm = useCallback(async () => {
+    if (!restoreSource) return;
+    setRestoring(true);
+    try {
+      // 后端 restore_user_data 会校验备份文件、写入恢复标记并重启应用
+      await invoke('restore_user_data', { backupPath: restoreSource });
+      void emit('toast:show', {
+        message: t('config.restore_started'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+    } catch (e) {
+      void emit('toast:show', {
+        message: `${t('config.restore_failed')}: ${String(e)}`,
+        type: 'error',
+        duration: 6000,
+        key: Date.now(),
+      });
+      setRestoring(false);
+      setRestoreConfirmOpen(false);
+    }
+  }, [restoreSource, t]);
+
+  /** 微信快捷键变化处理 */
+  const handleChatShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_chat', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_chat', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  /** 设置快捷键变化处理 */
+  const handleSettingsShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_settings', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_settings', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  /** 笔记本快捷键变化处理 */
+  const handleMemoryShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_memory', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_memory', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  const handleScreenAnalyzeShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    const previous = get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A');
+    try {
+      await invoke('set_config', { key: 'base.shortcut_screen_analyze', value: shortcut });
+      await invoke('update_text_shortcuts');
+      await invoke('save_config');
+      setNested('base.shortcut_screen_analyze', shortcut);
+      return { ok: true };
+    } catch {
+      await invoke('set_config', { key: 'base.shortcut_screen_analyze', value: previous });
+      await invoke('update_text_shortcuts');
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [get, setNested]);
+
+  /** 公寓快捷键变化处理 */
+  const handleRoomShortcutChange = useCallback(async (shortcut: string): Promise<ConflictResult> => {
+    setNested('base.shortcut_room', shortcut);
+    try {
+      await invoke('set_config', { key: 'base.shortcut_room', value: shortcut });
+      await invoke('save_config');
+      await invoke('update_text_shortcuts');
+      void emit('toast:show', {
+        message: shortcut
+          ? t('toast.shortcut_applied', { shortcut: formatForDisplay(shortcut) })
+          : t('config.shortcut_recorder_idle'),
+        type: 'success',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: true };
+    } catch (e) {
+      void emit('toast:show', {
+        message: t('toast.shortcut_register_failed', { shortcut: formatForDisplay(shortcut) }),
+        type: 'error',
+        duration: 4000,
+        key: Date.now(),
+      });
+      return { ok: false, reason: 'conflict' };
+    }
+  }, [t]);
+
+  // 网络检测 —— 把当前 UI 中（可能尚未保存）的网络设置同步到后端内存配置，
+  // 保证检测的就是用户眼前这份配置。真实诊断逻辑在后端 `network::diagnose`，
+  // 结果由 NetworkDiagnosisDialog 呈现。
+  const syncNetworkConfigForDiagnosis = async () => {
+    const proxyMode = get<string>('network.proxy_mode', 'direct');
+    const proxyUrl = get<string>('network.proxy_url', '');
+    const timeout = get<number>('network.timeout', 30);
+    await invoke('set_config', { key: 'network.proxy_mode', value: proxyMode });
+    await invoke('set_config', { key: 'network.proxy_url', value: proxyUrl });
+    await invoke('set_config', { key: 'network.timeout', value: timeout });
+  };
+
+  // ===== LLM 一键检测 =====
+  // 收集测试目标：主 LLM 配置 + 工作智能体模型预置 + 路由矩阵全部任务
+  // （读取当前 UI 值，含未保存的修改）
+  /** 连通性探测与用量归因的统一目标清单：先档位，再按任务覆盖。 */
+  const routeTargets = () => [
+    ...ROUTING_TIERS.map((tier) => ({
+      prefix: `routing_tiers.${tier.tierType}`, key: tier.tierType, labelKey: tier.labelKey,
+    })),
+    ...ROUTING_TASKS.map((task) => ({
+      prefix: `routing_matrix.${task.taskType}`, key: task.taskType, labelKey: task.labelKey,
+    })),
+  ];
+
+  const collectLlmTestTargets = () => {
+    const s = (path: string, fallback = '') => ((get(path, fallback) as string) ?? '');
+    return [
+      {
+        reasoning: get('ai.reasoning', null) as ReasoningPref | null,
+        reasoningOverrides: get('ai.reasoning_overrides', null) as Record<string, unknown> | null,
+        sendTemperature: get('ai.send_temperature', true) as boolean,
+        sendMaxTokens: get('ai.send_max_tokens', true) as boolean,
+        key: 'main',
+        label: t('config.llm_test_main_label'),
+        providerType: s('ai.provider', 'openai') || 'openai',
+        model: s('ai.model').trim(),
+        apiKey: s('ai.api_key').trim(),
+        endpoint: s('ai.endpoint').trim(),
+        apiSecret: s('ai.api_secret'),
+        appId: s('ai.app_id'),
+      },
+      ...workModels.map((m) => ({
+        reasoning: m.reasoning ?? get('ai.reasoning', null) as ReasoningPref | null,
+        reasoningOverrides: m.reasoning_overrides,
+        sendTemperature: m.send_temperature ?? false,
+        sendMaxTokens: m.send_max_tokens ?? true,
+        key: `work:${m.id}`,
+        label: `${t('config.llm_test_work_model_label')}${m.name}`,
+        providerType: m.provider_type || 'openai',
+        model: (m.model ?? '').trim(),
+        apiKey: (m.api_key ?? '').trim(),
+        endpoint: (m.endpoint ?? '').trim(),
+        apiSecret: m.api_secret ?? '',
+        appId: m.app_id ?? '',
+      })),
+      ...routeTargets().map(({ prefix, key, labelKey }) => ({
+        reasoning: get(`${prefix}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null,
+        reasoningOverrides: get(`${prefix}.reasoning_overrides`, null) as Record<string, unknown> | null,
+        sendTemperature: (get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean,
+        sendMaxTokens: (get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean,
+        key,
+        label: t(labelKey),
+        providerType: s(`${prefix}.provider_type`) || 'openai',
+        model: s(`${prefix}.model`).trim(),
+        apiKey: s(`${prefix}.api_key`).trim(),
+        endpoint: s(`${prefix}.endpoint`).trim(),
+        apiSecret: s(`${prefix}.api_secret`),
+        appId: s(`${prefix}.app_id`),
+      })),
+    ];
+  };
+
+  // 相同连接共享一次探测，串行执行并遵守服务端限流冷却。
+  const handleTestLlmRoutes = async () => {
+    if (llmTesting) return;
+    const targets = collectLlmTestTargets();
+    setLlmTesting(true);
+    setLlmTestResults(
+      Object.fromEntries(targets.map((tg) => [tg.key, { state: 'testing' as const }]))
+    );
+    try {
+      await runProbeBatch(targets, async (tg) => {
+        const res = await invoke<{
+          success: boolean; elapsed_ms: number; error: string | null; reply: string | null;
+        }>('test_llm_route', { params: {
+          provider_type: tg.providerType, model: tg.model, api_key: tg.apiKey,
+          reasoning: tg.reasoning, reasoning_overrides: tg.reasoningOverrides,
+          send_temperature: tg.sendTemperature, send_max_tokens: tg.sendMaxTokens,
+          endpoint: tg.endpoint, api_secret: tg.apiSecret, app_id: tg.appId,
+        } });
+        return res.success
+          ? { state: 'ok', elapsedMs: res.elapsed_ms, reply: res.reply ?? undefined }
+          : { state: 'error', error: res.error ?? 'Unknown', elapsedMs: res.elapsed_ms };
+      }, (keys, result) => {
+        setLlmTestResults(prev => ({ ...prev, ...Object.fromEntries(keys.map(key => [key, result])) }));
+      });
+    } finally {
+      setLlmTesting(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (importingSettings) return;
+    setSaving(true);
+    setSaveError(null);
+    // 任何失败都收集为错误信息显示给用户；主配置保存失败则不关闭窗口
+    let criticalError: string | null = null;
+
+    // 保存前先抓取旧的嵌入配置，用于保存后检测是否切换了嵌入模型/来源
+    let oldEmbedding: ConfigObject | undefined;
+    try {
+      const cur = await invoke<ConfigObject>('get_all_config');
+      oldEmbedding = (cur?.memory as ConfigObject | undefined)?.embedding as ConfigObject | undefined;
+    } catch {
+      /* ignore */
+    }
+
+    // 深拷贝 config，避免修改 UI 状态
+    const configCopy: ConfigObject = JSON.parse(JSON.stringify(config));
+
+    // routing_matrix / routing_tiers 整体设置（前后端均为 HashMap<String, TaskRouteConfig>）
+    if (configCopy.routing_matrix && typeof configCopy.routing_matrix === 'object') {
+      try {
+        await invoke('set_config', { key: 'routing_matrix', value: configCopy.routing_matrix });
+      } catch (e) {
+        console.warn('保存 routing_matrix 失败:', e);
+      }
+      delete configCopy.routing_matrix;
+    }
+    if (configCopy.routing_tiers && typeof configCopy.routing_tiers === 'object') {
+      try {
+        await invoke('set_config', { key: 'routing_tiers', value: configCopy.routing_tiers });
+      } catch (e) {
+        console.warn('保存 routing_tiers 失败:', e);
+      }
+      delete configCopy.routing_tiers;
+    }
+
+    // provider_cache 整体设置（前后端均为 HashMap<String, CachedProviderProfile>）
+    if (configCopy.provider_cache && typeof configCopy.provider_cache === 'object') {
+      try {
+        await invoke('set_config', { key: 'provider_cache', value: configCopy.provider_cache });
+      } catch (e) {
+        console.warn('保存 provider_cache 失败:', e);
+      }
+      delete configCopy.provider_cache;
+    }
+
+    // 递归写入所有配置项 —— 单项失败不影响其他项
+    const setDeep = async (obj: ConfigObject, prefix = '') => {
+      for (const key of Object.keys(obj)) {
+        const fullKey = prefix ? `${prefix}.${key}` : key;
+        // Runtime-owned discoveries may have grown since this settings snapshot was opened.
+        if (fullKey === 'companion.game_processes') continue;
+        const v = obj[key];
+        if (v && typeof v === 'object' && !Array.isArray(v)) {
+          await setDeep(v as ConfigObject, fullKey);
+        } else {
+          try {
+            await invoke('set_config', { key: fullKey, value: v });
+          } catch (e) {
+            console.warn(`保存配置项 ${fullKey} 失败:`, e);
+          }
+        }
+      }
+    };
+    try {
+      await setDeep(configCopy);
+    } catch (e) {
+      criticalError = `保存配置项失败: ${e}`;
+    }
+
+    // 写入磁盘 —— 关键步骤，失败则不关闭窗口
+    try {
+      await invoke('save_config');
+    } catch (e) {
+      criticalError = `保存到磁盘失败: ${e}`;
+    }
+    if (!criticalError) {
+      try { await invoke('update_text_shortcuts'); }
+      catch (e) { console.warn('更新快捷键失败:', e); }
+    }
+
+    // 子配置保存（失败不阻止主流程）
+    if (ttsConfig) {
+      try {
+        await invoke('set_tts_config', { config: ttsConfig, characterId: ttsEditCharId ?? undefined });
+        // 保存成功后清除该角色的草稿（草稿已与后端一致）
+        if (ttsEditCharId) {
+          setTtsDrafts((prev) => {
+            const next = { ...prev };
+            delete next[ttsEditCharId];
+            return next;
+          });
+        }
+        // 通知主窗口同步语音开关状态
+        try {
+          await emit('tts:config-changed', { enabled: ttsConfig.enabled });
+        } catch {
+          /* ignore */
+        }
+      } catch (e) {
+        console.warn('保存 TTS 配置失败:', e);
+      }
+    }
+    if (diaryConfig) {
+      try {
+        await invoke('set_diary_config', {
+          enable_auto_diary: diaryConfig.enable_auto_diary,
+          min_interaction_threshold: diaryConfig.min_interaction_threshold,
+          max_diary_length: diaryConfig.max_diary_length,
+          characterId: getCharacterId() ?? undefined,
+        });
+      } catch (e) {
+        console.warn('保存日记配置失败:', e);
+      }
+    }
+
+    // 通知主窗口同步语言切换
+    const newLang = (configCopy?.base as ConfigObject | undefined)?.language;
+    if (typeof newLang === 'string' && newLang) {
+      try {
+        await emit('config:language-changed', { language: newLang });
+      } catch {
+        /* ignore */
+      }
+    }
+
+    // 通知主窗口配置已保存（用于同步非语言配置，如智能避让开关）
+    // 标记自身保存：避免本窗口监听到自己 emit 的事件后重复重载
+    selfSaveRef.current = true;
+    try {
+      await emit('config:saved', {});
+    } catch {
+      selfSaveRef.current = false;
+      /* ignore */
+    }
+
+    if (criticalError) {
+      // 主配置保存失败 —— 不关闭窗口，显示错误让用户看到
+      setSaveError(criticalError);
+      setSaving(false);
+      return;
+    }
+
+    // 重新初始化 Brain / ModelRouter，让新的 LLM 配置立即生效（无需重启应用）
+    let reinitOk = false;
+    try {
+      await invoke('reinitialize');
+      reinitOk = true;
+    } catch (e) {
+      console.warn('重新初始化 Brain 失败（可能需要重启应用）:', e);
+      // 初始化失败通常意味着主 LLM / 嵌入服务配置仍不完整，
+      // 保持设置窗口打开，方便用户继续调整。
+      setSaveError(`重新初始化失败: ${e}`);
+      setSaving(false);
+      return;
+    }
+
+    // 让主动对话配置即时生效 + 通知主窗口更新 tick 间隔与 start/stop 状态
+    // 放在 reinitialize 之后：reinitialize 成功时新 Brain 已用新 config 构造，
+    // 此命令更新新 Brain 的 proactive config；reinitialize 失败时更新旧 Brain。
+    try {
+      await invoke('update_proactive_config');
+    } catch (e) {
+      console.warn('更新主动对话配置失败:', e);
+    }
+    try {
+      await emit('proactive:config-changed');
+    } catch {
+      /* ignore */
+    }
+
+    // 让世界感知配置即时生效（天气/内心独白/记忆巩固开关）
+    try {
+      await invoke('update_world_config');
+    } catch (e) {
+      console.warn('更新世界感知配置失败:', e);
+    }
+
+    // 让 ASR 配置即时生效（无需重启应用）
+    try {
+      await invoke('update_asr_config');
+    } catch (e) {
+      console.warn('更新 ASR 配置失败:', e);
+    }
+
+    // 检测嵌入模型/来源是否变化：变化则旧向量索引已在 reinitialize 时失效，
+    // 提示用户是否后台重建。rebuild_memory_embeddings 秒回（后台执行），不阻塞关窗。
+    const newEmb = (config.memory as ConfigObject | undefined)?.embedding as ConfigObject | undefined;
+    const embeddingChanged = reinitOk && !!oldEmbedding && !!newEmb && (
+      oldEmbedding.source !== newEmb.source ||
+      oldEmbedding.model !== newEmb.model ||
+      oldEmbedding.ollama_model !== newEmb.ollama_model ||
+      oldEmbedding.dimension !== newEmb.dimension
+    );
+    if (embeddingChanged) {
+      const ok = window.confirm(t('config.embedding_changed_rebuild_confirm'));
+      if (ok) {
+        try {
+          await invoke('rebuild_memory_embeddings');
+        } catch (e) {
+          console.warn('启动向量重建失败:', e);
+          try {
+            await emit('toast:show', {
+              message: t('config.toast_rebuild_start_failed'),
+              type: 'error',
+              duration: 5000,
+              key: Date.now(),
+            });
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+
+    setSavedFlash(true);
+    setSaving(false);
+    // 通过独立 Toast 窗口提示用户配置已保存（设置窗口关闭后仍可见）
+    try {
+      await emit('toast:show', {
+        message: t('config_saved'),
+        type: 'success',
+        duration: 3000,
+        key: Date.now(),
+      });
+    } catch {
+      /* ignore */
+    }
+    // 保存成功后关闭设置界面（单独 try，避免 close 失败影响 savedFlash 状态）
+    try {
+      await closeWindow();
+    } catch (e) {
+      console.warn('关闭窗口失败:', e);
+      setSaveError(`保存成功，但关闭窗口失败: ${e}`);
+    }
+  };
+
+  const handleReset = async () => {
+    try {
+      await invoke('reload_config');
+      await loadConfig();
+    } catch (e) {
+      console.warn('重置配置失败:', e);
+    }
+  };
+
+  const handleTabChange = (tab: TabKey) => {
+    // 离开网络页签时收起检测弹窗（弹窗不跨页签残留）
+    if (activeTab === 'network' && tab !== 'network') {
+      setNetworkDiagnosisOpen(false);
+    }
+    setActiveTab(tab);
+  };
+
+  // 关闭本设置窗口：
+  // 1) 优先走 Rust 侧权威关闭命令 close_child_window（直接 win.close()，绕过前端
+  //    close 事件链的潜在拦截——本项目 config 窗口被 openWindow 注册了 onCloseRequested
+  //    清理监听、且 Rust on_window_event 也监听 CloseRequested，纯前端 close() 在部分
+  //    运行时下不可靠，表现为「保存 / X 都关不掉」）；
+  // 2) 兜底强制销毁 destroy()（不触发 close-requested，绕过任何 preventClose）；
+  // 3) 最后退回前端 close()。
+  const closeWindow = async () => {
+    setNetworkDiagnosisOpen(false);
+    const win = getCurrentWindow();
+    const label = win.label;
+    try {
+      await invoke('close_child_window', { label });
+      return;
+    } catch {
+      /* 兜底 */
+    }
+    try {
+      await win.destroy();
+      return;
+    } catch {
+      /* 兜底 */
+    }
+    try {
+      await win.close();
+    } catch {
+      /* 忽略 */
+    }
+  };
+
+  // 页签内容在渲染期直接求值，**不要**再把它包回 useMemo。
+  //
+  // 这一段是个 switch，每个 case 里都会读到组件自己的局部状态——折叠开关
+  // （shortcutsExpanded / *AdvancedOpen）、工具页侧栏（toolSideTab）、各服务的
+  // 轮询结果（whisperService / ollamaModels / fishSpeechService）……而 useMemo
+  // 的依赖数组是手工维护的，谁漏写谁就退化成「点了没反应」「状态不刷新」，
+  // 而且不报错、只在运行时表现为死交互。此前已经靠逐条补依赖救过几次
+  // （见下面的工具页注释），属于必然复发的结构性问题。
+  //
+  // 代价核算：memo 省下的只是「每帧重建这棵元素树」的对象分配开销；真正的成本
+  // 在 React 的 diff 与 DOM 提交，那部分无论有没有 memo 都照样发生，且未变化的
+  // 子树本来就会被 React 自己跳过。所以这里去掉 memo 几乎没有可测的性能损失，
+  // 却能把「漏依赖」这一整类 bug 从根上消掉。
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case 'general':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_general')}</div>
+            <SelectField
+              label={t('config.field_language')}
+              value={get('base.language', 'zh-CN')}
+              onChange={(v) => void handleLanguageChange(v)}
+              options={[
+                { value: 'zh-CN', label: '简体中文' },
+                { value: 'en', label: 'English' },
+                { value: 'ja', label: '日本語' },
+              ]}
+            />
+            <SelectField
+              label={t('config.field_theme')}
+              value={get('base.theme', 'system')}
+              onChange={(v) => void handleThemeChange(v)}
+              options={[
+                { value: 'system', label: t('config.theme_option_system') },
+                { value: 'light', label: t('config.theme_option_light') },
+                { value: 'dark', label: t('config.theme_option_dark') },
+              ]}
+            />
+            <ToggleField
+              label={t('config.theme_auto_solar', { defaultValue: '按日出日落自动切换主题' })}
+              help={t('config.theme_auto_solar_help', { defaultValue: '使用天气位置的日出、日落时间切换全局与手机主题；无日照数据时使用上方主题。关闭后恢复上方选择。' })}
+              value={get('base.theme_auto_solar', false)}
+              onChange={async (value) => {
+                setNested('base.theme_auto_solar', value);
+                try {
+                  await invoke('set_config', { key: 'base.theme_auto_solar', value });
+                  await invoke('save_config');
+                  await emit('config:theme-changed', { theme: get('base.theme', 'system') });
+                } catch (error) { console.warn('保存自动主题设置失败:', error); }
+              }}
+            />
+            <ToggleField
+              label={t('config.field_smart_positioning')}
+              help={t('config.smart_positioning_help')}
+              value={get('window.smart_positioning_enabled', true)}
+              onChange={(v) => { setNested('window.smart_positioning_enabled', v); if (v) setNested('window.desktop_physics_enabled', false); }}
+            />
+            <ToggleField
+              label={t('config.field_desktop_physics')}
+              help={t('config.desktop_physics_help')}
+              value={get('window.desktop_physics_enabled', false)}
+              onChange={(v) => { setNested('window.desktop_physics_enabled', v); if (v) setNested('window.smart_positioning_enabled', false); }}
+            />
+            <ToggleField
+              label={t('config.field_mouse_follow')}
+              help={t('config.mouse_follow_help')}
+              value={get('pet_render.always_follow_mouse', false)}
+              onChange={(v) => setNested('pet_render.always_follow_mouse', v)}
+            />
+            <ToggleField
+              label={t('config.field_auto_start')}
+              help={t('config.auto_start_help')}
+              value={get('base.auto_start', false)}
+              onChange={(v) => setNested('base.auto_start', v)}
+            />
+            {apartmentInstalled ? (
+              <ToggleField
+                label={t('config.field_apartment_enabled')}
+                help={t('config.apartment_enabled_help')}
+                value={get('base.apartment_enabled', true)}
+                onChange={(v) => setNested('base.apartment_enabled', v)}
+              />
+            ) : null}
+            <ResourceLibrarySettings />
+            <ShortcutsDrawer
+              label={t('config.section_shortcuts')}
+              expanded={shortcutsExpanded}
+              onToggle={() => setShortcutsExpanded((v) => !v)}
+              configuredCount={[
+                get<string>('base.shortcut', ''),
+                get<string>('base.shortcut_chat', ''),
+                get<string>('base.shortcut_settings', ''),
+                get<string>('base.shortcut_memory', ''),
+                get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A'),
+                apartmentInstalled && get('base.apartment_enabled', true) ? get<string>('base.shortcut_room', '') : '',
+              ].filter((v) => !!v).length}
+            >
+              <ShortcutRecorder
+                value={get<string>('base.shortcut', 'Control+LeftAlt+Z')}
+                defaultValue="Control+LeftAlt+Z"
+                onChange={handleShortcutChange}
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_chat', 'Control+LeftAlt+C')}
+                defaultValue="Control+LeftAlt+C"
+                onChange={handleChatShortcutChange}
+                labelKey="config.field_shortcut_chat"
+                helpKey="config.shortcut_chat_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_settings', 'CommandOrControl+Shift+S')}
+                defaultValue="CommandOrControl+Shift+S"
+                onChange={handleSettingsShortcutChange}
+                labelKey="config.field_shortcut_settings"
+                helpKey="config.shortcut_settings_help"
+              />
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_memory', 'CommandOrControl+Shift+M')}
+                defaultValue="CommandOrControl+Shift+M"
+                onChange={handleMemoryShortcutChange}
+                labelKey="config.field_shortcut_memory"
+                helpKey="config.shortcut_memory_help"
+              />
+              {apartmentInstalled && get('base.apartment_enabled', true) && <ShortcutRecorder
+                value={get<string>('base.shortcut_room', 'CommandOrControl+Shift+R')}
+                defaultValue="CommandOrControl+Shift+R"
+                onChange={handleRoomShortcutChange}
+                labelKey="config.field_shortcut_room"
+                helpKey="config.shortcut_room_help"
+              />}
+              <ShortcutRecorder
+                value={get<string>('base.shortcut_screen_analyze', 'Control+LeftAlt+A')}
+                defaultValue="Control+LeftAlt+A"
+                onChange={handleScreenAnalyzeShortcutChange}
+                distinguishAltSides
+                labelKey="config.field_shortcut_screen_analyze"
+                helpKey="config.shortcut_screen_analyze_help"
+              />
+            </ShortcutsDrawer>
+          </>
+        );
+      case 'world':
+        return (
+          <>
+            {/* ── 真实世界感知（原独立页签合并）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_world')}
+            </div>
+            <ToggleField
+              label={t('config.field_world_enable')}
+              value={get('world.enable', true)}
+              onChange={(v) => setNested('world.enable', v)}
+            />
+            <ToggleField
+              label={t('config.field_world_inject_prompt')}
+              help={t('config.world_inject_prompt_help')}
+              value={get('world.inject_into_prompt', true)}
+              onChange={(v) => setNested('world.inject_into_prompt', v)}
+            />
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_world_weather')}
+            </div>
+            <ToggleField
+              label={t('config.field_world_weather')}
+              value={get('world.enable_weather', true)}
+              onChange={(v) => setNested('world.enable_weather', v)}
+            />
+            <NumberField
+              label={t('config.field_world_weather_ttl')}
+              value={get('world.weather_cache_ttl_secs', 3600)}
+              onChange={(v) => setNested('world.weather_cache_ttl_secs', v)}
+              min={300}
+              step={300}
+              help={t('config.world_weather_ttl_help')}
+            />
+            <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)', marginBottom: 18 }}>
+              {t('config.world_weather_details_help')}
+            </div>
+            <ToggleField
+              label={t('config.world_apple_weather_enabled')}
+              help={t('config.world_apple_weather_help')}
+              value={get('world.apple_weather.enabled', false)}
+              onChange={(v) => setNested('world.apple_weather.enabled', v)}
+            />
+            {get('world.apple_weather.enabled', false) && (
+              <>
+                <TextField label="Apple Team ID" value={get('world.apple_weather.team_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.team_id', v)} />
+                <TextField label="WeatherKit Service ID" value={get('world.apple_weather.service_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.service_id', v)} placeholder="com.example.weather" />
+                <TextField label="Apple Key ID" value={get('world.apple_weather.key_id', '')}
+                  onChange={(v) => setNested('world.apple_weather.key_id', v)} />
+                <TextField label={t('config.world_apple_weather_timezone')}
+                  value={get('world.apple_weather.timezone', '')}
+                  onChange={(v) => setNested('world.apple_weather.timezone', v)}
+                  placeholder="Asia/Shanghai" help={t('config.world_apple_weather_timezone_help')} />
+                <WeatherKitPrivateKeyField
+                  value={get('world.apple_weather.api_secret', '')}
+                  onChange={(v) => setNested('world.apple_weather.api_secret', v)} />
+                <a href="https://developer.apple.com/weatherkit/" target="_blank" rel="noreferrer">WeatherKit</a>
+                {' · '}
+                <a href="https://weatherkit.apple.com/legal-attribution.html" target="_blank" rel="noreferrer">Apple Weather · {t('config.world_weather_attribution')}</a>
+              </>
+            )}
+            <NumberField
+              label={t('config.field_world_latitude')}
+              value={get('world.latitude', 0)}
+              onChange={(v) => setNested('world.latitude', v)}
+              step={0.01}
+              help={t('config.world_latitude_help')}
+            />
+            <NumberField
+              label={t('config.field_world_longitude')}
+              value={get('world.longitude', 0)}
+              onChange={(v) => setNested('world.longitude', v)}
+              step={0.01}
+              help={t('config.world_longitude_help')}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: -4, marginBottom: 4 }}>
+              <button
+                onClick={handleAutoDetectLocation}
+                disabled={detectingLocation}
+                style={{
+                  padding: '4px 12px',
+                  fontSize: 12,
+                  background: 'var(--panel-bg-surface-elevated)',
+                  border: '1px solid var(--panel-border)',
+                  borderRadius: 6,
+                  color: 'var(--panel-text)',
+                  cursor: detectingLocation ? 'wait' : 'pointer',
+                  opacity: detectingLocation ? 0.6 : 1,
+                }}
+              >
+                {detectingLocation ? t('config.world_auto_detect_loading') : t('config.world_auto_detect')}
+              </button>
+            </div>
+
+          </>
+        );
+      case 'companion':
+        return (
+          <>
+            <CompanionSettings language={i18n.language} get={get} set={setNested} />
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>{i18n.language.startsWith('zh') ? '角色包' : 'Character packs'}</div>
+            <CharacterPackageSettings />
+            {/* ── 内心独白 + 主动问候（合并分组，便于联动）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_world_monologue')}
+            </div>
+            <ToggleField
+              label={t('config.field_world_monologue')}
+              value={get('world.enable_inner_monologue', true)}
+              onChange={(v) => setNested('world.enable_inner_monologue', v)}
+            />
+
+            {/* ── 主动对话（从独立页签合并）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_proactive')}
+            </div>
+            <ToggleField
+              label={t('config.field_enable_proactive')}
+              value={get('proactive.enabled', true)}
+              onChange={(v) => setNested('proactive.enabled', v)}
+            />
+
+            {/* 内心独白优化的主动问候：仅当内心独白和主动对话都开启时显示 */}
+            {get('world.enable_inner_monologue', true) && get('proactive.enabled', true) && (
+              <ToggleField
+                label={t('config.field_enable_social_urge_gating')}
+                value={get('proactive.enable_social_urge_gating', true)}
+                onChange={(v) => setNested('proactive.enable_social_urge_gating', v)}
+                help={t('config.monologue_greeting_help')}
+              />
+            )}
+            <NumberField
+              label={t('config.field_check_interval')}
+              value={get('proactive.tick_interval', 10)}
+              onChange={(v) => setNested('proactive.tick_interval', v)}
+              min={5}
+              step={5}
+            />
+            <NumberField
+              label={t('config.field_idle_threshold')}
+              value={get('proactive.idle_threshold', 300)}
+              onChange={(v) => setNested('proactive.idle_threshold', v)}
+              min={30}
+              step={30}
+            />
+            <NumberField
+              label={t('config.field_min_trigger_interval')}
+              value={get('proactive.min_trigger_interval', 180)}
+              onChange={(v) => setNested('proactive.min_trigger_interval', v)}
+              min={60}
+              step={60}
+            />
+            <SliderField
+              label={t('config.field_proactivity')}
+              value={get('proactive.proactivity', 0.5)}
+              onChange={(v) => setNested('proactive.proactivity', v)}
+              min={0}
+              max={1}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />
+            <ToggleField
+              label={t('config.field_enable_idle_trigger')}
+              value={get('proactive.enable_idle_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_idle_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_window_change')}
+              value={get('proactive.enable_window_change_trigger', false)}
+              onChange={(v) => setNested('proactive.enable_window_change_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_away_reminder')}
+              value={get('proactive.enable_away_reminder', true)}
+              onChange={(v) => setNested('proactive.enable_away_reminder', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_system_pressure_trigger')}
+              value={get('proactive.enable_system_pressure_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_system_pressure_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_screen_peek_trigger')}
+              value={get('proactive.enable_screen_peek_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_screen_peek_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_app_duration_trigger')}
+              value={get('proactive.enable_app_duration_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_app_duration_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_late_night_trigger')}
+              value={get('proactive.enable_late_night_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_late_night_trigger', v)}
+            />
+            <ToggleField
+              label={t('config.field_enable_music_trigger')}
+              value={get('proactive.enable_music_trigger', true)}
+              onChange={(v) => setNested('proactive.enable_music_trigger', v)}
+            />
+
+            <details className="settings-sticker-drawer">
+              <summary><span>{i18n.language.startsWith('zh') ? '聊天表情包' : 'Chat stickers'}</span><small>{i18n.language.startsWith('zh') ? '发送频率 · 共享贴纸库 · 导入管理' : 'Frequency · Library · Import'}</small></summary>
+              <div className="settings-sticker-body"><StickerSettings /></div>
+            </details>
+
+            {/* ── 日记（仅保留启用开关，其余由智能体自主决定）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_diary')}
+            </div>
+            {diaryLoading ? (
+              <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)' }}>{t('common.loading')}</div>
+            ) : diaryConfig ? (
+              <ToggleField
+                label={t('config.field_enable_auto_diary')}
+                value={diaryConfig.enable_auto_diary}
+                onChange={(v) => setDiaryConfig({ ...diaryConfig, enable_auto_diary: v })}
+              />
+            ) : null}
+
+          </>
+        );
+      case 'storage':
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('storageSettings.title')}</div>
+            <StorageSettings />
+          </>
+        );
+      case 'data':
+        return (
+          <>
+            <ConfigTransferSettings disabled={backingUp || restoring || saving || importingSettings} onImporting={setImportingSettings} />
+            <div style={sectionTitleStyle}>{t('config.section_backup')}</div>
+            <p className="settings-data-help">{t('config.backup_help')}</p>
+            {backupResult && <p role={backupResult.error ? 'alert' : 'status'} className="settings-data-help" style={{ overflowWrap: 'anywhere' }}>
+              {backupResult.error ? `${t('config.backup_failed')}: ${backupResult.error}` : `${t('config.backup_done')}: ${backupResult.destination}`}
+            </p>}
+            <div className="settings-data-actions">
+              <div className="settings-data-row">
+                <span className="settings-data-icon"><Download size={18} aria-hidden="true" /></span>
+                <div className="settings-data-copy">
+                  <h3>{t('config.backup_btn')}</h3>
+                  <p>{t('config.backup_export_help')}</p>
+                </div>
+                <button type="button" className="settings-data-button settings-data-button-primary"
+                  onClick={() => void handleBackup()} disabled={backingUp || restoring}>
+                  {backingUp ? t('common.saving') : t('config.backup_btn')}
+                </button>
+              </div>
+              <div className="settings-data-row">
+                <span className="settings-data-icon"><Upload size={18} aria-hidden="true" /></span>
+                <div className="settings-data-copy">
+                  <h3>{t('config.restore_btn')}</h3>
+                  <p>{t('config.backup_restore_help')}</p>
+                </div>
+                <button type="button" className="settings-data-button"
+                  onClick={() => void handleRestorePick()} disabled={restoring || backingUp}>
+                  {restoring ? t('config.restore_btn_loading') : t('config.restore_btn')}
+                </button>
+              </div>
+            </div>
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>{t('config.backup_reset_title')}</div>
+            <div className="settings-data-row settings-data-reset">
+              <span className="settings-data-icon"><RotateCcw size={18} aria-hidden="true" /></span>
+              <div className="settings-data-copy">
+                <h3>{t('config.clear_memories_btn')}</h3>
+                <p>{t('config.backup_reset_help')}</p>
+              </div>
+              <button type="button" className="settings-data-button settings-data-button-danger"
+                onClick={() => { setKeepImportedCharacters(true); setClearMemoriesOpen(true); }} disabled={backingUp || restoring}>
+                {t('config.clear_memories_btn')}
+              </button>
+            </div>
+          </>
+        );
+      case 'ai':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_ai')}</div>
+            <ProviderPresetUpdater charId={getCharacterId()} />
+            <ProviderSelector pathPrefix="ai" get={get} setNested={setNested} t={t} />
+            <datalist id="ai-model-suggestions">
+              {(allProviderPresets.find(
+                (p) => presetMatches(p, get('ai.provider', 'openai') as string, get('ai.endpoint', '') as string),
+              )?.mainModels ?? []).map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+            <TextField
+              label={t('config.field_model_name')}
+              value={get('ai.model', 'gpt-5.5')}
+              onChange={(v) => setNested('ai.model', v)}
+              placeholder={t('config.ph_model')}
+              list="ai-model-suggestions"
+            />
+            <TextField
+              label={t('config.field_api_key')}
+              type="password"
+              value={get('ai.api_key', '')}
+              onChange={(v) => setNested('ai.api_key', v)}
+              placeholder={t('config.ph_api_key')}
+            />
+            {needsSecretFor(get('ai.provider', 'openai')) && (
+              <TextField
+                label={t('config.field_api_secret')}
+                type="password"
+                value={get('ai.api_secret', '')}
+                onChange={(v) => setNested('ai.api_secret', v)}
+                placeholder={t('config.ph_api_secret')}
+              />
+            )}
+            {needsAppIdFor(get('ai.provider', 'openai')) && (
+              <TextField
+                label={t('config.field_app_id')}
+                value={get('ai.app_id', '')}
+                onChange={(v) => setNested('ai.app_id', v)}
+                placeholder={t('config.ph_app_id')}
+              />
+            )}
+            <TextField
+              label={t('config.field_endpoint')}
+              value={get('ai.endpoint', 'https://api.openai.com/v1')}
+              onChange={(v) => setNested('ai.endpoint', v)}
+              placeholder={t('config.ph_endpoint')}
+            />
+            <ToggleField label={t('config.send_temperature')} value={(get('ai.send_temperature', true) ?? true) as boolean} onChange={v => setNested('ai.send_temperature', v)} help={t('config.parameter_send_help')} />
+                {(get('ai.send_temperature', true) ?? true) as boolean && (<SliderField
+              label={t('config.field_temperature')}
+              value={get('ai.temperature', 0.70)}
+              onChange={(v) => setNested('ai.temperature', v)}
+              min={0}
+              max={2}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />)}
+            <ToggleField label={t('config.send_max_tokens')} value={(get('ai.send_max_tokens', true) ?? true) as boolean} onChange={v => setNested('ai.send_max_tokens', v)} help={t('config.parameter_send_help')} />
+                {(get('ai.send_max_tokens', true) ?? true) as boolean && (<NumberField
+              label={t('config.field_max_tokens')}
+              value={get('ai.max_tokens', 2048)}
+              onChange={(v) => setNested('ai.max_tokens', v)}
+              min={64}
+              step={64}
+            />)}
+            <NumberField
+              label={t('config.field_context_window')}
+              value={get('ai.context_window', 1000000)}
+              onChange={(v) => setNested('ai.context_window', v)}
+              min={8192}
+              step={4096}
+              help={t('config.context_window_help')}
+            />
+            <ReasoningPrefField
+              label={t('config.field_reasoning_pref')}
+              help={t('config.reasoning_pref_help')}
+              providerType={get('ai.provider', 'openai') as string} model={get('ai.model', '') as string}
+              temperature={get<number>('ai.temperature',0.7)} maxTokens={get<number>('ai.max_tokens',2048)}
+              sendTemperature={get<boolean>('ai.send_temperature',true)} sendMaxTokens={get<boolean>('ai.send_max_tokens',true)}
+              overrides={get('ai.reasoning_overrides', null) as Record<string, unknown> | null} onOverridesChange={v=>setNested('ai.reasoning_overrides',v as ConfigValue)}
+              value={get('ai.reasoning', null) as ReasoningPref | null}
+              onChange={(v) => setNested('ai.reasoning', v as ConfigValue)}
+              t={t}
+            />
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_multimodal')}</div>
+            <ToggleField
+              label={t('config.field_enable_vision')}
+              help={t('config.field_enable_vision_help')}
+              value={get('ai.enable_vision', false)}
+              onChange={(v) => setNested('ai.enable_vision', v)}
+            />
+            <SelectField
+              label={t('config.field_image_detail')}
+              value={get('ai.image_detail', 'auto')}
+              onChange={(v) => setNested('ai.image_detail', v)}
+              options={[
+                { value: 'auto', label: t('config.opt_image_detail_auto') },
+                { value: 'low', label: t('config.opt_image_detail_low') },
+                { value: 'high', label: t('config.opt_image_detail_high') },
+              ]}
+            />
+
+          </>
+        );
+      case 'routing': {
+        // 档位与任务覆盖共用同一张字段表：只有配置前缀不同。
+        const routeBadge = (modelText: string, status?: 'ok' | 'error', fallbackText?: string) => {
+          if (!modelText) {
+            return fallbackText
+              ? <span style={{ fontSize: 12, color: 'var(--panel-text-quaternary)' }}>{fallbackText}</span>
+              : undefined;
+          }
+          return (
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 500,
+                color: status === 'error' ? '#F44336' : status === 'ok' ? '#4CAF50' : undefined,
+              }}
+              title={modelText}
+            >
+              {modelText}
+            </span>
+          );
+        };
+        const statusOf = (taskTypes: string[]) => {
+          if (taskTypes.some((key) => routeStatus[key] === 'error')) return 'error' as const;
+          if (taskTypes.some((key) => routeStatus[key] === 'ok')) return 'ok' as const;
+          return undefined;
+        };
+        const routeFields = (prefix: string) => (
+          <>
+            <ProviderSelector pathPrefix={prefix} get={get} setNested={setNested} t={t} />
+            <TextField label={t('config.field_model_name')} value={get(`${prefix}.model`, '')} onChange={(v) => setNested(`${prefix}.model`, v)} placeholder={t('config.ph_model')} />
+            <TextField label={t('config.field_api_key')} type="password" value={get(`${prefix}.api_key`, '')} onChange={(v) => setNested(`${prefix}.api_key`, v)} placeholder={t('config.ph_api_key')} />
+            {needsSecretFor(get(`${prefix}.provider_type`, 'openai')) && (
+              <TextField label={t('config.field_api_secret')} type="password" value={get(`${prefix}.api_secret`, '')} onChange={(v) => setNested(`${prefix}.api_secret`, v)} placeholder={t('config.ph_api_secret')} />
+            )}
+            {needsAppIdFor(get(`${prefix}.provider_type`, 'openai')) && (
+              <TextField label={t('config.field_app_id')} value={get(`${prefix}.app_id`, '')} onChange={(v) => setNested(`${prefix}.app_id`, v)} placeholder={t('config.ph_app_id')} />
+            )}
+            <TextField label={t('config.field_endpoint')} value={get(`${prefix}.endpoint`, '')} onChange={(v) => setNested(`${prefix}.endpoint`, v)} placeholder={t('config.ph_endpoint')} />
+            <ToggleField label={t('config.send_temperature')} value={(get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested(`${prefix}.send_temperature`, v)} help={t('config.parameter_send_help')} />
+            {(get(`${prefix}.send_temperature`, get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
+              label={t('config.field_temperature')}
+              value={get(`${prefix}.temperature`, get('ai.temperature', 0.70))}
+              onChange={(v) => setNested(`${prefix}.temperature`, v)}
+              min={0}
+              max={2}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+              help={t('config.field_route_temperature_help')}
+            />)}
+            <ToggleField label={t('config.send_max_tokens')} value={(get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested(`${prefix}.send_max_tokens`, v)} help={t('config.parameter_send_help')} />
+            {(get(`${prefix}.send_max_tokens`, get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
+              label={t('config.field_max_tokens')}
+              value={get(`${prefix}.max_tokens`, get('ai.max_tokens', 2048))}
+              onChange={(v) => setNested(`${prefix}.max_tokens`, v)}
+              min={64}
+              step={64}
+              help={t('config.field_route_max_tokens_help')}
+            />)}
+            <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get(`${prefix}.provider_type`, 'openai') as string} model={get(`${prefix}.model`, '') as string}
+              temperature={get<number>(`${prefix}.temperature`, get<number>('ai.temperature', 0.7))} maxTokens={get<number>(`${prefix}.max_tokens`, get<number>('ai.max_tokens', 2048))}
+              sendTemperature={get<boolean>(`${prefix}.send_temperature`, get<boolean>('ai.send_temperature', true))} sendMaxTokens={get<boolean>(`${prefix}.send_max_tokens`, get<boolean>('ai.send_max_tokens', true))}
+              value={get(`${prefix}.reasoning`, get('ai.reasoning', null)) as ReasoningPref | null}
+              onChange={v => setNested(`${prefix}.reasoning`, v as ConfigValue)}
+              overrides={get(`${prefix}.reasoning_overrides`, null) as Record<string, unknown> | null}
+              onOverridesChange={v => setNested(`${prefix}.reasoning_overrides`, v as ConfigValue)} t={t}/>
+          </>
+        );
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_routing')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14 }}>
+              {t('config.routing_description')}
+            </div>
+            <ToggleField
+              label={t('config.field_enable_routing')}
+              value={get('enable_routing_matrix', false)}
+              onChange={(v) => setNested('enable_routing_matrix', v)}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '14px 0' }}>
+              <button
+                onClick={handleTestLlmRoutes}
+                disabled={llmTesting}
+                style={{
+                  padding: '9px 18px',
+                  border: 'none',
+                  background: llmTesting ? 'var(--panel-toggle-off)' : 'var(--panel-accent)',
+                  color: 'var(--panel-selected-text)',
+                  borderRadius: 12,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  fontFamily: 'inherit',
+                  cursor: llmTesting ? 'not-allowed' : 'pointer',
+                  opacity: llmTesting ? 0.7 : 1,
+                  whiteSpace: 'nowrap',
+                  transition: 'background 0.2s ease',
+                  boxShadow: llmTesting ? 'none' : 'var(--panel-shadow-subtle)',
+                }}
+              >
+                {llmTesting ? t('config.llm_test_testing') : t('config.llm_test_btn')}
+              </button>
+            </div>
+            {Object.keys(llmTestResults).length > 0 && (
+              <LlmProbeResults targets={collectLlmTestTargets()} results={llmTestResults} testing={llmTesting} />
+            )}
+            <div style={{ ...subsectionTitleStyle, marginTop: 22 }}>{t('config.routing_tiers_title')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 10 }}>
+              {t('config.routing_tiers_description')}
+            </div>
+            {ROUTING_TIERS.map((tier) => {
+              const prefix = `routing_tiers.${tier.tierType}`;
+              const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+              return (
+                <CollapsibleSection
+                  key={tier.tierType}
+                  title={t(tier.labelKey)}
+                  subtitle={t(tier.helpKey)}
+                  defaultOpen={false}
+                  titleAccessory={routeBadge(
+                    modelText,
+                    statusOf(ROUTING_TASKS.filter((task) => task.tier === tier.tierType).map((task) => task.taskType)),
+                  )}
+                >
+                  {routeFields(prefix)}
+                </CollapsibleSection>
+              );
+            })}
+
+            <div style={{ ...subsectionTitleStyle, marginTop: 22 }}>{t('config.routing_tasks_title')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 10 }}>
+              {t('config.routing_tasks_description')}
+            </div>
+            {[...new Set(ROUTING_TASKS.map((task) => task.groupKey))].map((groupKey) => (
+              <details className="settings-routing-group" key={groupKey}>
+                <summary>
+                  <span>{t(groupKey)}</span>
+                  <span className="settings-routing-group-count">{ROUTING_TASKS.filter((task) => task.groupKey === groupKey).length}</span>
+                </summary>
+                <div className="settings-routing-group-body">
+                  {ROUTING_TASKS.filter((task) => task.groupKey === groupKey).map((task) => {
+                    const prefix = `routing_matrix.${task.taskType}`;
+                    const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+                    const tierLabel = ROUTING_TIERS.find((tier) => tier.tierType === task.tier);
+                    return (
+                      <CollapsibleSection
+                        key={task.taskType}
+                        title={t(task.labelKey)}
+                        subtitle={t(task.helpKey)}
+                        defaultOpen={false}
+                        titleAccessory={routeBadge(
+                          modelText,
+                          routeStatus[task.taskType] as 'ok' | 'error' | undefined,
+                          tierLabel ? `${t('config.routing_inherits')} ${t(tierLabel.labelKey)}` : '',
+                        )}
+                      >
+                        {routeFields(prefix)}
+                      </CollapsibleSection>
+                    );
+                  })}
+                </div>
+              </details>
+            ))}
+
+            {NON_LLM_TASKS.map((task) => {
+              const prefix = `routing_matrix.${task.taskType}`;
+              const modelText = String(get(`${prefix}.model`, '') ?? '').trim();
+              return (
+                <details className="settings-routing-group" key={task.taskType}>
+                  <summary>
+                    <span>{t(task.labelKey)}</span>
+                    <span className="settings-routing-group-count">1</span>
+                  </summary>
+                  <div className="settings-routing-group-body">
+                <CollapsibleSection
+                  title={t(task.labelKey)}
+                  subtitle={t(task.helpKey)}
+                  defaultOpen={false}
+                  titleAccessory={routeBadge(modelText, routeStatus[task.taskType] as 'ok' | 'error' | undefined)}
+                >
+                  {routeFields(prefix)}
+                </CollapsibleSection>
+                  </div>
+                </details>
+              );
+            })}
+
+          </>
+        );
+      }
+      case 'work':
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_work_models')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14 }}>
+              {t('config.work_models_description')}
+            </div>
+            {workModels.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--panel-text-quaternary)', padding: '10px 0 2px' }}>
+                {t('config.work_models_empty')}
+              </div>
+            )}
+            {workModels.map((m, idx) => {
+              const isActive = workModelsActiveId === m.id;
+              const needsSecret = needsSecretFor(m.provider_type || 'openai');
+              const needsAppId = needsAppIdFor(m.provider_type || 'openai');
+              return (
+                <div
+                  key={m.id}
+                  style={{
+                    border: `1px solid ${isActive ? 'var(--panel-accent)' : 'var(--panel-border)'}`,
+                    borderRadius: 8,
+                    padding: 12,
+                    marginBottom: 12,
+                    background: 'var(--panel-card)',
+                  }}
+                >
+                  {/* 别名输入框与删除按钮同行：label 在行外，input 与按钮同一 flex 行，
+                      按钮高度随行拉伸与输入框完全齐平（border/radius 与输入框一致） */}
+                  <div style={{ ...fieldStyle, marginBottom: 8 }}>
+                    <label style={labelStyle}>{t('config.field_work_model_name')}</label>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                      <input
+                        type="text"
+                        value={m.name}
+                        onChange={(e) => patchWorkModel(idx, { name: e.target.value })}
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, boxSizing: 'border-box' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeWorkModel(m.id)}
+                        style={{
+                          flexShrink: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          width: 44,
+                          border: '1.5px solid var(--panel-border)',
+                          background: 'transparent',
+                          color: 'var(--panel-danger)',
+                          cursor: 'pointer',
+                          borderRadius: 12,
+                          transition: 'background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease',
+                          opacity: 0.75,
+                          boxSizing: 'border-box',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(229, 57, 53, 0.12)'; e.currentTarget.style.borderColor = 'rgba(229, 57, 53, 0.4)'; e.currentTarget.style.opacity = '1'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'var(--panel-border)'; e.currentTarget.style.opacity = '0.75'; }}
+                        title={t('config.work_models_remove')}
+                      >
+                        <Trash2 size={15} strokeWidth={2} />
+                      </button>
+                    </div>
+                  </div>
+                  <WorkModelProviderSelector
+                    model={m}
+                    onPatch={(patch) => patchWorkModel(idx, patch)}
+                    get={get}
+                    setNested={setNested}
+                    t={t}
+                  />
+                  <datalist id={`wm-model-suggestions-${m.id}`}>
+                    {(allProviderPresets.find(
+                      (p) => presetMatches(p, m.provider_type || 'openai', m.endpoint || ''),
+                    )?.mainModels ?? []).map((mm) => (
+                      <option key={mm} value={mm} />
+                    ))}
+                  </datalist>
+                  <TextField
+                    label={t('config.field_model_name')}
+                    value={m.model}
+                    onChange={(v) => {
+                      // 别名未填时，自动用模型名称补全别名
+                      if (v && !m.name) patchWorkModel(idx, { model: v, name: v });
+                      else patchWorkModel(idx, { model: v });
+                    }}
+                    placeholder={t('config.ph_model')}
+                    list={`wm-model-suggestions-${m.id}`}
+                  />
+                  <TextField
+                    label={t('config.field_endpoint')}
+                    value={m.endpoint}
+                    onChange={(v) => patchWorkModel(idx, { endpoint: v })}
+                    placeholder={t('config.ph_endpoint')}
+                  />
+                  <TextField
+                    label={t('config.field_api_key')}
+                    type="password"
+                    value={m.api_key}
+                    onChange={(v) => patchWorkModel(idx, { api_key: v })}
+                    placeholder={t('config.ph_api_key')}
+                  />
+                  {needsSecret && (
+                    <TextField
+                      label={t('config.field_api_secret')}
+                      type="password"
+                      value={m.api_secret ?? ''}
+                      onChange={(v) => patchWorkModel(idx, { api_secret: v })}
+                      placeholder={t('config.ph_api_secret')}
+                    />
+                  )}
+                  {needsAppId && (
+                    <TextField
+                      label={t('config.field_app_id')}
+                      value={m.app_id ?? ''}
+                      onChange={(v) => patchWorkModel(idx, { app_id: v })}
+                      placeholder={t('config.ph_app_id')}
+                    />
+                  )}
+                  <ToggleField label={t('config.send_temperature')} value={m.send_temperature ?? false} onChange={v => patchWorkModel(idx, { send_temperature: v })} help={t('config.parameter_send_help')} />
+                  {m.send_temperature && <SliderField label={t('config.field_temperature')} value={m.temperature ?? 0.7} onChange={v => patchWorkModel(idx, { temperature: v })} min={0} max={2} step={0.05} format={v => v.toFixed(2)} />}
+                  <ToggleField label={t('config.send_max_tokens')} value={m.send_max_tokens ?? true} onChange={v => patchWorkModel(idx, { send_max_tokens: v })} help={t('config.parameter_send_help')} />
+                  {(m.send_max_tokens ?? true) && <NumberField label={t('config.field_max_tokens')} value={m.max_tokens ?? 16384} onChange={v => patchWorkModel(idx, { max_tokens: v })} min={64} step={64} />}
+                  <NumberField
+                    label={t('config.field_context_window')}
+                    value={m.context_window ?? 1000000}
+                    onChange={(v) => patchWorkModel(idx, { context_window: v })}
+                    min={8192}
+                    step={4096}
+                    help={t('config.context_window_help')}
+                  />
+                  <ReasoningPrefField
+                    label={t('config.field_reasoning_pref')}
+                    help={t('config.reasoning_pref_help')}
+                    providerType={m.provider_type} model={m.model}
+                    temperature={m.temperature ?? get<number>('ai.temperature',0.7)} maxTokens={m.max_tokens ?? get<number>('ai.max_tokens',2048)}
+                    sendTemperature={m.send_temperature ?? get<boolean>('ai.send_temperature',true)} sendMaxTokens={m.send_max_tokens ?? get<boolean>('ai.send_max_tokens',true)}
+                    overrides={m.reasoning_overrides} onOverridesChange={v=>patchWorkModel(idx,{reasoning_overrides:v})}
+                    value={m.reasoning ?? null}
+                    onChange={(v) => patchWorkModel(idx, { reasoning: v } as Partial<WorkModelProfile>)}
+                    t={t}
+                  />
+
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              onClick={addWorkModel}
+              style={{
+                width: '100%',
+                marginTop: 4,
+                padding: '8px',
+                border: '1px dashed var(--panel-border)',
+                borderRadius: 8,
+                background: 'transparent',
+                color: 'var(--panel-accent)',
+                cursor: 'pointer',
+                fontSize: 13,
+              }}
+            >
+              + {t('config.work_models_add')}
+            </button>
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_default_workspace')}</div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.default_workspace_description')}
+            </div>
+            <BrowseTextField
+              label={t('config.field_default_workspace_path')}
+              value={defaultWorkspace}
+              onChange={setDefaultWorkspace}
+              placeholder={t('config.default_workspace_placeholder')}
+              onBrowse={() => void handlePickDefaultWorkspace()}
+              browseLabel={t('config.default_workspace_browse')}
+            />
+          </>
+        );
+      case 'usage':
+        return (
+          <>
+            <TokenUsagePanel />
+          </>
+        );
+      case 'tools':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_tools_native_fc')}</div>
+            <ToggleField
+              label={t('config.field_enable_native_fc')}
+              value={get('tools.enable_native_function_calling', true)}
+              onChange={(v) => setNested('tools.enable_native_function_calling', v)}
+            />
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_switches')}</div>
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginBottom: 12, lineHeight: 1.5 }}>
+              {t('config.tools_switches_help')}
+            </div>
+            {toolList.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--panel-text-quaternary)', padding: '10px 0 2px' }}>
+                {t('config.tools_switches_empty')}
+              </div>
+            ) : (
+              (() => {
+                const side = toolSideTab;
+                // 该侧的工具面：陪伴侧 = scope∈{companion,both}；工作侧 = scope∈{work,both}
+                const sideTools = toolList.filter((tl) =>
+                  side === 'companion' ? tl.scope !== 'work' : tl.scope !== 'companion',
+                );
+                // 分侧禁用集合：只读本侧（另一侧的开关互不影响）
+                const disabledSet = new Set((get(`tools.disabled_tools.${side}`, []) as string[]));
+                const isLocked = (tl: { companion_locked: boolean; work_locked: boolean }) =>
+                  side === 'companion' ? tl.companion_locked : tl.work_locked;
+                const kw = toolSearch.trim().toLowerCase();
+                const match = (tl: { name: string; description: string }) =>
+                  !kw ||
+                  tl.name.toLowerCase().includes(kw) ||
+                  (tl.description ?? '').toLowerCase().includes(kw);
+                const filtered = sideTools.filter(match);
+                // 锁定工具恒为启用，计入"已启用"分子
+                const enabledCount = filtered.filter((tl) => isLocked(tl) || !disabledSet.has(tl.name)).length;
+
+                // 工具按类型归类，固定顺序展示
+                const CATEGORY_ORDER = ['file', 'web', 'system', 'memory', 'media', 'pet', 'mcp'];
+                const grouped = CATEGORY_ORDER
+                  .map((cat) => ({ cat, tools: filtered.filter((tl) => tl.category === cat) }))
+                  .filter((g) => g.tools.length > 0);
+
+                const cardGrid = (tools: typeof filtered) => (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+                    {tools.map((tl) => {
+                      const locked = isLocked(tl);
+                      const enabled = locked || !disabledSet.has(tl.name);
+                      return (
+                        <ToolSwitchCard
+                          key={tl.name}
+                          name={tl.name}
+                          description={tl.description}
+                          categoryLabel={t(`config.tool_cat_${tl.category}`)}
+                          custom={!!tl.is_custom}
+                          customBadge={t('config.tool_badge_custom')}
+                          enabled={enabled}
+                          locked={locked}
+                          lockedLabel={t('config.tool_badge_locked')}
+                          onToggle={() => {
+                            if (locked) return;
+                            // 分侧写入：仅改本侧集合，另一侧的开关不受影响
+                            const next = new Set(disabledSet);
+                            if (enabled) next.add(tl.name);
+                            else next.delete(tl.name);
+                            setNested(`tools.disabled_tools.${side}`, Array.from(next));
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                );
+
+                return (
+                  <>
+                    {/* 侧别切换：陪伴侧与工作侧是两条独立产品线，工具面与开关互相独立 */}
+                    <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+                      {(['companion', 'work'] as const).map((s) => {
+                        const active = s === side;
+                        const count = toolList.filter((tl) =>
+                          s === 'companion' ? tl.scope !== 'work' : tl.scope !== 'companion',
+                        ).length;
+                        return (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setToolSideTab(s)}
+                            style={{
+                              flex: 1,
+                              padding: '7px 10px',
+                              borderRadius: 8,
+                              fontSize: 12,
+                              fontFamily: 'inherit',
+                              cursor: 'pointer',
+                              border: active
+                                ? '1px solid var(--panel-accent)'
+                                : '1px solid var(--panel-border)',
+                              background: active ? 'rgba(124, 92, 255, 0.12)' : 'transparent',
+                              color: active ? 'var(--panel-accent)' : 'var(--panel-text-secondary)',
+                            }}
+                          >
+                            {t(s === 'companion' ? 'config.tools_side_companion' : 'config.tools_side_work')}
+                            {` (${count})`}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <input
+                        type="text"
+                        value={toolSearch}
+                        onChange={(e) => setToolSearch(e.target.value)}
+                        placeholder={t('config.tools_search_ph')}
+                        style={{ ...inputStyle, flex: 1, padding: '7px 10px', fontSize: 12 }}
+                      />
+                      <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', whiteSpace: 'nowrap' }}>
+                        {t('config.tools_enabled_count', { enabled: enabledCount, total: filtered.length })}
+                      </span>
+                    </div>
+                    {/* 搜索时平铺展示全部命中项；默认按类别收纳展开 */}
+                    {kw ? (
+                      cardGrid(filtered)
+                    ) : (
+                      grouped.map((g) => (
+                        <CollapsibleSection
+                          key={g.cat}
+                          defaultOpen={false}
+                          title={`${t(`config.tool_cat_${g.cat}`)} (${
+                            g.tools.filter((tl) => isLocked(tl) || !disabledSet.has(tl.name)).length
+                          }/${g.tools.length})`}
+                        >
+                          {cardGrid(g.tools)}
+                        </CollapsibleSection>
+                      ))
+                    )}
+                  </>
+                );
+              })()
+            )}
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_execution')}</div>
+            <SchemaSettings command="get_desktop_settings" language={i18n.language}
+              get={(key, fallback) => get(key, fallback) as number} set={setNested} />
+            <NumberField
+              label={t('config.field_tool_max_iterations')}
+              value={(get('tools.max_iterations', 10) as number) === 0 ? -1 : (get('tools.max_iterations', 10) as number)}
+              onChange={(v) => setNested('tools.max_iterations', v === -1 ? 0 : v)}
+              min={-1}
+              max={50}
+              step={1}
+              help={t('config.field_unlimited_hint')}
+            />
+            <NumberField
+              label={t('config.field_tool_max_rounds')}
+              value={(get('tools.max_rounds', 20) as number) === 0 ? -1 : (get('tools.max_rounds', 20) as number)}
+              onChange={(v) => setNested('tools.max_rounds', v === -1 ? 0 : v)}
+              min={-1}
+              max={20}
+              step={1}
+              help={t('config.field_unlimited_hint')}
+            />
+            <NumberField
+              label={t('config.field_tool_max_coding_rounds')}
+              value={(get('tools.max_coding_rounds', 48) as number) === 0 ? -1 : (get('tools.max_coding_rounds', 48) as number)}
+              onChange={(v) => setNested('tools.max_coding_rounds', v === -1 ? 0 : v)}
+              min={-1}
+              max={100}
+              step={8}
+              help={t('config.field_unlimited_hint')}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_max_coding_rounds_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_max_result_chars')}
+              value={(get('tools.max_result_chars', 4000) as number) === 0 ? -1 : (get('tools.max_result_chars', 4000) as number)}
+              onChange={(v) => setNested('tools.max_result_chars', v === -1 ? 0 : v)}
+              min={-1}
+              step={500}
+              help={t('config.field_unlimited_hint')}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_max_result_chars_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_feedback_history_chars')}
+              value={(get('tools.feedback_history_chars', 2000) as number) === 0 ? -1 : (get('tools.feedback_history_chars', 2000) as number)}
+              onChange={(v) => setNested('tools.feedback_history_chars', v === -1 ? 0 : v)}
+              min={-1}
+              step={200}
+              help={t('config.field_unlimited_hint')}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_feedback_history_chars_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_default_timeout')}
+              value={get('tools.default_tool_timeout_secs', 120)}
+              onChange={(v) => setNested('tools.default_tool_timeout_secs', v)}
+              min={5}
+              step={5}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_default_timeout_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_confirmation_timeout')}
+              value={get('tools.confirmation_timeout_secs', 600)}
+              onChange={(v) => setNested('tools.confirmation_timeout_secs', v)}
+              min={30}
+              step={30}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_confirmation_timeout_help')}
+            </div>
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_cache')}</div>
+            <ToggleField
+              label={t('config.field_tool_enable_cache')}
+              value={get('tools.enable_cache', true)}
+              onChange={(v) => setNested('tools.enable_cache', v)}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_enable_cache_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_cache_ttl')}
+              value={get('tools.cache_ttl_secs', 300)}
+              onChange={(v) => setNested('tools.cache_ttl_secs', v)}
+              min={0}
+              step={30}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_cache_ttl_help')}
+            </div>
+            <NumberField
+              label={t('config.field_tool_cache_max_size')}
+              value={get('tools.cache_max_size', 1000)}
+              onChange={(v) => setNested('tools.cache_max_size', v)}
+              min={0}
+              step={100}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_cache_max_size_help')}
+            </div>
+
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_tools_permission')}</div>
+            <SelectField
+              label={t('config.field_tool_access_level')}
+              value={get('tools.access_level', 'fs-write')}
+              onChange={(v) => setNested('tools.access_level', v)}
+              options={[
+                { value: 'read-only', label: t('config.access_level_readonly') },
+                { value: 'fs-read', label: t('config.access_level_fsread') },
+                { value: 'fs-write', label: t('config.access_level_fswrite') },
+                { value: 'full-control', label: t('config.access_level_fullcontrol') },
+              ]}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_tool_access_level_help')}
+            </div>
+
+          </>
+        );
+      case 'memory':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('storageSettings.instructions')}</div>
+            <PersonalInstructionsSettings value={get<string>('memory.custom_instructions', '')}
+              onChange={v => setNested('memory.custom_instructions', v)} />
+            <div style={sectionTitleStyle}>{t('config.section_memory')}</div>
+            <NumberField
+              label={t('config.field_short_term_limit')}
+              help={t('config.field_short_term_limit_help')}
+              value={get('memory.max_short_term_memory', 20)}
+              onChange={(v) => setNested('memory.max_short_term_memory', v)}
+              min={1}
+              step={1}
+            />
+            <SelectField
+              label={t('config.field_retrieval_strategy')}
+              value={get('memory.retrieval_strategy', 'auto')}
+              onChange={(v) => setNested('memory.retrieval_strategy', v)}
+              options={[
+                { value: 'auto', label: t('config.opt_auto') },
+                { value: 'keyword', label: t('config.opt_keyword') },
+                { value: 'vector', label: t('config.opt_vector') },
+                { value: 'hybrid', label: t('config.opt_hybrid') },
+                { value: 'graph', label: t('config.opt_graph') },
+              ]}
+            />
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -10, marginBottom: 14, lineHeight: 1.5 }}>
+              {t('config.field_retrieval_strategy_help')}
+            </div>
+            <ToggleField
+              label={t('config.field_enable_expiration')}
+              value={get('memory.enable_expiration', true)}
+              onChange={(v) => setNested('memory.enable_expiration', v)}
+            />
+
+            {/* 巩固流水线配置 */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_consolidation')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.consolidation_description')}
+            </div>
+            <ToggleField
+              label={t('config.field_world_consolidation')}
+              help={t('config.world_consolidation_help')}
+              value={get('world.enable_memory_consolidation', true)}
+              onChange={(v) => setNested('world.enable_memory_consolidation', v)}
+            />
+            <NumberField
+              label={t('config.field_stage1_threshold')}
+              help={t('config.field_stage1_threshold_help')}
+              value={get('memory.consolidation.stage1_short_term_threshold', 20)}
+              onChange={(v) => setNested('memory.consolidation.stage1_short_term_threshold', v)}
+              min={3}
+              step={1}
+            />
+            <NumberField
+              label={t('config.field_stage1_idle_sec')}
+              help={t('config.field_stage1_idle_sec_help')}
+              value={get('memory.consolidation.stage1_idle_timeout_sec', 1800)}
+              onChange={(v) => setNested('memory.consolidation.stage1_idle_timeout_sec', v)}
+              min={60}
+              step={60}
+            />
+
+            {/* 检索三因子加权 */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_retrieval_weights')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.retrieval_weights_description')}
+            </div>
+            <SliderField
+              label={t('config.field_weight_recency')}
+              help={t('config.field_weight_recency_help')}
+              value={get('memory.retrieval_weights.recency', 0.25)}
+              onChange={(v) => setNested('memory.retrieval_weights.recency', v)}
+              min={0}
+              max={1}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />
+            <SliderField
+              label={t('config.field_weight_relevance')}
+              help={t('config.field_weight_relevance_help')}
+              value={get('memory.retrieval_weights.relevance', 0.4)}
+              onChange={(v) => setNested('memory.retrieval_weights.relevance', v)}
+              min={0}
+              max={1}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />
+            <SliderField
+              label={t('config.field_weight_importance')}
+              help={t('config.field_weight_importance_help')}
+              value={get('memory.retrieval_weights.importance', 0.15)}
+              onChange={(v) => setNested('memory.retrieval_weights.importance', v)}
+              min={0}
+              max={1}
+              step={0.05}
+              format={(v) => v.toFixed(2)}
+            />
+            <NumberField
+              label={t('config.field_recency_tau')}
+              help={t('config.field_recency_tau_help')}
+              value={get('memory.retrieval_weights.recency_tau_hours', 24)}
+              onChange={(v) => setNested('memory.retrieval_weights.recency_tau_hours', v)}
+              min={1}
+              step={1}
+            />
+
+            {/* 嵌入服务配置（独立路由 fallback） */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_embedding')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.embedding_description')}
+            </div>
+            <ToggleField
+              label={t('config.field_enable_embedding')}
+              value={get('memory.embedding.enabled', false)}
+              onChange={(v) => setNested('memory.embedding.enabled', v)}
+            />
+            <SelectField
+              label={t('config.field_embedding_source')}
+              value={get('memory.embedding.source', 'cloud')}
+              onChange={(v) => setNested('memory.embedding.source', v)}
+              options={[
+                { value: 'cloud', label: t('config.opt_embedding_cloud') },
+                { value: 'local', label: t('config.opt_embedding_local') },
+              ]}
+            />
+
+            {get('memory.embedding.source', 'cloud') === 'cloud' ? (
+              (() => {
+                const endpoint = get<string>('memory.embedding.endpoint', '');
+                const activePreset = embeddingPresets.find(
+                  (p) =>
+                    normalizeEmbeddingEndpoint(p.endpoint) ===
+                    normalizeEmbeddingEndpoint(endpoint),
+                );
+                // 选中厂商时只列该厂商的模型；「自定义」回退到全部云端模型
+                const modelOptions = activePreset
+                  ? activePreset.models.map((m) => ({
+                      id: m.model,
+                      dimension: m.dimension,
+                      label: m.note ? `${m.model} · ${m.note}` : m.model,
+                    }))
+                  : embeddingModels
+                      .filter((m) => m.source === 'cloud')
+                      .map((m) => ({ id: m.id, dimension: m.dimension, label: m.display_name }));
+                return (
+                  <>
+                    <SelectField
+                      label={t('config.field_embedding_provider')}
+                      value={activePreset?.id ?? 'custom'}
+                      onChange={(v) => {
+                        const picked = embeddingPresets.find((p) => p.id === v);
+                        // 只填端点：模型名与 API Key 由用户决定，维度在选中模型时自动带出
+                        if (picked) setNested('memory.embedding.endpoint', picked.endpoint);
+                      }}
+                      options={[
+                        ...embeddingPresets.map((p) => ({
+                          value: p.id,
+                          label: p.region ? `${p.provider} · ${p.region}` : p.provider,
+                        })),
+                        { value: 'custom', label: t('config.opt_embedding_provider_custom') },
+                      ]}
+                    />
+                    {activePreset && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: 'var(--panel-text-tertiary)',
+                          margin: '-6px 0 14px',
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        {activePreset.recommendedFor}
+                        {activePreset.recommendedFor ? ' · ' : ''}
+                        {activePreset.needsApiKey === false
+                          ? t('config.embedding_provider_no_key')
+                          : t('config.embedding_provider_needs_key')}
+                        {activePreset.models.length > 0 && (
+                          <>
+                            {' · '}
+                            {t('config.embedding_provider_models')}：
+                            {activePreset.models.map((m) => `${m.model}(${m.dimension})`).join('、')}
+                          </>
+                        )}
+                        {activePreset.consoleUrl && (
+                          <>
+                            {' · '}
+                            <a
+                              href={activePreset.consoleUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: 'var(--panel-accent)' }}
+                            >
+                              {t('config.embedding_provider_console')}
+                            </a>
+                          </>
+                        )}
+                      </div>
+                    )}
+                    <TextField
+                      label={t('config.field_embedding_endpoint')}
+                      value={get('memory.embedding.endpoint', '')}
+                      onChange={(v) => setNested('memory.embedding.endpoint', v)}
+                      placeholder={t('config.ph_embedding_endpoint')}
+                    />
+                    <TextField
+                      label={t('config.field_api_key')}
+                      type="password"
+                      value={get('memory.embedding.api_key', '')}
+                      onChange={(v) => setNested('memory.embedding.api_key', v)}
+                      placeholder={t('config.ph_api_key')}
+                    />
+                    <TextField
+                      label={t('config.field_embedding_model')}
+                      value={get('memory.embedding.model', '')}
+                      onChange={(v) => {
+                        setNested('memory.embedding.model', v);
+                        // 命中预设模型时自动带出维度（维度填错会导致整批请求失败）
+                        const known = modelOptions.find((m) => m.id === v);
+                        if (known) setNested('memory.embedding.dimension', known.dimension);
+                      }}
+                      placeholder={t('config.ph_embedding_model')}
+                      list="embedding-cloud-models"
+                    />
+                    <datalist id="embedding-cloud-models">
+                      {modelOptions.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </datalist>
+                    <NumberField
+                      label={t('config.field_embedding_dim')}
+                      value={get('memory.embedding.dimension', 1024)}
+                      onChange={(v) => setNested('memory.embedding.dimension', v)}
+                      min={64}
+                      step={64}
+                    />
+                  </>
+                );
+              })()
+            ) : (
+              <>
+                <BrowseTextField
+                  label={t('config.field_ollama_path')}
+                  value={get('memory.embedding.ollama_path', 'G:\\ollama\\ollama.exe')}
+                  onChange={(v) => setNested('memory.embedding.ollama_path', v)}
+                  placeholder="G:\\ollama\\ollama.exe"
+                  onBrowse={async () => {
+                    try {
+                      const selected = await open({
+                        multiple: false,
+                        filters: [{ name: 'ollama', extensions: ['exe'] }],
+                      });
+                      if (typeof selected === 'string' && selected) {
+                        setNested('memory.embedding.ollama_path', selected);
+                      }
+                    } catch (e) {
+                      console.warn('选择 ollama 路径失败:', e);
+                    }
+                  }}
+                  browseLabel={t('config.btn_browse')}
+                />
+                <SelectField
+                  label={t('config.field_ollama_model')}
+                  value={get('memory.embedding.ollama_model', 'bge-m3')}
+                  onChange={(v) => {
+                    setNested('memory.embedding.ollama_model', v);
+                    const dim = OLLAMA_MODEL_DIMS[v];
+                    if (dim) setNested('memory.embedding.dimension', dim);
+                  }}
+                  options={(() => {
+                    const cur = get('memory.embedding.ollama_model', 'bge-m3');
+                    const set = new Set<string>([
+                      'bge-m3',
+                      'nomic-embed-text',
+                      ...ollamaModels,
+                    ]);
+                    if (cur && !set.has(cur)) set.add(cur);
+                    return Array.from(set).map((m) => ({ value: m, label: m }));
+                  })()}
+                />
+                <NumberField
+                  label={t('config.field_embedding_dim')}
+                  value={get('memory.embedding.dimension', 1024)}
+                  onChange={(v) => setNested('memory.embedding.dimension', v)}
+                  min={64}
+                  step={64}
+                />
+
+                {/* Ollama 服务控制：启动/停止 + 状态徽章 + PID */}
+                <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <button
+                    type="button"
+                    onClick={toggleOllamaService}
+                    disabled={ollamaServiceBusy}
+                    style={{
+                      padding: '6px 14px',
+                      border: 'none',
+                      borderRadius: 6,
+                      background:
+                        ollamaService?.status === 'running' ? '#e74c3c' : '#27ae60',
+                      color: '#fff',
+                      fontSize: 12,
+                      cursor: ollamaServiceBusy ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      opacity: ollamaServiceBusy ? 0.6 : 1,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    {ollamaService?.status === 'running'
+                      ? t('config.btn_ollama_stop')
+                      : t('config.btn_ollama_start')}
+                  </button>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      background:
+                        ollamaService?.status === 'running'
+                          ? 'rgba(39,174,96,0.15)'
+                          : ollamaService?.status === 'crashed'
+                            ? 'rgba(231,76,60,0.15)'
+                            : 'var(--panel-bg-surface-elevated)',
+                      color:
+                        ollamaService?.status === 'running'
+                          ? '#27ae60'
+                          : ollamaService?.status === 'crashed'
+                            ? '#e74c3c'
+                            : 'var(--panel-text-secondary)',
+                    }}
+                  >
+                    {(() => {
+                      const s = ollamaService?.status ?? 'stopped';
+                      switch (s) {
+                        case 'running':
+                          return t('config.ollama_status_running');
+                        case 'starting':
+                          return t('config.ollama_status_starting');
+                        case 'stopping':
+                          return t('config.ollama_status_stopping');
+                        case 'crashed':
+                          return t('config.ollama_status_crashed');
+                        default:
+                          return t('config.ollama_status_stopped');
+                      }
+                    })()}
+                  </span>
+                  {ollamaService?.pid && (
+                    <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                      PID: {ollamaService.pid}
+                    </span>
+                  )}
+                </div>
+
+                {/* 拉取模型 */}
+                <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    onClick={pullOllamaModel}
+                    disabled={ollamaPulling}
+                    style={{
+                      padding: '6px 14px',
+                      border: '1.5px solid var(--panel-border)',
+                      borderRadius: 6,
+                      background: 'var(--panel-surface)',
+                      color: 'var(--panel-text-secondary)',
+                      fontSize: 12,
+                      cursor: ollamaPulling ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      opacity: ollamaPulling ? 0.6 : 1,
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {ollamaPulling
+                      ? t('config.btn_ollama_pulling')
+                      : t('config.btn_ollama_pull')}
+                  </button>
+                  {(() => {
+                    const cur = get('memory.embedding.ollama_model', 'bge-m3');
+                    const prefix = `${cur}:`;
+                    const loaded = ollamaModels.some(
+                      (m) => m === cur || m.startsWith(prefix),
+                    );
+                    const others = ollamaModels.filter(
+                      (m) => m !== cur && !m.startsWith(prefix),
+                    );
+                    return (
+                      <>
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 600,
+                            color: loaded ? '#27ae60' : '#e67e22',
+                          }}
+                        >
+                          {loaded
+                            ? t('config.ollama_current_model_loaded', { model: cur })
+                            : t('config.ollama_current_model_missing', { model: cur })}
+                        </span>
+                        {others.length > 0 && (
+                          <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                            {t('config.ollama_other_installed', {
+                              models: others.join(', '),
+                            })}
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+
+                <ToggleField
+                  label={t('config.field_ollama_auto_start')}
+                  help={t('config.field_ollama_auto_start_help')}
+                  value={get('memory.embedding.ollama_auto_start', false)}
+                  onChange={(v) => setNested('memory.embedding.ollama_auto_start', v)}
+                />
+              </>
+            )}
+
+            {/* 向量索引后端配置（local=内置 sqlite-vec / external=外部向量库） */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_vector_store')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.vector_store_description')}
+            </div>
+            <SelectField
+              label={t('config.field_vector_store_source')}
+              value={get<string>('memory.vector_store.source', 'local')}
+              onChange={(v) => setNested('memory.vector_store.source', v)}
+              options={[
+                { value: 'local', label: t('config.opt_vector_store_local') },
+                { value: 'external', label: t('config.opt_vector_store_external') },
+              ]}
+            />
+            {get<string>('memory.vector_store.source', 'local') === 'external' && (
+              <>
+                <TextField
+                  label={t('config.field_vector_store_url')}
+                  value={get('memory.vector_store.external_url', '')}
+                  onChange={(v) => setNested('memory.vector_store.external_url', v)}
+                  placeholder="http://localhost:6333"
+                />
+                <TextField
+                  label={t('config.field_vector_store_api_key')}
+                  type="password"
+                  value={get('memory.vector_store.api_key', '')}
+                  onChange={(v) => setNested('memory.vector_store.api_key', v)}
+                  placeholder={t('config.ph_vector_store_api_key')}
+                />
+                <TextField
+                  label={t('config.field_vector_store_collection')}
+                  value={get('memory.vector_store.collection', 'vivian_memories')}
+                  onChange={(v) => setNested('memory.vector_store.collection', v)}
+                  placeholder="vivian_memories"
+                />
+                <NumberField
+                  label={t('config.field_vector_store_hnsw_m')}
+                  value={get('memory.vector_store.hnsw_m', 16)}
+                  onChange={(v) => setNested('memory.vector_store.hnsw_m', v)}
+                  min={4}
+                  max={128}
+                  step={4}
+                />
+                <NumberField
+                  label={t('config.field_vector_store_ef_construction')}
+                  value={get('memory.vector_store.ef_construction', 200)}
+                  onChange={(v) => setNested('memory.vector_store.ef_construction', v)}
+                  min={64}
+                  max={1000}
+                  step={32}
+                />
+              </>
+            )}
+
+            {/* 独立精排（cross-encoder reranker）配置 */}
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>
+              {t('config.section_rerank')}
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 14, lineHeight: 1.6 }}>
+              {t('config.rerank_description')}
+            </div>
+            <ToggleField
+              label={t('config.field_rerank_enabled')}
+              help={t('config.field_rerank_enabled_help')}
+              value={get('memory.rerank.enabled', false)}
+              onChange={(v) => setNested('memory.rerank.enabled', v)}
+            />
+            {get('memory.rerank.enabled', false) && (
+              <>
+                <TextField
+                  label={t('config.field_rerank_endpoint')}
+                  value={get('memory.rerank.endpoint', 'http://localhost:11434')}
+                  onChange={(v) => setNested('memory.rerank.endpoint', v)}
+                  placeholder="http://localhost:11434"
+                />
+                <SelectField
+                  label={t('config.field_rerank_model')}
+                  value={get('memory.rerank.model', 'bge-reranker-v2-m3')}
+                  onChange={(v) => setNested('memory.rerank.model', v)}
+                  options={(() => {
+                    const cur = get('memory.rerank.model', 'bge-reranker-v2-m3');
+                    const set = new Set<string>(['bge-reranker-v2-m3', 'bge-reranker-base', ...ollamaModels]);
+                    if (cur && !set.has(cur)) set.add(cur);
+                    return Array.from(set).map((m) => ({ value: m, label: m }));
+                  })()}
+                />
+                <NumberField
+                  label={t('config.field_rerank_top_k')}
+                  value={get('memory.rerank.top_k', 20)}
+                  onChange={(v) => setNested('memory.rerank.top_k', v)}
+                  min={1}
+                  max={100}
+                  step={1}
+                />
+              </>
+            )}
+          </>
+        );
+      case 'voice':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_asr')}</div>
+            <div className="speech-settings-note">{t('speechSettings.asr_intro')}</div>
+            <SelectField
+              label={t('config.field_asr_engine')}
+              value={get('speech_recognition.engine', 'winrt')}
+              onChange={(v) => setNested('speech_recognition.engine', v)}
+              options={[
+                { value: 'winrt', label: t('config.opt_winrt') },
+                { value: 'whisper', label: t('config.opt_whisper') },
+                { value: 'azure', label: t('config.opt_azure') },
+                { value: 'aliyun', label: t('config.opt_aliyun') },
+                { value: 'openai_whisper', label: t('config.opt_openai_whisper') },
+              ]}
+              labelExtra={
+                <button
+                  type="button"
+                  title={t('config.btn_asr_help')}
+                  onClick={() => {
+                    const engineToBackend: Record<string, AsrBackendKey> = {
+                      winrt: 'winrt',
+                      whisper: 'whisper',
+                      azure: 'azure',
+                      aliyun: 'aliyun',
+                      openai_whisper: 'openai_whisper',
+                    };
+                    const cur = (get('speech_recognition.engine', 'winrt') as string) ?? 'winrt';
+                    openAsrHelp(engineToBackend[cur] ?? 'winrt');
+                  }}
+                  style={{
+                    width: 16,
+                    height: 16,
+                    borderRadius: '50%',
+                    border: 'none',
+                    background: 'var(--panel-toggle-off)',
+                    color: 'var(--panel-text-secondary)',
+                    fontSize: 11,
+                    fontWeight: 600,
+                    lineHeight: 1,
+                    cursor: 'pointer',
+                    padding: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontFamily: 'inherit',
+                  }}
+                >
+                  ?
+                </button>
+              }
+            />
+            <SelectField
+              label={t('config.field_asr_language')}
+              value={get('speech_recognition.language', 'zh-CN')}
+              onChange={(v) => setNested('speech_recognition.language', v)}
+              options={[
+                { value: 'zh-CN', label: t('config.opt_zh_cn') },
+                { value: 'en-US', label: t('config.opt_en_us') },
+                { value: 'ja-JP', label: t('config.opt_ja') },
+              ]}
+            />
+            <NumberField
+              label={t('config.field_silence_timeout')}
+              value={get('speech_recognition.silence_timeout_ms', 1500)}
+              onChange={(v) => setNested('speech_recognition.silence_timeout_ms', v)}
+              min={200}
+              step={100}
+            />
+
+            {(get('speech_recognition.engine', 'winrt') as string) === 'whisper' && (
+              <>
+                <div style={{ ...sectionTitleStyle, marginTop: 16 }}>
+                  {t('config.section_whisper_service')}
+                </div>
+                {/* 一键启动/停止 faster-whisper-server 子进程 */}
+                <div
+                  style={{
+                    padding: '8px 10px',
+                    border: '1px solid var(--panel-border)',
+                    borderRadius: 8,
+                    background: 'var(--panel-bg-surface)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                    marginBottom: 8,
+                  }}
+                >
+                  <button
+                    onClick={toggleWhisperService}
+                    disabled={whisperServiceBusy || whisperService?.status === 'installing'}
+                    style={{
+                      padding: '6px 14px',
+                      border: 'none',
+                      borderRadius: 6,
+                      background:
+                        whisperService?.status === 'running'
+                          ? '#e74c3c'
+                          : whisperService?.status === 'installing'
+                            ? '#e67e22'
+                            : '#27ae60',
+                      color: '#fff',
+                      fontSize: 12,
+                      cursor: whisperServiceBusy || whisperService?.status === 'installing' ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      opacity: whisperServiceBusy || whisperService?.status === 'installing' ? 0.6 : 1,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                  >
+                    {(whisperServiceBusy || whisperService?.status === 'installing') && (
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          width: 12,
+                          height: 12,
+                          border: '2px solid rgba(0,0,0,0.3)',
+                          borderTopColor: '#fff',
+                          borderRadius: '50%',
+                          animation: 'gptsovits-spin 0.8s linear infinite',
+                          flexShrink: 0,
+                        }}
+                      />
+                    )}
+                    {whisperService?.status === 'running'
+                      ? whisperServiceBusy
+                        ? t('config.whisper_status_stopping')
+                        : t('config.btn_whisper_stop')
+                      : whisperService?.status === 'installing'
+                        ? t('config.whisper_status_installing')
+                        : whisperService?.status === 'starting'
+                          ? t('config.whisper_status_starting')
+                          : whisperService?.status === 'stopping'
+                            ? t('config.whisper_status_stopping')
+                            : whisperServiceBusy
+                              ? t('config.whisper_status_starting')
+                              : t('config.btn_whisper_start')}
+                  </button>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      borderRadius: 4,
+                      background:
+                        whisperService?.status === 'running'
+                          ? 'rgba(39,174,96,0.15)'
+                          : whisperService?.status === 'crashed'
+                            ? 'rgba(231,76,60,0.15)'
+                            : whisperService?.status === 'installing'
+                              ? 'rgba(230,126,34,0.15)'
+                              : 'var(--panel-bg-surface-elevated)',
+                      color:
+                        whisperService?.status === 'running'
+                          ? '#27ae60'
+                          : whisperService?.status === 'crashed'
+                            ? '#e74c3c'
+                            : whisperService?.status === 'installing'
+                              ? '#e67e22'
+                              : 'var(--panel-text-secondary)',
+                    }}
+                  >
+                    {(() => {
+                      const s = whisperService?.status ?? 'stopped';
+                      switch (s) {
+                        case 'running':
+                          return t('config.whisper_status_running');
+                        case 'installing':
+                          return t('config.whisper_status_installing');
+                        case 'starting':
+                          return t('config.whisper_status_starting');
+                        case 'stopping':
+                          return t('config.whisper_status_stopping');
+                        case 'crashed':
+                          return t('config.whisper_status_crashed');
+                        default:
+                          return t('config.whisper_status_stopped');
+                      }
+                    })()}
+                  </span>
+                  {whisperService?.pid && (
+                    <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                      PID: {whisperService.pid}
+                    </span>
+                  )}
+                  {whisperService?.endpoint && (
+                    <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                      {whisperService.endpoint}
+                    </span>
+                  )}
+                  {whisperService?.error && (
+                    <div
+                      style={{
+                        width: '100%',
+                        fontSize: 11,
+                        color: '#e74c3c',
+                        background: 'rgba(231,76,60,0.08)',
+                        padding: '6px 8px',
+                        borderRadius: 4,
+                        marginTop: 4,
+                        wordBreak: 'break-all',
+                      }}
+                    >
+                      {whisperService.error}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── 普通模式：常用选项 ── */}
+
+                {/* 模型选择 */}
+                <p className="speech-settings-hint">{t('speechSettings.local_service_help')}</p>
+                <SelectField
+                  label={t('config.field_whisper_service_model')}
+                  value={get('speech_recognition.whisper.service_model', 'small')}
+                  onChange={(v) =>
+                    setNested('speech_recognition.whisper.service_model', v)
+                  }
+                  options={[
+                    { value: 'tiny', label: 'tiny' },
+                    { value: 'base', label: 'base' },
+                    { value: 'small', label: 'small' },
+                    { value: 'medium', label: 'medium' },
+                    { value: 'large-v3', label: 'large-v3' },
+                  ]}
+                />
+
+                {/* 设备 */}
+                <SelectField
+                  label={t('config.field_whisper_service_device')}
+                  value={get('speech_recognition.whisper.service_device', 'auto')}
+                  onChange={(v) =>
+                    setNested('speech_recognition.whisper.service_device', v)
+                  }
+                  options={[
+                    { value: 'auto', label: t('config.opt_whisper_device_auto') },
+                    { value: 'cpu', label: 'CPU' },
+                    { value: 'cuda', label: 'CUDA (GPU)' },
+                  ]}
+                />
+
+
+                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
+                      {t('speechSettings.connection')}
+                    </div>
+                    <p className="speech-settings-hint">{t('speechSettings.connection_help')}</p>
+                    <TextField
+                      label={t('config.field_whisper_server_url')}
+                      value={get('speech_recognition.whisper.server_url', '')}
+                      onChange={(v) => setNested('speech_recognition.whisper.server_url', v)}
+                      placeholder="http://127.0.0.1:8000"
+                    />
+                    {get<string>('speech_recognition.whisper.streaming_mode', 'none') !== 'realtime_ws' && (
+                    <SelectField
+                      label={t('config.field_whisper_api_format')}
+                      value={get('speech_recognition.whisper.api_format', 'openai')}
+                      onChange={(v) => setNested('speech_recognition.whisper.api_format', v)}
+                      options={[
+                        { value: 'openai', label: t('config.opt_whisper_api_format_openai') },
+                        { value: 'whisper_cpp', label: t('config.opt_whisper_api_format_whisper_cpp') },
+                      ]}
+                    />
+                    )}
+                    <TextField
+                      label={t('config.field_whisper_api_key')}
+                      value={get('speech_recognition.whisper.api_key', '')}
+                      onChange={(v) => setNested('speech_recognition.whisper.api_key', v)}
+                      placeholder={t('speechSettings.api_key_placeholder')}
+                      type="password"
+                    />
+
+                {/* 流式模式 */}
+                <SelectField
+                  label={t('config.field_whisper_streaming_mode')}
+                  value={get('speech_recognition.whisper.streaming_mode', 'none')}
+                  onChange={(v) =>
+                    setNested('speech_recognition.whisper.streaming_mode', v)
+                  }
+                  options={[
+                    { value: 'none', label: t('config.opt_whisper_streaming_none') },
+                    { value: 'sse', label: t('config.opt_whisper_streaming_sse') },
+                    { value: 'realtime_ws', label: t('config.opt_whisper_streaming_realtime_ws') },
+                  ]}
+                />
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--panel-text-tertiary)',
+                    marginTop: -8,
+                    marginBottom: 8,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {t(`speechSettings.whisper_modes.${get('speech_recognition.whisper.streaming_mode', 'none')}`)}
+                </div>
+
+                {get<string>('speech_recognition.whisper.streaming_mode', 'none') === 'realtime_ws' && (
+                  <>
+                    {/* Realtime WebSocket 专属配置 */}
+                    <div style={{ ...sectionTitleStyle, marginTop: 12 }}>
+                      {t('config.section_whisper_realtime')}
+                    </div>
+                    <TextField
+                      label={t('config.field_whisper_realtime_model')}
+                      value={get('speech_recognition.whisper.realtime_model', '') ?? ''}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.realtime_model', v)
+                      }
+                      placeholder={t('config.placeholder_whisper_realtime_model')}
+                    />
+                    <TextField
+                      label={t('config.field_whisper_realtime_language')}
+                      value={get('speech_recognition.whisper.realtime_language', '') ?? ''}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.realtime_language', v)
+                      }
+                      placeholder="zh / en / ja"
+                    />
+
+                  </>
+                )}
+
+                {/* ── 高级设置折叠区 ── */}
+                <button
+                  type="button"
+                  aria-expanded={whisperAdvancedOpen}
+                  onClick={() => setWhisperAdvancedOpen((v) => !v)}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 0',
+                    background: 'transparent',
+                    border: 'none',
+                    borderTop: '1px solid var(--panel-border)',
+                    cursor: 'pointer',
+                    fontFamily: 'inherit',
+                    color: 'var(--panel-text-secondary)',
+                    fontSize: 12,
+                    marginTop: 8,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      transition: 'transform 0.15s',
+                      transform: whisperAdvancedOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                      color: 'var(--panel-text-tertiary)',
+                      fontSize: 10,
+                    }}
+                  >
+                    ▸
+                  </span>
+                  <span>{t('config.section_whisper_advanced')}</span>
+                </button>
+
+                {whisperAdvancedOpen && (
+                  <>
+                    {/* 自动启动开关 */}
+                    <ToggleField
+                      label={t('config.field_whisper_service_auto_start')}
+                      value={get('speech_recognition.whisper.service_auto_start', false)}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.service_auto_start', v)
+                      }
+                    />
+
+                    {/* Python 路径（可选，用于推导 faster-whisper-server 脚本位置） */}
+                    <BrowseTextField
+                      label={t('config.field_whisper_service_python_path')}
+                      value={get('speech_recognition.whisper.service_python_path', '') ?? ''}
+                      onChange={(v) =>
+                        setNested(
+                          'speech_recognition.whisper.service_python_path',
+                          v,
+                        )
+                      }
+                      placeholder={t('config.placeholder_whisper_service_python_path')}
+                      onBrowse={async () => {
+                        try {
+                          const selected = await open({
+                            multiple: false,
+                            filters: [{ name: 'Python', extensions: ['exe'] }],
+                          });
+                          if (typeof selected === 'string' && selected) {
+                            setNested(
+                              'speech_recognition.whisper.service_python_path',
+                              selected,
+                            );
+                          }
+                        } catch (e) {
+                          console.warn('选择 Python 路径失败:', e);
+                        }
+                      }}
+                      browseLabel={t('config.btn_browse')}
+                    />
+
+                    {/* 安装路径（可选，作为子进程 cwd） */}
+                    <BrowseTextField
+                      label={t('config.field_whisper_service_install_path')}
+                      value={
+                        get('speech_recognition.whisper.service_install_path', '') ?? ''
+                      }
+                      onChange={(v) =>
+                        setNested(
+                          'speech_recognition.whisper.service_install_path',
+                          v,
+                        )
+                      }
+                      placeholder={t('config.placeholder_whisper_service_install_path')}
+                      onBrowse={async () => {
+                        try {
+                          const selected = await open({ directory: true, multiple: false });
+                          if (typeof selected === 'string' && selected) {
+                            setNested(
+                              'speech_recognition.whisper.service_install_path',
+                              selected,
+                            );
+                          }
+                        } catch (e) {
+                          console.warn('选择安装路径失败:', e);
+                        }
+                      }}
+                      browseLabel={t('config.btn_browse')}
+                    />
+
+                    {/* 计算精度 */}
+                    <SelectField
+                      label={t('config.field_whisper_service_compute_type')}
+                      value={get('speech_recognition.whisper.service_compute_type', 'auto')}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.service_compute_type', v)
+                      }
+                      options={[
+                        { value: 'auto', label: t('config.opt_whisper_compute_auto') },
+                        { value: 'int8', label: 'int8 (CPU 推荐)' },
+                        { value: 'int8_float16', label: 'int8_float16' },
+                        { value: 'float16', label: 'float16 (GPU 推荐)' },
+                        { value: 'float32', label: 'float32' },
+                      ]}
+                    />
+
+                    {/* 端口 */}
+                    <NumberField
+                      label={t('config.field_whisper_service_port')}
+                      value={get('speech_recognition.whisper.service_port', 8000)}
+                      onChange={(v) =>
+                        setNested('speech_recognition.whisper.service_port', v)
+                      }
+                      min={1024}
+                      max={65535}
+                    />
+
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: 'var(--panel-text-tertiary)',
+                        marginTop: -4,
+                        marginBottom: 8,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {t('config.whisper_hint_pip_required')}
+                    </div>
+
+                    {get<string>('speech_recognition.whisper.streaming_mode', 'none') !== 'realtime_ws' && (
+                    <NumberField
+                      label={t('config.field_whisper_max_seconds')}
+                      value={get('speech_recognition.whisper.max_audio_seconds', 30)}
+                      onChange={(v) => setNested('speech_recognition.whisper.max_audio_seconds', v)}
+                      min={5}
+                      max={60}
+                      step={5}
+                    />
+                    )}
+                  </>
+                )}
+              </>
+            )}
+
+            {(get('speech_recognition.engine', 'winrt') as string) === 'azure' && (
+              <>
+                <div
+                  style={{
+                    ...sectionTitleStyle,
+                    marginTop: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{t('config.section_azure')}</span>
+                  <GetApiKeyButton url="https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/SpeechServices" />
+                </div>
+                <TextField
+                  label={t('config.field_azure_speech_key')}
+                  value={get('speech_recognition.azure.speech_key', '')}
+                  onChange={(v) => setNested('speech_recognition.azure.speech_key', v)}
+                  type="password"
+                  placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                />
+                <TextField
+                  label={t('config.field_azure_region')}
+                  value={get('speech_recognition.azure.speech_region', 'eastasia')}
+                  onChange={(v) => setNested('speech_recognition.azure.speech_region', v)}
+                  placeholder="eastasia"
+                />
+                <AdvancedToggle
+                  open={azureAsrAdvancedOpen}
+                  onToggle={() => setAzureAsrAdvancedOpen((v) => !v)}
+                  label={t('config.section_advanced_settings')}
+                />
+                {azureAsrAdvancedOpen && (
+                  <>
+                    <ToggleField
+                      label={t('config.field_azure_conversation_mode')}
+                      value={get('speech_recognition.azure.conversation_mode', true)}
+                      onChange={(v) => setNested('speech_recognition.azure.conversation_mode', v)}
+                    />
+                    <NumberField
+                      label={t('config.field_azure_max_seconds')}
+                      value={get('speech_recognition.azure.max_audio_seconds', 30)}
+                      onChange={(v) => setNested('speech_recognition.azure.max_audio_seconds', v)}
+                      min={5}
+                      max={60}
+                      step={5}
+                    />
+                  </>
+                )}
+              </>
+            )}
+
+            {(get('speech_recognition.engine', 'winrt') as string) === 'openai_whisper' && (
+              <>
+                <div
+                  style={{
+                    ...sectionTitleStyle,
+                    marginTop: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{t('config.section_openai_whisper')}</span>
+                  <GetApiKeyButton url="https://platform.openai.com/api-keys" />
+                </div>
+                <TextField
+                  label={t('config.field_openai_whisper_api_key')}
+                  value={get('speech_recognition.openai_whisper.api_key', '')}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.api_key', v)}
+                  placeholder="sk-..."
+                  type="password"
+                />
+                <TextField
+                  label={t('config.field_openai_whisper_base_url')}
+                  value={get('speech_recognition.openai_whisper.base_url', 'https://api.openai.com')}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.base_url', v)}
+                  placeholder="https://api.openai.com"
+                />
+                <NumberField
+                  label={t('config.field_openai_whisper_max_seconds')}
+                  value={get('speech_recognition.openai_whisper.max_audio_seconds', 30)}
+                  onChange={(v) => setNested('speech_recognition.openai_whisper.max_audio_seconds', v)}
+                  min={5}
+                  max={60}
+                  step={5}
+                />
+              </>
+            )}
+
+            {(get('speech_recognition.engine', 'winrt') as string) === 'aliyun' && (
+              <>
+                <div
+                  style={{
+                    ...sectionTitleStyle,
+                    marginTop: 16,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <span>{t('config.section_aliyun')}</span>
+                  <GetApiKeyButton url="https://nls-portal.console.aliyun.com/" />
+                </div>
+                <TextField
+                  label={t('config.field_aliyun_app_key')}
+                  value={get('speech_recognition.aliyun.app_key', '')}
+                  onChange={(v) => setNested('speech_recognition.aliyun.app_key', v)}
+                  placeholder="xxxxxxxxxxxxxxxx"
+                />
+                <TextField
+                  label={t('config.field_aliyun_access_key_id')}
+                  value={get('speech_recognition.aliyun.access_key_id', '')}
+                  onChange={(v) => setNested('speech_recognition.aliyun.access_key_id', v)}
+                  placeholder="LTAI..."
+                />
+                <TextField
+                  label={t('config.field_aliyun_access_key_secret')}
+                  value={get('speech_recognition.aliyun.access_key_secret', '')}
+                  onChange={(v) => setNested('speech_recognition.aliyun.access_key_secret', v)}
+                  type="password"
+                  placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                />
+                <AdvancedToggle
+                  open={aliyunAsrAdvancedOpen}
+                  onToggle={() => setAliyunAsrAdvancedOpen((v) => !v)}
+                  label={t('config.section_advanced_settings')}
+                />
+                {aliyunAsrAdvancedOpen && (
+                  <NumberField
+                    label={t('config.field_aliyun_max_seconds')}
+                    value={get('speech_recognition.aliyun.max_audio_seconds', 60)}
+                    onChange={(v) => setNested('speech_recognition.aliyun.max_audio_seconds', v)}
+                    min={5}
+                    max={120}
+                    step={5}
+                  />
+                )}
+              </>
+            )}
+
+          </>
+        );
+      case 'speech':
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_tts')}
+            </div>
+            {/* TTS 按角色独立配置：切换编辑目标角色 */}
+            {characters.length > 1 && (
+              <div style={{ marginBottom: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {characters.map((c) => {
+                  const active = (ttsEditCharId ?? characters[0]?.id) === c.id;
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => switchTtsEditChar(c.id)}
+                      style={{
+                        padding: '6px 14px',
+                        borderRadius: 16,
+                        border: `1px solid ${active ? 'var(--panel-border-strong)' : 'var(--panel-border)'}`,
+                        background: active ? 'var(--panel-selected-bg)' : 'transparent',
+                        color: active ? 'var(--panel-selected-text)' : 'var(--panel-text-secondary)',
+                        cursor: 'pointer',
+                        fontSize: 13,
+                        fontWeight: active ? 600 : 400,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      {c.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {ttsConfig ? (
+              <>
+                <ToggleField
+                  label={t('config.field_enable_tts')}
+                  value={ttsConfig.enabled}
+                  onChange={(v) => setTtsConfig({ ...ttsConfig, enabled: v })}
+                />
+                <SelectField
+                  label={t('config.field_tts_engine')}
+                  value={ttsConfig.engine}
+                  onChange={(v) => {
+                    const newEngine = v as TtsConfigState['engine'];
+                    setTtsConfig({ ...ttsConfig, engine: newEngine });
+                    if (newEngine === 'edgetts') {
+                      void loadEdgeTtsVoices(ttsEditCharId ?? undefined);
+                    } else {
+                      setEdgeTtsVoices([]);
+                    }
+                  }}
+                  options={[
+                    { value: 'none', label: t('config.opt_tts_none') },
+                    { value: 'edgetts', label: t('config.opt_tts_edgetts') },
+                    { value: 'azure', label: t('config.opt_tts_azure') },
+                    { value: 'gptsovits', label: t('config.opt_tts_gptsovits') },
+                    { value: 'fishspeech', label: t('config.opt_tts_fishspeech') },
+                    { value: 'minimax', label: t('config.opt_tts_minimax') },
+                    { value: 'doubao', label: t('config.opt_tts_doubao') },
+                    { value: 'mimo', label: t('config.opt_tts_mimo') },
+                    { value: 'elevenlabs', label: t('config.opt_tts_elevenlabs') },
+                  ]}
+                  labelExtra={(() => {
+                    // 只有写了说明书的后端才显示帮助按钮：
+                    // 缺少映射时返回 undefined，而不是错误地打开 EdgeTTS 的文档
+                    const engineToBackend: Record<string, TtsBackendKey> = {
+                      edgetts: 'edgetts',
+                      azure: 'azure',
+                      gptsovits: 'gptsovits',
+                      fishspeech: 'fishspeech',
+                      bertvits2: 'fishspeech',
+                      minimax: 'minimax',
+                      doubao: 'doubao',
+                      mimo: 'mimo',
+                      elevenlabs: 'elevenlabs',
+                    };
+                    const target = ttsConfig ? engineToBackend[ttsConfig.engine] : undefined;
+                    if (!target) return undefined;
+                    return (
+                      <button
+                        type="button"
+                        title={t('config.btn_tts_help')}
+                        onClick={() => openTtsHelp(target)}
+                        style={{
+                          width: 16,
+                          height: 16,
+                          borderRadius: '50%',
+                          border: 'none',
+                          background: 'var(--panel-toggle-off)',
+                          color: 'var(--panel-text-secondary)',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          lineHeight: 1,
+                          cursor: 'pointer',
+                          padding: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        ?
+                      </button>
+                    );
+                  })()}
+                />
+                <SelectField
+                  label={t('config.field_tts_fallback_engine')}
+                  value={ttsConfig.fallback_engine ?? 'none'}
+                  onChange={(v) =>
+                    setTtsConfig({
+                      ...ttsConfig,
+                      fallback_engine: v === 'none' ? null : (v as TtsConfigState['fallback_engine']),
+                    })
+                  }
+                  options={[
+                    { value: 'none', label: t('config.opt_tts_none') },
+                    { value: 'edgetts', label: t('config.opt_tts_edgetts') },
+                    { value: 'azure', label: t('config.opt_tts_azure') },
+                    { value: 'gptsovits', label: t('config.opt_tts_gptsovits') },
+                    { value: 'fishspeech', label: t('config.opt_tts_fishspeech') },
+                    { value: 'minimax', label: t('config.opt_tts_minimax') },
+                    { value: 'doubao', label: t('config.opt_tts_doubao') },
+                    { value: 'mimo', label: t('config.opt_tts_mimo') },
+                    { value: 'elevenlabs', label: t('config.opt_tts_elevenlabs') },
+                  ]}
+                />
+                {/* 双实例并行模式：仅在所有角色都选择 GPT-SoVITS 引擎且配置了安装路径时显示 */}
+                {(() => {
+                  const allCharsUseGptsovits = characters.length >= 2
+                    && characters.every((c) => charTtsEngines[c.id] === 'gptsovits');
+                  if (!allCharsUseGptsovits) return null;
+                  return (
+                    <div style={{ marginBottom: 8 }}>
+                      <ToggleField
+                        label={t('config.field_tts_gptsovits_dual_instance')}
+                        value={ttsConfig.gpt_sovits_dual_instance}
+                        onChange={(v) => setTtsConfig({
+                          ...ttsConfig,
+                          gpt_sovits_dual_instance: v,
+                          gpt_sovits_second_port: v ? (ttsConfig.gpt_sovits_second_port ?? 9881) : null,
+                        })}
+                      />
+                      {ttsConfig.gpt_sovits_dual_instance && (
+                        <div style={{ marginTop: 6 }}>
+                          <TextField
+                            label={t('config.field_tts_gptsovits_second_port')}
+                            value={ttsConfig.gpt_sovits_second_port?.toString() ?? ''}
+                            onChange={(v) => {
+                              const n = parseInt(v, 10);
+                              setTtsConfig({ ...ttsConfig, gpt_sovits_second_port: isNaN(n) ? null : n });
+                            }}
+                            placeholder="9881"
+                            type="number"
+                          />
+                          <div
+                            style={{
+                              width: '100%',
+                              fontSize: 11,
+                              color: 'var(--panel-text-tertiary)',
+                              marginTop: 4,
+                              padding: '6px 8px',
+                              background: 'var(--panel-bg-surface)',
+                              borderRadius: 4,
+                            }}
+                          >
+                            {t('config.gptsovits_hint_dual_instance')}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+                <NumberField
+                  label={t('config.field_tts_retry_count')}
+                  value={ttsConfig.retry_count}
+                  onChange={(v) => setTtsConfig({ ...ttsConfig, retry_count: v })}
+                  min={0}
+                  max={5}
+                  step={1}
+                />
+                <SliderField
+                  label={t('config.field_tts_rate')}
+                  value={ttsConfig.rate}
+                  onChange={(v) => setTtsConfig({ ...ttsConfig, rate: v })}
+                  min={0.5}
+                  max={3.0}
+                  step={0.1}
+                  format={(v) => `${v.toFixed(1)}x`}
+                />
+                <SliderField
+                  label={t('config.field_tts_volume')}
+                  value={ttsConfig.volume}
+                  onChange={(v) => setTtsConfig({ ...ttsConfig, volume: v })}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  format={(v) => `${Math.round(v * 100)}%`}
+                />
+
+                {/* EdgeTTS 配置 */}
+                {ttsConfig.engine === 'edgetts' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                      }}
+                    >
+                      <span>{t('config.section_tts_edgetts')}</span>
+                    </div>
+                    <SelectField
+                      label={t('config.field_tts_edgetts_voice')}
+                      value={ttsConfig.voice_id ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, voice_id: v || null })}
+                      options={[
+                        { value: '', label: t('config.opt_tts_edgetts_voice_default') },
+                        ...edgeTtsVoices
+                          .filter((v) => {
+                            const lang = ttsConfig.tts_language ?? ttsConfig.display_language ?? '';
+                            if (!lang) return true;
+                            return v.language === lang || v.language.startsWith(lang + '-');
+                          })
+                          .map((v) => ({
+                            value: v.id,
+                            label: `${t(`config.tts_voice_names.${v.id}`, { defaultValue: v.name })} (${v.language})`,
+                          })),
+                      ]}
+                    />
+                  </>
+                )}
+
+                {/* Azure 配置 */}
+                {ttsConfig.engine === 'azure' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_azure')}</span>
+                      <GetApiKeyButton url="https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesHub/~/SpeechServices" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_azure_key')}
+                      value={ttsConfig.azure_key ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, azure_key: v || null })}
+                      placeholder="Azure Portal → 密钥和终结点 → KEY 1（32 位字符串）"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_azure_region')}
+                      value={ttsConfig.azure_region ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, azure_region: v || null })}
+                      placeholder="eastus（如 eastus / westus / southeastasia / japaneast）"
+                    />
+                    <AdvancedToggle
+                      open={azureTtsAdvancedOpen}
+                      onToggle={() => setAzureTtsAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {azureTtsAdvancedOpen && (
+                      <>
+                        <SelectField
+                          label={t('config.field_tts_azure_style')}
+                          value={ttsConfig.azure_style ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, azure_style: v || null })}
+                          options={[
+                            { value: '', label: t('config.opt_tts_azure_style_none') },
+                            { value: 'cheerful', label: 'cheerful（愉快）' },
+                            { value: 'sad', label: 'sad（悲伤）' },
+                            { value: 'excited', label: 'excited（兴奋）' },
+                            { value: 'friendly', label: 'friendly（友好）' },
+                            { value: 'whispering', label: 'whispering（耳语）' },
+                            { value: 'angry', label: 'angry（愤怒）' },
+                            { value: 'calm', label: 'calm（平静）' },
+                            { value: 'gentle', label: 'gentle（温柔）' },
+                            { value: 'hopeful', label: 'hopeful（希望）' },
+                            { value: 'shouting', label: 'shouting（呼喊）' },
+                            { value: 'terrified', label: 'terrified（恐惧）' },
+                            { value: 'chat', label: 'chat（闲聊）' },
+                            { value: 'assistant', label: 'assistant（助手）' },
+                            { value: 'customerservice', label: 'customerservice（客服）' },
+                            { value: 'newscast', label: 'newscast（新闻播报）' },
+                            { value: 'narration-professional', label: 'narration-professional（专业叙述）' },
+                            { value: 'narration-relaxed', label: 'narration-relaxed（轻松叙述）' },
+                            { value: 'empathetic', label: 'empathetic（共情）' },
+                            { value: 'affectionate', label: 'affectionate（深情）' },
+                          ]}
+                        />
+                        <TextField
+                          label={t('config.field_tts_azure_style_degree')}
+                          value={ttsConfig.azure_style_degree?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseFloat(v);
+                            setTtsConfig({ ...ttsConfig, azure_style_degree: isNaN(n) ? null : n });
+                          }}
+                          placeholder="1.0（范围 0.5-2.0，默认 1.0）"
+                          type="number"
+                        />
+                        <SelectField
+                          label={t('config.field_tts_azure_role')}
+                          value={ttsConfig.azure_role ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, azure_role: v || null })}
+                          options={[
+                            { value: '', label: t('config.opt_tts_azure_role_none') },
+                            { value: 'YoungAdultFemale', label: 'YoungAdultFemale（年轻女性）' },
+                            { value: 'YoungAdultMale', label: 'YoungAdultMale（年轻男性）' },
+                            { value: 'OlderAdultFemale', label: 'OlderAdultFemale（中年女性）' },
+                            { value: 'OlderAdultMale', label: 'OlderAdultMale（中年男性）' },
+                            { value: 'SeniorFemale', label: 'SeniorFemale（老年女性）' },
+                            { value: 'SeniorMale', label: 'SeniorMale（老年男性）' },
+                            { value: 'Girl', label: 'Girl（女孩）' },
+                            { value: 'Boy', label: 'Boy（男孩）' },
+                          ]}
+                        />
+                        <TextField
+                          label={t('config.field_tts_azure_pitch')}
+                          value={ttsConfig.azure_pitch?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseFloat(v);
+                            setTtsConfig({ ...ttsConfig, azure_pitch: isNaN(n) ? null : n });
+                          }}
+                          placeholder="0（范围 -50 到 +50 半音，默认 0）"
+                          type="number"
+                        />
+                        <SelectField
+                          label={t('config.field_tts_azure_output_format')}
+                          value={ttsConfig.azure_output_format ?? 'audio-24khz-48kbitrate-mono-mp3'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, azure_output_format: v || null })}
+                          options={[
+                            { value: 'audio-24khz-48kbitrate-mono-mp3', label: 'MP3 24kHz 48kbps（默认）' },
+                            { value: 'audio-24khz-160kbitrate-mono-mp3', label: 'MP3 24kHz 160kbps（高码率）' },
+                            { value: 'audio-48khz-192kbitrate-mono-mp3', label: 'MP3 48kHz 192kbps（HD）' },
+                            { value: 'riff-24khz-16bit-mono-pcm', label: 'WAV 24kHz 16bit（推荐，无损）' },
+                            { value: 'riff-16khz-16bit-mono-pcm', label: 'WAV 16kHz 16bit（低采样率）' },
+                            { value: 'riff-48khz-16bit-mono-pcm', label: 'WAV 48kHz 16bit（HD）' },
+                            { value: 'ogg-24khz-16bit-mono-opus', label: 'OGG 24kHz Opus' },
+                            { value: 'webm-24khz-16bit-mono-opus', label: 'WebM 24kHz Opus' },
+                            { value: 'raw-24khz-16bit-mono-pcm', label: 'PCM 24kHz 16bit（裸数据，无 WAV 头）' },
+                          ]}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* GPT-SoVITS 配置 */}
+                {ttsConfig.engine === 'gptsovits' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                      }}
+                    >
+                      {t('config.section_tts_gptsovits')}
+                    </div>
+
+                    {/* 远程部署提示：不装本地服务也能用 */}
+                    <div
+                      style={{
+                        width: '100%',
+                        fontSize: 11,
+                        color: 'var(--panel-text-tertiary)',
+                        marginTop: -4,
+                        marginBottom: 10,
+                        padding: '6px 8px',
+                        background: 'var(--panel-bg-surface)',
+                        borderRadius: 4,
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {t('speechSettings.shared_service')}
+                    </div>
+
+                    {/* 服务地址（基础配置：本地服务启动后自动填入；远程/Docker 服务手填） */}
+                    <TextField
+                      label={t('config.field_tts_gptsovits_url')}
+                      value={ttsConfig.gpt_sovits_url ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_url: v || null })}
+                      placeholder={t('config.placeholder_gptsovits_url')}
+                    />
+                    <div style={subsectionTitleStyle}>{t('speechSettings.models')}</div>
+                    <p className="speech-settings-hint">{t('speechSettings.model_path_help')}</p>
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_gpt_model')}
+                      value={ttsConfig.gpt_sovits_gpt_model ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_gpt_model: v.trim() ? v : null })}
+                      placeholder={t('speechSettings.model_placeholder')}
+                      list="gptsovits-gpt-model-suggestions"
+                      onBrowse={() => pickPath('gpt_sovits_gpt_model', false, ['ckpt'])}
+                      browseLabel={t('config.btn_browse')}
+                    />
+                    <datalist id="gptsovits-gpt-model-suggestions">
+                      {gptSovitsModels.gpt_models.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
+                    </datalist>
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_sovits_model')}
+                      value={ttsConfig.gpt_sovits_sovits_model ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_sovits_model: v.trim() ? v : null })}
+                      placeholder={t('speechSettings.model_placeholder')}
+                      list="gptsovits-sovits-model-suggestions"
+                      onBrowse={() => pickPath('gpt_sovits_sovits_model', false, ['pth'])}
+                      browseLabel={t('config.btn_browse')}
+                    />
+                    <datalist id="gptsovits-sovits-model-suggestions">
+                      {gptSovitsModels.sovits_models.map((m) => <option key={m.path} value={m.path}>{m.name}</option>)}
+                    </datalist>
+                    <div className="speech-settings-note" role="status"
+                      data-state={!!ttsConfig.gpt_sovits_gpt_model?.trim() !== !!ttsConfig.gpt_sovits_sovits_model?.trim() ? 'partial' : 'normal'}>
+                      {t(ttsConfig.gpt_sovits_gpt_model?.trim() && ttsConfig.gpt_sovits_sovits_model?.trim()
+                        ? 'speechSettings.models_ready'
+                        : ttsConfig.gpt_sovits_gpt_model?.trim() || ttsConfig.gpt_sovits_sovits_model?.trim()
+                          ? 'speechSettings.models_partial' : 'speechSettings.models_default')}
+                    </div>
+                    <SelectField
+                      label={t('config.field_tts_gptsovits_format')}
+                      value={ttsConfig.gpt_sovits_format ?? 'wav'}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_format: v })}
+                      options={[
+                        { value: 'wav', label: t('config.opt_gptsovits_format_wav') },
+                        { value: 'raw', label: t('config.opt_gptsovits_format_raw') },
+                      ]}
+                    />
+                    <TextField
+                      label={t('config.field_tts_gptsovits_timeout')}
+                      help={t('speechSettings.timeout_help')}
+                      value={ttsConfig.gpt_sovits_timeout_secs?.toString() ?? ''}
+                      onChange={(v) => {
+                        const n = parseInt(v, 10);
+                        setTtsConfig({ ...ttsConfig, gpt_sovits_timeout_secs: isNaN(n) || n <= 0 ? null : n });
+                      }}
+                      placeholder={t('config.ph_gptsovits_timeout')}
+                      type="number"
+                    />
+
+                    {/* 参考音频 — 决定音色 */}
+                    <p className="speech-settings-hint">{t('speechSettings.reference_help')}</p>
+                    <div style={subsectionTitleStyle}>
+                      {t('config.gptsovits_section_reference')}
+                    </div>
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_ref_audio')}
+                      value={ttsConfig.gpt_sovits_ref_audio ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_ref_audio: v || null })}
+                      placeholder={t('config.placeholder_gptsovits_ref_audio')}
+                      onBrowse={() => pickPath('gpt_sovits_ref_audio', false, ['wav', 'mp3', 'flac'])}
+                      browseLabel={t('config.btn_browse')}
+                    />
+                    <SelectField
+                      label={t('config.field_tts_gptsovits_prompt_lang')}
+                      value={ttsConfig.gpt_sovits_prompt_lang ?? 'zh'}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_prompt_lang: v || null })}
+                      options={[
+                        { value: 'zh', label: '中文 (zh)' },
+                        { value: 'en', label: 'English (en)' },
+                        { value: 'ja', label: '日本語 (ja)' },
+                        { value: 'ko', label: '한국어 (ko)' },
+                        { value: 'yue', label: '粤语 (yue)' },
+                      ]}
+                    />
+                    <TextField
+                      label={t('config.field_tts_gptsovits_prompt_text')}
+                      value={ttsConfig.gpt_sovits_prompt_text ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_prompt_text: v || null })}
+                      placeholder={t('config.placeholder_gptsovits_prompt_text')}
+                    />
+
+                    {/* 已配置本地安装时展开，直接显示启动按钮与运行状态。 */}
+                    <details open={Boolean(ttsConfig.gpt_sovits_install_path)} style={{ marginTop: 8 }}>
+                      <summary
+                        style={{
+                          fontSize: 11,
+                          color: 'var(--panel-text-tertiary)',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          userSelect: 'none',
+                          padding: '6px 0',
+                        }}
+                      >
+                        {t('config.gptsovits_section_local_service')}
+                      </summary>
+                      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {/* 服务控制面板 — 一键启动 / 停止 + 状态显示 */}
+                    <div
+                      style={{
+                        padding: '12px 14px',
+                        border: '1px solid var(--panel-border)',
+                        borderRadius: 8,
+                        background: 'var(--panel-bg-surface)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        flexWrap: 'wrap',
+                        marginBottom: 8,
+                      }}
+                    >
+                      <button
+                        onClick={toggleGptsovitsService}
+                        disabled={gptsovitsServiceBusy || !ttsConfig.gpt_sovits_install_path}
+                        style={{
+                          padding: '6px 14px',
+                          border: 'none',
+                          borderRadius: 6,
+                          background:
+                            gptsovitsService?.status === 'running'
+                              ? '#e74c3c'
+                              : '#27ae60',
+                          color: '#fff',
+                          fontSize: 12,
+                          cursor:
+                            gptsovitsServiceBusy || !ttsConfig.gpt_sovits_install_path
+                              ? 'not-allowed'
+                              : 'pointer',
+                          fontFamily: 'inherit',
+                          opacity:
+                            gptsovitsServiceBusy || !ttsConfig.gpt_sovits_install_path ? 0.6 : 1,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        {gptsovitsServiceBusy && (
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              width: 12,
+                              height: 12,
+                              border: '2px solid rgba(0,0,0,0.3)',
+                              borderTopColor: '#fff',
+                              borderRadius: '50%',
+                              animation: 'gptsovits-spin 0.8s linear infinite',
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                        {gptsovitsService?.status === 'running'
+                          ? gptsovitsServiceBusy
+                            ? t('config.gptsovits_status_stopping')
+                            : t('config.btn_gptsovits_stop')
+                          : gptsovitsService?.status === 'starting'
+                            ? t('config.gptsovits_status_starting')
+                            : gptsovitsService?.status === 'stopping'
+                              ? t('config.gptsovits_status_stopping')
+                              : gptsovitsServiceBusy
+                                ? t('config.gptsovits_status_starting')
+                                : t('config.btn_gptsovits_start')}
+                      </button>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: '2px 8px',
+                          borderRadius: 4,
+                          background:
+                            gptsovitsService?.status === 'running'
+                              ? 'rgba(39,174,96,0.15)'
+                              : gptsovitsService?.status === 'crashed'
+                                ? 'rgba(231,76,60,0.15)'
+                                : 'var(--panel-bg-surface-elevated)',
+                          color:
+                            gptsovitsService?.status === 'running'
+                              ? '#27ae60'
+                              : gptsovitsService?.status === 'crashed'
+                                ? '#e74c3c'
+                                : 'var(--panel-text-secondary)',
+                        }}
+                      >
+                        {(() => {
+                          const s = gptsovitsService?.status ?? 'stopped';
+                          switch (s) {
+                            case 'running':
+                              return t('config.gptsovits_status_running');
+                            case 'starting':
+                              return t('config.gptsovits_status_starting');
+                            case 'stopping':
+                              return t('config.gptsovits_status_stopping');
+                            case 'crashed':
+                              return t('config.gptsovits_status_crashed');
+                            default:
+                              return t('config.gptsovits_status_stopped');
+                          }
+                        })()}
+                      </span>
+                      {gptsovitsService?.pid && (
+                        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                          PID: {gptsovitsService.pid}
+                        </span>
+                      )}
+                      {gptsovitsService?.endpoint && (
+                        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                          {gptsovitsService.endpoint}
+                        </span>
+                      )}
+                      {gptsovitsService?.dual_instance && gptsovitsService.instances && gptsovitsService.instances.length > 0 && (
+                        <div style={{ width: '100%', display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 2 }}>
+                          {gptsovitsService.instances.map((inst) => (
+                            <span
+                              key={inst.port}
+                              style={{
+                                fontSize: 10,
+                                padding: '2px 6px',
+                                borderRadius: 3,
+                                background: inst.status === 'running'
+                                  ? 'rgba(39,174,96,0.12)'
+                                  : inst.status === 'crashed'
+                                    ? 'rgba(231,76,60,0.12)'
+                                    : 'var(--panel-bg-hover)',
+                                color: inst.status === 'running'
+                                  ? '#27ae60'
+                                  : inst.status === 'crashed'
+                                    ? '#e74c3c'
+                                    : 'var(--panel-text-tertiary)',
+                              }}
+                            >
+                              :{inst.port} {inst.status === 'running' ? '✓' : inst.status === 'starting' ? '...' : inst.status === 'crashed' ? '✗' : '○'}
+                              {inst.pid ? ` PID:${inst.pid}` : ''}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {gptsovitsService?.error && (
+                        <div
+                          style={{
+                            width: '100%',
+                            fontSize: 11,
+                            color: '#e74c3c',
+                            background: 'rgba(231,76,60,0.08)',
+                            padding: '6px 8px',
+                            borderRadius: 4,
+                            marginTop: 4,
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {gptsovitsService.error}
+                        </div>
+                      )}
+                      {!ttsConfig.gpt_sovits_install_path && (
+                        <div
+                          style={{
+                            width: '100%',
+                            fontSize: 11,
+                            color: 'var(--panel-text-tertiary)',
+                            marginTop: 4,
+                          }}
+                        >
+                          {t('config.gptsovits_hint_install_required')}
+                        </div>
+                      )}
+                    </div>
+                    {/* 自动启动开关：仅在填写了安装路径后显示 */}
+                    {ttsConfig.gpt_sovits_install_path && (
+                      <ToggleField
+                        label={t('config.field_tts_gptsovits_auto_start')}
+                        value={ttsConfig.gpt_sovits_auto_start}
+                        onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_auto_start: v })}
+                      />
+                    )}
+
+                    {/* 安装路径（始终显示，决定后续字段可见性） */}
+                    <BrowseTextField
+                      label={t('config.field_tts_gptsovits_install_path')}
+                      value={ttsConfig.gpt_sovits_install_path ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_install_path: v || null })}
+                      placeholder={t('config.placeholder_gptsovits_install_path')}
+                      onBrowse={() => pickPath('gpt_sovits_install_path', true)}
+                      browseLabel={t('config.btn_browse')}
+                    />
+
+                    {/* 部署参数 — 仅在填写了安装路径后显示 */}
+                    {ttsConfig.gpt_sovits_install_path && (
+                      <>
+                        <div style={subsectionTitleStyle}>
+                          {t('config.gptsovits_section_deploy')}
+                        </div>
+                        <TextField
+                          label={t('config.field_tts_gptsovits_gpu')}
+                          value={ttsConfig.gpt_sovits_gpu?.toString() ?? '0'}
+                          onChange={(v) => {
+                            const n = parseInt(v, 10);
+                            setTtsConfig({ ...ttsConfig, gpt_sovits_gpu: isNaN(n) ? null : n });
+                          }}
+                          placeholder="0（GPU 卡号；-1 为 CPU 推理）"
+                          type="number"
+                        />
+                        <TextField
+                          label={t('config.field_tts_gptsovits_python_path')}
+                          value={ttsConfig.gpt_sovits_python_path ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_python_path: v || null })}
+                          placeholder={t('config.placeholder_gptsovits_python_path')}
+                        />
+                        {!gptSovitsModels.has_runtime && !ttsConfig.gpt_sovits_python_path && (
+                          <div
+                            style={{
+                              width: '100%',
+                              fontSize: 11,
+                              color: '#e67e22',
+                              background: 'rgba(230,126,34,0.08)',
+                              padding: '6px 8px',
+                              borderRadius: 4,
+                              marginBottom: 8,
+                            }}
+                          >
+                            {t('config.gptsovits_hint_no_runtime')}
+                          </div>
+                        )}
+                        <TextField
+                          label={t('config.field_tts_gptsovits_port')}
+                          value={ttsConfig.gpt_sovits_port?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseInt(v, 10);
+                            setTtsConfig({ ...ttsConfig, gpt_sovits_port: isNaN(n) ? null : n });
+                          }}
+                          placeholder={t('config.placeholder_gptsovits_port')}
+                          type="number"
+                        />
+                      </>
+                    )}
+                      </div>
+                    </details>
+
+                    {/* 高级参数抽屉 */}
+                    <details style={{ marginTop: 8 }}>
+                      <summary
+                        style={{
+                          fontSize: 11,
+                          color: 'var(--panel-text-tertiary)',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          userSelect: 'none',
+                          padding: '6px 0',
+                        }}
+                      >
+                        {t('config.gptsovits_section_advanced')}
+                      </summary>
+                      <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                        <SelectField
+                          label={t('config.field_tts_gptsovits_parallel_infer')}
+                          value={ttsConfig.gpt_sovits_parallel_infer === false ? 'false' : 'true'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_parallel_infer: v === 'true' })}
+                          options={[
+                            { value: 'true', label: t('config.opt_gptsovits_parallel_on') },
+                            { value: 'false', label: t('config.opt_gptsovits_parallel_off') },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_gptsovits_text_split_method')}
+                          value={ttsConfig.gpt_sovits_text_split_method ?? 'cut5'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_text_split_method: v || null })}
+                          options={[
+                            { value: 'cut0', label: t('config.opt_gptsovits_cut0') },
+                            { value: 'cut1', label: t('config.opt_gptsovits_cut1') },
+                            { value: 'cut2', label: t('config.opt_gptsovits_cut2') },
+                            { value: 'cut3', label: t('config.opt_gptsovits_cut3') },
+                            { value: 'cut4', label: t('config.opt_gptsovits_cut4') },
+                            { value: 'cut5', label: t('config.opt_gptsovits_cut5') },
+                          ]}
+                        />
+                        <TextField
+                          label={t('config.field_tts_gptsovits_top_k')}
+                          value={ttsConfig.gpt_sovits_top_k?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseInt(v, 10);
+                            setTtsConfig({ ...ttsConfig, gpt_sovits_top_k: isNaN(n) ? null : n });
+                          }}
+                          placeholder="15（默认）"
+                          type="number"
+                        />
+                        <TextField
+                          label={t('config.field_tts_gptsovits_top_p')}
+                          value={ttsConfig.gpt_sovits_top_p?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseFloat(v);
+                            setTtsConfig({ ...ttsConfig, gpt_sovits_top_p: isNaN(n) ? null : n });
+                          }}
+                          placeholder="1.0（默认）"
+                          type="number"
+                        />
+                        <TextField
+                          label={t('config.field_tts_gptsovits_temperature')}
+                          value={ttsConfig.gpt_sovits_temperature?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseFloat(v);
+                            setTtsConfig({ ...ttsConfig, gpt_sovits_temperature: isNaN(n) ? null : n });
+                          }}
+                          placeholder="1.0（默认）"
+                          type="number"
+                        />
+                        <BrowseTextField
+                          label={t('config.field_tts_gptsovits_config_path')}
+                          value={ttsConfig.gpt_sovits_config_path ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, gpt_sovits_config_path: v || null })}
+                          placeholder={t('config.placeholder_gptsovits_config_path')}
+                          onBrowse={() => pickPath('gpt_sovits_config_path', false, ['yaml', 'yml'])}
+                          browseLabel={t('config.btn_browse')}
+                        />
+                        {/* 辅助参考音频(不限数量) — 多参考音频音色融合 */}
+                        <AuxRefAudiosDrawer
+                          value={ttsConfig.gpt_sovits_aux_ref_audios}
+                          onChange={(arr) =>
+                            setTtsConfig({
+                              ...ttsConfig,
+                              gpt_sovits_aux_ref_audios: arr.length ? arr : null,
+                            })
+                          }
+                          label={t('config.field_tts_gptsovits_aux_ref_audios')}
+                          addLabel={t('config.btn_gptsovits_add_aux')}
+                        />
+                      </div>
+                    </details>
+                  </>
+                )}
+
+                {/* Fish Speech 配置 */}
+                {ttsConfig.engine === 'fishspeech' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_fishspeech')}</span>
+                    </div>
+
+                    {/* 服务控制面板 — 一键启动 / 停止 + 状态显示 */}
+                    <div
+                      style={{
+                        padding: '12px 14px',
+                        border: '1px solid var(--panel-border)',
+                        borderRadius: 8,
+                        background: 'var(--panel-bg-surface)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 10,
+                        flexWrap: 'wrap',
+                        marginBottom: 8,
+                      }}
+                    >
+                      <button
+                        onClick={toggleFishSpeechService}
+                        disabled={fishSpeechServiceBusy || !ttsConfig.fish_speech_install_path}
+                        style={{
+                          padding: '6px 14px',
+                          border: 'none',
+                          borderRadius: 6,
+                          background:
+                            fishSpeechService?.status === 'running'
+                              ? '#e74c3c'
+                              : '#27ae60',
+                          color: '#fff',
+                          fontSize: 12,
+                          cursor:
+                            fishSpeechServiceBusy || !ttsConfig.fish_speech_install_path
+                              ? 'not-allowed'
+                              : 'pointer',
+                          fontFamily: 'inherit',
+                          opacity:
+                            fishSpeechServiceBusy || !ttsConfig.fish_speech_install_path ? 0.6 : 1,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                        }}
+                      >
+                        {fishSpeechServiceBusy && (
+                          <span
+                            style={{
+                              display: 'inline-block',
+                              width: 12,
+                              height: 12,
+                              border: '2px solid rgba(0,0,0,0.3)',
+                              borderTopColor: '#fff',
+                              borderRadius: '50%',
+                              animation: 'gptsovits-spin 0.8s linear infinite',
+                              flexShrink: 0,
+                            }}
+                          />
+                        )}
+                        {fishSpeechService?.status === 'running'
+                          ? fishSpeechServiceBusy
+                            ? t('config.fishspeech_status_stopping')
+                            : t('config.btn_fishspeech_stop')
+                          : fishSpeechService?.status === 'starting'
+                            ? t('config.fishspeech_status_starting')
+                            : fishSpeechService?.status === 'stopping'
+                              ? t('config.fishspeech_status_stopping')
+                              : fishSpeechServiceBusy
+                                ? t('config.fishspeech_status_starting')
+                                : t('config.btn_fishspeech_start')}
+                      </button>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: '2px 8px',
+                          borderRadius: 4,
+                          background:
+                            fishSpeechService?.status === 'running'
+                              ? 'rgba(39,174,96,0.15)'
+                              : fishSpeechService?.status === 'crashed'
+                                ? 'rgba(231,76,60,0.15)'
+                                : 'var(--panel-bg-surface-elevated)',
+                          color:
+                            fishSpeechService?.status === 'running'
+                              ? '#27ae60'
+                              : fishSpeechService?.status === 'crashed'
+                                ? '#e74c3c'
+                                : 'var(--panel-text-secondary)',
+                        }}
+                      >
+                        {(() => {
+                          const s = fishSpeechService?.status ?? 'stopped';
+                          switch (s) {
+                            case 'running':
+                              return t('config.fishspeech_status_running');
+                            case 'starting':
+                              return t('config.fishspeech_status_starting');
+                            case 'stopping':
+                              return t('config.fishspeech_status_stopping');
+                            case 'crashed':
+                              return t('config.fishspeech_status_crashed');
+                            default:
+                              return t('config.fishspeech_status_stopped');
+                          }
+                        })()}
+                      </span>
+                      {fishSpeechService?.pid && (
+                        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                          PID: {fishSpeechService.pid}
+                        </span>
+                      )}
+                      {fishSpeechService?.endpoint && (
+                        <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>
+                          {fishSpeechService.endpoint}
+                        </span>
+                      )}
+                      {fishSpeechService?.error && (
+                        <div
+                          style={{
+                            width: '100%',
+                            fontSize: 11,
+                            color: '#e74c3c',
+                            background: 'rgba(231,76,60,0.08)',
+                            padding: '6px 8px',
+                            borderRadius: 4,
+                            marginTop: 4,
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {fishSpeechService.error}
+                        </div>
+                      )}
+                      {!ttsConfig.fish_speech_install_path && (
+                        <div
+                          style={{
+                            width: '100%',
+                            fontSize: 11,
+                            color: 'var(--panel-text-tertiary)',
+                            marginTop: 4,
+                          }}
+                        >
+                          {t('config.fishspeech_hint_install_required')}
+                        </div>
+                      )}
+                    </div>
+                    {/* 自动启动开关：仅在填写了安装路径后显示 */}
+                    {ttsConfig.fish_speech_install_path && (
+                      <ToggleField
+                        label={t('config.field_tts_fishspeech_auto_start')}
+                        value={ttsConfig.fish_speech_auto_start}
+                        onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_auto_start: v })}
+                      />
+                    )}
+
+                    {/* 安装路径（决定后续字段可见性） */}
+                    <BrowseTextField
+                      label={t('config.field_tts_fishspeech_install_path')}
+                      value={ttsConfig.fish_speech_install_path ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_install_path: v || null })}
+                      placeholder={t('config.placeholder_fishspeech_install_path')}
+                      onBrowse={() => pickPath('fish_speech_install_path', true)}
+                      browseLabel={t('config.btn_browse')}
+                    />
+
+                    {/* 部署参数 — 仅在填写了安装路径后显示 */}
+                    {ttsConfig.fish_speech_install_path && (
+                      <>
+                        <div style={subsectionTitleStyle}>
+                          {t('config.fishspeech_section_deploy')}
+                        </div>
+                        <TextField
+                          label={t('config.field_tts_fishspeech_python_path')}
+                          value={ttsConfig.fish_speech_python_path ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_python_path: v || null })}
+                          placeholder={t('config.placeholder_fishspeech_python_path')}
+                        />
+                        <TextField
+                          label={t('config.field_tts_fishspeech_port')}
+                          value={ttsConfig.fish_speech_port?.toString() ?? ''}
+                          onChange={(v) => {
+                            const n = parseInt(v, 10);
+                            setTtsConfig({ ...ttsConfig, fish_speech_port: isNaN(n) ? null : n });
+                          }}
+                          placeholder={t('config.placeholder_fishspeech_port')}
+                          type="number"
+                        />
+                        <BrowseTextField
+                          label={t('config.field_tts_fishspeech_llama_checkpoint')}
+                          value={ttsConfig.fish_speech_llama_checkpoint_path ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_llama_checkpoint_path: v || null })}
+                          placeholder={t('config.placeholder_fishspeech_llama_checkpoint')}
+                          onBrowse={() => pickPath('fish_speech_llama_checkpoint_path', false, ['ckpt', 'pt', 'pth', 'bin', 'safetensors'])}
+                          browseLabel={t('config.btn_browse')}
+                        />
+                        <BrowseTextField
+                          label={t('config.field_tts_fishspeech_decoder_checkpoint')}
+                          value={ttsConfig.fish_speech_decoder_checkpoint_path ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_decoder_checkpoint_path: v || null })}
+                          placeholder={t('config.placeholder_fishspeech_decoder_checkpoint')}
+                          onBrowse={() => pickPath('fish_speech_decoder_checkpoint_path', false, ['ckpt', 'pt', 'pth', 'bin', 'safetensors'])}
+                          browseLabel={t('config.btn_browse')}
+                        />
+                        <ToggleField
+                          label={t('config.field_tts_fishspeech_half')}
+                          value={ttsConfig.fish_speech_half}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_half: v })}
+                        />
+                        <ToggleField
+                          label={t('config.field_tts_fishspeech_compile')}
+                          value={ttsConfig.fish_speech_compile}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_compile: v })}
+                        />
+                      </>
+                    )}
+
+                    <TextField
+                      label={t('config.field_tts_fishspeech_url')}
+                      value={ttsConfig.fish_speech_url ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_url: v || null })}
+                      placeholder="http://127.0.0.1:8080（本地部署），留空使用云端 https://api.fish.audio"
+                    />
+                    <TextField
+                      label={t('config.field_tts_fishspeech_character')}
+                      value={ttsConfig.fish_speech_character ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_character: v || null })}
+                      placeholder="音色模型 ID（如 7f92f8afb8ec43bf81429cc1c9199cb1，留空则用下方参考音频）"
+                    />
+                    <AdvancedToggle
+                      open={fishSpeechAdvancedOpen}
+                      onToggle={() => setFishSpeechAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {fishSpeechAdvancedOpen && (
+                      <>
+                        <TextField
+                          label={t('config.field_tts_fishspeech_key')}
+                          value={ttsConfig.fish_speech_key ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_key: v || null })}
+                          placeholder="fish.audio 的 API Key（云端必填，本地可留空）"
+                          type="password"
+                        />
+                        <SelectField
+                          label={t('config.field_tts_fishspeech_format')}
+                          value={ttsConfig.fish_speech_format ?? 'wav'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_format: v || null })}
+                          options={[
+                            { value: 'wav', label: 'WAV（推荐，无损）' },
+                            { value: 'mp3', label: 'MP3' },
+                            { value: 'pcm', label: 'PCM' },
+                            { value: 'opus', label: 'Opus' },
+                          ]}
+                        />
+                        <TextField
+                          label={t('config.field_tts_fishspeech_ref_audio')}
+                          value={ttsConfig.fish_speech_ref_audio ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_ref_audio: v || null })}
+                          placeholder="D:/voices/sample.wav（5-10 秒，零样本克隆，与参考 ID 二选一）"
+                        />
+                        <TextField
+                          label={t('config.field_tts_fishspeech_ref_text')}
+                          value={ttsConfig.fish_speech_ref_text ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, fish_speech_ref_text: v || null })}
+                          placeholder="参考音频对应的文字转写（配合上方参考音频使用）"
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* MiniMax 配置 */}
+                {ttsConfig.engine === 'minimax' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_minimax')}</span>
+                      <GetApiKeyButton url="https://platform.minimaxi.com/user-center/basic-information/interface-key" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_minimax_key')}
+                      value={ttsConfig.minimax_key ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, minimax_key: v || null })}
+                      placeholder="MiniMax 平台 API Key"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_minimax_voice_id')}
+                      value={ttsConfig.minimax_voice_id ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, minimax_voice_id: v || null })}
+                      placeholder="音色 ID（在平台创建音色后获得，如 voice_id xxx）"
+                    />
+                    <AdvancedToggle
+                      open={minimaxAdvancedOpen}
+                      onToggle={() => setMinimaxAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {minimaxAdvancedOpen && (
+                      <>
+                        <SelectField
+                          label={t('config.field_tts_minimax_model')}
+                          value={ttsConfig.minimax_model ?? 'speech-01-turbo'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, minimax_model: v || null })}
+                          options={[
+                            { value: 'speech-01-turbo', label: t('config.opt_tts_minimax_model_turbo') },
+                            { value: 'speech-01-hd', label: t('config.opt_tts_minimax_model_hd') },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_minimax_format')}
+                          value={ttsConfig.minimax_format ?? 'mp3'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, minimax_format: v || null })}
+                          options={[
+                            { value: 'mp3', label: 'MP3（推荐）' },
+                            { value: 'wav', label: 'WAV（无损）' },
+                            { value: 'pcm', label: 'PCM' },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_minimax_sample_rate')}
+                          value={String(ttsConfig.minimax_sample_rate ?? 32000)}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, minimax_sample_rate: Number(v) })}
+                          options={[
+                            { value: '32000', label: '32000 Hz（默认）' },
+                            { value: '24000', label: '24000 Hz' },
+                            { value: '16000', label: '16000 Hz' },
+                          ]}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* 豆包(火山引擎)配置 */}
+                {ttsConfig.engine === 'doubao' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_doubao')}</span>
+                      <GetApiKeyButton url="https://console.volcengine.com/speech/app" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_doubao_appid')}
+                      value={ttsConfig.doubao_appid ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_appid: v || null })}
+                      placeholder="火山引擎应用 ID (App ID)"
+                    />
+                    <TextField
+                      label={t('config.field_tts_doubao_access_token')}
+                      value={ttsConfig.doubao_access_token ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_access_token: v || null })}
+                      placeholder="访问令牌 (Access Token)"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_doubao_voice_type')}
+                      value={ttsConfig.doubao_voice_type ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_voice_type: v || null })}
+                      placeholder="BV700_V2_streaming（灿灿 2.0，推荐）/ BV001_V2_streaming（通用女声 2.0）"
+                    />
+                    <AdvancedToggle
+                      open={doubaoAdvancedOpen}
+                      onToggle={() => setDoubaoAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {doubaoAdvancedOpen && (
+                      <>
+                        <TextField
+                          label={t('config.field_tts_doubao_cluster')}
+                          value={ttsConfig.doubao_cluster ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_cluster: v || null })}
+                          placeholder="volcano_tts（默认，声音复刻可能需修改）"
+                        />
+                        <SelectField
+                          label={t('config.field_tts_doubao_format')}
+                          value={ttsConfig.doubao_format ?? 'mp3'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_format: v || null })}
+                          options={[
+                            { value: 'mp3', label: 'MP3（推荐）' },
+                            { value: 'wav', label: 'WAV（无损）' },
+                            { value: 'pcm', label: 'PCM' },
+                            { value: 'ogg_opus', label: 'OGG Opus' },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_doubao_sample_rate')}
+                          value={String(ttsConfig.doubao_sample_rate ?? 24000)}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, doubao_sample_rate: Number(v) })}
+                          options={[
+                            { value: '24000', label: '24000 Hz（默认）' },
+                            { value: '16000', label: '16000 Hz' },
+                            { value: '8000', label: '8000 Hz' },
+                          ]}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* MiMo（小米，语音克隆）配置 */}
+                {ttsConfig.engine === 'mimo' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_mimo')}</span>
+                      <GetApiKeyButton url="https://platform.xiaomimimo.com" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_mimo_key')}
+                      value={ttsConfig.mimo_key ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, mimo_key: v || null })}
+                      placeholder="MiMo 平台 API Key"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_mimo_voice_audio')}
+                      value={ttsConfig.mimo_voice_audio_path ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, mimo_voice_audio_path: v || null })}
+                      placeholder={t('config.ph_tts_mimo_voice_audio')}
+                      help={t('config.field_tts_mimo_voice_audio_help')}
+                    />
+                    <TextField
+                      label={t('config.field_tts_mimo_style_prompt')}
+                      value={ttsConfig.mimo_style_prompt ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, mimo_style_prompt: v || null })}
+                      placeholder={t('config.ph_tts_mimo_style_prompt')}
+                    />
+                    <TextField
+                      label={t('config.field_tts_mimo_endpoint')}
+                      value={ttsConfig.mimo_endpoint ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, mimo_endpoint: v || null })}
+                      placeholder="https://api.xiaomimimo.com/v1/chat/completions（默认）"
+                    />
+                  </>
+                )}
+
+                {/* ElevenLabs（云端音色库/克隆）配置 */}
+                {ttsConfig.engine === 'elevenlabs' && (
+                  <>
+                    <div
+                      style={{
+                        ...sectionTitleStyle,
+                        marginTop: 16,
+                        fontSize: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                      }}
+                    >
+                      <span>{t('config.section_tts_elevenlabs')}</span>
+                      <GetApiKeyButton url="https://elevenlabs.io/app/settings/api-keys" />
+                    </div>
+                    <TextField
+                      label={t('config.field_tts_elevenlabs_key')}
+                      value={ttsConfig.elevenlabs_key ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_key: v || null })}
+                      placeholder="xi-api-key（控制台 → Settings → API Keys）"
+                      type="password"
+                    />
+                    <TextField
+                      label={t('config.field_tts_elevenlabs_voice_id')}
+                      value={ttsConfig.elevenlabs_voice_id ?? ''}
+                      onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_voice_id: v || null })}
+                      placeholder={t('config.ph_tts_elevenlabs_voice_id')}
+                      help={t('config.field_tts_elevenlabs_voice_id_help')}
+                    />
+                    <AdvancedToggle
+                      open={elevenlabsAdvancedOpen}
+                      onToggle={() => setElevenlabsAdvancedOpen((v) => !v)}
+                      label={t('config.section_advanced_settings')}
+                    />
+                    {elevenlabsAdvancedOpen && (
+                      <>
+                        <SelectField
+                          label={t('config.field_tts_elevenlabs_model')}
+                          value={ttsConfig.elevenlabs_model ?? 'eleven_multilingual_v2'}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_model: v || null })}
+                          options={[
+                            { value: 'eleven_multilingual_v2', label: t('config.opt_tts_elevenlabs_model_multilingual') },
+                            { value: 'eleven_turbo_v2_5', label: t('config.opt_tts_elevenlabs_model_turbo') },
+                            { value: 'eleven_flash_v2_5', label: t('config.opt_tts_elevenlabs_model_flash') },
+                            { value: 'eleven_v3', label: t('config.opt_tts_elevenlabs_model_v3') },
+                          ]}
+                        />
+                        <SelectField
+                          label={t('config.field_tts_elevenlabs_output_format')}
+                          value={ttsConfig.elevenlabs_output_format ?? 'mp3_44100_128'}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_output_format: v || null })
+                          }
+                          options={[
+                            { value: 'mp3_44100_128', label: 'MP3 44.1kHz 128kbps（推荐）' },
+                            { value: 'mp3_22050_32', label: 'MP3 22.05kHz 32kbps（省带宽）' },
+                            { value: 'pcm_24000', label: 'PCM 24kHz（无压缩）' },
+                          ]}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_stability')}
+                          value={ttsConfig.elevenlabs_stability ?? 0.5}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_stability: v })}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_stability_help')}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_similarity')}
+                          value={ttsConfig.elevenlabs_similarity_boost ?? 0.75}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_similarity_boost: v })
+                          }
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_similarity_help')}
+                        />
+                        <SliderField
+                          label={t('config.field_tts_elevenlabs_style')}
+                          value={ttsConfig.elevenlabs_style ?? 0}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_style: v })}
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          format={(v) => v.toFixed(2)}
+                          help={t('config.field_tts_elevenlabs_style_help')}
+                        />
+                        <ToggleField
+                          label={t('config.field_tts_elevenlabs_speaker_boost')}
+                          value={ttsConfig.elevenlabs_speaker_boost ?? true}
+                          onChange={(v) =>
+                            setTtsConfig({ ...ttsConfig, elevenlabs_speaker_boost: v })
+                          }
+                          help={t('config.field_tts_elevenlabs_speaker_boost_help')}
+                        />
+                        <TextField
+                          label={t('config.field_tts_elevenlabs_endpoint')}
+                          value={ttsConfig.elevenlabs_endpoint ?? ''}
+                          onChange={(v) => setTtsConfig({ ...ttsConfig, elevenlabs_endpoint: v || null })}
+                          placeholder="https://api.elevenlabs.io（默认，可填自建反代）"
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+
+                {/* ── 跨语言 TTS：显示语言与 TTS 语言不同时启用翻译 ── */}
+                <div style={subsectionTitleStyle}>
+                  {t('config.section_tts_cross_lang')}
+                </div>
+                <SelectField
+                  label={t('config.field_display_language')}
+                  value={ttsConfig.display_language ?? ''}
+                  onChange={(v) => setTtsConfig({ ...ttsConfig, display_language: v || null })}
+                  options={[
+                    { value: '', label: t('config.opt_lang_same_as_system') },
+                    { value: 'zh', label: '中文' },
+                    { value: 'ja', label: '日本語' },
+                    { value: 'en', label: 'English' },
+                  ]}
+                />
+                <SelectField
+                  label={t('config.field_tts_language')}
+                  value={ttsConfig.tts_language ?? ''}
+                  onChange={(v) => {
+                    const next = { ...ttsConfig, tts_language: v || null };
+                    // 选了 TTS 语言但显示语言为空时，自动填充中文（角色默认中文对话）
+                    if (v && !next.display_language) {
+                      next.display_language = 'zh';
+                    }
+                    setTtsConfig(next);
+                  }}
+                  options={[
+                    { value: '', label: t('config.opt_lang_same_as_display') },
+                    { value: 'zh', label: '中文' },
+                    { value: 'ja', label: '日本語' },
+                    { value: 'en', label: 'English' },
+                  ]}
+                />
+                {/* 翻译服务配置：仅在 display_language 和 tts_language 都已设置且不同时显示 */}
+                {ttsConfig.display_language &&
+                  ttsConfig.tts_language &&
+                  ttsConfig.display_language !== ttsConfig.tts_language && (
+                    <>
+                      <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 6 }}>
+                        {t('config.translation_provider_hint')}
+                      </div>
+                      <SelectField
+                        label={t('config.field_translation_provider')}
+                        value={ttsConfig.translation_provider ?? 'google'}
+                        onChange={(v) => setTtsConfig({ ...ttsConfig, translation_provider: v || null })}
+                        options={[
+                          { value: 'google', label: 'Google Translate' },
+                          { value: 'deepl', label: 'DeepL' },
+                          { value: 'llm', label: 'LLM' },
+                        ]}
+                      />
+                      {ttsConfig.translation_provider === 'llm' ? (
+                        <>
+                          <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 6 }}>
+                            {t('config.translation_llm_hint')}
+                          </div>
+                          <ProviderSelector
+                            pathPrefix="routing_matrix.translation"
+                            get={get}
+                            setNested={setNested}
+                            t={t}
+                          />
+                          <TextField
+                            label={t('config.field_model_name')}
+                            value={get('routing_matrix.translation.model', '')}
+                            onChange={(v) => setNested('routing_matrix.translation.model', v)}
+                          />
+                          <TextField
+                            label={t('config.field_api_key')}
+                            type="password"
+                            value={get('routing_matrix.translation.api_key', '')}
+                            onChange={(v) => setNested('routing_matrix.translation.api_key', v)}
+                          />
+                          {needsSecretFor(get('routing_matrix.translation.provider_type', 'openai')) && (
+                            <TextField
+                              label={t('config.field_api_secret')}
+                              type="password"
+                              value={get('routing_matrix.translation.api_secret', '')}
+                              onChange={(v) => setNested('routing_matrix.translation.api_secret', v)}
+                            />
+                          )}
+                          {needsAppIdFor(get('routing_matrix.translation.provider_type', 'openai')) && (
+                            <TextField
+                              label={t('config.field_app_id')}
+                              value={get('routing_matrix.translation.app_id', '')}
+                              onChange={(v) => setNested('routing_matrix.translation.app_id', v)}
+                            />
+                          )}
+                          <TextField
+                            label={t('config.field_endpoint')}
+                            value={get('routing_matrix.translation.endpoint', '')}
+                            onChange={(v) => setNested('routing_matrix.translation.endpoint', v)}
+                          />
+                          <ToggleField label={t('config.send_temperature')} value={(get('routing_matrix.translation.send_temperature', get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean} onChange={v => setNested('routing_matrix.translation.send_temperature', v)} help={t('config.parameter_send_help')} />
+                {(get('routing_matrix.translation.send_temperature', get('ai.send_temperature', true)) ?? get('ai.send_temperature', true)) as boolean && (<SliderField
+                            label={t('config.field_temperature')}
+                            value={get('routing_matrix.translation.temperature', get('ai.temperature', 0.70))}
+                            onChange={(v) => setNested('routing_matrix.translation.temperature', v)}
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            format={(v) => v.toFixed(2)}
+                            help={t('config.field_route_temperature_help')}
+                          />)}
+                          <ToggleField label={t('config.send_max_tokens')} value={(get('routing_matrix.translation.send_max_tokens', get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean} onChange={v => setNested('routing_matrix.translation.send_max_tokens', v)} help={t('config.parameter_send_help')} />
+                {(get('routing_matrix.translation.send_max_tokens', get('ai.send_max_tokens', true)) ?? get('ai.send_max_tokens', true)) as boolean && (<NumberField
+                            label={t('config.field_max_tokens')}
+                            value={get('routing_matrix.translation.max_tokens', get('ai.max_tokens', 2048))}
+                            onChange={(v) => setNested('routing_matrix.translation.max_tokens', v)}
+                            min={64}
+                            step={64}
+                            help={t('config.field_route_max_tokens_help')}
+                          />)}
+                          <ReasoningPrefField label={t('config.field_reasoning_pref')} providerType={get('routing_matrix.translation.provider_type','openai') as string} model={get('routing_matrix.translation.model','') as string}
+                            temperature={get<number>('routing_matrix.translation.temperature',get<number>('ai.temperature',0.7))} maxTokens={get<number>('routing_matrix.translation.max_tokens',get<number>('ai.max_tokens',2048))}
+                            sendTemperature={get<boolean>('routing_matrix.translation.send_temperature',get<boolean>('ai.send_temperature',true))} sendMaxTokens={get<boolean>('routing_matrix.translation.send_max_tokens',get<boolean>('ai.send_max_tokens',true))}
+                            value={get('routing_matrix.translation.reasoning',get('ai.reasoning',null)) as ReasoningPref|null} onChange={v=>setNested('routing_matrix.translation.reasoning',v as ConfigValue)}
+                            overrides={get('routing_matrix.translation.reasoning_overrides',null) as Record<string,unknown>|null} onOverridesChange={v=>setNested('routing_matrix.translation.reasoning_overrides',v as ConfigValue)} t={t}/>
+                        </>
+                      ) : (
+                        <>
+                          <TextField
+                            label={t('config.field_translation_api_key')}
+                            value={ttsConfig.translation_api_key ?? ''}
+                            onChange={(v) => setTtsConfig({ ...ttsConfig, translation_api_key: v || null })}
+                            placeholder={t('config.placeholder_translation_api_key')}
+                            type="password"
+                          />
+                          <TextField
+                            label={t('config.field_translation_endpoint')}
+                            value={ttsConfig.translation_endpoint ?? ''}
+                            onChange={(v) => setTtsConfig({ ...ttsConfig, translation_endpoint: v || null })}
+                            placeholder={t('config.placeholder_translation_endpoint')}
+                          />
+                        </>
+                      )}
+                      <div style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const result = await invoke<string>('test_translation', {
+                                text: '你好，今天天气真好。',
+                                characterId: ttsEditCharId ?? undefined,
+                              });
+                              emit('toast:show', {
+                                type: 'success',
+                                message: `${t('config.toast_translation_test_ok')}: ${result}`,
+                                duration: 5000,
+                              });
+                            } catch (e) {
+                              emit('toast:show', {
+                                type: 'error',
+                                message: `${t('config.toast_translation_test_failed')}: ${e}`,
+                                duration: 6000,
+                              });
+                            }
+                          }}
+                          style={{
+                            padding: '6px 14px',
+                            border: '1px solid var(--panel-border)',
+                            borderRadius: 6,
+                            background: 'transparent',
+                            color: 'var(--panel-text)',
+                            fontSize: 12,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          {t('config.btn_test_translation')}
+                        </button>
+                      </div>
+                    </>
+                  )}
+
+                <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                  <button
+                    onClick={handleTestTts}
+                    style={{
+                      flex: 1,
+                      padding: '8px 12px',
+                      border: '1px solid var(--panel-border)',
+                      background: 'transparent',
+                      color: 'var(--panel-text)',
+                      borderRadius: 6,
+                      fontSize: 13,
+                      cursor: 'pointer',
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {t('config.btn_test_tts')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)' }}>{t('common.loading')}</div>
+            )}
+
+          </>
+        );
+      case 'realtime':
+        return (
+          <>
+            <div style={{ ...sectionTitleStyle, marginTop: 28 }}>{t('config.section_realtime')}</div>
+            <ToggleField
+              label={t('config.field_realtime_enable')}
+              value={get('realtime_voice.enabled', false) as boolean}
+              onChange={(v) => {
+                setNested('realtime_voice.enabled', v);
+                // 启用时强制固定输入模式为麦克风音频
+                if (v) setNested('realtime_voice.input_mod', 'audio');
+              }}
+            />
+            {get('realtime_voice.enabled', false) && (
+              <>
+                <SelectField
+                  label={t('config.field_realtime_provider')}
+                  value={get('realtime_voice.provider', 'doubao') as string}
+                  onChange={(v) => setNested('realtime_voice.provider', v)}
+                  options={[
+                    { value: 'doubao', label: t('config.opt_realtime_provider_doubao') },
+                    { value: 'gpt_live', label: t('config.opt_realtime_provider_gpt_live'), disabled: true },
+                  ]}
+                />
+                {get('realtime_voice.provider', 'doubao') === 'doubao' && (
+                  <>
+                    <TextField
+                      label={t('config.field_realtime_app_id')}
+                      value={get('realtime_voice.app_id', '') as string}
+                      onChange={(v) => setNested('realtime_voice.app_id', v)}
+                      placeholder="1234567890"
+                    />
+                    <TextField
+                      label={t('config.field_realtime_access_key')}
+                      value={get('realtime_voice.access_key', '') as string}
+                      onChange={(v) => setNested('realtime_voice.access_key', v)}
+                      placeholder="your-access-key"
+                      type="password"
+                    />
+                    <SelectField
+                      label={t('config.field_realtime_model')}
+                      value={get('realtime_voice.model', 'SC') as string}
+                      onChange={(v) => setNested('realtime_voice.model', v)}
+                      options={[
+                        { value: 'SC', label: 'SC (声音复刻克隆音色)' },
+                        { value: 'O', label: 'O (精品音色+联网)' },
+                      ]}
+                    />
+                    <TextField
+                      label={t('config.field_realtime_speaker')}
+                      value={get('realtime_voice.speaker', '') as string}
+                      onChange={(v) => setNested('realtime_voice.speaker', v)}
+                      placeholder="ICL_zh_female_wenrouwenya_tob"
+                    />
+                    <TextField
+                      label={t('config.field_realtime_end_smooth_window')}
+                      value={String(get('realtime_voice.end_smooth_window_ms', 1500))}
+                      onChange={(v) => setNested('realtime_voice.end_smooth_window_ms', Number(v) || 1500)}
+                      placeholder="1500"
+                    />
+                  </>
+                )}
+              </>
+            )}
+          </>
+        );
+
+      case 'network':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_network')}</div>
+            <SelectField
+              label={t('config.field_proxy_mode')}
+              value={get('network.proxy_mode', 'direct')}
+              onChange={(v) => setNested('network.proxy_mode', v)}
+              options={[
+                { value: 'direct', label: t('config.opt_no_proxy') },
+                { value: 'system', label: t('config.opt_system_proxy') },
+                { value: 'manual', label: t('config.opt_manual') },
+              ]}
+            />
+            <TextField
+              label={t('config.field_proxy_url')}
+              value={get('network.proxy_url', '')}
+              onChange={(v) => setNested('network.proxy_url', v)}
+              placeholder={t('config.ph_proxy')}
+              disabled={get<string>('network.proxy_mode', 'direct') !== 'manual'}
+            />
+            <NumberField
+              label={t('config.field_timeout')}
+              value={get('network.timeout', 30)}
+              onChange={(v) => setNested('network.timeout', v)}
+              min={5}
+              step={5}
+            />
+            <div className="settings-field" style={{ ...fieldStyle, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                onClick={() => setNetworkDiagnosisOpen(true)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  padding: '8px 16px',
+                  border: '1px solid var(--panel-border)',
+                  borderRadius: 6,
+                  background: 'var(--panel-bg-active)',
+                  color: 'var(--panel-text)',
+                  fontSize: 13,
+                  fontFamily: 'inherit',
+                  cursor: 'pointer',
+                }}
+              >
+                <Activity size={14} strokeWidth={2.2} />
+                {t('config.diag_open')}
+              </button>
+              <span style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', lineHeight: 1.45 }}>
+                {t('config.diag_open_help')}
+              </span>
+            </div>
+
+            {/* ── 远程访问（Tailscale 场景）：启用开关与章节标题同行 ── */}
+            <div
+              style={{
+                ...sectionTitleStyle,
+                marginTop: 24,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <span style={{ flexShrink: 0 }}>{t('config.section_remote_access')}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, color: 'var(--panel-text-secondary)', fontWeight: 500 }}>
+                  {t('config.field_remote_access_enabled')}
+                </span>
+                <button
+                  onClick={() => setNested('network.remote_access.enabled', !get<boolean>('network.remote_access.enabled', false))}
+                  style={{
+                    width: 40,
+                    height: 22,
+                    borderRadius: 11,
+                    border: 'none',
+                    background: get<boolean>('network.remote_access.enabled', false) ? 'var(--panel-accent)' : 'var(--panel-toggle-off)',
+                    position: 'relative',
+                    cursor: 'pointer',
+                    transition: 'background 0.2s ease',
+                    flexShrink: 0,
+                  }}
+                  aria-label={t('config.field_remote_access_enabled')}
+                >
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      left: get<boolean>('network.remote_access.enabled', false) ? 20 : 2,
+                      width: 18,
+                      height: 18,
+                      borderRadius: '50%',
+                      background: 'var(--panel-surface)',
+                      transition: 'left 0.2s ease',
+                      boxShadow: 'var(--panel-shadow-subtle)',
+                    }}
+                  />
+                </button>
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--panel-text-tertiary)', marginTop: -8, marginBottom: 14, lineHeight: 1.4 }}>
+              {t('config.help_remote_access_enabled')}
+            </div>
+            <NumberField
+              label={t('config.field_remote_access_port')}
+              value={get<number>('network.remote_access.port', 8080)}
+              onChange={(v) => setNested('network.remote_access.port', v)}
+              min={1024}
+              max={65535}
+              step={1}
+              help={t('config.help_remote_access_port')}
+            />
+
+            {/* ── 网络搜索（已并入网络页签，多引擎混用）── */}
+            <div style={{ ...sectionTitleStyle, marginTop: 24 }}>
+              {t('config.section_web_search')}
+            </div>
+
+            {/* 多引擎混选：用户可同时启用多个引擎（也是智能体 engines 参数的可选范围） */}
+            <MultiCheckboxField
+              label={t('config.field_web_search_providers')}
+              help={t('config.help_web_search_providers')}
+              values={get<string[]>('web_search.providers', ['duckduckgo'])}
+              onChange={(next) => setNested('web_search.providers', next)}
+              options={[
+                { value: 'duckduckgo', label: t('config.opt_web_search_duckduckgo') },
+                { value: 'searxng', label: t('config.opt_web_search_searxng') },
+                { value: 'tavily', label: t('config.opt_web_search_tavily') },
+                { value: 'deepseek', label: t('config.opt_web_search_deepseek') },
+                { value: 'exa', label: 'Exa' },
+                { value: 'perplexity', label: 'Perplexity' },
+                { value: 'openai', label: 'OpenAI Web Search' },
+                { value: 'xai', label: 'Grok Web Search' },
+                { value: 'anthropic', label: 'Claude Web Search' },
+              ]}
+              minSelected={1}
+            />
+            <NumberField
+              label={t('config.field_web_search_max_results')}
+              help={t('config.help_web_search_max_results')}
+              value={get('web_search.max_results', 0)}
+              onChange={(v) => setNested('web_search.max_results', v)}
+              min={0}
+              max={20}
+              step={1}
+            />
+            <NumberField
+              label={t('config.field_web_search_timeout')}
+              value={get('web_search.timeout_secs', 15)}
+              onChange={(v) => setNested('web_search.timeout_secs', v)}
+              min={5}
+              step={5}
+            />
+            <ToggleField
+              label={t('config.field_web_search_bg_fetch')}
+              help={t('config.help_web_search_bg_fetch')}
+              value={get('web_search.enable_background_knowledge_fetch', true)}
+              onChange={(v) => setNested('web_search.enable_background_knowledge_fetch', v)}
+            />
+            <SelectField
+              label={t('config.field_web_search_language')}
+              value={get('web_search.language', '')}
+              onChange={(v) => setNested('web_search.language', v)}
+              options={[
+                { value: '', label: t('config.opt_lang_auto') },
+                { value: 'zh-CN', label: '简体中文' },
+                { value: 'en', label: 'English' },
+                { value: 'ja', label: '日本語' },
+              ]}
+            />
+
+            {/* SearXNG 子配置（启用 SearXNG 时显示） */}
+            {get<string[]>('web_search.providers', ['duckduckgo']).includes('searxng') && (
+              <CollapsibleSection
+                title={t('config.section_web_search_searxng')}
+                defaultOpen
+              >
+                <TextField
+                  label={t('config.field_searxng_base_url')}
+                  value={get('web_search.searxng.base_url', '')}
+                  onChange={(v) => setNested('web_search.searxng.base_url', v)}
+                  placeholder="http://localhost:8080"
+                />
+                <TextField
+                  label={t('config.field_searxng_token')}
+                  value={get('web_search.searxng.auth_token', '')}
+                  onChange={(v) => setNested('web_search.searxng.auth_token', v)}
+                  placeholder={t('config.ph_optional')}
+                  type="password"
+                />
+              </CollapsibleSection>
+            )}
+
+            {/* Tavily 子配置（启用 Tavily 时显示） */}
+            {get<string[]>('web_search.providers', ['duckduckgo']).includes('tavily') && (
+              <CollapsibleSection
+                title={t('config.section_web_search_tavily')}
+                defaultOpen
+              >
+                <TextField
+                  label={t('config.field_tavily_api_key')}
+                  value={get('web_search.tavily.api_key', '')}
+                  onChange={(v) => setNested('web_search.tavily.api_key', v)}
+                  placeholder="tvly-..."
+                  type="password"
+                />
+                <ToggleField
+                  label={t('config.field_tavily_include_raw')}
+                  value={get('web_search.tavily.include_raw_content', true)}
+                  onChange={(v) => setNested('web_search.tavily.include_raw_content', v)}
+                />
+                <SelectField
+                  label={t('config.field_tavily_search_depth')}
+                  value={get('web_search.tavily.search_depth', 'basic')}
+                  onChange={(v) => setNested('web_search.tavily.search_depth', v)}
+                  options={[
+                    { value: 'basic', label: t('config.opt_tavily_basic') },
+                    { value: 'advanced', label: t('config.opt_tavily_advanced') },
+                  ]}
+                />
+              </CollapsibleSection>
+            )}
+
+            {[
+              { id: 'exa', label: 'Exa', endpoint: 'https://api.exa.ai', native: false },
+              { id: 'perplexity', label: 'Perplexity', endpoint: 'https://api.perplexity.ai', native: false },
+              { id: 'openai', label: 'OpenAI Web Search', endpoint: 'https://api.openai.com/v1', native: true },
+              { id: 'xai', label: 'Grok Web Search', endpoint: 'https://api.x.ai/v1', native: true },
+              { id: 'anthropic', label: 'Claude Web Search', endpoint: 'https://api.anthropic.com/v1', native: true },
+            ].filter(({ id }) => get<string[]>('web_search.providers', ['duckduckgo']).includes(id)).map(({ id, label, endpoint, native }) => (
+              <CollapsibleSection key={id} title={label} defaultOpen>
+                <TextField label="API Key" value={get(`web_search.${id}.api_key`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.api_key`, v)} type="password" />
+                <TextField label={t('config.field_ds_search_base_url')} value={get(`web_search.${id}.base_url`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.base_url`, v)} placeholder={endpoint} />
+                {native && <TextField label={t('config.field_ds_search_model')} value={get(`web_search.${id}.model`, '')}
+                  onChange={(v) => setNested(`web_search.${id}.model`, v)} placeholder={t('config.search_model_required')} />}
+                <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)', padding: '8px 0' }}>
+                  {t(native ? 'config.native_search_cost' : 'config.search_api_cost')}
+                </div>
+              </CollapsibleSection>
+            ))}
+
+            {/* DeepSeek 官方原生搜索子配置（启用 deepseek 时显示） */}
+            {get<string[]>('web_search.providers', ['duckduckgo']).includes('deepseek') && (
+              <CollapsibleSection
+                title={t('config.section_web_search_deepseek')}
+                defaultOpen
+              >
+                <TextField
+                  label={t('config.field_ds_search_api_key')}
+                  value={get('web_search.deepseek.api_key', '')}
+                  onChange={(v) => setNested('web_search.deepseek.api_key', v)}
+                  placeholder={t('config.ph_ds_search_api_key')}
+                  type="password"
+                />
+                <TextField
+                  label={t('config.field_ds_search_model')}
+                  value={get('web_search.deepseek.model', '')}
+                  onChange={(v) => setNested('web_search.deepseek.model', v)}
+                  placeholder={t('config.ph_ds_search_model')}
+                />
+                <TextField
+                  label={t('config.field_ds_search_base_url')}
+                  value={get('web_search.deepseek.base_url', 'https://api.deepseek.com/anthropic/v1')}
+                  onChange={(v) => setNested('web_search.deepseek.base_url', v)}
+                  placeholder="https://api.deepseek.com/anthropic/v1"
+                />
+                <NumberField
+                  label={t('config.field_ds_search_max_uses')}
+                  value={get('web_search.deepseek.max_uses', 5)}
+                  onChange={(v) => setNested('web_search.deepseek.max_uses', v)}
+                  min={1}
+                  step={1}
+                />
+                <NumberField
+                  label={t('config.field_ds_search_timeout')}
+                  value={get('web_search.deepseek.timeout_secs', 60)}
+                  onChange={(v) => setNested('web_search.deepseek.timeout_secs', v)}
+                  min={10}
+                  step={10}
+                />
+              </CollapsibleSection>
+            )}
+          </>
+        );
+      case 'about':
+        return (
+          <>
+            <div style={sectionTitleStyle}>{t('config.section_about')}</div>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '32px 0 16px' }}>
+              <img
+                src="/favicon.ico"
+                alt="Vivian"
+                style={{ width: 72, height: 72, borderRadius: '50%', marginBottom: 14, display: 'block' }}
+              />
+              <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Vivian</div>
+              <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)', marginBottom: 4 }}>
+                {t('config.about_subtitle')}
+              </div>
+              {appVersion && (
+                <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)', marginBottom: 24 }}>
+                  v{appVersion}
+                </div>
+              )}
+            </div>
+            <div style={{ padding: '0 8px' }}>
+              {[
+                { label: t('config.about_project'), value: (
+                  <a href="https://github.com/SpacervalLam/Vivian-ai-desktop-pet" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--panel-text)', textDecoration: 'none' }}>
+                    github.com/SpacervalLam/Vivian-ai-desktop-pet
+                  </a>
+                )},
+                { label: t('config.about_contact'), value: 'spacervallam@gmail.com' },
+                ...(osInfo ? [{ label: t('config.about_os'), value: osInfo }] : []),
+              ].map((row) => (
+                <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--panel-border)' }}>
+                  <span style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{row.label}</span>
+                  <span style={{ fontSize: 13, color: 'var(--panel-text)', textAlign: 'right' }}>{row.value}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        );
+      case 'plugins':
+        return <PluginsPanel />;
+      case 'connections':
+        return <ConnectionsPanel />;
+    }
+  };
+
+  return (
+    <div
+      className="scrapbook settings-window"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: 'calc(100vh - 16px)',
+        background: 'var(--panel-bg)',
+        fontFamily:
+          '"Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+        color: 'var(--panel-text)',
+        overflow: 'hidden',
+      }}
+    >
+      <style>{`
+        @keyframes gptsovits-spin{to{transform:rotate(360deg)}}
+        @keyframes cfg-fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+        .scrapbook input:focus,
+        .scrapbook select:focus,
+        .scrapbook textarea:focus {
+          outline: none;
+          border-color: var(--panel-accent) !important;
+          box-shadow: 0 0 0 2px var(--panel-accent-soft), var(--panel-shadow-card) !important;
+        }
+        .scrapbook button { cursor: pointer; }
+        .scrapbook button:hover:not(:disabled) { filter: brightness(1.06); }
+        .scrapbook button:active:not(:disabled) { transform: translateY(0.5px); }
+        .scrapbook input, .scrapbook select, .scrapbook textarea {
+          border-radius: 12px;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .scrapbook * { animation: none !important; transition: none !important; }
+        }
+      `}</style>
+      {/* 手账封面条（清新插画风：纸胶带 + 印章标题） */}
+      <header
+        data-tauri-drag-region
+        className="settings-header"
+        style={{
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          margin: '10px 14px 0',
+          padding: '10px 18px 9px',
+          border: '1px solid var(--panel-border-light)',
+          borderRadius: 16,
+          background: 'var(--panel-surface)',
+          boxShadow: 'var(--panel-shadow-card)',
+          flexShrink: 0,
+          userSelect: 'none',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 999,
+              background: 'var(--panel-accent)',
+              boxShadow: '0 0 0 4px var(--panel-accent-soft)',
+            }}
+          />
+          <div style={{ fontSize: 15, fontWeight: 700, letterSpacing: 0.5 }}>{t('config.title')}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <button
+            onClick={() => setSetupGuideOpen(true)}
+            aria-label={t('config.setup_guide.guide_btn')}
+            title={t('config.setup_guide.guide_btn')}
+            style={{
+              width: 26,
+              height: 26,
+              border: '1px solid var(--panel-border)',
+              background: 'transparent',
+              color: 'var(--panel-text-tertiary)',
+              cursor: 'pointer',
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'background 0.15s ease, color 0.15s ease, border-color 0.15s ease',
+              padding: 0,
+              lineHeight: 1,
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--panel-selected-bg)';
+              e.currentTarget.style.color = 'var(--panel-selected-text)';
+              e.currentTarget.style.borderColor = 'var(--panel-selected-bg)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--panel-text-tertiary)';
+              e.currentTarget.style.borderColor = 'var(--panel-border)';
+            }}
+          >
+            ?
+          </button>
+          <button
+            type="button"
+            className="settings-minimize-button"
+            onClick={() => { void getCurrentWindow().minimize().catch((error) => console.error('Failed to minimize settings window', error)); }}
+            aria-label={t('common.minimize')}
+            title={t('common.minimize')}
+          >
+            <Minus size={16} />
+          </button>
+          <button
+            onClick={closeWindow}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            style={{
+              width: 26,
+              height: 26,
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--panel-text-secondary)',
+              cursor: 'pointer',
+              borderRadius: 999,
+              fontSize: 13,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'background 0.15s ease, color 0.15s ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'var(--panel-danger)';
+              e.currentTarget.style.color = 'var(--panel-selected-text)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--panel-text-secondary)';
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </header>
+
+      <div className="settings-layout">
+        <aside className="settings-sidebar">
+          <div className="settings-search-region">
+            <div className="settings-search">
+              <Search size={15} aria-hidden="true" />
+              <input ref={searchRef} aria-label={copy.search} placeholder={copy.search}
+                value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setSettingsQuery('');
+                  if (event.key === 'Enter' && visiblePages[0]) handleTabChange(visiblePages[0].key);
+                }} />
+              {settingsQuery && <button aria-label={copy.clearSearch} onClick={() => { setSettingsQuery(''); searchRef.current?.focus(); }}><X size={14} /></button>}
+            </div>
+          </div>
+          <nav className="settings-navigation" aria-label={t('config.title')}>
+            {settingsGroups.map((group) => {
+              const pages = visiblePages.filter((page) => page.group === group);
+              if (!pages.length) return null;
+              return <div className="settings-nav-group" key={group}>
+                <div className="settings-nav-caption">{copy.groups[group]}</div>
+                {pages.map((page) => {
+                  const Icon = page.icon;
+                  return <button key={page.key} className="settings-nav-item"
+                    aria-current={activeTab === page.key ? 'page' : undefined}
+                    title={copy.pages[page.key][1]} onClick={() => handleTabChange(page.key)}>
+                    <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+                    <span>{copy.pages[page.key][0]}</span>
+                  </button>;
+                })}
+              </div>;
+            })}
+            {!visiblePages.length && <div className="settings-search-empty" role="status">{copy.noResults}</div>}
+          </nav>
+        </aside>
+        <main className="settings-content" ref={contentRef}>
+          <div className="settings-page-heading">
+            <span className="settings-page-eyebrow">{copy.groups[currentPage.group]}</span>
+            <h1>{copy.pages[activeTab][0]}</h1>
+            <p>{copy.pages[activeTab][1]}</p>
+          </div>
+          {activeTab === 'usage' ? renderTabContent() : <SettingsSections key={activeTab} contentsLabel={copy.contents}>
+            {renderTabContent()}
+          </SettingsSections>}
+        </main>
+      </div>
+
+      <div
+        className="settings-footer"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'flex-end',
+          gap: 10,
+          padding: '12px 18px',
+          margin: '0 14px 12px',
+          border: '1px solid var(--panel-border-light)',
+          borderRadius: 16,
+          flexShrink: 0,
+          background: 'var(--panel-surface)',
+          boxShadow: 'var(--panel-shadow-card)',
+        }}
+      >
+        {saveError && (
+          <span
+            style={{
+              flex: 1,
+              fontSize: 12,
+              color: 'var(--panel-danger)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={saveError}
+          >
+            {saveError}
+          </span>
+        )}
+        <button
+          onClick={handleReset}
+          disabled={importingSettings}
+          style={{
+            padding: '9px 18px',
+            minWidth: 120,
+            border: '1.5px solid var(--panel-border)',
+            background: 'var(--panel-surface)',
+            color: 'var(--panel-text)',
+            borderRadius: 12,
+            fontSize: 13,
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            boxShadow: 'var(--panel-shadow-subtle)',
+          }}
+        >
+          {copy.reload}
+        </button>
+        <button
+          onClick={handleSave}
+          disabled={saving || importingSettings}
+          style={{
+            padding: '9px 18px',
+            minWidth: 120,
+            border: 'none',
+            background: savedFlash ? 'var(--panel-success)' : 'var(--panel-accent)',
+            color: 'var(--panel-selected-text)',
+            borderRadius: 12,
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: saving ? 'not-allowed' : 'pointer',
+            opacity: saving ? 0.7 : 1,
+            fontFamily: 'inherit',
+            transition: 'background 0.2s ease',
+            boxShadow: 'var(--panel-shadow-subtle)',
+          }}
+        >
+          {saving ? t('common.saving') : savedFlash ? t('common.saved') : t('common.save')}
+        </button>
+      </div>
+
+      {/* 保存中遮罩：阻止保存期间修改表单 */}
+      {saving && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 9999,
+            background: 'rgba(0, 0, 0, 0.18)',
+            backdropFilter: 'blur(1.5px)',
+            WebkitBackdropFilter: 'blur(1.5px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'wait',
+          }}
+        >
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--panel-text)',
+              background: 'var(--panel-surface)',
+              border: '1px solid var(--panel-border)',
+              borderRadius: 12,
+              padding: '10px 20px',
+              boxShadow: 'var(--panel-shadow-card)',
+            }}
+          >
+            <span
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 999,
+                border: '2px solid var(--panel-border)',
+                borderTopColor: 'var(--panel-accent)',
+                animation: 'gptsovits-spin 0.8s linear infinite',
+              }}
+            />
+            {t('common.saving')}
+          </div>
+        </div>
+      )}
+
+      {/* TTS 后端使用说明书弹窗 */}
+      <TtsHelpDialog
+        open={ttsHelpOpen}
+        initialBackend={ttsHelpBackend}
+        onClose={() => setTtsHelpOpen(false)}
+      />
+
+      {/* ASR 后端使用说明书弹窗 */}
+      <AsrHelpDialog
+        open={asrHelpOpen}
+        initialBackend={asrHelpBackend}
+        onClose={() => setAsrHelpOpen(false)}
+      />
+
+      {/* 清空记忆确认弹窗 */}
+      <ClearConfirmDialog
+        open={clearMemoriesOpen}
+        loading={clearingMemories}
+        onConfirm={handleClearMemoriesConfirm}
+        onCancel={() => setClearMemoriesOpen(false)}
+      >
+        <div style={{ padding: '0 22px 18px', fontSize: 13, color: 'var(--panel-text)' }}>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input type="checkbox" checked={keepImportedCharacters} disabled={clearingMemories}
+              onChange={e => setKeepImportedCharacters(e.target.checked)} />
+            {t('memory.keep_imported_characters')}
+          </label>
+          <p style={{ margin: '8px 0 0', color: 'var(--panel-text-secondary)', lineHeight: 1.6 }}>
+            {t('memory.keep_imported_characters_help')}
+          </p>
+        </div>
+      </ClearConfirmDialog>
+
+      {/* 恢复备份确认弹窗 */}
+      <ClearConfirmDialog
+        open={restoreConfirmOpen}
+        loading={restoring}
+        title={t('config.restore_confirm_title')}
+        message={`${t('config.restore_confirm_message')}\n${restoreSource ?? ''}`}
+        confirmLabel={t('config.restore_btn_confirm')}
+        loadingLabel={t('config.restore_btn_loading')}
+        onConfirm={handleRestoreConfirm}
+        onCancel={() => setRestoreConfirmOpen(false)}
+      />
+
+      {/* 网络检测弹窗（完整诊断） */}
+      <NetworkDiagnosisDialog
+        open={networkDiagnosisOpen}
+        onClose={() => setNetworkDiagnosisOpen(false)}
+        beforeRun={syncNetworkConfigForDiagnosis}
+      />
+
+      {/* 配置引导弹窗 */}
+      <SetupGuideModal
+        open={setupGuideOpen}
+        onClose={() => setSetupGuideOpen(false)}
+        onGoLlm={() => {
+          setActiveTab('ai');
+          setSetupGuideOpen(false);
+        }}
+        onGoMemory={() => {
+          setActiveTab('memory');
+          setSetupGuideOpen(false);
+        }}
+        onGoVoice={() => {
+          setActiveTab('speech');
+          setSetupGuideOpen(false);
+        }}
+        onGoSearch={() => {
+          setActiveTab('network');
+          setSetupGuideOpen(false);
+        }}
+        status={{
+          llm: !!get('ai.api_key', ''),
+          memory:
+            get<boolean>('memory.embedding.enabled', false) === true &&
+            (get<string>('memory.embedding.source', 'cloud') === 'local' ||
+              !!get('memory.embedding.api_key', '')),
+          search: (get<string[]>('web_search.providers', ['duckduckgo']) ?? []).length > 0,
+          voice: ttsConfig !== null && ttsConfig.engine !== 'none',
+          routing: get<boolean>('enable_routing_matrix', false) === true,
+        }}
+      />
+    </div>
+  );
+};
+
+export default ConfigWindow;

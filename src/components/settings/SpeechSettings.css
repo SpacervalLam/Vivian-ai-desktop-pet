@@ -1,0 +1,24 @@
+.speech-settings-note {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  background: var(--panel-bg-surface);
+  color: var(--panel-text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.speech-settings-note p { margin: 0; }
+.speech-settings-note p + p { margin-top: 6px; }
+.speech-settings-note[data-state="partial"] {
+  border-color: var(--panel-accent);
+  background: var(--panel-accent-soft);
+}
+.speech-settings-hint {
+  margin: -4px 0 14px;
+  color: var(--panel-text-tertiary);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}

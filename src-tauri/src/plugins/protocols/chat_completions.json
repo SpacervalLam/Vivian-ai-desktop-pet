@@ -1,0 +1,58 @@
+{
+  "id": "chat_completions",
+  "provider_type": "chat_completions",
+  "version": "1.0.0",
+  "auth": {
+    "type": "header",
+    "header_name": "Authorization",
+    "scheme": "Bearer",
+    "value_from": "api_key"
+  },
+  "transport": {
+    "method": "POST",
+    "path": "/v1/chat/completions"
+  },
+  "request": {
+    "message_format": "chat_completions",
+    "body": {
+      "model": "{model}",
+      "messages": "{messages}",
+      "temperature": "{temperature}",
+      "max_tokens": "{max_tokens}",
+      "stream": "{stream}",
+      "tools": "{tools}",
+      "enable_search": "{enable_search}"
+    },
+    "stream_field": "stream",
+    "search": { "mode": "boolean_true", "field": "enable_search" },
+    "reasoning_style": "chat_completions",
+    "json_schema": { "mode": "json_schema" },
+    "tools_format": "chat_completions"
+  },
+  "response": {
+    "content": "$.choices[0].message.content",
+    "reasoning": "$.choices[0].message.reasoning_content",
+    "finish_reason": "$.choices[0].finish_reason",
+    "strip_thinking": true
+  },
+  "streaming": {
+    "mode": "sse",
+    "done_sentinel": "[DONE]",
+    "chunk": {
+      "text": "$.choices[0].delta.content",
+      "reasoning": "$.choices[0].delta.reasoning_content",
+      "tool_index": "$.choices[0].delta.tool_calls[*].index",
+      "tool_id": "$.choices[0].delta.tool_calls[*].id",
+      "tool_name": "$.choices[0].delta.tool_calls[*].function.name",
+      "tool_args_delta": "$.choices[0].delta.tool_calls[*].function.arguments",
+      "finish_reason": "$.choices[0].delta.finish_reason"
+    }
+  },
+  "capabilities": {
+    "supports_streaming": true,
+    "supports_tools": true,
+    "supports_structured_output": true,
+    "supports_json_mode": true,
+    "supports_thinking": true
+  }
+}

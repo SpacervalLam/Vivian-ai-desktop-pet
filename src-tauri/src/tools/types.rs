@@ -1,0 +1,1514 @@
+//! 核心工具类型定义 - 增强版工具系统
+//!
+//! 定义工具系统的所有核心类型，包括工具 trait、工具结果、
+//! 验证结果、权限结果、工具上下文、错误码等。
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// 工具类别
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolCategory {
+    File,
+    Web,
+    System,
+    Memory,
+    Media,
+    Pet,
+    Mcp,
+}
+
+impl ToolCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolCategory::File => "file",
+            ToolCategory::Web => "web",
+            ToolCategory::System => "system",
+            ToolCategory::Memory => "memory",
+            ToolCategory::Media => "media",
+            ToolCategory::Pet => "pet",
+            ToolCategory::Mcp => "mcp",
+        }
+    }
+}
+
+/// 工具可见性分层：控制工具在 LLM 上下文中的展示粒度，减少 token 开销。
+///
+/// - `Always`：完整 schema 注入（核心高频工具）
+/// - `Lazy`：仅名称+一行描述，完整 schema 通过 `tool_search` 按需加载
+/// - `Deferred`：仅名称出现在 `<available-deferred-tools>` 块中
+///
+/// 默认行为由 `tool_call_manager` 根据 `ToolCategory` + `should_defer()` + `always_load()` 推断，
+/// 个别工具可通过 `Tool::visibility_tier()` 覆盖。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolVisibility {
+    /// 完整 schema 注入（默认）
+    Always,
+    /// 仅名称+一行描述（节省 token）
+    Lazy,
+    /// 仅名称，需 tool_search 加载完整 schema
+    Deferred,
+}
+
+/// 工具场景：用于动态筛选暴露给 LLM 的工具子集
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolScene {
+    /// 默认场景：全量暴露（向后兼容）
+    #[default]
+    Default,
+    /// 低信任场景（陌生人/初识）：禁用系统控制类工具
+    LowTrust,
+    /// 专注场景（用户在工作）：只保留 Memory + 必要 System
+    Focus,
+    /// 闲聊场景：用户消息短 + 无任务关键词 + 近期无工具调用
+    /// 只注入核心工具（memory_search / tool_search / cross_character）
+    Chat,
+    /// 任务场景：用户消息含任务关键词 OR 近期调过工具
+    /// 注入核心 + 任务相关工具类别
+    Task,
+    /// 后台场景：proactive_tick 触发，无用户输入
+    /// 只注入 memory_search / cross_character
+    Idle,
+}
+
+impl ToolScene {
+    /// 根据关系阶段 + 当前情绪 + 活动应用推断场景
+    ///
+    /// 优先级：低信任 > 专注 > 默认
+    pub fn from_context(intimacy_stage: Option<&str>, emotion: Option<&str>) -> Self {
+        Self::from_context_with_app(intimacy_stage, emotion, None)
+    }
+
+    /// 带活动应用上下文的场景推断
+    ///
+    /// `active_app` 为前台应用标题/进程名，用于判断是否处于专注工作场景。
+    pub fn from_context_with_app(
+        intimacy_stage: Option<&str>,
+        emotion: Option<&str>,
+        active_app: Option<&str>,
+    ) -> Self {
+        Self::from_full_context(
+            intimacy_stage,
+            emotion,
+            active_app,
+            "",
+            false,
+        )
+    }
+
+    /// 全上下文场景推断（整合关系/专注 + 用户输入/历史工具调用）
+    ///
+    /// 优先级：
+    /// 1. 低信任阶段（stranger/acquainted）→ `LowTrust`
+    /// 2. 专注场景（前台为 IDE/编辑器/办公软件）→ `Focus`
+    /// 3. 用户输入驱动（Chat/Task/Idle）：
+    ///    - `user_input` 为空 → `Idle`
+    ///    - 含任务关键词（中日英三语）OR 近期调过工具 → `Task`
+    ///    - 其他 → `Chat`
+    ///
+    /// `has_recent_tool_use` 由调用方通过 `ToolSystem::has_recent_tool_call` 查询。
+    pub fn from_full_context(
+        intimacy_stage: Option<&str>,
+        _emotion: Option<&str>,
+        active_app: Option<&str>,
+        user_input: &str,
+        has_recent_tool_use: bool,
+    ) -> Self {
+        // 低信任阶段：禁用控制类工具
+        match intimacy_stage.unwrap_or("") {
+            "stranger" | "acquainted" => return ToolScene::LowTrust,
+            _ => {}
+        }
+        // 专注场景：检测到工作类应用时启用
+        if let Some(app) = active_app {
+            let app_lower = app.to_lowercase();
+            const FOCUS_APPS: &[&str] = &[
+                "code", "visual studio", "vscode", "idea", "pycharm", "rustrover",
+                "webstorm", "goland", "clion", "eclipse", "intellij",
+                "notepad++", "sublime", "vim", "neovim", "emacs",
+                "terminal", "powershell", "cmd", "wsl",
+                "word", "excel", "powerpoint", "outlook", "onenote",
+                "photoshop", "illustrator", "figma", "blender",
+                "unity", "unreal", "godot",
+                "matlab", "jupyter", "rstudio",
+            ];
+            if FOCUS_APPS.iter().any(|k| app_lower.contains(k)) {
+                return ToolScene::Focus;
+            }
+        }
+        // 用户输入驱动：Chat / Task / Idle
+        Self::from_user_input(user_input, has_recent_tool_use)
+    }
+
+    /// 基于用户输入 + 历史工具调用判定场景（Chat/Task/Idle）
+    ///
+    /// 规则（纯规则，不用 LLM）：
+    /// - `user_input` 为空 → `Idle`
+    /// - `user_input` 含任务关键词（中日英三语）→ `Task`
+    /// - `has_recent_tool_use=true`（最近 3 轮调过工具）→ `Task`
+    /// - `user_input` 长度 < 50 字 + 无任务关键词 + 无近期工具调用 → `Chat`
+    /// - 其他（长消息但无任务关键词）→ `Chat`（保守判定，避免误注入大量工具）
+    pub fn from_user_input(user_input: &str, has_recent_tool_use: bool) -> Self {
+        // 无用户输入 → 后台场景
+        let trimmed = user_input.trim();
+        if trimmed.is_empty() {
+            return ToolScene::Idle;
+        }
+
+        // 近期调过工具 → 任务场景
+        if has_recent_tool_use {
+            return ToolScene::Task;
+        }
+
+        // 含任务关键词 → 任务场景
+        if contains_task_keyword(trimmed) {
+            return ToolScene::Task;
+        }
+
+        // 默认闲聊场景
+        ToolScene::Chat
+    }
+
+    /// 当前场景下给 LLM 的工具使用软提示（注入到 prompt，不强制屏蔽）
+    ///
+    /// 设计哲学：从"硬黑名单过滤"转向"延迟加载 + 场景软提示 + 执行时确认门"。
+    /// 所有工具仍对 LLM 可见（活跃或延迟），由 LLM 自主判断是否调用，
+    /// 危险操作通过 `check_permissions` 在执行时弹窗确认（软门），而非 prompt 层硬屏蔽。
+    /// 这样可以避免"用户难过时想听音乐却被屏蔽媒体工具"之类死板行为。
+    pub fn soft_hint(&self) -> &'static str {
+        match self {
+            ToolScene::LowTrust => {
+                "当前关系阶段较低（陌生人/初识），用户对系统控制类操作可能尚未建立信任。\
+                 调用 open_application / close_application / open_url / 输入控制类工具前，\
+                 优先用语言确认用户意图；这些工具执行时会请求用户确认，请配合用户选择。"
+            }
+            ToolScene::Focus => {
+                "用户正在专注工作（检测到 IDE/编辑器/办公软件前台）。\
+                 避免主动发起娱乐性操作（媒体播放、桌宠大幅动作），\
+                 优先低打扰的回应方式。用户明确请求时不受此限制。"
+            }
+            ToolScene::Chat => {
+                "当前是陪伴对话场景。工具分两种面向：认知类（记忆检索/写入、日记、笔记、按时段回忆）\
+                 是你的大脑，先用来回忆和判断；执行类（桌面操作、媒体、终端、文件写入）是你的手脚，\
+                 只在用户确实要求操作或需要现场观察时使用。完整 schema 常驻核心工具；其余能力按需出现：\
+                 需要时先调用 tool_search 取回 schema，或直接按语义召回结果调用。\
+                 能用已有记忆或语言完成的事优先直接回复，不要为了展示能力而调工具。"
+            }
+            ToolScene::Task => {
+                "当前是任务场景，已注入任务相关工具的完整 schema。\
+                 认知类工具（记忆/笔记/检索）用来查背景与已确认事实；执行类工具（桌面/终端/浏览器/文件）用来落地动作。\
+                 不要用回忆代替实际执行，也不要重复检索已经拿到的事实。若需要的工具未在列表中，先调用 tool_search 加载。"
+            }
+            ToolScene::Idle => {
+                "当前是后台场景（无用户输入），仅注入核心工具。\
+                 优先低打扰的自主行为，避免主动发起需要用户确认的操作。"
+            }
+            ToolScene::Default => "",
+        }
+    }
+}
+
+/// 任务关键词检测（中日英三语）
+///
+/// 覆盖常见任务动词：帮助/查找/打开/执行/搜索/读写/启动/关闭/运行/播放/创建/删除/修改/复制/移动/下载/上传
+/// 中文 / 英文 / 日文 三语支持
+///
+/// `pub(crate)`：除场景判定外，generation 侧判断「本轮是否指向可执行任务」
+/// 也用这张表，避免同一概念出现第二份词表。
+pub(crate) fn contains_task_keyword(text: &str) -> bool {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    static TASK_KEYWORD_REGEX: Lazy<Regex> = Lazy::new(|| {
+        // 中日英三语任务关键词
+        // 中文：帮/帮我/查找/找/打开/开/执行/搜索/搜/读取/读/写入/写/启动/起/关闭/关/运行/播放/放/创建/建/删除/删/修改/改/复制/拷贝/移动/搬/下载/上传
+        // 英文：help/find/search/open/run/execute/read/write/start/stop/close/launch/play/create/delete/modify/copy/move/download/upload
+        // 日文：助けて/探す/探して/開く/開いて/実行/検索/読む/読んで/書く/書いて/起動/終了/閉じる/閉じて/再生/作成/削除/変更/コピー/移動/ダウンロード/アップロード
+        Regex::new(
+            r"(?i)\
+            \b(help|find|search|open|run|execute|read|write|start|stop|close|launch|play|create|delete|modify|copy|move|download|upload|look\s*up|show\s*me|get\s*the|fetch)\b|\
+            (帮|帮我|帮忙|查找|找一下|找下|打开|开一下|开下|执行|搜索|搜一下|搜下|读取|读一下|读下|写入|写一下|写下|启动|起一下|关闭|关一下|关下|运行|跑一下|播放|放一下|创建|建一个|删除|删掉|删一下|修改|改一下|改下|复制|拷贝|移动|搬|下载|上传|看一下|看下|查一下|查下|搞一下|搞定|处理|办一下|办下)\
+            |(助けて|探して|探す|開いて|開く|実行|検索|読んで|読む|書いて|書く|起動|終了|閉じて|閉じる|再生|作成|削除|変更|コピー|移動|ダウンロード|アップロード|やって|して)"
+        ).expect("task keyword regex")
+    });
+
+    TASK_KEYWORD_REGEX.is_match(text)
+}
+
+/// 工具上下文修改器：工具执行后回调，可修改后续工具的 `ToolUseContext`。
+///
+/// 使用 `Arc<dyn Fn>` 而非 `Box<dyn FnOnce>` 以保留 `Clone`。
+/// 调用方约定只触发一次（由 `ToolCallManager` 在 `execute_multi_step` 中应用）。
+pub type ContextModifier = Arc<dyn Fn(&mut ToolUseContext) + Send + Sync>;
+
+/// 工具结果
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ToolResult {
+    /// 工具返回的数据
+    pub data: Option<Value>,
+    /// 错误信息（失败时）
+    pub error: Option<String>,
+    /// 是否成功
+    pub success: bool,
+    /// 是否标志着用户目标已达成（true 时 Agent 循环应立即终止，不再继续推理或调用其他工具）
+    ///
+    /// 由 `Tool::signals_goal_completion() && result.success` 自动推导，
+    /// 也可由工具在特殊分支显式设置（如壁纸切换成功后任务即完成）。
+    /// 默认 false。Executor 在工具执行后根据 trait 声明覆写此字段。
+    #[serde(default)]
+    pub goal_completed: bool,
+    /// 上下文修改器（不参与序列化，工具执行后由编排器应用）
+    #[serde(skip)]
+    pub context_modifier: Option<ContextModifier>,
+    /// 工具产出的图片（仅 read_image 这类「让模型看见」的工具会填）。
+    ///
+    /// 为什么不塞进 `data`：图片一旦序列化进 JSON 文本就是 base64 字符串，
+    /// 既吃满上下文预算，又不可能被模型真的「看懂」。这里单独走一条通道，
+    /// 由调用方映射成 provider 的 image part。
+    #[serde(skip)]
+    pub images: Option<Vec<crate::brain::coding_agent::CodingImage>>,
+}
+
+impl std::fmt::Debug for ToolResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolResult")
+            .field("data", &self.data)
+            .field("error", &self.error)
+            .field("success", &self.success)
+            .field("goal_completed", &self.goal_completed)
+            .field(
+                "context_modifier",
+                &self.context_modifier.as_ref().map(|_| "<closure>"),
+            )
+            .finish()
+    }
+}
+
+impl ToolResult {
+    /// 创建成功结果
+    pub fn success(data: Value) -> Self {
+        Self {
+            data: Some(data),
+            error: None,
+            success: true,
+            goal_completed: false,
+            context_modifier: None,
+            images: None,
+        }
+    }
+
+    /// 创建标准格式的成功返回
+    pub fn standard_success(message: &str, data: Option<Value>) -> Self {
+        let payload = serde_json::json!({
+            "success": true,
+            "message": message,
+            "data": data,
+            "error": null,
+        });
+        Self {
+            data: Some(payload),
+            error: None,
+            success: true,
+            goal_completed: false,
+            context_modifier: None,
+            images: None,
+        }
+    }
+
+    /// 创建标准格式的错误返回
+    pub fn standard_error(message: &str, error: Option<&str>, data: Option<Value>) -> Self {
+        let payload = serde_json::json!({
+            "success": false,
+            "message": message,
+            "data": data,
+            "error": error.unwrap_or(message),
+        });
+        Self {
+            data: Some(payload),
+            error: Some(error.unwrap_or(message).to_string()),
+            success: false,
+            goal_completed: false,
+            context_modifier: None,
+            images: None,
+        }
+    }
+
+    /// 创建简单错误结果
+    pub fn error(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self {
+            data: None,
+            error: Some(msg.clone()),
+            success: false,
+            goal_completed: false,
+            context_modifier: None,
+            images: None,
+        }
+    }
+
+    /// 附加上下文修改器，返回自身便于链式构造。
+    pub fn with_context_modifier(mut self, modifier: ContextModifier) -> Self {
+        self.context_modifier = Some(modifier);
+        self
+    }
+
+    /// 显式标记本工具调用已完成用户目标（Agent 循环应在反馈结果后终止）。
+    /// 通常无需手动调用：Executor 会根据 `Tool::signals_goal_completion()` 自动设置；
+    /// 仅当工具在特定分支才视为"目标完成"时使用。
+    pub fn with_goal_completed(mut self) -> Self {
+        self.goal_completed = self.success;
+        self
+    }
+}
+
+impl Default for ToolResult {
+    fn default() -> Self {
+        Self {
+            data: None,
+            error: None,
+            success: false,
+            goal_completed: false,
+            context_modifier: None,
+            images: None,
+        }
+    }
+}
+
+/// 工具使用上下文
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUseContext {
+    /// 会话 ID
+    pub session_id: String,
+    /// 用户 ID
+    pub user_id: String,
+    /// 主工作目录（决定相对路径解析、终端 cwd 与提示词环境块；空串表示无工作区模式）
+    pub working_directory: String,
+    /// 附加工作目录：主工作区之外额外授权的目录，逐个带只读标记与操作白名单。
+    ///
+    /// 与 [`PermissionContext::additional_working_directories`] 同一种表达。
+    /// 沙箱硬闸门与权限确认闸门共用 [`ToolUseContext::is_path_authorized`] 做
+    /// 「是否在任一授权根内」的判定 —— 两层口径必须一致，否则会出现
+    /// 「沙箱放行、权限拒绝」这类互相矛盾的结论。
+    #[serde(default)]
+    pub extra_working_directories: Vec<WorkingDirectoryPermission>,
+    /// 调用时间戳
+    pub timestamp: DateTime<Utc>,
+    /// Vivian 当前主导情绪标签（如 "joy" / "sadness" / "neutral"）
+    #[serde(default)]
+    pub current_emotion: Option<String>,
+    /// 当前关系阶段（如 "stranger" / "close" / "soulmate"）
+    #[serde(default)]
+    pub intimacy_stage: Option<String>,
+    /// 最近记忆摘要（供工具感知上下文，如"用户最近在聊工作压力"）
+    #[serde(default)]
+    pub recent_memory_summary: Option<String>,
+    /// 工具场景（由情绪/关系阶段推断，控制暴露给 LLM 的工具子集）
+    #[serde(default)]
+    pub tool_scene: ToolScene,
+    /// 当前角色 ID（多角色架构下用于路由到对应角色的 MemoryManager / PsychologyManager / manifest）
+    #[serde(default)]
+    pub char_id: String,
+    /// 当前用户消息原文（供 observe_user 等工具记录 source_text）
+    #[serde(default)]
+    pub user_message: Option<String>,
+    /// 会话级访问级别覆盖（None 时回退全局 runtime config 的 access_level；
+    /// 编程智能体按会话权限设置，实现会话粒度的工具放行控制）
+    #[serde(default)]
+    pub access_level: Option<AgentAccessLevel>,
+    /// Host policy revision; stale approvals and process spawns cannot execute.
+    #[serde(default)]
+    pub policy_epoch: u64,
+    /// 调用方智能体类型："chat"（陪伴对话）/ "work"（编程/工作智能体）
+    ///
+    /// 供场景敏感工具做差异化默认（如 web_search 的默认结果数：聊天 10 / 工作 15）。
+    /// 缺省为 "chat"（主对话链与后台任务均为聊天侧）。
+    #[serde(default)]
+    pub agent_kind: String,
+    /// 委派深度：0 = 顶层智能体，子 agent 内发起的调用为其所在深度（父深度 + 1）。
+    ///
+    /// 两处消费：
+    /// - `work_delegate` 据此拒绝过深委派（递归预算）
+    /// - `work_ask_user` 据此拒绝子 agent 提问——子 agent 面前没有人类应答者，
+    ///   挂起等待会永久阻塞，必须让模型把未决问题写进最终结果带回父级
+    #[serde(default)]
+    pub subagent_depth: usize,
+    /// 本轮实际暴露给模型的工具名（含运行时注入的浏览器工具与自建工具）。
+    ///
+    /// `tool_list` 用它划范围：元工具的价值是「告诉我现在能做什么」，如果它列出
+    /// 一个本轮没注入的工具，模型会照着去调，然后吃一个"未提供"的错误——比没有
+    /// 清单更糟。None 表示调用方没声明（非智能体场景），此时按工作侧全量列。
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// 本轮搜索已经返回可读来源；仅控制读取工具的展示，不授予调用权限。
+    #[serde(default)]
+    pub content_reader_ready: bool,
+}
+
+impl Default for ToolUseContext {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            user_id: String::new(),
+            working_directory: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            extra_working_directories: Vec::new(),
+            timestamp: Utc::now(),
+            current_emotion: None,
+            intimacy_stage: None,
+            recent_memory_summary: None,
+            tool_scene: ToolScene::Default,
+            char_id: String::new(),
+            user_message: None,
+            access_level: None,
+            policy_epoch: 0,
+            agent_kind: "chat".to_string(),
+            subagent_depth: 0,
+            allowed_tools: None,
+            content_reader_ready: false,
+        }
+    }
+}
+
+impl ToolUseContext {
+    pub fn new(session_id: impl Into<String>, user_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            user_id: user_id.into(),
+            working_directory: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            extra_working_directories: Vec::new(),
+            timestamp: Utc::now(),
+            current_emotion: None,
+            intimacy_stage: None,
+            recent_memory_summary: None,
+            tool_scene: ToolScene::Default,
+            char_id: String::new(),
+            user_message: None,
+            access_level: None,
+            policy_epoch: 0,
+            agent_kind: "chat".to_string(),
+            subagent_depth: 0,
+            allowed_tools: None,
+            content_reader_ready: false,
+        }
+    }
+
+    /// 设置委派深度（子 agent 内发起的调用应为其所在深度）
+    pub fn with_subagent_depth(mut self, depth: usize) -> Self {
+        self.subagent_depth = depth;
+        self
+    }
+
+    /// 设置主工作目录（不再接收第二个参数时保留既有附加目录）
+    pub fn with_working_directory(mut self, dir: impl Into<String>) -> Self {
+        self.working_directory = dir.into();
+        self
+    }
+
+    /// 追加一个附加工作目录（主工作区之外的授权目录）。
+    pub fn with_extra_working_directory(mut self, path: impl Into<String>, read_only: bool) -> Self {
+        let path = path.into();
+        self.extra_working_directories.push(WorkingDirectoryPermission {
+            permissions: if read_only {
+                vec!["read".to_string()]
+            } else {
+                vec!["read".to_string(), "write".to_string(), "delete".to_string()]
+            },
+            is_read_only: read_only,
+            path,
+        });
+        self
+    }
+
+    /// 批量设置附加工作目录（覆盖既有）。
+    pub fn with_extra_working_directories(
+        mut self,
+        dirs: impl IntoIterator<Item = (String, bool)>,
+    ) -> Self {
+        self.extra_working_directories = dirs
+            .into_iter()
+            .map(|(path, read_only)| WorkingDirectoryPermission {
+                permissions: if read_only {
+                    vec!["read".to_string()]
+                } else {
+                    vec!["read".to_string(), "write".to_string(), "delete".to_string()]
+                },
+                is_read_only: read_only,
+                path,
+            })
+            .collect();
+        self
+    }
+
+    /// 相对路径以会话工作目录为基准，供权限检查和实际文件操作共用。
+    /// 不使用进程 cwd，也不在此折叠 `..`，保留沙箱的穿越检查。
+    pub fn resolve_path(&self, path: &str) -> String {
+        let path = path.trim();
+        let p = std::path::Path::new(path);
+        if path.is_empty() || p.is_absolute() || self.working_directory.trim().is_empty() {
+            path.to_string()
+        } else {
+            std::path::Path::new(&self.working_directory).join(p).to_string_lossy().into_owned()
+        }
+    }
+
+    /// 主工作会话的越界读取交给权限确认；子任务仍受上层工作区范围约束。
+    pub fn allows_external_file_reads(&self) -> bool {
+        self.is_work_agent() && self.subagent_depth == 0
+    }
+
+    /// 路径是否落在任一授权工作区内（主工作区 + 附加目录）。
+    ///
+    /// 与沙箱硬闸门、各工具 `validate_input` 共用 [`is_path_within_any`]，
+    /// 保证「是否在授权范围内」在全链路只有一个判定口径。
+    pub fn is_path_authorized(&self, path: &str) -> bool {
+        // Companion cwd is the application's launch directory, not a workspace
+        // selected by the user. Its file operations still require permission.
+        if !self.is_work_agent() || self.subagent_depth == 0 && self.access_level == Some(AgentAccessLevel::FullControl) { return true; }
+        is_path_within_any(
+            path,
+            &self.working_directory,
+            self.extra_working_directories.iter().map(|d| d.path.as_str()),
+        )
+    }
+
+    pub fn is_path_writable(&self, path: &str) -> bool {
+        if !self.is_path_authorized(path) || self.access_level == Some(AgentAccessLevel::ReadOnly) { return false; }
+        let in_primary = !self.working_directory.is_empty() && is_path_within(path, &self.working_directory);
+        let mount = self.extra_working_directories.iter().filter(|dir| is_path_within(path, &dir.path)
+            && (!in_primary || dir.path.len() >= self.working_directory.len()))
+            .max_by_key(|dir| dir.path.len());
+        mount.is_none_or(|dir| !dir.is_read_only && dir.permissions.iter().any(|p| p == "write" || p == "*"))
+    }
+
+    /// 设置调用方智能体类型（"chat" / "work"）
+    pub fn with_agent_kind(mut self, kind: impl Into<String>) -> Self {
+        self.agent_kind = kind.into();
+        self
+    }
+
+    /// 是否来自工作智能体（编程 / 子代理 / 工作会话）
+    pub fn is_work_agent(&self) -> bool {
+        self.agent_kind == "work"
+    }
+
+    pub fn with_emotion(mut self, emotion: impl Into<String>) -> Self {
+        self.current_emotion = Some(emotion.into());
+        self.recompute_scene();
+        self
+    }
+
+    pub fn with_intimacy_stage(mut self, stage: impl Into<String>) -> Self {
+        self.intimacy_stage = Some(stage.into());
+        self.recompute_scene();
+        self
+    }
+
+    pub fn with_memory_summary(mut self, summary: impl Into<String>) -> Self {
+        self.recent_memory_summary = Some(summary.into());
+        self
+    }
+
+    pub fn with_char_id(mut self, char_id: impl Into<String>) -> Self {
+        self.char_id = char_id.into();
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    pub fn with_user_message(mut self, msg: impl Into<String>) -> Self {
+        self.user_message = Some(msg.into());
+        self
+    }
+
+    /// 根据当前情绪/关系阶段重新计算工具场景
+    pub fn recompute_scene(&mut self) {
+        self.tool_scene = ToolScene::from_context(
+            self.intimacy_stage.as_deref(),
+            self.current_emotion.as_deref(),
+        );
+    }
+}
+
+/// 工具错误码
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ToolErrorCode {
+    UnknownError,
+    ToolNotFound,
+    InvalidInput,
+    PermissionDenied,
+    UserDenied,
+    TimeoutError,
+}
+
+impl ToolErrorCode {
+    /// 获取错误码对应的详细信息和建议
+    pub fn get_error_info(&self) -> ToolErrorInfo {
+        match self {
+            ToolErrorCode::UnknownError => ToolErrorInfo {
+                name: "UnknownError".to_string(),
+                code: 0,
+                suggestion: "发生了未知错误，请重试或联系开发者。".to_string(),
+            },
+            ToolErrorCode::ToolNotFound => ToolErrorInfo {
+                name: "ToolNotFound".to_string(),
+                code: 1,
+                suggestion: "工具不存在，请检查工具名称是否正确，或使用 tool_list 查看可用工具。".to_string(),
+            },
+            ToolErrorCode::InvalidInput => ToolErrorInfo {
+                name: "InvalidInput".to_string(),
+                code: 2,
+                suggestion: "输入参数格式不正确，请检查参数类型和必填项。".to_string(),
+            },
+            ToolErrorCode::PermissionDenied => ToolErrorInfo {
+                name: "PermissionDenied".to_string(),
+                code: 3,
+                suggestion: "权限不足，需要用户授权或切换到自动模式。".to_string(),
+            },
+            ToolErrorCode::UserDenied => ToolErrorInfo {
+                name: "UserDenied".to_string(),
+                code: 400,
+                suggestion: "用户拒绝了操作，请不要重复尝试。".to_string(),
+            },
+            ToolErrorCode::TimeoutError => ToolErrorInfo {
+                name: "Timeout".to_string(),
+                code: 4,
+                suggestion: "操作超时，请重试或尝试简化操作。".to_string(),
+            },
+        }
+    }
+}
+
+/// 工具错误信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolErrorInfo {
+    pub name: String,
+    pub code: i32,
+    pub suggestion: String,
+}
+
+/// 权限模式
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionMode {
+    /// 默认模式：按规则检查
+    Default,
+    /// 绕过模式：直接允许所有操作
+    Bypass,
+    /// 询问模式：所有操作都需用户确认
+    Ask,
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        PermissionMode::Default
+    }
+}
+
+/// 工具风险分级
+///
+/// 按副作用范围从低到高排序，越高表示对系统/用户环境影响越大。
+/// 与 `AgentAccessLevel` 共同决定 `allow` / `ask` / `deny`。
+///
+/// # 定级规则（新工具按此判定，逐条向下匹配，命中即定级）
+///
+/// 1. 会模拟键鼠 / 剪贴板 / 焦点切换吗？→ `InputControl`
+/// 2. 会访问网络或把内容外发出去吗？→ `Network`
+/// 3. 会执行进程 / 拉起后台智能体 / 改变系统状态（壁纸、应用开关）吗？→ `Shell`
+/// 4. 会写入本地文件或持久化数据吗？→ `FsWrite`
+/// 5. 会读取本地文件 / 持久化数据吗？→ `FsRead`
+/// 6. 以上皆否（纯内存态、应用内查询、UI 呈现）→ `Safe`
+///
+/// # 注意
+///
+/// - **不要依赖 trait 默认值**。`Tool::risk()` 缺省返回 `Safe`，即「任何访问级别
+///   下都不弹确认」。有副作用的工具必须显式覆盖，否则等于悄悄放行。
+/// - `Safe` 只表示「无副作用」，不表示「不敏感」。截屏类工具虽无副作用，
+///   但仍通过 [`super::permission::is_confirmation_required_tool`] 强制走确认流程。
+/// - 默认采用 `fs-write`（工作区读写 + 网络）；`full-control` 必须由用户显式启用。
+///   已有用户的持久化选择保持不变。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolRiskTier {
+    /// 无副作用：纯查询、内存态、应用内数据读取、UI 呈现
+    Safe,
+    /// 文件系统读取：read_file / list_dir / grep_search / 历史与记忆检索
+    FsRead,
+    /// 文件系统写入：write_file / edit_file / 记忆、日记、待办、日程落盘
+    FsWrite,
+    /// 进程与系统控制：run_command / 应用开关 / 壁纸切换 / 后台智能体委派
+    Shell,
+    /// 网络访问：web_search / open_url / 远程 API 调用
+    Network,
+    /// 输入控制：键鼠模拟 / 剪贴板 / 焦点切换
+    InputControl,
+}
+
+impl ToolRiskTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolRiskTier::Safe => "safe",
+            ToolRiskTier::FsRead => "fs-read",
+            ToolRiskTier::FsWrite => "fs-write",
+            ToolRiskTier::Shell => "shell",
+            ToolRiskTier::Network => "network",
+            ToolRiskTier::InputControl => "input-control",
+        }
+    }
+}
+
+/// Agent 访问级别
+///
+/// 由 `config.tools.access_level` 配置，决定当前会话允许执行的风险等级。
+/// 级别从低到高，高级别包含低级别权限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentAccessLevel {
+    /// 只读：允许 Safe 与 FsRead 工具（无副作用查询、文件读取）
+    ReadOnly,
+    /// 文件读取：+ FsRead
+    FsRead,
+    /// 文件写入：+ FsWrite + Network（可联网搜索）
+    FsWrite,
+    /// 完全控制：+ Shell + InputControl
+    FullControl,
+}
+
+impl AgentAccessLevel {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "read-only" | "readonly" => Self::ReadOnly,
+            "fs-write" | "fswrite" => Self::FsWrite,
+            "full-control" | "fullcontrol" | "full" => Self::FullControl,
+            _ => Self::FsRead,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::FsRead => "fs-read",
+            Self::FsWrite => "fs-write",
+            Self::FullControl => "full-control",
+        }
+    }
+}
+
+/// 权限网关矩阵：访问级别 × 工具风险 → 行为
+///
+/// 规则：
+/// - Safe 工具在所有级别下允许
+/// - 工具风险 ≤ 当前访问级别时允许
+/// - 工具风险 = 下一级时需要询问
+/// - 工具风险超出当前级别两级以上时拒绝
+pub fn policy_for(access: AgentAccessLevel, risk: ToolRiskTier) -> PermissionBehavior {
+    use PermissionBehavior::*;
+    // Safe 永远允许
+    if risk == ToolRiskTier::Safe {
+        return Allow;
+    }
+    // 只读级别也能读取文件；写入、命令及联网仍按原矩阵限制。
+    if access == AgentAccessLevel::ReadOnly && risk == ToolRiskTier::FsRead {
+        return Allow;
+    }
+    // FullControl 永远允许（除 InputControl 询问以保留兜底）
+    if access == AgentAccessLevel::FullControl {
+        return if risk == ToolRiskTier::InputControl { Ask } else { Allow };
+    }
+    // Network 单独处理：一维 ordinal 无法表达"FsWrite 包含 Network 但不包含 Shell"
+    // （Network ordinal 高于 Shell，通用矩阵会在 FsRead/FsWrite 级别误判为 Deny）
+    if risk == ToolRiskTier::Network {
+        return match access {
+            AgentAccessLevel::ReadOnly => Deny,
+            AgentAccessLevel::FsRead => Ask,
+            AgentAccessLevel::FsWrite | AgentAccessLevel::FullControl => Allow,
+        };
+    }
+    // Shell 单独处理：启动/关闭应用等 Shell 工具在中间级别一律询问，
+    // FullControl 才直接放行（open_application 另有信任列表快速通道兜底）
+    if risk == ToolRiskTier::Shell {
+        return match access {
+            AgentAccessLevel::ReadOnly => Deny,
+            AgentAccessLevel::FullControl => Allow,
+            AgentAccessLevel::FsRead | AgentAccessLevel::FsWrite => Ask,
+        };
+    }
+    // 计算等级差：access 的最大允许风险
+    let access_max = match access {
+        AgentAccessLevel::ReadOnly => ToolRiskTier::Safe,
+        AgentAccessLevel::FsRead => ToolRiskTier::FsRead,
+        AgentAccessLevel::FsWrite => ToolRiskTier::FsWrite,
+        AgentAccessLevel::FullControl => ToolRiskTier::InputControl,
+    };
+    if risk <= access_max {
+        Allow
+    } else if risk as u8 - access_max as u8 == 1 {
+        Ask
+    } else {
+        Deny
+    }
+}
+
+/// 权限行为
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionBehavior {
+    /// 允许
+    Allow,
+    /// 拒绝
+    Deny,
+    /// 需要询问
+    Ask,
+    /// 透传（由上层决定）
+    Passthrough,
+}
+
+/// 权限检查结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionResult {
+    /// 权限行为
+    pub behavior: PermissionBehavior,
+    /// 提示消息
+    pub message: String,
+    /// 更新后的输入参数（权限层可调整）
+    pub updated_input: Option<Value>,
+}
+
+impl Default for PermissionResult {
+    fn default() -> Self {
+        Self {
+            behavior: PermissionBehavior::Passthrough,
+            message: String::new(),
+            updated_input: None,
+        }
+    }
+}
+
+impl PermissionResult {
+    pub fn allow() -> Self {
+        Self {
+            behavior: PermissionBehavior::Allow,
+            message: String::new(),
+            updated_input: None,
+        }
+    }
+
+    pub fn allow_with_input(updated_input: Value) -> Self {
+        Self {
+            behavior: PermissionBehavior::Allow,
+            message: String::new(),
+            updated_input: Some(updated_input),
+        }
+    }
+
+    pub fn deny(message: impl Into<String>) -> Self {
+        Self {
+            behavior: PermissionBehavior::Deny,
+            message: message.into(),
+            updated_input: None,
+        }
+    }
+
+    pub fn ask(message: impl Into<String>) -> Self {
+        Self {
+            behavior: PermissionBehavior::Ask,
+            message: message.into(),
+            updated_input: None,
+        }
+    }
+
+    pub fn passthrough(message: impl Into<String>) -> Self {
+        Self {
+            behavior: PermissionBehavior::Passthrough,
+            message: message.into(),
+            updated_input: None,
+        }
+    }
+
+    pub fn is_allowed(&self) -> bool {
+        self.behavior == PermissionBehavior::Allow
+    }
+
+    pub fn is_denied(&self) -> bool {
+        self.behavior == PermissionBehavior::Deny
+    }
+
+    pub fn requires_confirmation(&self) -> bool {
+        matches!(self.behavior, PermissionBehavior::Ask | PermissionBehavior::Passthrough)
+    }
+}
+
+/// 验证结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    /// 是否通过
+    pub result: bool,
+    /// 提示消息
+    pub message: String,
+    /// 错误码
+    pub error_code: i32,
+    /// 验证后的输入参数（含 schema 默认值/类型转换）
+    pub data: Option<Value>,
+}
+
+impl Default for ValidationResult {
+    fn default() -> Self {
+        Self {
+            result: true,
+            message: String::new(),
+            error_code: 0,
+            data: None,
+        }
+    }
+}
+
+impl ValidationResult {
+    pub fn success(data: Option<Value>) -> Self {
+        Self {
+            result: true,
+            message: String::new(),
+            error_code: 0,
+            data,
+        }
+    }
+
+    pub fn failure(message: impl Into<String>, error_code: i32) -> Self {
+        Self {
+            result: false,
+            message: message.into(),
+            error_code,
+            data: None,
+        }
+    }
+}
+
+/// 权限上下文
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionContext {
+    /// 权限模式
+    pub mode: PermissionMode,
+    /// Agent 访问级别（与工具 risk() 共同决定 allow/ask/deny）
+    #[serde(default = "default_access_level_enum")]
+    pub access_level: AgentAccessLevel,
+    /// 额外工作目录（路径 → 权限集合）
+    pub additional_working_directories: HashMap<String, WorkingDirectoryPermission>,
+    /// 始终允许的工具规则
+    #[serde(default)]
+    pub always_allow: Vec<String>,
+    /// 始终拒绝的工具规则
+    #[serde(default)]
+    pub always_deny: Vec<String>,
+    /// 始终询问的工具规则
+    #[serde(default)]
+    pub always_ask: Vec<String>,
+}
+
+fn default_access_level_enum() -> AgentAccessLevel {
+    AgentAccessLevel::FsWrite
+}
+
+/// 工作目录权限
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkingDirectoryPermission {
+    /// 路径
+    pub path: String,
+    /// 允许的操作（read/write/delete）
+    pub permissions: Vec<String>,
+    /// 是否只读
+    pub is_read_only: bool,
+}
+
+impl Default for PermissionContext {
+    fn default() -> Self {
+        Self {
+            mode: PermissionMode::Default,
+            access_level: AgentAccessLevel::FsWrite,
+            additional_working_directories: HashMap::new(),
+            always_allow: Vec::new(),
+            always_deny: Vec::new(),
+            always_ask: Vec::new(),
+        }
+    }
+}
+
+impl PermissionContext {
+    pub fn new(mode: PermissionMode) -> Self {
+        Self {
+            mode,
+            ..Default::default()
+        }
+    }
+
+    pub fn with_access_level(mut self, level: AgentAccessLevel) -> Self {
+        self.access_level = level;
+        self
+    }
+
+    pub fn is_bypass_mode(&self) -> bool {
+        self.mode == PermissionMode::Bypass
+    }
+
+    pub fn is_ask_mode(&self) -> bool {
+        self.mode == PermissionMode::Ask
+    }
+
+    /// 添加工作目录
+    pub fn add_working_directory(&mut self, path: impl Into<String>, read_only: bool) {
+        let path = path.into();
+        self.additional_working_directories.insert(
+            path.clone(),
+            WorkingDirectoryPermission {
+                path,
+                permissions: if read_only {
+                    vec!["read".to_string()]
+                } else {
+                    vec!["read".to_string(), "write".to_string(), "delete".to_string()]
+                },
+                is_read_only: read_only,
+            },
+        );
+    }
+
+    /// 检查路径是否在工作目录中
+    ///
+    /// 与 [`check_file_permission`](super::permission::check_file_permission)
+    /// 共用 [`is_path_within`]，保证「是否在授权目录内」在全链路只有一个判定口径。
+    pub fn is_path_in_working_directory(&self, path: &str) -> bool {
+        self.additional_working_directories
+            .values()
+            .any(|wd| is_path_within(path, &wd.path))
+    }
+
+    /// 获取工作目录权限
+    ///
+    /// 与 [`check_file_permission`](super::permission::check_file_permission) 一样取
+    /// **最长匹配**：工作区可以互相嵌套，取第一个匹配会让结论随 HashMap 迭代顺序摆动。
+    pub fn get_working_directory_permissions(&self, path: &str) -> Option<&[String]> {
+        self.additional_working_directories
+            .values()
+            .filter(|wd| is_path_within(path, &wd.path))
+            .max_by_key(|wd| wd.path.len())
+            .map(|wd| wd.permissions.as_slice())
+    }
+}
+
+/// 路径规范化（解析 `..`/`.`，统一分隔符）
+///
+/// 注意：必须真正"解析" `..`（弹出上一级）而非简单过滤，
+/// 否则 `/a/b/../c` 会被错算成 `/a/b/c`，导致权限检查评估的路径
+/// 与操作系统实际访问的路径不一致（如 `/wd/../../etc` 被误判仍在 `/wd` 内）。
+pub fn normalize_path(path: &str) -> String {
+    use std::path::{Component, PathBuf};
+
+    let p = PathBuf::from(path);
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+/// 以路径组件而非字符串前缀判断 path 是否位于 root 内。
+///
+/// 字符串前缀会把相邻同名前缀目录误认成授权目录的子路径；
+/// Path::starts_with 按组件比较，可保持工作区授权边界封闭。
+pub fn is_path_within(path: &str, root: &str) -> bool {
+    if path.trim().is_empty() || root.trim().is_empty() { return false; }
+    // Existing ancestors include junctions; a new file below an escaping link
+    // must be checked against its actual target, rather than the link's name.
+    fn resolved(path: &str) -> String {
+        let mut ancestor = std::path::PathBuf::from(path);
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(real) = std::fs::canonicalize(&ancestor) { ancestor = real; break; }
+            let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else { break; };
+            suffix.push(name);
+            if !ancestor.pop() { break; }
+        }
+        for part in suffix.iter().rev() { ancestor.push(part); }
+        let text = ancestor.to_string_lossy();
+        let text = if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else { text.strip_prefix(r"\\?\").unwrap_or(&text).to_string() };
+        normalize_path(&text)
+    }
+    let normalized_path = resolved(path);
+    let normalized_root = resolved(root);
+    std::path::Path::new(&normalized_path)
+        .starts_with(std::path::Path::new(&normalized_root))
+}
+
+/// 路径是否落在任一授权工作区内（主工作区 + 附加工作区集合）。
+///
+/// 全链路唯一的「是否在授权范围内」判定：沙箱硬闸门、各工具 `validate_input` 与
+/// 权限层的归属检查都走这里，避免出现「沙箱放行、权限拒绝」这类互相矛盾的结论。
+///
+/// 主工作区为空串时视为「无目录沙箱」，一律返回 true —— 无工作区模式依赖这一点：
+/// 文件操作走绝对路径，写入是否放行交给权限层向用户确认。
+pub fn is_path_within_any<'a>(
+    path: &str,
+    primary: &str,
+    extras: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if primary.is_empty() {
+        return true;
+    }
+    is_path_within(path, primary) || extras.into_iter().any(|dir| is_path_within(path, dir))
+}
+
+/// 工具定义（用于序列化和传输）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    pub is_read_only: bool,
+    pub category: String,
+}
+
+/// 工具语义类别：决定工具循环结束后的人设回迁方式
+///
+/// 原生 function calling 的 ReAct 循环收尾时需要知道本轮工具产出的是
+/// "信息"还是"状态变更"：
+/// - [`ToolSemantics::Retrieval`]：产出供用户消费的信息（搜索/记忆/读取类），
+///   收尾注入 relay prompt，让角色用自己的语气转述关键内容
+/// - [`ToolSemantics::Action`]：改变世界状态（写入/开关/发送类），收尾直接确认
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSemantics {
+    /// 检索类：产出信息，收尾需转述
+    Retrieval,
+    /// 动作类：改变状态，收尾直接确认
+    Action,
+}
+
+/// 工具的能力面向：认知（大脑）与执行（手脚）。
+///
+/// 这是**决策语义**，不是权限等级：两类工具都可以读写，区别在于结果用来"想"还是"做"。
+/// - [`ToolFacet::Brain`]：记忆、日记、笔记、跨会话检索、联网取证。产出的是"我知道什么"，
+///   用来回忆、判断、回答；写记忆/写日记也属于这里——它改变的是内部认知，不是外部世界。
+/// - [`ToolFacet::Limb`]：桌面操作、终端/命令、文件写入、浏览器自动化、媒体/壁纸、角色动作。
+///   内部是"我对世界做了什么"；这类调用有外部副作用，通常伴随沙箱与确认。
+///
+/// 用途：闲聊场景给认知面更多完整 schema 预算（先想再答），执行面默认延迟到真正需要动手时；
+/// 延迟工具索引按面向分组，让模型先判断"这事要回忆还是要操作"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolFacet {
+    /// 认知面：记忆 / 日记 / 笔记 / 知识检索
+    Brain,
+    /// 执行面：操作电脑 / 改变外部状态
+    Limb,
+}
+
+impl ToolFacet {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ToolFacet::Brain => "brain",
+            ToolFacet::Limb => "limb",
+        }
+    }
+}
+
+/// 工具 trait - 所有工具必须实现的核心接口
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// 工具名称
+    fn name(&self) -> &str;
+
+    /// 工具描述
+    fn description(&self) -> &str;
+
+    /// 按界面语言返回工具描述，用于 ToolSemanticFilter 语义匹配与多语言 prompt 注入
+    ///
+    /// `lang` 已归一化为 "zh"/"en"/"ja"。默认实现 fallback 到 `description()`（英文），
+    /// 具体工具可 override 提供 ZH/JA 版本，让用户输入语言与工具描述语言对齐以提升语义匹配精度。
+    fn description_in(&self, lang: &str) -> &str {
+        let _ = lang;
+        self.description()
+    }
+
+    /// 使用场景语料：用户可能怎么开口，才会用到这个工具
+    ///
+    /// 语义筛选是拿用户输入的嵌入去匹配工具的嵌入。若只嵌 `description`
+    /// （如"打开一个应用程序"），匹配发生在"功能描述 ↔ 自然语言提问"之间，
+    /// 两种说法不同构，精度有限。这里让工具自带一批真实可能的用户说法，
+    /// 检索时与描述一并嵌入，把匹配拉回"用户说法 ↔ 用户说法"的同一空间。
+    ///
+    /// 默认返回空串（表示无额外语料，仅用描述），工具可按需 override。
+    /// 内容不必逐字匹配——它的作用是把向量拉进同一个邻域。
+    fn usage_corpus(&self, _lang: &str) -> &'static str {
+        ""
+    }
+
+    /// 输入参数 JSON Schema
+    fn parameters_schema(&self) -> Value;
+
+    /// 按界面语言返回输入参数 JSON Schema（参数 description 字段本地化）
+    ///
+    /// `lang` 已归一化为 "zh"/"en"/"ja"。默认实现 fallback 到 `parameters_schema()`（英文），
+    /// 具体工具可 override 提供 ZH/JA 版本，让心智页模板预览的参数说明与界面语言一致。
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        let _ = lang;
+        self.parameters_schema()
+    }
+
+    /// 验证输入参数
+    async fn validate_input(
+        &self,
+        input: &Value,
+        context: &ToolUseContext,
+    ) -> ValidationResult;
+
+    /// 检查权限
+    async fn check_permissions(
+        &self,
+        input: &Value,
+        context: &ToolUseContext,
+    ) -> PermissionResult;
+
+    /// 执行工具
+    async fn call(&self, args: Value, context: &ToolUseContext) -> ToolResult;
+
+    /// 是否只读操作
+    fn is_read_only(&self) -> bool;
+
+    /// Opt in only when identical caller context and arguments may reuse a result.
+    /// Read-only alone says nothing about freshness (files, desktop state, MCP,
+    /// tool discovery and memory can change outside the tool executor).
+    fn is_cacheable(&self) -> bool {
+        false
+    }
+
+    /// 工具语义：工具循环收尾方式的判定依据
+    ///
+    /// 默认从 [`Tool::is_read_only`] 推导——只读工具产出信息，归检索类。
+    /// 个别写入型但需要角色转述结论的工具（如观察记录）可覆盖。
+    fn semantics(&self) -> ToolSemantics {
+        if self.is_read_only() {
+            ToolSemantics::Retrieval
+        } else {
+            ToolSemantics::Action
+        }
+    }
+
+    /// 工具面向：认知（大脑）还是执行（手脚）。
+    ///
+    /// 默认按 [`Tool::category`] 推导：`Memory` / `Web` 是认知面（记忆、笔记、检索到的知识），
+    /// 其余（System / File / Media / Pet / Mcp）是执行面（操作机器或改变外部状态）。
+    /// 注意它与 [`Tool::semantics`] 是两条轴：`save_memory` 是 Action（写入）但属于 Brain；
+    /// `computer_state` 是 Retrieval（只读）但属于 Limb。
+    fn facet(&self) -> ToolFacet {
+        match self.category() {
+            ToolCategory::Memory | ToolCategory::Web => ToolFacet::Brain,
+            _ => ToolFacet::Limb,
+        }
+    }
+
+    /// 工具类别
+    fn category(&self) -> ToolCategory;
+
+    /// 是否为智能体自进化创造的非默认工具（自建工具）
+    ///
+    /// 默认 false；`DynamicTool`（自建工具）覆盖为 true。
+    /// 供前端设置页以特殊样式区分展示。
+    fn is_custom(&self) -> bool {
+        false
+    }
+
+    /// 是否破坏性操作（默认 false）
+    fn is_destructive(&self) -> bool {
+        false
+    }
+
+    /// 本次调用的执行预算（覆盖执行器的外层超时）。
+    ///
+    /// 外层超时（`executor::get_tool_timeout`）是**按工具名**登记的静态值，
+    /// 而部分工具的耗时由**调用参数**决定——`run_command` 的 `timeout_secs`
+    /// 最高可到 600 秒，外层却固定 120 秒。两层各自计时时外层总是先到，
+    /// 工具内部精心写的「命令执行超时（N 秒）」永远不可达，模型只收到一句
+    /// 无信息量的「操作超时」，无法判断是命令跑太久还是卡死。
+    ///
+    /// 覆盖此方法即可让外层放宽到工具自己需要的预算；返回 None 表示沿用
+    /// 静态登记值。
+    fn execution_timeout(&self, _args: &Value) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// 工具风险分级（默认 Safe）
+    ///
+    /// 权限网关根据此返回值与 `AgentAccessLevel` 矩阵决定 allow/ask/deny。
+    /// 副作用越大的工具应返回越高的风险分级。
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::Safe
+    }
+
+    /// 是否始终全量暴露给 LLM（核心工具默认 false，由具体工具覆盖为 true）
+    ///
+    /// true：工具的完整 name + description + schema 始终注入 system prompt / tools 字段
+    /// false：可能被延迟加载（参见 `should_defer`）
+    fn always_load(&self) -> bool {
+        false
+    }
+
+    /// 是否延迟加载（默认 false）
+    ///
+    /// true：初始 prompt 只注入工具名（在 `<available-deferred-tools>` 块中），
+    ///       完整 schema 需要 `tool_search` 取回。
+    /// false：与 `always_load` 配合决定注入方式：
+    ///       - always_load=true → 全量注入
+    ///       - always_load=false && should_defer=false → 全量注入（常用工具）
+    ///       - always_load=false && should_defer=true → 仅注入名字（长尾工具）
+    ///
+    /// 注意：`always_load()` 声明的是"这个工具不能被语义召回挤掉"，不等于
+    /// "每个场景都占一个完整 schema 槽位"。闲聊/后台/低信任场景仍受每场景
+    /// schema 预算约束，超预算时低优先级工具会降级为 Lazy。
+    fn should_defer(&self) -> bool {
+        false
+    }
+
+    /// 一行能力描述（供 ToolSearch 关键词匹配，比 description 短）
+    ///
+    /// 建议 3-10 词，不要与工具名重复的词。
+    /// 例如 wallpaper 工具的 search_hint 可以是 "动态壁纸切换与控制"
+    fn search_hint(&self) -> &str {
+        ""
+    }
+
+    /// 反用例清单：明确告诉 LLM "什么情况下不要调用本工具"
+    ///
+    /// 每条是一个简短的自然语言句子，会被拼接到 description 末尾的
+    /// `Do NOT use this tool for:` 段落。返回空切片表示无反用例约束。
+    ///
+    /// 设计目的：降低 LLM 在语义相近工具间的误调用（如"打开应用"vs"打开网址"）。
+    fn anti_use_cases(&self) -> &[&str] {
+        &[]
+    }
+
+    /// 工具可见性分层：控制本工具在 LLM 上下文中的展示粒度。
+    ///
+    /// 默认实现从现有标志推断：
+    /// - `should_defer=true` → `Deferred`
+    /// - `always_load=true` → `Always`
+    /// - 其余 → `Always`（由渲染层按 category 进一步调整为 `Lazy`）
+    ///
+    /// 个别工具可覆盖此方法以显式指定分层。
+    fn visibility_tier(&self) -> ToolVisibility {
+        if self.should_defer() {
+            ToolVisibility::Deferred
+        } else {
+            ToolVisibility::Always
+        }
+    }
+
+    /// 是否在执行成功后即标志用户目标已完成。
+    ///
+    /// 返回 `true` 时，Executor 会在 `result.success == true` 的情况下
+    /// 自动把 `ToolResult.goal_completed` 置为 `true`；Agent 循环检测到
+    /// 该标志后会立即终止后续工具调用轮次，避免 LLM 在任务已完成的
+    /// 情况下继续推理出多余动作（例如壁纸切换成功后又去 web_search 找图）。
+    ///
+    /// 适用工具：副作用型且"成功即终结"的工具，例如：
+    /// - `wallpaper_set`：壁纸切换成功 = 用户目标达成
+    /// - `open_application`：打开应用成功 = 用户目标达成
+    /// - 媒体播放/暂停、消息发送等
+    ///
+    /// 不适用工具：查询型工具（如 `wallpaper_list` / `web_search` /
+    /// `read_file`），它们只是为后续步骤提供信息，成功不等于任务完成。
+    fn signals_goal_completion(&self) -> bool {
+        false
+    }
+
+    /// 转换为工具定义（含反用例拼接的完整描述）
+    fn to_definition(&self) -> ToolDefinition {
+        let full_desc = self.render_full_description();
+        ToolDefinition {
+            name: self.name().to_string(),
+            description: full_desc,
+            input_schema: self.parameters_schema(),
+            is_read_only: self.is_read_only(),
+            category: self.category().as_str().to_string(),
+        }
+    }
+
+    /// 渲染含反用例的完整描述
+    fn render_full_description(&self) -> String {
+        let base = self.description();
+        let anti = self.anti_use_cases();
+        if anti.is_empty() {
+            return base.to_string();
+        }
+        let mut bullets = String::new();
+        for case in anti {
+            bullets.push_str(&format!("- {}\n", case));
+        }
+        format!("{}\n\nDo NOT use this tool for:\n{}", base, bullets.trim_end())
+    }
+
+    /// 转换为 OpenAI 工具格式（含反用例）
+    fn to_openai_format(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name(),
+                "description": self.render_full_description(),
+                "parameters": self.parameters_schema(),
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod facet_tests {
+    use super::*;
+
+    struct FacetProbe(ToolCategory, bool);
+    #[async_trait]
+    impl Tool for FacetProbe {
+        fn name(&self) -> &str { "facet_probe" }
+        fn description(&self) -> &str { "facet probe" }
+        fn parameters_schema(&self) -> Value { serde_json::json!({"type":"object","properties":{}}) }
+        async fn validate_input(&self, _: &Value, _: &ToolUseContext) -> ValidationResult { ValidationResult::success(None) }
+        async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult { PermissionResult::allow() }
+        async fn call(&self, _: Value, _: &ToolUseContext) -> ToolResult { ToolResult::success(serde_json::json!(null)) }
+        fn is_read_only(&self) -> bool { self.1 }
+        fn category(&self) -> ToolCategory { self.0 }
+    }
+
+    #[test]
+    fn facet_is_cognition_for_memory_and_web_but_limb_for_operations() {
+        for category in [ToolCategory::Memory, ToolCategory::Web] {
+            assert_eq!(FacetProbe(category, true).facet(), ToolFacet::Brain);
+            assert_eq!(FacetProbe(category, false).facet(), ToolFacet::Brain, "写记忆仍是认知面");
+        }
+        for category in [ToolCategory::System, ToolCategory::File, ToolCategory::Media, ToolCategory::Pet, ToolCategory::Mcp] {
+            assert_eq!(FacetProbe(category, true).facet(), ToolFacet::Limb, "只读的桌面观察仍是执行面");
+        }
+    }
+
+    #[test]
+    fn facet_and_semantics_are_independent_axes() {
+        let write_memory = FacetProbe(ToolCategory::Memory, false);
+        assert_eq!(write_memory.facet(), ToolFacet::Brain);
+        assert_eq!(write_memory.semantics(), ToolSemantics::Action);
+        let read_desktop = FacetProbe(ToolCategory::System, true);
+        assert_eq!(read_desktop.facet(), ToolFacet::Limb);
+        assert_eq!(read_desktop.semantics(), ToolSemantics::Retrieval);
+    }
+}

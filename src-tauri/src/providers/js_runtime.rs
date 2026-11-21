@@ -1,0 +1,850 @@
+//! JavaScript 插件宿主（boa_engine）—— 全量 Cordis 式宿主的第一块拼图
+//!
+//! ## 背景
+//!
+//! 我方插件体系是「Rust 核心 + 数据声明式插件」（skills=markdown、tools=JSON+PS 脚本、
+//! mcp=JSON、providers=JSON），插件不携带 Rust 代码，也不携带任意可执行逻辑。
+//! 若要对齐 deepseek-harness / Cordis 的「任意可执行代码插件」，需嵌入一个 JS 引擎，
+//! 让插件贡献 JS 代码（provider 协议、工具处理函数、技能、mcp 配置、生命周期钩子）。
+//!
+//! 这里嵌入 `boa_engine`（纯 Rust 的 ECMAScript 引擎），建立单线程宿主：
+//!
+//! - **单线程模型**：boa 的 `Context` 未实现 `Send`，因此每个宿主独占一个工作线程，
+//!   JS 求值全部发生在该线程；外部通过 mpsc + oneshot 请求/应答。
+//! - **ctx 注入**：求值前向全局注入 `ctx` 宿主对象（`ctx.skill / ctx.tool /
+//!   ctx.provider / ctx.mcp / ctx.on / ctx.log`），以及 `module.exports` 兼容面。
+//! - **贡献注册**：JS 里 `ctx.x(...)` 调用把声明式描述 push 进共享注册表
+//!   （`Arc<Mutex<Vec<JsContribution>>>`），宿主侧据此注册 provider / tool / skill。
+//! - **生命周期**：`ctx.on('load'|'start'|'stop'|'dispose', fn)` 注册回调，
+//!   由 worker 在对应时机按序触发。
+//! - **工具处理函数**：`ctx.tool` 经 JsPluginTool 注册进 ToolSystem，调用通过
+//!   消息通道回到对应 worker；等待期间不占用全局宿主锁。
+//! - **重载与取消**：显式重载先构造新 worker，再提交替换；VM 指令批次之间
+//!   检查截止时间和取消标记，取消后丢弃运行时上下文。
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::future::Future;
+
+use boa_engine::native_function::NativeFunction;
+use boa_engine::object::{JsObject, ObjectInitializer};
+use boa_engine::property::Attribute;
+use boa_engine::{js_string, Context, JsArgs, JsValue, Script, Source};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// 一条 JS 贡献的声明式描述（供宿主侧在 eval 后读取注册）.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsSkillReg {
+    pub namespace: String,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsToolReg {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsProviderReg {
+    pub provider_type: String,
+    /// 声明式 ProtocolSpec 或自定义 spec（任意 JSON）.
+    pub spec: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsMcpReg {
+    pub id: String,
+    pub config: Value,
+}
+
+/// JS 插件贡献的抽象描述（注册表元素）.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JsContribution {
+    Skill(JsSkillReg),
+    Tool(JsToolReg),
+    Provider(JsProviderReg),
+    Mcp(JsMcpReg),
+}
+
+impl JsContribution {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JsContribution::Skill(_) => "skill",
+            JsContribution::Tool(_) => "tool",
+            JsContribution::Provider(_) => "provider",
+            JsContribution::Mcp(_) => "mcp",
+        }
+    }
+    pub fn display_name(&self) -> &str {
+        match self {
+            JsContribution::Skill(s) => &s.name,
+            JsContribution::Tool(t) => &t.name,
+            JsContribution::Provider(p) => &p.provider_type,
+            JsContribution::Mcp(m) => &m.id,
+        }
+    }
+}
+
+/// 宿主侧共享状态（worker 宿主闭包写入，宿主线程只读）.
+#[derive(Default)]
+struct HostState {
+    contributions: Mutex<Vec<JsContribution>>,
+    logs: Mutex<Vec<String>>,
+    last_error: Mutex<Option<String>>,
+    version: Mutex<String>,
+    #[cfg(test)]
+    queued_tool: Mutex<Option<Sender<()>>>,
+}
+
+/// 单条 JS 源脚本（插件目录下一个 `.js` 文件）.
+pub struct JsSourceFile {
+    pub path: PathBuf,
+    pub source: String,
+}
+
+/// 生命周期事件名（对齐 Cordis：load / start / stop / dispose）.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    Load,
+    Start,
+    Stop,
+    Dispose,
+}
+impl Lifecycle {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Lifecycle::Load => "load",
+            Lifecycle::Start => "start",
+            Lifecycle::Stop => "stop",
+            Lifecycle::Dispose => "dispose",
+        }
+    }
+}
+
+/// 向 worker 下发的命令.
+enum Cmd {
+    Load {
+        files: Vec<JsSourceFile>,
+        respond: Sender<Result<usize, String>>,
+    },
+    /// 调用 ctx.tool 注册的处理函数（在 worker 线程内同步求值，宿主侧负责超时）
+    CallTool {
+        name: String,
+        args: Value,
+        respond: Sender<Result<String, String>>,
+    },
+    Shutdown {
+        respond: Sender<()>,
+    },
+    #[cfg(test)]
+    Pause { entered: Sender<()>, release: std::sync::mpsc::Receiver<()> },
+}
+
+/// 宿主侧对外句柄（内部命令通道 + 共享注册表）.
+pub struct JsRuntime {
+    tx: Sender<Cmd>,
+    dir: PathBuf,
+    alive: Arc<AtomicBool>,
+    shared: Arc<HostState>,
+}
+
+/// worker 线程全权持有的对象（boa Context 与其上的 JS 全局句柄）.
+struct Worker {
+    ctx: Context,
+    shared: Arc<HostState>,
+    alive: Arc<AtomicBool>,
+    deadline: Instant,
+    disposing: bool,
+    /// 工具处理函数：tool name → callable JsValue。
+    tool_handlers: JsObject,
+    /// 生命周期回调：event 名 → callable JsValue。
+    events: JsObject,
+}
+
+fn global_obj(ctx: &mut Context, name: &str) -> Option<JsObject> {
+    ctx.global_object()
+        .get(js_string!(name), ctx)
+        .ok()
+        .and_then(|v| v.as_object())
+}
+
+/// 单次 JS 执行的资源上限（Context 级，跨 eval 生效）：
+/// 插件代码不可信——死循环 / 深递归必须被引擎拦截，否则 worker 线程会被
+/// `while (true) {}` 永久占用。boa 0.21 无分配量上限接口，内存膨胀场景由
+/// 循环迭代上限间接兜住 + 装载应答超时（[`LOAD_TIMEOUT`]）作最后防线。
+const JS_MAX_LOOP_ITERATIONS: u64 = 1_000_000;
+const JS_MAX_RECURSION_DEPTH: usize = 192;
+
+/// 装载请求的应答超时：超时说明 worker 卡死（理论上被上述上限兜住，
+/// 这是最后防线）——运行时作废，调用方需重建（重载插件）。
+const LOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 单次 ctx.tool 调用的应答超时（处理函数在 worker 内同步求值；
+/// 引擎递归/循环上限已拦截死循环，超时只是兜底）
+const CALL_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
+
+impl Worker {
+    fn new(shared: Arc<HostState>, alive: Arc<AtomicBool>) -> Self {
+        let mut ctx = Context::default();
+        {
+            let limits = ctx.runtime_limits_mut();
+            limits.set_loop_iteration_limit(JS_MAX_LOOP_ITERATIONS);
+            limits.set_recursion_limit(JS_MAX_RECURSION_DEPTH);
+        }
+        let tool_handlers = ObjectInitializer::new(&mut ctx).build();
+        let events = ObjectInitializer::new(&mut ctx).build();
+        let _ = ctx.register_global_property(
+            js_string!("__plugin_handlers"),
+            tool_handlers.clone(),
+            Attribute::WRITABLE | Attribute::CONFIGURABLE,
+        );
+        let _ = ctx.register_global_property(
+            js_string!("__plugin_events"),
+            events.clone(),
+            Attribute::WRITABLE | Attribute::CONFIGURABLE,
+        );
+        Worker { ctx, shared, alive, deadline:Instant::now()+LOAD_TIMEOUT, disposing:false, tool_handlers, events }
+    }
+
+    /// Yield between VM instruction batches so shutdown and deadlines also stop
+    /// an executing JS loop. A cancelled context is discarded with its worker.
+    fn evaluate(&mut self, source: &str) -> Result<JsValue, String> {
+        let script = Script::parse(Source::from_bytes(source), None, &mut self.ctx)
+            .map_err(|error| error.to_string())?;
+        let mut execution = Box::pin(script.evaluate_async_with_budget(&mut self.ctx, 4096));
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        loop {
+            if (!self.disposing && !self.alive.load(Ordering::Relaxed))
+                || Instant::now() >= self.deadline
+            {
+                self.alive.store(false, Ordering::Relaxed);
+                return Err("JS 执行已取消或超时，运行时已关闭".into());
+            }
+            if let std::task::Poll::Ready(result) = execution.as_mut().poll(&mut context) {
+                return result.map_err(|error| error.to_string());
+            }
+        }
+    }
+    /// 注入 `ctx` 宿主对象与 `module.exports` 兼容面。
+    fn inject_host(&mut self, namespace: &str) -> Result<(), String> {
+        let ns = namespace.to_string();
+        let shared = self.shared.clone();
+        let version_str = self.shared.version.lock().unwrap().clone();
+
+        let log_fn = {
+            let shared = shared.clone();
+            let ns = ns.clone();
+            move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+                let level = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_else(|| "info".to_string());
+                let parts: Vec<String> = args[1..]
+                    .iter()
+                    .map(|v| {
+                        if v.is_object() {
+                            v.to_json(c)
+                                .ok()
+                                .flatten()
+                                .map(|j| serde_json::to_string(&j).unwrap_or_else(|_| "{}".to_string()))
+                                .unwrap_or_else(|| "<obj>".to_string())
+                        } else {
+                            v.clone()
+                                .to_string(c)
+                                .map(|s| s.to_std_string_escaped())
+                                .unwrap_or_else(|_| "<v>".to_string())
+                        }
+                    })
+                    .collect();
+                let line = format!("[js-plugin:{ns}] [{level}] {}", parts.join(" "));
+                {
+                    let mut logs = shared.logs.lock().unwrap();
+                    logs.push(line.clone());
+                    if logs.len() > 500 {
+                        let drain_count = logs.len() - 500;
+                        logs.drain(..drain_count);
+                    }
+                }
+                tracing::info!("{line}");
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let skill_fn = {
+            let shared = shared.clone();
+            let ns = ns.clone();
+            move |_this: &JsValue, args: &[JsValue], _c: &mut Context| {
+                let name = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let desc = args
+                    .get_or_undefined(1)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let body = args
+                    .get_or_undefined(2)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                shared.contributions.lock().unwrap().push(JsContribution::Skill(
+                    JsSkillReg {
+                        namespace: ns.clone(),
+                        name: name.clone(),
+                        description: desc,
+                        body,
+                    },
+                ));
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let tool_fn = {
+            let shared = shared.clone();
+            move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+                let name = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let description = args
+                    .get_or_undefined(1)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let parameters = args
+                    .get_or_undefined(2)
+                    .to_json(c)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                let handler = args.get_or_undefined(3).clone();
+                if handler.is_callable() {
+                    if let Some(h) = global_obj(c, "__plugin_handlers") {
+                        let _ = h.set(js_string!(name.as_str()), handler, false, c);
+                    }
+                }
+                shared.contributions.lock().unwrap().push(JsContribution::Tool(
+                    JsToolReg { name, description, parameters },
+                ));
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let provider_fn = {
+            let shared = shared.clone();
+            move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+                let provider_type = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let spec = args
+                    .get_or_undefined(1)
+                    .to_json(c)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Value::Null);
+                shared.contributions.lock().unwrap().push(JsContribution::Provider(
+                    JsProviderReg { provider_type, spec },
+                ));
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let mcp_fn = {
+            let shared = shared.clone();
+            move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+                let id = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let config = args
+                    .get_or_undefined(1)
+                    .to_json(c)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(Value::Null);
+                shared.contributions.lock().unwrap().push(JsContribution::Mcp(
+                    JsMcpReg { id, config },
+                ));
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let on_fn = {
+            move |_this: &JsValue, args: &[JsValue], c: &mut Context| {
+                let event = args
+                    .get_or_undefined(0)
+                    .as_string()
+                    .map(|s| s.to_std_string_escaped())
+                    .unwrap_or_default();
+                let handler = args.get_or_undefined(1).clone();
+                if handler.is_callable() {
+                    if let Some(e) = global_obj(c, "__plugin_events") {
+                        let _ = e.set(js_string!(event), handler, false, c);
+                    }
+                }
+                Ok(JsValue::undefined())
+            }
+        };
+
+        let plugin_obj = ObjectInitializer::new(&mut self.ctx)
+            .property(
+                js_string!("name"),
+                JsValue::from(js_string!(ns.as_str())),
+                Attribute::READONLY,
+            )
+            .property(
+                js_string!("version"),
+                JsValue::from(js_string!(version_str.as_str())),
+                Attribute::READONLY,
+            )
+            .build();
+
+        let ctx_obj = ObjectInitializer::new(&mut self.ctx)
+            .property(js_string!("apiVersion"), JsValue::from(crate::plugin_contract::PLUGIN_API_VERSION), Attribute::READONLY)
+            .property(js_string!("plugin"), JsValue::from(plugin_obj), Attribute::READONLY)
+            // SAFETY: 各闭包仅捕获 `Arc<HostState>` / `String` 等纯 Rust 数据，
+            // 不含 boa GC 可追踪类型（JsObject / JsValue 等），满足 from_closure 的
+            // 安全不变量（GC 不会在其内部持有/移动句柄）。
+            .function(
+                unsafe { NativeFunction::from_closure(log_fn) },
+                (js_string!("log"), js_string!("log")),
+                2,
+            )
+            .function(
+                unsafe { NativeFunction::from_closure(skill_fn) },
+                (js_string!("skill"), js_string!("skill")),
+                3,
+            )
+            .function(
+                unsafe { NativeFunction::from_closure(tool_fn) },
+                (js_string!("tool"), js_string!("tool")),
+                4,
+            )
+            .function(
+                unsafe { NativeFunction::from_closure(provider_fn) },
+                (js_string!("provider"), js_string!("provider")),
+                2,
+            )
+            .function(
+                unsafe { NativeFunction::from_closure(mcp_fn) },
+                (js_string!("mcp"), js_string!("mcp")),
+                2,
+            )
+            .function(
+                unsafe { NativeFunction::from_closure(on_fn) },
+                (js_string!("on"), js_string!("on")),
+                2,
+            )
+            .build();
+
+        self.ctx
+            .register_global_property(js_string!("ctx"), JsValue::from(ctx_obj), Attribute::WRITABLE | Attribute::CONFIGURABLE)
+            .map_err(|e| format!("注入 ctx 失败: {e}"))?;
+        let module_obj = ObjectInitializer::new(&mut self.ctx).build();
+        self.ctx
+            .register_global_property(js_string!("module"), JsValue::from(module_obj), Attribute::WRITABLE | Attribute::CONFIGURABLE)
+            .map_err(|e| format!("注入 module 失败: {e}"))?;
+        Ok(())
+    }
+
+    fn fire_lifecycle(&mut self, event: Lifecycle) -> Result<(), String> {
+        let handler = self
+            .events
+            .get(js_string!(event.as_str()), &mut self.ctx)
+            .ok()
+            .filter(|v| v.is_callable());
+        let Some(handler) = handler else {
+            return Ok(());
+        };
+        let Some(obj) = handler.as_object() else {
+            return Ok(());
+        };
+        self.ctx.register_global_property(js_string!("__plugin_lifecycle"),obj,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        self.evaluate("__plugin_lifecycle()")
+            .map(|_| ())
+            .map_err(|e| format!("生命周期 {} 回调异常: {e}", event.as_str()))
+    }
+
+    /// 重置全局：以全新空对象替换事件回调 / 工具处理函数表并重新注册到全局
+    /// （比逐键删除简单可靠——对象整体丢弃，旧引用全部失效）。
+    fn reset(&mut self) {
+        self.events = ObjectInitializer::new(&mut self.ctx).build();
+        self.tool_handlers = ObjectInitializer::new(&mut self.ctx).build();
+        let _ = self.ctx.register_global_property(
+            js_string!("__plugin_handlers"),
+            self.tool_handlers.clone(),
+            Attribute::WRITABLE | Attribute::CONFIGURABLE,
+        );
+        let _ = self.ctx.register_global_property(
+            js_string!("__plugin_events"),
+            self.events.clone(),
+            Attribute::WRITABLE | Attribute::CONFIGURABLE,
+        );
+        self.shared.contributions.lock().unwrap().clear();
+        self.shared.logs.lock().unwrap().clear();
+        self.shared.last_error.lock().unwrap().take();
+    }
+
+    /// 装载脚本：停旧贡献（stop 生命周期）→ 重置 → 注入宿主 → 求值 →
+    /// 触发 load → start（进入运行态）。
+    fn load(&mut self, files: Vec<JsSourceFile>, namespace: &str) -> Result<usize, String> {
+        // 对既有脚本先触发 stop（优雅降级）
+        let _ = self.fire_lifecycle(Lifecycle::Stop);
+        self.reset();
+        self.inject_host(namespace)?;
+
+        for f in &files {
+            if let Err(e) = self.evaluate(&f.source) {
+                let msg = format!("求值 {} 失败: {e}", f.path.display());
+                tracing::error!("[JsRuntime] {msg}");
+                *self.shared.last_error.lock().unwrap() = Some(msg.clone());
+                return Err(msg);
+            }
+        }
+        let count = self.shared.contributions.lock().unwrap().len();
+        self.fire_lifecycle(Lifecycle::Load)?;
+        // start：load 成功后触发（此前缺失，ctx.on("start") 注册的回调永远不会执行）
+        self.fire_lifecycle(Lifecycle::Start)?;
+        Ok(count)
+    }
+
+    fn handle_cmd(
+        &mut self,
+        cmd: Cmd,
+        namespace: &str,
+    ) -> bool {
+        match cmd {
+            Cmd::Load { files, respond } => {
+                self.deadline = Instant::now()+LOAD_TIMEOUT;
+                let r = self.load(files, namespace);
+                let _ = respond.send(r);
+            }
+            Cmd::CallTool { name, args, respond } => {
+                self.deadline = Instant::now()+CALL_TOOL_TIMEOUT;
+                let r = self.call_tool(&name, &args);
+                let _ = respond.send(r);
+            }
+            Cmd::Shutdown { respond } => {
+                self.disposing = true;
+                self.deadline = Instant::now()+Duration::from_secs(1);
+                let _ = self.fire_lifecycle(Lifecycle::Stop);
+                let _ = self.fire_lifecycle(Lifecycle::Dispose);
+                let _ = respond.send(());
+                self.shared.last_error.lock().unwrap().take();
+                return false; // 退出循环
+            }
+            #[cfg(test)]
+            Cmd::Pause { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.recv_timeout(Duration::from_secs(5));
+            }
+        }
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    /// 在 worker 线程内调用 ctx.tool 注册的处理函数。
+    ///
+    /// 处理函数存于 `__plugin_handlers`（ctx.tool 声明时写入）。参数 JSON 反序列化
+    /// 为 JsValue 传入，返回值序列化回 JSON。找不到处理函数/调用抛异常返回 Err。
+    fn call_tool(&mut self, name: &str, args: &Value) -> Result<String, String> {
+        let handler = self
+            .tool_handlers
+            .get(js_string!(name), &mut self.ctx)
+            .ok()
+            .filter(|v| v.is_callable());
+        let Some(handler) = handler else {
+            return Err(format!("js 工具处理函数不存在: {name}"));
+        };
+        let Some(fn_obj) = handler.as_object() else {
+            return Err(format!("js 工具处理函数不可调用: {name}"));
+        };
+        let arg_val = JsValue::from_json(args, &mut self.ctx)
+            .map_err(|e| format!("js 工具参数反序列化失败: {e}"))?;
+        self.ctx.register_global_property(js_string!("__plugin_call"),fn_obj,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        self.ctx.register_global_property(js_string!("__plugin_arg"),arg_val,Attribute::WRITABLE | Attribute::CONFIGURABLE).map_err(|error|error.to_string())?;
+        match self.evaluate("__plugin_call(__plugin_arg)") {
+            Ok(result) => {
+                if result.as_object().is_some_and(|object|boa_engine::object::builtins::JsPromise::from_object(object).is_ok()) {
+                    return Err("JS 工具处理函数必须同步返回；外部 I/O 请通过 MCP 或声明式工具注册，不能返回 Promise".into());
+                }
+                let json = result
+                    .to_json(&mut self.ctx)
+                    .map_err(|e| format!("js 工具返回值不可序列化: {e}"))?;
+                match json {
+                    Some(v) if v.is_string() => v
+                        .as_str()
+                        .map(String::from)
+                        .ok_or_else(|| "js 工具返回值异常".into()),
+                    Some(v) => serde_json::to_string(&v)
+                        .map_err(|e| format!("js 工具返回值序列化失败: {e}")),
+                    None => Ok(String::new()),
+                }
+            }
+            Err(e) => Err(format!("js 工具执行异常: {e}")),
+        }
+    }
+}
+
+impl Drop for JsRuntime {
+    fn drop(&mut self) {
+        let (tx, _rx) = channel();
+        let _ = self.tx.send(Cmd::Shutdown { respond: tx });
+        self.alive.store(false, Ordering::Relaxed);
+    }
+}
+
+impl JsRuntime {
+    pub fn is_alive(&self) -> bool { self.alive.load(Ordering::Relaxed) }
+
+    /// 新建宿主。`dir` 为待装载 JS 插件的根目录（递归扫描 `*.js`）；
+    /// `namespace` 用于技能命名空间（`<namespace>/<skill>`）；`watch=true` 启动
+    /// HMR watcher 线程（文件 mtime 变化自动触发重载）。
+    pub fn new(dir: PathBuf, namespace: String, version: String, watch: bool) -> Self {
+        let shared = Arc::new(HostState::default());
+        *shared.version.lock().unwrap() = version;
+        let alive = Arc::new(AtomicBool::new(true));
+
+        let (tx, rx) = channel::<Cmd>();
+        let shared_w = shared.clone();
+        let alive_w = alive.clone();
+        let ns_w = namespace.clone();
+        std::thread::Builder::new()
+            .name(format!("js-plugin-{namespace}"))
+            .spawn(move || {
+                let mut worker = Worker::new(shared_w,alive_w.clone());
+                loop {
+                    match rx.recv() {
+                        Ok(cmd) => {
+                            if !alive_w.load(Ordering::Relaxed) && !matches!(&cmd,Cmd::Shutdown { .. }) { break; }
+                            if !worker.handle_cmd(cmd, &ns_w) {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                alive_w.store(false,Ordering::Relaxed);
+            })
+            .expect("failed to spawn js worker thread");
+
+        // HMR watcher 已移除（生产调用方全部传 watch=false；重载入口是 reload_plugin 命令）
+        let _ = watch;
+
+        JsRuntime { tx, dir, alive, shared }
+    }
+
+    /// 递归扫描根目录下全部 `*.js`，按路径排序。
+    pub fn scan_sources(&self) -> Vec<JsSourceFile> {
+        collect_js(&self.dir)
+    }
+
+    /// 装载（或重载）：停旧贡献、重置全局、求值指定文件集，返回贡献总数。
+    ///
+    /// 桥接层按 manifest `js` glob 展开后调用（非全目录扫描）。
+    /// 应答超时（[`LOAD_TIMEOUT`]）即视为 worker 卡死：运行时作废（alive=false，
+    /// 后续命令不再受理），错误信息指引用户修复插件代码后重载。
+    pub fn reload_with(&self, files: Vec<JsSourceFile>) -> Result<usize, String> {
+        let (respond_tx, respond_rx) = channel();
+        let cmd = Cmd::Load { files, respond: respond_tx };
+        self.tx
+            .send(cmd)
+            .map_err(|e| format!("js worker 已关闭: {e}"))?;
+        match respond_rx.recv_timeout(LOAD_TIMEOUT) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.alive.store(false, Ordering::Relaxed);
+                let msg = format!(
+                    "JS 装载超时（{} 秒）——worker 已作废。请检查插件代码（死循环/超大计算）后重载插件",
+                    LOAD_TIMEOUT.as_secs()
+                );
+                tracing::error!("[JsRuntime] {msg}");
+                Err(msg)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("js worker 无应答".to_string())
+            }
+        }
+    }
+
+    /// 装载（或重载）：停旧贡献、重置全局、求值当前目录全部脚本，返回贡献总数。
+    pub fn reload(&self) -> Result<usize, String> {
+        let files = self.scan_sources();
+        self.reload_with(files)
+    }
+
+    /// 调用 ctx.tool 注册的处理函数（worker 线程内同步求值）。
+    ///
+    /// 应答超时（[`CALL_TOOL_TIMEOUT`]）或 worker 已作废（装载超时/关闭后）
+    /// 返回 Err。worker 在 VM 指令批次之间检查取消和截止时间；超时后
+    /// 丢弃整个 Context，不再处理排队的调用。引擎原生操作不支持抢占。
+    pub fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
+        if !self.alive.load(Ordering::Relaxed) {
+            return Err(format!("js worker 已关闭，无法调用工具 {name}（请重载插件）"));
+        }
+        let (respond_tx, respond_rx) = channel();
+        let cmd = Cmd::CallTool { name: name.to_string(), args, respond: respond_tx };
+        self.tx
+            .send(cmd)
+            .map_err(|e| format!("js worker 已关闭: {e}"))?;
+        #[cfg(test)]
+        if let Some(queued) = self.shared.queued_tool.lock().unwrap().take() { let _ = queued.send(()); }
+        match respond_rx.recv_timeout(CALL_TOOL_TIMEOUT) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let msg = format!(
+                    "js 工具 {name} 执行超时（{} 秒），worker 可能已卡死",
+                    CALL_TOOL_TIMEOUT.as_secs()
+                );
+                tracing::error!("[JsRuntime] {msg}");
+                self.alive.store(false, Ordering::Relaxed);
+                Err(msg)
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                Err("js worker 无应答".to_string())
+            }
+        }
+    }
+
+    /// 最近一次成功装载后收集的贡献快照。
+    pub fn contributions(&self) -> Vec<JsContribution> {
+        self.shared.contributions.lock().unwrap().clone()
+    }
+
+    /// 宿主导出日志（诊断 / 设置页展示）。
+    pub fn logs(&self) -> Vec<String> {
+        self.shared.logs.lock().unwrap().clone()
+    }
+
+    /// 最近一次装载的错误（诊断用）。
+    pub fn last_error(&self) -> Option<String> {
+        self.shared.last_error.lock().unwrap().clone()
+    }
+
+    /// 关闭宿主（幂等）。
+    pub fn shutdown(&self) {
+        let (tx, _rx) = channel();
+        let _ = self.tx.send(Cmd::Shutdown { respond: tx });
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_for_test(&self) -> (std::sync::mpsc::Receiver<()>, Sender<()>) {
+        let (entered, waiting) = channel();
+        let (release, released) = channel();
+        self.tx.send(Cmd::Pause { entered, release:released }).unwrap();
+        (waiting,release)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn notify_next_tool_for_test(&self, queued: Sender<()>) {
+        *self.shared.queued_tool.lock().unwrap() = Some(queued);
+    }
+}
+
+/// 递归收集目录下全部 `.js` 文件.
+fn collect_js(dir: &PathBuf) -> Vec<JsSourceFile> {
+    let mut out = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                if let Ok(source) = std::fs::read_to_string(&path) {
+                    out.push(JsSourceFile { path, source });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_shutdown_interrupts_running_js_and_releases_the_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(JsRuntime::new(directory.path().to_path_buf(),"cancel".into(),"1".into(),false));
+        runtime.reload_with(vec![JsSourceFile { path:directory.path().join("main.js"),source:"ctx.tool('busy','busy',{type:'object'},function(){ctx.log('info','entered-busy');let sum=0;for(let i=0;i<999999;i++){for(let j=0;j<999999;j++){sum+=Math.sqrt(j);}}return sum;});".into() }]).unwrap();
+        let weak = Arc::downgrade(&runtime.shared);
+        let calling = runtime.clone();
+        let call = std::thread::spawn(move ||calling.call_tool("busy",serde_json::json!({})));
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while !runtime.logs().iter().any(|line|line.contains("entered-busy")) {
+            assert!(Instant::now()<deadline,"Worker did not enter the handler");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        runtime.shutdown(); assert!(call.join().unwrap().is_err()); drop(runtime);
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while weak.upgrade().is_some() {
+            assert!(Instant::now()<deadline,"Cancelled worker retained its context");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn extension_api_version_and_async_handler_failures_are_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = JsRuntime::new(dir.path().to_path_buf(), "fixture".into(), "1".into(), false);
+        rt.reload_with(vec![JsSourceFile { path:dir.path().join("main.js"), source:"ctx.tool('version','version',{type:'object'},function(){return ctx.apiVersion;});ctx.tool('async','async',{type:'object'},async function(){return 'hidden';});".into() }]).unwrap();
+        assert_eq!(rt.call_tool("version",serde_json::json!({})).unwrap(),crate::plugin_contract::PLUGIN_API_VERSION.to_string());
+        assert!(rt.call_tool("async",serde_json::json!({})).unwrap_err().contains("Promise"));
+        rt.shutdown();
+    }
+
+    fn probe_script() -> String {
+        r#"
+            ctx.log('info', 'hello plugin');
+            ctx.skill('math', '计算', '你是一个计算助手');
+            ctx.tool('add', '加法', {type:'object',properties:{a:{type:'number'},b:{type:'number'}}}, function(x){ return x; });
+            ctx.provider('acme', { id: 'acme', provider_type: 'acme', request: { message_format: 'chat_completions' } });
+            ctx.mcp('fs', { command: 'npx', args: ['-y','s'] });
+        "#
+        .to_string()
+    }
+
+    #[test]
+    fn contributions_are_captured() {
+        let dir = std::env::temp_dir().join(format!("vivian-js-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe.js"), probe_script()).unwrap();
+        let rt = JsRuntime::new(dir.clone(), "t".into(), "1.0.0".into(), false);
+        let n = rt.reload().expect("reload 应成功");
+        assert_eq!(n, 4);
+        let contribs = rt.contributions();
+        assert_eq!(contribs.len(), 4);
+        assert!(contribs.iter().any(|c| c.kind() == "skill"));
+        assert!(contribs.iter().any(|c| c.kind() == "tool"));
+        assert!(contribs.iter().any(|c| c.kind() == "provider"));
+        assert!(contribs.iter().any(|c| c.kind() == "mcp"));
+        let logs = rt.logs();
+        assert!(!logs.is_empty());
+        assert!(logs.iter().any(|l| l.contains("[info]")));
+        rt.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

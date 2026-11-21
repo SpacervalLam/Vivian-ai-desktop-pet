@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { ShortcutBackgroundCache } from '../src/utils/shortcutBackgroundCache.ts';
+const values=new Map();const storage=()=>({getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)});
+let samples=0;const sample=()=>{samples++;return 'rgb(240, 220, 40)'};
+const cache=new ShortcutBackgroundCache(storage);
+assert.equal(cache.get('app:application:calc.exe',sample),'rgb(240, 220, 40)');
+cache.get('app:application:calc.exe',sample);assert.equal(samples,1);
+const restarted=new ShortcutBackgroundCache(storage);restarted.get('app:application:calc.exe',sample);assert.equal(samples,1,'restart restores color without reading pixels');
+restarted.get('app:application:other.exe',sample);assert.equal(samples,2,'target change samples the new icon once');
+const blocked=new ShortcutBackgroundCache(()=>{throw Error('blocked')});blocked.get('a',sample);blocked.get('a',sample);assert.equal(samples,3,'unavailable storage still caches within the session');
+assert.throws(()=>cache.get('retry',()=>{throw Error('not loaded')}));cache.get('retry',sample);assert.equal(samples,4,'failed sampling does not poison the cache');
+console.log('Shortcut backgrounds: sample once, persistent reuse, target invalidation, storage fallback and retry passed.');

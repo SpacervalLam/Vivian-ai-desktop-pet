@@ -1,0 +1,17 @@
+.screen-watch { box-sizing: border-box; height: 100vh; overflow: auto; padding: 18px 20px; background: #17232b; color: #eaf3f4; font: 13px/1.55 'Segoe UI', sans-serif; }
+.screen-watch header { display: flex; align-items: center; gap: 8px; }
+.watch-dot { width: 9px; height: 9px; border-radius: 50%; background: #a8b2b8; }
+.watch-dot.is-sharing { background: #ff6b69; box-shadow: 0 0 0 4px #ff6b6920; }
+.watch-clock { margin-left: auto; color: #b6c7cf; font-variant-numeric: tabular-nums; }
+.screen-watch h1 { font-size: 17px; margin: 12px 0 2px; }
+.watch-dimensions { color: #b6c7cf; font-size: 11px; }
+.screen-watch p { margin: 9px 0; }
+.screen-watch .watch-small { font-size: 11px; color: #b6c7cf; }
+.watch-reason, .watch-error { color: #ffbd99; }
+.watch-description { border-left: 2px solid #72c7b8; padding-left: 10px; white-space: pre-wrap; }
+.screen-watch footer { display: flex; gap: 10px; position: sticky; bottom: -18px; background: #17232b; padding: 12px 0 4px; }
+.screen-watch button { cursor: pointer; border: 1px solid #657c87; border-radius: 8px; padding: 7px 12px; background: #263b46; color: #eaf3f4; font: inherit; }
+.screen-watch .watch-start { background: #245e56; border-color: #69c0af; }
+.screen-watch .watch-stop { margin-left: auto; border-color: #e6968e; color: #ffd0ca; }
+.screen-watch button:disabled { opacity: .45; cursor: default; }
+.screen-watch button:focus-visible { outline: 2px solid #9de6d6; outline-offset: 3px; }

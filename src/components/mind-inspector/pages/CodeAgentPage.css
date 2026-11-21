@@ -1,0 +1,7217 @@
+/* ==========================================================================
+   CodeAgentPage — Codex 布局 + 手账风格样式
+   --------------------------------------------------------------------------
+   - 布局仿 Codex：左侧任务会话栏 / 中央对话流 / 右侧检查器
+   - 视觉：手账纸张、纸胶带、便签、线格纸输入区、印章式圆钮
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   手账调色板载体
+   --------------------------------------------------------------------------
+   只负责定义设计变量与纸面质感，供**整个心智观察器子树**继承（工作页、
+   心智/日记页、记忆窗口都挂这个类）。
+
+   刻意与工作页作用域分开：早先两者共用 `.codex-root` 一个类，导致写在工作页
+   样式表里的选择器会顺着祖先链命中整个观察器窗口——工作页的规则去改别处的
+   滚动条和按钮。一个类只表达一件事。
+   -------------------------------------------------------------------------- */
+.codex-theme {
+  /* 手账纸面（始终暖纸，不随应用深浅主题切换，避免手账质感丢失） */
+  --codex-paper: #f6efe1;
+  --codex-paper-deep: #eee4cf;
+  --codex-paper-card: #fffcf3;
+  --codex-paper-grid: rgba(83, 125, 150, 0.08);
+  --codex-ink: #3b3428;
+  --codex-ink-soft: #6b6158;
+  --codex-ink-faint: #9a8f7d;
+  --codex-line: #d8ccb4;
+  --codex-line-light: #e5dccb;
+  --codex-accent: #537d96;
+  --codex-accent-deep: #3f6179;
+  --codex-accent-soft: rgba(83, 125, 150, 0.12);
+  --codex-warm: #c96a57;
+  --codex-warm-soft: rgba(201, 106, 87, 0.12);
+  --codex-success: #5d8a5f;
+  --codex-success-soft: rgba(93, 138, 95, 0.14);
+  --codex-danger: #b3402f;
+  --codex-danger-soft: rgba(179, 64, 47, 0.1);
+  --codex-warning: #b2822a;
+  --codex-warning-soft: rgba(178, 130, 42, 0.16);
+  --codex-tape-yellow: rgba(244, 224, 160, 0.55);
+  --codex-tape-pink: rgba(236, 198, 190, 0.5);
+  --codex-tape-blue: rgba(178, 211, 226, 0.5);
+  --codex-tape-green: rgba(194, 219, 189, 0.5);
+  /* 便利贴（markdown 代码块专用）。比纸面暖一档的黄 —— 只用「更暖 + 更方 + 抬起」
+     三样把「贴上去的那张纸」和「底下的纸」分开，不加折角、不加胶带、不做旋转
+     （旋转会让里面的等宽文本错位、横向滚动条跟着歪，属于「复杂」那一类）。
+     极简主题在 MindInspectorThemes.css 里把这三样全部还原成平面卡片。 */
+  --codex-note-bg: #fbf0c9;
+  --codex-note-line: rgba(160, 132, 62, 0.24);
+  --codex-note-shadow: 0 2px 7px rgba(59, 52, 40, 0.13), 0 1px 2px rgba(59, 52, 40, 0.08);
+  /* 语言标签落在暖黄底上要单独给一档：原 --codex-ink-faint 在 #fffcf3 上是 3.10:1，
+     换到便利贴底会掉到 2.79:1（低于 3:1）。这个值合成后是 3.65:1 —— 过线，
+     但仍明显轻于正文的 10.78:1，保住「语言标签是次要信息」的层级。 */
+  --codex-note-ink-faint: rgba(107, 97, 88, 0.82);
+  --codex-shadow-sm: 0 1px 2px rgba(59, 52, 40, 0.1), 0 1px 3px rgba(59, 52, 40, 0.06);
+  --codex-shadow-md: 0 2px 8px rgba(59, 52, 40, 0.14), 0 1px 2px rgba(59, 52, 40, 0.08);
+  --codex-shadow-lg: 0 10px 28px rgba(59, 52, 40, 0.18), 0 3px 8px rgba(59, 52, 40, 0.1);
+  /* 中文落马善政手写体：Kalam/Segoe Print 无中文字形→自然落到 'Ma Shan Zheng'，
+     后面的 楷体/宋体是离线兜底。这条链与 MindInspectorThemes.css 里
+     .mind-inspector-root[data-ui-style="minimal"] 外壳那段字面量必须逐字一致
+     （check-mind-shell-theme.mjs 会比对），改这里务必同步改那里。 */
+  --codex-font: 'Kalam', 'Ma Shan Zheng', 'Segoe Print', 'STKaiti', 'KaiTi', '楷体', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --codex-mono: 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Consolas, 'Courier New', monospace;
+
+  /* ---------- markdown 排版字体 ----------
+     刻意不复用 --codex-font：那条链首选 'Kalam' 从未引入，回退会一路掉到
+     Microsoft YaHei（黑体），与暖纸信纸风对不上（同样的坑见 .codex-group-menu）。
+
+     **拉丁字体必须排在 Ma Shan Zheng 前面。** CSS 的字体回退是**逐字符**的：取
+     「列表里第一个含有该字符字形的字体」。Ma Shan Zheng 自带拉丁字形，排在首位就会
+     把西文全吃掉 —— 它是毛笔行书体，写西文又斜又软，加粗还只能靠合成粗体糊出来。
+     把西文衬线提到前面：拉丁字符走 EB Garamond → PT Serif → Georgia（Windows 自带）
+     → Times New Roman，中文这些字体都没有字形，自然落到 Ma Shan Zheng。
+     后面的 Noto Serif SC / Songti SC / SimSun 是中文兜底（万一 Ma Shan Zheng 没加载）。 */
+  --codex-md-font: 'EB Garamond', 'PT Serif', Georgia, 'Times New Roman', 'Ma Shan Zheng', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'SimSun', serif;
+  /* 装饰手写体（标题、表头）：西文先吃在线加载的 Caveat，离线时退到本地自带的
+     Segoe Print，**最后**才轮到 Ma Shan Zheng —— 同一条原则，不让毛笔体写西文。
+     与 .codex-group-menu 用的是同一套栈。 */
+  --codex-md-hand: 'Caveat', 'Segoe Print', 'Dancing Script', 'Ma Shan Zheng', 'KaiTi', '楷体', cursive;
+  /* 手写体只有 400 一个字重，写 700 会被浏览器合成粗体（糊成一坨「加粗黑体」感），
+     所以标题字重也做成变量 —— 极简主题换回无衬线后要覆盖成 600。
+     注意 --codex-md-font 现在首选中含 Georgia 等**有真粗体**的西文衬线，所以
+     strong 里的西文会正常变粗，而中文仍是 400 + 荧光笔底。 */
+  --codex-md-h-weight: 400;
+
+  /* 将整个心智观察器内的 --panel-* 统一为手账暖纸，使所有子页面自动继承 */
+  --panel-bg: #f6efe1;
+  --panel-surface: #fffcf3;
+  --panel-elevated: #fffcf3;
+  --panel-bg-hover: rgba(59, 52, 40, 0.06);
+  --panel-bg-active: rgba(59, 52, 40, 0.1);
+  --panel-bg-surface: rgba(59, 52, 40, 0.04);
+  --panel-bg-surface-elevated: rgba(59, 52, 40, 0.06);
+  --panel-bar-bg: rgba(255, 252, 243, 0.6);
+  --panel-text: #3b3428;
+  --panel-text-secondary: #6b6158;
+  --panel-text-tertiary: #9a8f7d;
+  --panel-text-quaternary: #b8ad9c;
+  --panel-accent: #537d96;
+  --panel-accent-bright: #3f6179;
+  --panel-accent-muted: rgba(83, 125, 150, 0.12);
+  --panel-accent-soft: rgba(83, 125, 150, 0.06);
+  --panel-border: #d8ccb4;
+  --panel-border-hover: #c8bca6;
+  --panel-border-light: #e5dccb;
+  --panel-border-strong: #3b3428;
+  --panel-toggle-off: #d8ccb4;
+  --panel-tag-bg: #fbf4e4;
+  --panel-danger: #b3402f;
+  --panel-success: #5d8a5f;
+  --panel-warning: #b2822a;
+  --panel-info: #537d96;
+  --panel-selected-bg: #537d96;
+  --panel-selected-text: #fffaf0;
+  --panel-shadow-subtle: 0 1px 2px rgba(59, 52, 40, 0.06), 0 1px 3px rgba(59, 52, 40, 0.05);
+  --panel-shadow-card: 0 2px 8px rgba(59, 52, 40, 0.08), 0 1px 2px rgba(59, 52, 40, 0.05);
+  --panel-shadow-elevated: 0 10px 28px rgba(59, 52, 40, 0.12), 0 2px 6px rgba(59, 52, 40, 0.08);
+  --panel-input-bg: #fffcf3;
+  --panel-overlay: rgba(39, 33, 28, 0.35);
+  --panel-scrollbar: rgba(59, 52, 40, 0.22);
+  --panel-scrollbar-hover: rgba(59, 52, 40, 0.34);
+  --panel-sidebar-bg: rgba(255, 252, 243, 0.9);
+  --panel-sidebar-shadow: 0 4px 16px rgba(59, 52, 40, 0.1);
+  --panel-subtle-bg: rgba(59, 52, 40, 0.04);
+  --panel-subtle-border: rgba(59, 52, 40, 0.09);
+  --panel-bubble: #fff7d6;
+  --panel-code-block: #fdf8ec;
+  --panel-code-banner: #fbf4e4;
+  --panel-menu: #fffcf3;
+  --panel-tip: #fbf4e4;
+  --panel-sidebar-fill: #fbf7ee;
+  --panel-violet: rgb(151, 117, 181);
+  --panel-blue-450: rgb(83, 125, 150);
+
+  background-color: var(--codex-paper);
+  background-image:
+    radial-gradient(var(--codex-paper-grid) 1px, transparent 1px);
+  background-size: 22px 22px;
+  font-family: var(--codex-font);
+  color: var(--codex-ink);
+}
+
+/* --------------------------------------------------------------------------
+   工作页作用域
+   --------------------------------------------------------------------------
+   三栏工作台自己的布局与组件样式都收敛在这里。工作页元素同时挂
+   `.codex-theme`（取调色板）与 `.workbench-root`（取布局与组件样式）。
+   -------------------------------------------------------------------------- */
+.workbench-root {
+  position: relative;
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.codex-theme *,
+.codex-theme *::before,
+.codex-theme *::after {
+  box-sizing: border-box;
+}
+
+/* ===================== 深色手账模式 ===================== */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .codex-theme {
+    --codex-paper: #1e1a16;
+    --codex-paper-deep: #241f1a;
+    --codex-paper-card: #2b241e;
+    --codex-paper-grid: rgba(216, 204, 180, 0.07);
+    --codex-ink: #e8e0d2;
+    --codex-ink-soft: #b8ac9a;
+    --codex-ink-faint: #8f867b;
+    --codex-line: #4a4038;
+    --codex-line-light: #3a332d;
+    --codex-accent: #8fb4cc;
+    --codex-accent-deep: #c5dceb;
+    --codex-accent-soft: rgba(143, 180, 204, 0.14);
+    --codex-warm: #d88b78;
+    --codex-warm-soft: rgba(216, 139, 120, 0.16);
+    --codex-success: #9cc3a1;
+    --codex-success-soft: rgba(156, 195, 161, 0.14);
+    --codex-danger: #e58a7a;
+    --codex-danger-soft: rgba(229, 138, 122, 0.14);
+    --codex-warning: #d8a45c;
+    --codex-warning-soft: rgba(216, 164, 92, 0.16);
+    --codex-tape-yellow: rgba(214, 181, 116, 0.25);
+    --codex-tape-pink: rgba(214, 151, 138, 0.22);
+    --codex-tape-blue: rgba(143, 180, 204, 0.24);
+    --codex-tape-green: rgba(156, 195, 161, 0.22);
+    /* 深色手账下的便利贴：靠「比纸面亮一档 + 偏黄」立起来，阴影只负责压边 */
+    --codex-note-bg: #3b3122;
+    --codex-note-line: rgba(216, 204, 180, 0.18);
+    --codex-note-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+    --codex-note-ink-faint: #a1958a;
+    --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+    --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+    --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.55), 0 3px 8px rgba(0, 0, 0, 0.45);
+
+    --panel-bg: #1e1a16;
+    --panel-surface: #2b241e;
+    --panel-elevated: #2b241e;
+    --panel-bg-hover: rgba(232, 224, 210, 0.06);
+    --panel-bg-active: rgba(232, 224, 210, 0.1);
+    --panel-bg-surface: rgba(232, 224, 210, 0.05);
+    --panel-bg-surface-elevated: rgba(232, 224, 210, 0.08);
+    --panel-bar-bg: rgba(43, 36, 30, 0.6);
+    --panel-text: #e8e0d2;
+    --panel-text-secondary: #b8ac9a;
+    --panel-text-tertiary: #8f867b;
+    --panel-text-quaternary: #6e665d;
+    --panel-accent: #8fb4cc;
+    --panel-accent-bright: #c5dceb;
+    --panel-accent-muted: rgba(143, 180, 204, 0.16);
+    --panel-accent-soft: rgba(143, 180, 204, 0.08);
+    --panel-border: #4a4038;
+    --panel-border-hover: #5c5045;
+    --panel-border-light: #3a332d;
+    --panel-border-strong: #e8e0d2;
+    --panel-toggle-off: #4a4038;
+    --panel-tag-bg: #2b241e;
+    --panel-danger: #e58a7a;
+    --panel-success: #9cc3a1;
+    --panel-warning: #d8a45c;
+    --panel-info: #8fb4cc;
+    --panel-selected-bg: #8fb4cc;
+    --panel-selected-text: #1e1a16;
+    --panel-shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+    --panel-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35);
+    --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
+    --panel-input-bg: #2b241e;
+    --panel-overlay: rgba(0, 0, 0, 0.55);
+    --panel-scrollbar: rgba(232, 224, 210, 0.22);
+    --panel-scrollbar-hover: rgba(232, 224, 210, 0.34);
+    --panel-sidebar-bg: rgba(43, 36, 30, 0.9);
+    --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+    --panel-subtle-bg: rgba(232, 224, 210, 0.05);
+    --panel-subtle-border: rgba(232, 224, 210, 0.1);
+    --panel-bubble: #3a3126;
+    --panel-code-block: #241f1a;
+    --panel-code-banner: #2b241e;
+    --panel-menu: #2b241e;
+    --panel-tip: #2b241e;
+    --panel-sidebar-fill: #241f1a;
+    --panel-violet: rgb(177, 145, 210);
+    --panel-blue-450: rgb(143, 180, 204);
+  }
+}
+
+:root[data-theme="dark"] .codex-theme {
+  --codex-paper: #1e1a16;
+  --codex-paper-deep: #241f1a;
+  --codex-paper-card: #2b241e;
+  --codex-paper-grid: rgba(216, 204, 180, 0.07);
+  --codex-ink: #e8e0d2;
+  --codex-ink-soft: #b8ac9a;
+  --codex-ink-faint: #8f867b;
+  --codex-line: #4a4038;
+  --codex-line-light: #3a332d;
+  --codex-accent: #8fb4cc;
+  --codex-accent-deep: #c5dceb;
+  --codex-accent-soft: rgba(143, 180, 204, 0.14);
+  --codex-warm: #d88b78;
+  --codex-warm-soft: rgba(216, 139, 120, 0.16);
+  --codex-success: #9cc3a1;
+  --codex-success-soft: rgba(156, 195, 161, 0.14);
+  --codex-danger: #e58a7a;
+  --codex-danger-soft: rgba(229, 138, 122, 0.14);
+  --codex-warning: #d8a45c;
+  --codex-warning-soft: rgba(216, 164, 92, 0.16);
+  --codex-tape-yellow: rgba(214, 181, 116, 0.25);
+  --codex-tape-pink: rgba(214, 151, 138, 0.22);
+  --codex-tape-blue: rgba(143, 180, 204, 0.24);
+  --codex-tape-green: rgba(156, 195, 161, 0.22);
+  /* 深色手账下的便利贴：同 @media 那块，两处必须一致 */
+  --codex-note-bg: #3b3122;
+  --codex-note-line: rgba(216, 204, 180, 0.18);
+  --codex-note-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --codex-note-ink-faint: #a1958a;
+  --codex-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+  --codex-shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --codex-shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.55), 0 3px 8px rgba(0, 0, 0, 0.45);
+
+  --panel-bg: #1e1a16;
+  --panel-surface: #2b241e;
+  --panel-elevated: #2b241e;
+  --panel-bg-hover: rgba(232, 224, 210, 0.06);
+  --panel-bg-active: rgba(232, 224, 210, 0.1);
+  --panel-bg-surface: rgba(232, 224, 210, 0.05);
+  --panel-bg-surface-elevated: rgba(232, 224, 210, 0.08);
+  --panel-bar-bg: rgba(43, 36, 30, 0.6);
+  --panel-text: #e8e0d2;
+  --panel-text-secondary: #b8ac9a;
+  --panel-text-tertiary: #8f867b;
+  --panel-text-quaternary: #6e665d;
+  --panel-accent: #8fb4cc;
+  --panel-accent-bright: #c5dceb;
+  --panel-accent-muted: rgba(143, 180, 204, 0.16);
+  --panel-accent-soft: rgba(143, 180, 204, 0.08);
+  --panel-border: #4a4038;
+  --panel-border-hover: #5c5045;
+  --panel-border-light: #3a332d;
+  --panel-border-strong: #e8e0d2;
+  --panel-toggle-off: #4a4038;
+  --panel-tag-bg: #2b241e;
+  --panel-danger: #e58a7a;
+  --panel-success: #9cc3a1;
+  --panel-warning: #d8a45c;
+  --panel-info: #8fb4cc;
+  --panel-selected-bg: #8fb4cc;
+  --panel-selected-text: #1e1a16;
+  --panel-shadow-subtle: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --panel-shadow-card: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --panel-shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --panel-input-bg: #2b241e;
+  --panel-overlay: rgba(0, 0, 0, 0.55);
+  --panel-scrollbar: rgba(232, 224, 210, 0.22);
+  --panel-scrollbar-hover: rgba(232, 224, 210, 0.34);
+  --panel-sidebar-bg: rgba(43, 36, 30, 0.9);
+  --panel-sidebar-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --panel-subtle-bg: rgba(232, 224, 210, 0.05);
+  --panel-subtle-border: rgba(232, 224, 210, 0.1);
+  --panel-bubble: #3a3126;
+  --panel-code-block: #241f1a;
+  --panel-code-banner: #2b241e;
+  --panel-menu: #2b241e;
+  --panel-tip: #2b241e;
+  --panel-sidebar-fill: #241f1a;
+  --panel-violet: rgb(177, 145, 210);
+  --panel-blue-450: rgb(143, 180, 204);
+}
+
+/* ==========================================================================
+   滚动条：全主题共用一套 —— 胶囊滑块、无轨道、无箭头
+   --------------------------------------------------------------------------
+   **这里绝不能声明 `scrollbar-width` / `scrollbar-color`。**
+   一旦声明，Chromium 就改用原生滚动条渲染，下面 `::-webkit-scrollbar` 那一整套
+   样式**全部变成死代码**。这里原先正是这么写的（`scrollbar-width: thin` +
+   `scrollbar-color: rgba(59,52,40,.22)`），于是真正画出来的其实是 Windows 原生
+   滚动条：**宽 15px、顶上带一个箭头按钮**、滑块颜色写死暖棕（极简模式下也不跟
+   主题走）。实测：声明在 → 15px，顶部多出 `rgb(205,197,184)` 的箭头像素；
+   把声明去掉 → 12px，箭头消失、下面的样式才真正生效。
+   想给 Firefox 兜底就放进 `@supports not selector(::-webkit-scrollbar)`：
+   Chromium 认这个选择器（实测 `CSS.supports('selector(::-webkit-scrollbar)')`
+   = true），块会被整段跳过，不会反过来把自定义样式顶掉。
+   -------------------------------------------------------------------------- */
+
+.codex-theme ::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.codex-theme ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 原生箭头按钮：Chromium 默认会在两端画小三角，这是「不好看」的主要来源。
+   滚动靠滚轮 / 触控板 / 键盘就够了，显式关掉。 */
+.codex-theme ::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.codex-theme ::-webkit-scrollbar-thumb {
+  /* 3px 透明边框 + `background-clip: padding-box`：滑块本体只有 6px 宽，
+     两侧各留 3px 呼吸位，不再贴死在窗口边缘。圆角取 999px（胶囊），
+     与主题里其它圆角元素同一套语言。 */
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar, rgba(59, 52, 40, 0.22));
+  background-clip: padding-box;
+  /* 内容很长时滑块别缩成一个小点：至少要看得清、抓得住 */
+  min-height: 40px;
+  min-width: 40px;
+}
+
+/* `background:` 是**简写**，会把 `background-clip` 重置回 `border-box` ——
+   所以悬停 / 按下这两条必须把 `border` 与 `background-clip` 一并重写，
+   否则一悬停滑块就变回 12px 满宽、把刚才那 3px 呼吸位吃掉。 */
+.codex-theme ::-webkit-scrollbar-thumb:hover {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar-hover, rgba(59, 52, 40, 0.34));
+  background-clip: padding-box;
+}
+
+.codex-theme ::-webkit-scrollbar-thumb:active {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--panel-scrollbar-hover, rgba(59, 52, 40, 0.34));
+  background-clip: padding-box;
+}
+
+.codex-theme ::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox 兜底。Chromium 会整段跳过（见上），所以不影响自定义样式。 */
+@supports not selector(::-webkit-scrollbar) {
+  .codex-theme {
+    scrollbar-width: thin;
+    scrollbar-color: var(--panel-scrollbar, rgba(59, 52, 40, 0.22)) transparent;
+  }
+}
+
+.codex-theme button {
+  font-family: inherit;
+}
+
+/* ===================== 左右侧边栏拖拽调宽 ===================== */
+
+.codex-resize-handle {
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.1s ease, opacity 0.2s ease;
+  user-select: none;
+}
+
+.codex-resize-handle:hover,
+.codex-resize-handle:active {
+  background: var(--codex-accent);
+  opacity: 0.6;
+}
+
+/* 对应侧收起时手柄淡出并停用。手柄改为常驻渲染：条件渲染会让它瞬间消失，
+   那 6px 的布局跳变正好落在侧栏收放动画的第一帧上，看得出「顿一下」。 */
+.codex-resize-handle.hidden {
+  opacity: 0;
+  pointer-events: none;
+  cursor: default;
+}
+
+/* 拖拽调宽期间必须关掉宽度过渡：否则每一帧的目标宽度都被 0.32s 缓动拖住，
+   手感会变成「橡皮筋追鼠标」，越拖越滞后。 */
+.codex-sidebar.resizing,
+.codex-inspector.resizing {
+  transition: none;
+}
+
+/* 尊重系统的「减少动态效果」偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .codex-sidebar,
+  .codex-inspector,
+  .codex-brand-title,
+  .codex-new-row,
+  .codex-sidebar-scroll,
+  .codex-pinned,
+  .codex-pinned.collapsed,
+  .codex-main-col .codex-chat,
+  .codex-main-col .codex-composer-wrap,
+  .codex-main-col .codex-stats-line,
+  .codex-main-col .codex-to-bottom {
+    transition: none;
+  }
+}
+
+/* ===================== 左侧：任务会话栏 ===================== */
+
+.codex-sidebar {
+  width: 268px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--codex-paper-card);
+  border-right: 2px dashed var(--codex-line);
+  position: relative;
+  z-index: 2;
+  /* 收放过渡。左侧刻意不用 overflow:hidden 裁切——它收起后还剩 54px 窄条，
+     内层一旦固定宽度，折叠按钮就没法在窄条里居中了。改用「宽度缓动 + 内容
+     快速淡出」：内容 0.16s 就透明，之后那点挤压重排根本看不见。 */
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 侧栏顶部装饰纸胶带 */
+.codex-sidebar::before {
+  content: '';
+  position: absolute;
+  top: 14px;
+  left: -18px;
+  width: 120px;
+  height: 26px;
+  background: var(--codex-tape-yellow);
+  transform: rotate(-38deg);
+  opacity: 0.75;
+  pointer-events: none;
+  box-shadow: 0 1px 3px rgba(59, 52, 40, 0.15);
+}
+
+.codex-brand {
+  padding: 18px 16px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.codex-brand-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--codex-ink);
+  /* 收起时淡出并收掉占位，让折叠按钮在窄条里居中。
+     用 max-width 而不是 display:none —— display 不可过渡，会先闪一下再收缩。 */
+  max-width: 200px;
+  overflow: hidden;
+  transition: opacity 0.16s ease, max-width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.codex-brand-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  background: var(--codex-tape-blue);
+  padding: 2px 7px 1px;
+  border-radius: 999px;
+  letter-spacing: 1px;
+}
+
+/* 新建任务：主按钮（走默认工作区）+ 右侧下拉箭头（手动选目录）同一行 */
+.codex-new-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0 12px 10px;
+  /* 收起时高度也要收掉，否则窄条里会留一块空白 */
+  max-height: 60px;
+  transition: max-height 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              margin 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              opacity 0.16s ease;
+}
+
+.codex-new-btn {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1.5px dashed var(--codex-line);
+  border-radius: 10px 14px 10px 12px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--codex-shadow-sm);
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.codex-new-btn:hover {
+  border-color: var(--codex-accent);
+  background: #fbf4e6;
+  transform: translateY(-1px);
+}
+
+.codex-new-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.codex-new-caret {
+  flex-shrink: 0;
+  width: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed var(--codex-line);
+  border-radius: 10px 12px 10px 12px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  cursor: pointer;
+  box-shadow: var(--codex-shadow-sm);
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.codex-new-caret:hover,
+.codex-new-caret.open {
+  border-color: var(--codex-accent);
+  background: #fbf4e6;
+}
+
+.codex-new-caret:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.codex-new-menu {
+  top: calc(100% + 6px);
+}
+
+/* 下拉项下方的一行小字：默认工作区路径 / 手动选择说明 */
+.codex-new-menu-hint {
+  padding: 0 9px 4px 31px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--codex-ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 水平裁切：收窄过程中内容不会甩到对话区上 */
+  overflow-x: hidden;
+  padding: 0 10px 18px;
+  transition: opacity 0.16s ease;
+}
+
+.codex-sidebar-section {
+  margin-top: 14px;
+}
+
+.codex-sidebar-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--codex-ink-soft);
+  padding: 0 6px 7px;
+  position: relative;
+}
+
+/* 标题下铅笔线 */
+.codex-sidebar-label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: repeating-linear-gradient(90deg, var(--codex-line) 0 4px, transparent 4px 8px);
+}
+
+/* 工作区芯片（topbar）：显示主工作区目录名，点击展开工作区管理菜单。
+   附加上工作区数量以 +N 徽标提示。 */
+.codex-workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 7px 2px 6px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 9px 7px 9px 7px;
+  background: var(--codex-paper);
+  color: var(--codex-ink-soft);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.codex-workspace-chip:hover {
+  border-color: var(--codex-line);
+  background: #fffcf3;
+}
+
+.codex-workspace-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.codex-workspace-chip .codex-workspace-name {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-workspace-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  background: var(--codex-tape-blue);
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+}
+
+/* ===== 工作区管理菜单 ===== */
+
+.codex-ws-menu {
+  min-width: 300px;
+  max-width: 400px;
+}
+
+.codex-ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border-radius: 9px;
+  font-size: 12px;
+}
+
+.codex-ws-badge {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+  color: var(--codex-accent-deep);
+  background: rgba(83, 125, 150, 0.16);
+}
+
+.codex-ws-badge-extra {
+  color: var(--codex-warm);
+  background: var(--codex-warm-soft);
+}
+
+.codex-ws-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--codex-ink-soft);
+}
+
+.codex-ws-toggle {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line-light);
+  background: transparent;
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.codex-ws-toggle.ro {
+  color: var(--codex-warm);
+  border-color: var(--codex-warm-soft);
+}
+
+.codex-ws-remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.codex-ws-remove:hover {
+  background: rgba(229, 57, 53, 0.12);
+  color: #e53935;
+}
+
+/* ===== 左侧栏收纳 ===== */
+
+.codex-sidebar-collapse-btn {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink);
+  cursor: pointer;
+  border: 1px solid rgba(178, 130, 42, 0.2);
+  box-shadow: var(--codex-shadow-sm);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.codex-sidebar-collapse-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-sidebar.collapsed {
+  width: 54px;
+}
+
+.codex-sidebar.collapsed .codex-brand {
+  padding: 12px 0;
+  justify-content: center;
+}
+
+/* 品牌标题与徽章在窄条里必须真的不占位，否则折叠按钮居中不了 */
+.codex-sidebar.collapsed .codex-brand-title,
+.codex-sidebar.collapsed .codex-brand-badge {
+  opacity: 0;
+  max-width: 0;
+  overflow: hidden;
+}
+
+/* 会话列表与新建按钮：淡出 + 收掉高度，但不卸载 ——
+   卸载的话动画一开始内容就没了，只剩一条空栏在缩，看着像闪屏 */
+.codex-sidebar.collapsed .codex-new-row {
+  max-height: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.codex-sidebar.collapsed .codex-sidebar-scroll {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.codex-sidebar.collapsed .codex-sidebar-collapse-btn {
+  margin-left: 0;
+}
+
+/* ===== 会话视图工具 ===== */
+
+.codex-session-label {
+  flex-wrap: nowrap;
+}
+
+.codex-session-label::after {
+  order: 1;
+  flex: 1;
+  min-width: 8px;
+}
+
+.codex-session-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  order: 2;
+}
+
+.codex-session-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  background: transparent;
+}
+
+.codex-session-tool-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-session-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  margin-bottom: 8px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink-faint);
+  font-size: 12px;
+}
+
+.codex-session-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--codex-ink);
+  font-size: 12px;
+}
+
+.codex-session-search input::placeholder {
+  color: var(--codex-ink-faint);
+}
+
+.codex-session-search button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-session-search button:hover {
+  color: var(--codex-danger);
+  background: var(--codex-danger-soft);
+}
+
+.codex-session-tools-panel {
+  padding: 8px;
+  margin-bottom: 10px;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px 12px 10px 12px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.codex-session-tools-title {
+  padding: 4px 6px 2px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-session-tools-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.codex-session-tools-option:hover {
+  background: var(--codex-accent-soft);
+}
+
+.codex-session-tools-option.active {
+  background: var(--codex-tape-blue);
+  color: var(--codex-accent-deep);
+  font-weight: 600;
+}
+
+.codex-session-tools-sep {
+  height: 1px;
+  background: var(--codex-line-light);
+  margin: 4px 2px;
+}
+
+.codex-session-group {
+  margin-bottom: 6px;
+}
+
+.codex-session-group-title {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--codex-accent-deep);
+  letter-spacing: 0.5px;
+  border-bottom: 1px dashed var(--codex-line-light);
+  margin-bottom: 3px;
+}
+
+.codex-session-group-title > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-workspace-rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  font-size: 11px;
+  padding: 2px 6px;
+  outline: none;
+}
+
+.codex-session-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.codex-session-group-title:hover .codex-session-group-actions,
+.codex-session-group-title:focus-within .codex-session-group-actions {
+  opacity: 1;
+}
+
+.codex-group-more-btn,
+.codex-group-add-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  background: transparent;
+}
+
+.codex-group-more-btn:hover,
+.codex-group-add-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-group-menu {
+  position: absolute;
+  top: 22px;
+  right: 4px;
+  z-index: 120;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codex-group-menu button {
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 12px;
+  /* 走 --codex-md-hand，**不写死字体栈** —— 手账主题下它是
+     'Caveat' → 'Segoe Print' → 'Dancing Script' → 'Ma Shan Zheng'（与之前写死的那串
+     等效：拉丁吃 Caveat，中文没有拉丁字形、继续往后落到马善政），
+     极简主题下它已被覆写成无衬线。写死的话极简模式的菜单还是手写体。
+     这里原本写死有两个原因，现在都不成立了：
+     1) reset 里 button 是 font: inherit，字重会从 .codex-session-group-title 拿到 700
+        —— 由下面这行显式 font-weight: 400 解决，与字体栈无关；
+     2) --codex-font 首选 'Kalam' 从未引入，回退链一路掉到 Microsoft YaHei（黑体）
+        —— --codex-md-hand 是另一条链，没这个问题。 */
+  font-family: var(--codex-md-hand);
+  font-weight: 400;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.codex-group-menu button:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-session-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.codex-session-manual button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 14px;
+  border-radius: 4px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-session-manual button:hover {
+  color: var(--codex-accent-deep);
+  background: var(--codex-accent-soft);
+}
+
+.codex-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.codex-session-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px 12px 10px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.codex-session-item:hover {
+  background: rgba(83, 125, 150, 0.06);
+}
+
+.codex-session-item.active {
+  background: var(--codex-paper);
+  border-color: var(--codex-line);
+  box-shadow: var(--codex-shadow-sm);
+}
+
+/* 激活会话左侧的荧光笔划痕 */
+.codex-session-item.active::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: 8px;
+  bottom: 8px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--codex-tape-yellow);
+  box-shadow: 0 0 0 1px rgba(178, 130, 42, 0.18);
+}
+
+.codex-session-title {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--codex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 22px;
+  line-height: 20px;
+}
+
+.codex-session-meta {
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-session-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.codex-session-delete {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-session-item:hover .codex-session-delete {
+  display: flex;
+}
+
+.codex-session-delete:hover {
+  color: var(--codex-danger);
+  background: var(--codex-danger-soft);
+}
+
+.codex-session-unread-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--codex-accent); box-shadow: 0 0 0 3px var(--codex-accent-soft); }
+.codex-session-status-spinner { flex: 0 0 auto; color: var(--codex-accent); }
+.codex-session-status-question { flex: 0 0 auto; color: var(--codex-warm); }
+.codex-session-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-session-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: var(--codex-md-hand); font-weight: 400; }
+.codex-session-context-menu button:hover { background: var(--codex-accent-soft); }
+.codex-session-context-menu button.danger { color: var(--codex-danger); }
+.codex-session-context-menu button.danger { color: #b42318 !important; }
+
+/* 通用右键菜单卡（页签右键等复用；与会话菜单同一套视觉）。
+   两个菜单都是 **portal 到 document.body** 的弹层，逃出了 .mind-main，
+   主题标记靠 MindInspector 镜像到 <body> 的 data-ui-style 传进来
+   （见 MindInspector.tsx 那段注释 + MindInspectorThemes.css 的调色板作用域）。
+
+   所以这里**一律不许写死颜色与字体** —— 早先那套 `.scrapbook` / `.minimal`
+   修饰类从来没被挂上过（没有任何代码给这两个菜单加类），是条死路，已删除；
+   字体也不再写死手写体栈，改走 --codex-md-hand（手账 = Caveat 起头的手写体，
+   极简已被覆写成无衬线），否则极简模式下菜单还是手写体。 */
+.codex-context-menu { position: fixed; z-index: 1000; display: flex; flex-direction: column; min-width: 150px; padding: 5px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 10px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); }
+.codex-context-menu button { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--codex-ink, #252a30); background: transparent; text-align: left; cursor: pointer; font-size: 12px; font-family: var(--codex-md-hand); font-weight: 400; }
+.codex-context-menu button:hover { background: var(--codex-accent-soft); }
+.codex-context-menu button.danger { color: #b42318 !important; }
+
+/* 菜单正对着的那个页签：保持高亮，明确菜单作用对象 */
+.codex-preview-tab.menu-open { background: var(--codex-accent-soft); border-color: var(--codex-line); color: var(--codex-ink); }
+.codex-session-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; background: rgba(20, 24, 28, 0.28); }
+.codex-session-modal { width: min(360px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--codex-line, #d9dde3); border-radius: 14px; background: var(--codex-paper-card, #ffffff) !important; box-shadow: var(--codex-shadow-lg, 0 12px 32px rgba(20, 24, 28, 0.2)); color: var(--codex-ink, #252a30); }
+.codex-session-modal h3 { margin: 0 0 12px; font-size: 15px; }
+.codex-session-modal p { margin: 0 0 14px; color: var(--codex-ink-soft); font-size: 13px; }
+.codex-session-modal input { width: 100%; height: 30px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--codex-line); border-radius: 7px; background: var(--codex-paper); color: var(--codex-ink); outline: none; font-size: 12px; line-height: 28px; }
+.codex-session-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.codex-session-modal-actions button { height: 28px; min-height: 28px; border: 1px solid var(--codex-line); border-radius: 7px; padding: 0 11px; background: transparent; color: var(--codex-ink-soft); cursor: pointer; font-size: 12px; line-height: 26px; }
+.codex-session-modal-actions button.primary { background: var(--codex-accent); border-color: var(--codex-accent); color: white; }
+.codex-session-modal-actions button.danger { background: var(--codex-danger); border-color: var(--codex-danger); color: white; }
+.codex-session-modal.scrapbook { background: #fffaf2 !important; border-color: #e7d8c4; color: #403a34; }
+.codex-session-modal.minimal { background: #ffffff !important; border-color: #d9dde3; color: #252a30; }
+.codex-session-modal-actions button.danger { background: #b42318 !important; border-color: #b42318 !important; color: #ffffff !important; }
+
+.codex-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.codex-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 27px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: var(--codex-ink-soft);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.codex-tree-node:hover {
+  background: rgba(83, 125, 150, 0.07);
+}
+
+.codex-tree-node .codex-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--codex-mono);
+  font-size: 12px;
+}
+
+/* 左侧工作区文件树区块 */
+.codex-tree-section {
+  margin-top: 6px;
+  border-top: 1px dashed var(--codex-line-light);
+  padding-top: 6px;
+}
+
+.codex-tree-label {
+  width: 100%;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.codex-tree-label > svg:last-child {
+  margin-left: auto;
+  transition: transform 0.16s ease;
+}
+
+.codex-tree-label > svg:last-child.collapsed {
+  transform: rotate(-90deg);
+}
+
+.codex-workspace-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.codex-tree-loading,
+.codex-tree-error,
+.codex-tree-empty {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-tree-loading {
+  display: flex;
+  justify-content: center;
+}
+
+.codex-tree-error {
+  color: var(--codex-danger);
+}
+
+.codex-tree-file:hover {
+  background: rgba(83, 125, 150, 0.1);
+}
+
+/* ===================== 右侧「预览」页（多页签文件预览） ===================== */
+
+.codex-preview-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+}
+
+.codex-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+/* 页签栏：无上限、横向滚动（缩窄不换行） */
+.codex-preview-tabbar {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
+  background: var(--codex-paper);
+  border-bottom: 1px solid var(--codex-line-light);
+}
+.codex-preview-tabbar .codex-preview-tabs {
+  flex: 1;
+  min-width: 0;
+  border-bottom: 0;
+}
+.codex-preview-full-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin: 4px 8px;
+  padding: 0;
+  border: 1px solid rgba(178, 130, 42, .2);
+  border-radius: 50%;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink);
+  box-shadow: 0 2px 4px rgba(59, 52, 40, .12);
+  cursor: pointer;
+  transition: box-shadow .15s ease, transform .15s ease;
+}
+.codex-preview-full-toggle:hover { box-shadow: 0 3px 6px rgba(59, 52, 40, .18); }
+.codex-preview-full-toggle:active { transform: scale(.96); }
+.codex-preview-full-toggle:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: 2px; }
+.workbench-root.preview-full-view > .codex-main,
+.workbench-root.preview-full-view > .codex-resize-handle.right { display: none; }
+.workbench-root.preview-full-view .codex-inspector-tabs { display: none; }
+.workbench-root.preview-full-view > .codex-inspector {
+  flex: 1;
+  min-width: 0;
+  transition: none;
+}
+.codex-preview-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--codex-line-light);
+  background: var(--codex-paper);
+}
+
+.codex-preview-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.codex-preview-tabs {
+  scrollbar-width: none;
+}
+
+.codex-preview-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  font-family: var(--codex-mono);
+}
+
+.codex-preview-tab:hover {
+  background: rgba(83, 125, 150, 0.08);
+}
+
+.codex-preview-tab.active {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-line);
+  color: var(--codex-ink);
+  font-weight: 600;
+}
+
+.codex-preview-tab-close {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-preview-tab-close:hover {
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+}
+
+.codex-preview-no-tab {
+  padding: 2px 4px;
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+/* 内容区 */
+.codex-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+}
+
+.codex-preview-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 16px;
+  color: var(--codex-ink-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.codex-preview-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.codex-preview-error {
+  flex: 1;
+  padding: 20px 14px;
+  font-size: 12.5px;
+  color: var(--codex-danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.codex-preview-image {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.codex-preview-image img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-preview-pdf {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* ============ Office 文档预览 ============ */
+
+.codex-office-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--codex-ink-faint);
+  font-size: 12px;
+}
+
+/* 文档 / 表格共用的滚动容器：撑满预览区，内容自己滚。
+   留白是「桌面」——Word 那张纸浮在它上面，所以四周给得比表格宽松些。 */
+.codex-office-scroll {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 18px 26px;
+}
+
+/* ---- Word：mammoth 产出的结构化 HTML ----
+   渲染成**一页文档**：一张浮在桌面上的纸，而不是直接铺在面板底上的散文字。
+   这一层比任何字体调整都重要 —— 之前正文透明、贴边、也没有测度上限，
+   面板一宽正文就被拉成一行六七十个字，既不像文档也读不下去。
+
+   字体走 --codex-md-font / --codex-md-hand，与旁边的 markdown 渲染共用同一批变量：
+   手账主题下是衬线正文 + 手写标题，极简主题下这两个变量已被覆写成无衬线，
+   于是不必另写一份极简规则就能跟着主题走（同 --codex-md-* 的一贯做法）。 */
+.codex-office-doc {
+  /* 测度与 markdown 正文对齐（--md-measure 是 680px）：中文一行 40 字上下最好读，
+     原来没有上限，宽面板下会被拉成一行六七十个字 */
+  max-width: 680px;
+  /* 短文档也要看得出「一页纸」。min() 是为了别在矮面板里硬撑出滚动条。 */
+  min-height: min(420px, 100%);
+  margin: 0 auto;
+  /* 左右内边距跟着容器走：右栏窄（约 480）时固定 44px 会吃掉近两成宽度，
+     宽面板下又不该超过 46px。上下留白固定，那是「纸的天头地脚」。 */
+  padding: 38px clamp(22px, 7%, 46px) 48px;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line-light);
+  /* 纸片是方角不是药丸 —— 与便利贴代码块同一条原则 */
+  border-radius: 2px;
+  box-shadow: var(--codex-shadow-md);
+  color: var(--codex-ink);
+  font-family: var(--codex-md-font);
+  font-size: 13.5px;
+  line-height: 1.85;
+  word-break: break-word;
+}
+
+/* 纸自己的 padding 已经给了首尾留白，首/末元素别再叠一层 margin */
+.codex-office-doc > *:first-child { margin-top: 0; }
+.codex-office-doc > *:last-child { margin-bottom: 0; }
+
+.codex-office-doc h1,
+.codex-office-doc h2,
+.codex-office-doc h3,
+.codex-office-doc h4,
+.codex-office-doc h5,
+.codex-office-doc h6 {
+  /* 标题走装饰手写体，与 markdown 标题同一条链；字重交给变量 ——
+     手写体只有 400，写 600 会被浏览器合成粗体糊掉（见 --codex-md-h-weight 注释） */
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  line-height: 1.4;
+  color: var(--codex-ink);
+}
+
+/* 标题的间距写进各自的简写里：原来共用的 `margin: 16px 0 8px` 会让 h1 顶在
+   纸的上沿、又和 h2 挤在一起，层级看不出来 */
+.codex-office-doc h1 { font-size: 21px; margin: 0 0 18px; }
+.codex-office-doc h2 { font-size: 17.5px; margin: 26px 0 10px; }
+.codex-office-doc h3 { font-size: 15.5px; margin: 20px 0 8px; }
+/* 四~六级与正文同字号、字重也压回 400，改用强调色区分（与 markdown 同一条取舍） */
+.codex-office-doc h4,
+.codex-office-doc h5,
+.codex-office-doc h6 {
+  font-size: 13.5px;
+  margin: 16px 0 6px;
+  color: var(--codex-accent-deep);
+}
+
+.codex-office-doc p { margin: 0 0 11px; }
+.codex-office-doc ul,
+.codex-office-doc ol { margin: 0 0 11px; padding-left: 24px; }
+.codex-office-doc li { margin: 3px 0; }
+.codex-office-doc strong { font-weight: 600; }
+.codex-office-doc em { font-style: italic; }
+.codex-office-doc a { color: var(--codex-accent-deep); }
+
+/* 图：居中 + 一点纸边。默认的 inline 图会贴着正文左缘，长文档里显得散 */
+.codex-office-doc img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 14px auto;
+  border-radius: 3px;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+/* 引用：与 markdown 的引用块共用「和纸胶带便签」观感（左侧强调条 + 非对称圆角） */
+.codex-office-doc blockquote {
+  margin: 0 0 12px;
+  padding: 8px 14px;
+  border-left: 3px solid var(--codex-accent);
+  border-radius: 4px 10px 10px 4px;
+  background: var(--codex-tape-blue);
+  color: var(--codex-ink-soft);
+}
+
+.codex-office-doc hr {
+  margin: 20px 0;
+  border: 0;
+  border-top: 1px dashed var(--codex-line);
+}
+
+/* 表格。**mammoth 不产出 <thead>/<th>** —— 首行也是 <td>，所以表头样式必须挂在
+   `tr:first-child td` 上。原来写在 `th` 上的那两条从来就没生效过：表头一直只有
+   加粗、没有底色（截图里那张表能看出来）。 */
+.codex-office-doc table {
+  width: 100%;
+  margin: 0 0 14px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.codex-office-doc td {
+  padding: 7px 10px;
+  border: 1px solid var(--codex-line-light);
+  text-align: left;
+  vertical-align: top;
+}
+
+.codex-office-doc tr:first-child td {
+  /* 走 --codex-tape-yellow 而不是写死色值：这是本仓库约定的「主题钩子」之一 ——
+     手账浅色是暖黄、手账深色是暗琥珀、极简浅色是 #f4f4f5、极简深色是 #29292d，
+     四套组合一次覆盖，与 markdown 标题荧光笔用的是同一支色 */
+  background: var(--codex-tape-yellow);
+  font-weight: 600;
+  color: var(--codex-ink);
+}
+
+/* 隔行浅底防串行（与 markdown 表格同一条、同一个变量；首行是 odd，不会打架） */
+.codex-office-doc tr:nth-child(even) td {
+  background: var(--panel-bg-surface);
+}
+
+/* ---- Excel：工作表切换 + 网格 ---- */
+
+.codex-office-sheet {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.codex-office-sheet-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 4px 8px;
+  overflow-x: auto;
+  flex-shrink: 0;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--codex-line-light);
+  background: var(--codex-paper);
+}
+
+.codex-office-sheet-tabs::-webkit-scrollbar { display: none; }
+
+.codex-office-sheet-tab {
+  flex-shrink: 0;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.codex-office-sheet-tab:hover { background: rgba(83, 125, 150, 0.08); }
+
+.codex-office-sheet-tab.active {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-line);
+  color: var(--codex-ink);
+  font-weight: 600;
+}
+
+.codex-office-table {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: var(--codex-mono);
+  color: var(--codex-ink);
+}
+
+.codex-office-table td {
+  max-width: 260px;
+  padding: 5px 10px;
+  border: 1px solid var(--codex-line-light);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+}
+
+/* 首行是表头。原来铺的是 --codex-paper —— 和面板底色**一模一样**，等于没有底色，
+   整张表看上去就是一片网格。换成 --panel-bg-active（四套主题都定义过，且比
+   --panel-bg-surface 深一档），表头才立得起来。 */
+.codex-office-table tr:first-child td {
+  background: var(--panel-bg-active);
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+/* 隔行浅底：数字表格最容易串行 */
+.codex-office-table tr:nth-child(even) td {
+  background: var(--panel-bg-surface);
+}
+
+.codex-office-truncated {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--codex-line-light);
+  background: var(--codex-paper);
+  color: var(--codex-ink-faint);
+  font-size: 11.5px;
+}
+
+/* ---- 无法内嵌渲染 / 解析失败时的信息卡 ---- */
+
+.codex-office-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 26px 18px;
+  text-align: center;
+}
+
+.codex-office-card-icon { color: var(--codex-ink-faint); }
+
+.codex-office-card-name {
+  max-width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--codex-ink);
+  word-break: break-all;
+}
+
+.codex-office-card-meta {
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-office-card-note {
+  max-width: 300px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--codex-ink-soft);
+}
+
+.codex-office-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 320px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+  word-break: break-word;
+}
+
+.codex-office-card-error svg { flex-shrink: 0; margin-top: 2px; }
+
+.codex-office-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 5px;
+}
+
+.codex-office-card-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 27px;
+  padding: 0 11px;
+  border: 1px solid var(--codex-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.codex-office-card-actions button:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-ink);
+}
+
+.codex-office-card-actions button.primary {
+  background: var(--codex-accent);
+  border-color: var(--codex-accent);
+  color: #fff;
+}
+
+/* ============ markdown 预览：所见即所得就地编辑 ============ */
+
+.md-live-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* .md-live-saving-float 要贴在这个容器右上角（它不能进 .md-live —— 那是滚动容器，
+     跟着内容滚走就白做了） */
+  position: relative;
+}
+
+.md-live-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 3px 12px;
+  border-bottom: 1px dashed var(--codex-line-light);
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+}
+
+.md-live-saving {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--codex-accent-deep);
+}
+
+/* 「保存中…」做成**不占布局**的浮层。
+   它是个毫秒级的瞬时状态（写本地文件），若走 .md-live-status 那条占位条，
+   一出现/消失就把正文顶下去 ~21px，每存一次抖一下。
+   pointer-events: none 是必须的 —— 它浮在正文右上角，别把点击吃掉。 */
+.md-live-saving-float {
+  position: absolute;
+  top: 6px;
+  right: 14px;
+  z-index: 2;
+  padding: 1px 7px;
+  border-radius: 9px;
+  /* 用**不透明**的 --panel-surface 而不是半透明的 --panel-bg-surface：
+     它浮在正文上方，半透明底会让下面的字透出来糊成一团。
+     --panel-surface 在两套主题 × 明暗四组合下都有定义（纸感 #fffcf3 / #2b241e，
+     极简 #fafafa / #202020）。 */
+  background: var(--panel-surface);
+  pointer-events: none;
+}
+
+.md-live-disabled { color: var(--codex-warm); }
+
+/* 编辑区本身就是滚动容器，所以光标/滚动位置由它自己持有 */
+.md-live {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px 16px 28px;
+  outline: none;
+  cursor: text;
+}
+
+/*
+ * 语法标记：唯一作用是让 textContent 还原出 markdown 原文（见 MarkdownLiveEditor
+ * 顶部说明），因此永远不显示。用户打字时它们还是普通文本、照常可见；只有凑成一个
+ * 完整构造之后才被包进这里藏起来。
+ */
+.md-live .md-mark { display: none; }
+
+.md-live-block { position: relative; }
+
+/* 表格分隔行只贡献原文文本，不参与排版 */
+.md-live-tablesep { display: none; }
+
+/* 引用块里的行壳：必须 display:block 才断得开行。
+   行内那个 mark('\n') 是 display:none 的，指望它断行会让多行引用挤成一行。
+   作用域挂在 .codex-md 而不是 .md-live：md-line 虽然只有就地编辑器会产出，
+   但断行是「引用块能不能读」的硬要求，绑在宿主类上太脆。 */
+.codex-md .md-line { display: block; }
+
+/* 视觉件（复制按钮、勾选框、文件链接）在编辑区里仍要能点 */
+.md-live [contenteditable='false'] { cursor: pointer; }
+
+.codex-preview-binary {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 16px;
+  color: var(--codex-ink-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.codex-preview-text {
+  flex: 1;
+  min-width: 0;
+  padding: 10px;
+  overflow: auto;
+  /* 全局 body 是 user-select: none（拖窗口时不误选文字），预览区要显式打开：
+     这里要支持「抹黑选中一段 → 添加到对话 / 就地改写」 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.codex-preview-text .codex-pre {
+  margin: 0;
+}
+
+/* ===================== 预览页：抹黑选中 → 就地改写 ===================== */
+
+/* 选区浮卡：外层只负责定位（portal 到 body），内层才是那颗药丸 */
+.codex-selbubble {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  /* 必须清掉 .codex-theme 自带的「窗口纸面」（--codex-paper 底色 + 22px 稿纸网格背景图）。
+     本元素是 fixed + translateX(-50%)，宽度由内容撑开，于是它是一个**贴合药丸尺寸的矩形**；
+     而内层药丸是 border-radius: 999px 的圆角胶囊。两者形状不一致，那张矩形纸面就会从
+     **四个角**露出来（用户报的「四个角落有半透明的底色」就是它）。
+     弹层是浮在界面上的东西，不是窗口纸面 —— 这里只用 none，胶囊自己的底色照旧。 */
+  background: none;
+}
+
+.codex-selbubble-pill {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--codex-line);
+  border-radius: 999px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-selbubble-btn {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+  white-space: nowrap;
+}
+
+.codex-selbubble-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-selbubble-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.codex-selbubble-btn:disabled:hover {
+  background: transparent;
+  color: var(--codex-ink);
+}
+
+.codex-selbubble-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--codex-line);
+}
+
+.codex-selbubble-inputwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 12px;
+}
+
+.codex-selbubble-inputwrap input {
+  width: 260px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+}
+
+.codex-selbubble-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--codex-ink);
+  color: var(--codex-paper-card);
+}
+
+.codex-selbubble-send:disabled { opacity: 0.35; }
+.codex-selbubble-send:not(:disabled):hover { background: var(--codex-accent-deep); }
+
+.codex-selbubble-error {
+  max-width: 340px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+/* 就地改写的 diff 卡片：原文 / 改写 上下对照 + 编辑 / 拒绝 / 接受。
+   外层是 fixed 浮层，不占 markdown/source 的布局空间。 */
+.codex-editcard-overlay {
+  position: fixed;
+  z-index: 901;
+  width: min(560px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  transform: translateX(-50%);
+  pointer-events: auto;
+  /* 同 .codex-selbubble：外层矩形不能继承 .codex-theme 的窗口纸面，
+     否则内层 .codex-editcard 的 10px 圆角之外、四个角会露出纸色 + 稿纸网格。 */
+  background: none;
+}
+
+.codex-editcard-overlay.is-above {
+  transform: translate(-50%, -100%);
+}
+
+.codex-editcard {
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.codex-editcard-before,
+.codex-editcard-after {
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.codex-editcard-before {
+  background: var(--codex-danger-soft);
+  color: var(--codex-ink-soft);
+}
+
+.codex-editcard-after {
+  margin-top: 6px;
+  background: var(--codex-success-soft);
+  color: var(--codex-ink);
+}
+
+.codex-editcard-refine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid var(--codex-line);
+  border-radius: 999px;
+}
+
+.codex-editcard-refine input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+}
+
+.codex-editcard-error {
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+  font-size: 11.5px;
+  word-break: break-word;
+}
+
+.codex-editcard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.codex-editcard-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border-radius: 7px;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-editcard-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-editcard-btn:disabled { opacity: 0.5; cursor: default; }
+
+.codex-editcard-deny { color: var(--codex-danger); }
+.codex-editcard-deny:hover { background: var(--codex-danger-soft); color: var(--codex-danger); }
+
+.codex-editcard-accept { color: var(--codex-success); font-weight: 600; }
+.codex-editcard-accept:hover { background: var(--codex-success-soft); color: var(--codex-success); }
+
+/* ===================== 源码查看 / 编辑 ===================== */
+
+.codex-src {
+  --src-fs: 12.5px;
+  --src-lh: 1.6;
+  /* 高亮配色（浅色）；深色见下方覆盖 */
+  --src-kw: #a6431c;
+  --src-str: #3b6d11;
+  --src-num: #854f0b;
+  --src-fn: #185fa5;
+  --src-type: #0f6e56;
+  --src-attr: #993c1d;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-family: var(--codex-mono);
+  font-size: var(--src-fs);
+  line-height: var(--src-lh);
+  color: var(--codex-ink);
+}
+
+.codex-src-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--codex-line-light);
+  background: var(--panel-bar-bg);
+}
+.codex-src-lang {
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--codex-ink-faint);
+  font-family: var(--codex-mono);
+}
+.codex-src-meta {
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+  font-family: var(--codex-font);
+}
+.codex-src-spacer { flex: 1; }
+.codex-src-saved { font-size: 11.5px; color: var(--codex-success); }
+.codex-src-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.codex-src-btn:hover { background: var(--panel-bg-hover); color: var(--codex-ink); }
+.codex-src-btn:disabled { opacity: 0.5; cursor: default; }
+.codex-src-btn-primary { color: var(--codex-accent-deep); }
+.codex-src-btn-primary:hover { color: var(--codex-accent-deep); background: var(--codex-accent-soft); }
+
+.codex-src-error {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: var(--codex-font);
+  color: var(--codex-danger);
+  background: var(--codex-danger-soft);
+  border-bottom: 1px solid var(--codex-warm);
+}
+
+.codex-src-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+}
+
+/* 只读：行号 + 高亮代码 */
+.codex-src-code { flex: 1; min-width: max-content; padding: 6px 0 12px; }
+.codex-src-row { display: flex; min-height: calc(var(--src-fs) * var(--src-lh)); }
+.codex-src-ln {
+  flex: none;
+  width: 46px;
+  padding-right: 14px;
+  text-align: right;
+  color: var(--codex-ink-faint);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.codex-src-cell { white-space: pre; padding-right: 16px; }
+/* 横向滚动时行号列钉在左侧，不被长行推出视口 */
+.codex-src-row .codex-src-ln {
+  position: sticky;
+  left: 0;
+  background: var(--codex-paper);
+  z-index: 1;
+}
+
+.codex-src-row.is-target-line {
+  background: color-mix(in srgb, var(--codex-accent) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--codex-accent);
+}
+
+.codex-src-row.is-target-line .codex-src-ln {
+  background: color-mix(in srgb, var(--codex-paper) 88%, var(--codex-accent));
+  color: var(--codex-accent-deep);
+  font-weight: 700;
+}
+
+/* 编辑：行号 gutter + 实时高亮层 + textarea 统一滚动 */
+.codex-src-editor {
+  overflow: hidden;
+  align-items: stretch;
+  background: var(--codex-paper);
+}
+
+.codex-src-gutter {
+  flex: none;
+  width: 46px;
+  padding-right: 14px;
+  text-align: right;
+  color: var(--codex-ink-faint);
+  user-select: none;
+  overflow: hidden;
+  padding-top: 6px;
+  padding-bottom: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.codex-src-gutter .codex-src-ln { width: auto; padding-right: 0; }
+
+.codex-src-editor-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.codex-src-edit-highlight,
+.codex-src-textarea {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border: none;
+  padding: 6px 16px 12px 0;
+  background: transparent;
+  font-family: var(--codex-mono);
+  font-size: var(--src-fs);
+  line-height: var(--src-lh);
+  white-space: pre;
+  tab-size: 2;
+  overflow: auto;
+}
+
+.codex-src-edit-highlight {
+  z-index: 0;
+  color: var(--codex-ink);
+  pointer-events: none;
+  scrollbar-width: none;
+}
+
+.codex-src-edit-highlight::-webkit-scrollbar { display: none; }
+
+.codex-src-textarea {
+  z-index: 1;
+  outline: none;
+  resize: none;
+  color: transparent;
+  caret-color: var(--codex-ink);
+  -webkit-text-fill-color: transparent;
+}
+
+.codex-src-textarea::selection {
+  background: color-mix(in srgb, var(--codex-accent) 22%, transparent);
+  -webkit-text-fill-color: transparent;
+}
+
+.codex-src-more {
+  flex: none;
+  padding: 6px 10px;
+  border-top: 1px solid var(--codex-line-light);
+  text-align: center;
+}
+.codex-src-more-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  color: var(--codex-accent-deep);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+}
+.codex-src-more-btn:hover { background: var(--codex-accent-soft); }
+.codex-src-more-btn:disabled { opacity: 0.6; cursor: default; }
+.codex-src-more-error { font-size: 12px; color: var(--codex-danger); }
+
+/* ---------- markdown 渲染态（块级就地编辑） ---------- */
+
+.codex-src-md {
+  padding: 10px 12px;
+}
+
+/* 每块各成一层：铅笔只在 hover 时露出，免得正文被一排按钮打散注意力，
+   也保证普通点击/拖拽仍然是在选择文本而不是触发编辑 */
+.codex-src-mdblock {
+  position: relative;
+  padding: 2px 0;
+  border-radius: 6px;
+}
+.codex-src-mdblock:hover {
+  background: color-mix(in srgb, var(--codex-accent) 6%, transparent);
+}
+.codex-src-mdblock-btn {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 5px;
+  background: var(--codex-paper);
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.codex-src-mdblock:hover .codex-src-mdblock-btn {
+  display: inline-flex;
+}
+.codex-src-mdblock-btn:hover {
+  color: var(--codex-ink);
+  border-color: var(--codex-accent);
+}
+
+.codex-src-mdblock-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.codex-src-mdblock-area {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 84px;
+  padding: 8px 10px;
+  border: 1px solid var(--codex-accent);
+  border-radius: 6px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.codex-src-mdblock-area:focus {
+  outline: none;
+}
+.codex-src-mdblock-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+/* hljs token 主题 */
+.codex-src .hljs-keyword, .codex-src .hljs-selector-tag, .codex-src .hljs-literal,
+.codex-src .hljs-section, .codex-src .hljs-doctag, .codex-src .hljs-meta-keyword { color: var(--src-kw); }
+.codex-src .hljs-string, .codex-src .hljs-regexp, .codex-src .hljs-meta-string,
+.codex-src .hljs-addition, .codex-src .hljs-selector-attr { color: var(--src-str); }
+.codex-src .hljs-comment, .codex-src .hljs-quote { color: var(--codex-ink-faint); font-style: italic; }
+.codex-src .hljs-number, .codex-src .hljs-symbol, .codex-src .hljs-bullet,
+.codex-src .hljs-built_in, .codex-src .hljs-builtin-name { color: var(--src-num); }
+.codex-src .hljs-title, .codex-src .hljs-title.function_, .codex-src .hljs-function .hljs-title,
+.codex-src .hljs-name, .codex-src .hljs-link { color: var(--src-fn); }
+.codex-src .hljs-type, .codex-src .hljs-class .hljs-title, .codex-src .hljs-title.class_ { color: var(--src-type); }
+.codex-src .hljs-attr, .codex-src .hljs-attribute, .codex-src .hljs-variable,
+.codex-src .hljs-template-variable, .codex-src .hljs-selector-id,
+.codex-src .hljs-selector-class, .codex-src .hljs-selector-pseudo { color: var(--src-attr); }
+.codex-src .hljs-meta { color: var(--codex-ink-soft); }
+.codex-src .hljs-subst, .codex-src .hljs-params, .codex-src .hljs-tag { color: var(--codex-ink); }
+.codex-src .hljs-deletion { color: var(--codex-danger); }
+.codex-src .hljs-emphasis { font-style: italic; }
+.codex-src .hljs-strong { font-weight: 700; }
+.codex-src .hljs-link { text-decoration: underline; }
+
+/* 深色：高亮配色提亮 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .workbench-root .codex-src {
+    --src-kw: #e58a7a;
+    --src-str: #9cc3a1;
+    --src-num: #d8a45c;
+    --src-fn: #8fb4cc;
+    --src-type: #9fe1cb;
+    --src-attr: #f0997b;
+  }
+}
+
+/* 空态：对话文档入口 */
+.codex-preview-chatdocs {
+  margin-top: 10px;
+  width: 100%;
+  max-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.codex-preview-chatdocs-title {
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--codex-ink-faint);
+  margin-bottom: 2px;
+}
+
+.codex-preview-chatdoc {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  width: 100%;
+}
+
+.codex-preview-chatdoc:hover {
+  background: rgba(83, 125, 150, 0.08);
+  color: var(--codex-ink);
+}
+
+.codex-preview-chatdoc span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--codex-mono);
+}
+
+.codex-empty-note {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+  border: 1px dashed var(--codex-line);
+  border-radius: 8px;
+  background: rgba(255, 252, 243, 0.5);
+}
+
+/* ===================== 产物卡片 ===================== */
+
+.codex-deliverable-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--codex-accent);
+  background: var(--codex-accent-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.codex-deliverable-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.codex-deliverable-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: var(--codex-paper);
+  cursor: default;
+  min-width: 0;
+}
+
+.codex-deliverable-icon {
+  display: flex;
+  align-items: center;
+  color: var(--codex-accent);
+  flex-shrink: 0;
+}
+
+.codex-deliverable-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--codex-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 45%;
+}
+
+.codex-deliverable-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+  font-family: var(--codex-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 可点击：点击行在右侧预览页签打开文件（仅保留指针，不加悬浮高光） */
+.codex-deliverable-row.is-clickable {
+  cursor: pointer;
+}
+
+.codex-deliverable-row.is-clickable:focus-visible {
+  outline: 2px solid var(--codex-accent);
+  outline-offset: 1px;
+}
+
+/* ===================== 中央：对话区 ===================== */
+
+.codex-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: transparent;
+}
+
+/* 顶栏以下的那条横向带。置顶摘要绝对定位贴在 `.codex-main-col` 右边缘，
+   不参与这里的 flex 分配（只留一个 `.codex-main-col` 撑满），
+   所以它必须靠 `--codex-pinned-reserve` 让位而不是靠 flex 挤压。 */
+.codex-main-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+/* 对话列：消息列表 + 回到底部 + 输入区 + 统计。
+   position:relative 同时是 `.codex-to-bottom` 与置顶摘要的定位基准。
+   ----------------------------------------------------------------------
+   三个宽度变量的**唯一来源**（React 内联 style 写入，其余规则只读）：
+     --codex-pinned-w-expanded  展开值，收起期间不变（内层靠它保持展开宽度）
+     --codex-pinned-reserve     为面板让出的总宽度，收起时为 0
+     --codex-sb-w               对话滚动条实测宽度
+   纵向显隐（从上往下揭开 / 从下往上收掉）不占变量，纯靠 `.codex-pinned`
+   上的 `clip-path` 切换，见文件末尾置顶摘要那一节。
+   常量（PINNED_W_*、PINNED_GAP_W）都在 CodeAgentPageNew.tsx 顶部，改就改那里。
+   ---------------------------------------------------------------------- */
+.codex-main-col {
+  --codex-pinned-w-expanded: 250px;
+  --codex-summary-duration: 0.6s;
+  --codex-summary-easing: cubic-bezier(0.4, 0, 0.2, 1);
+  --codex-pinned-reserve: 0px;
+  --codex-sb-w: 12px;
+
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* --------------------------------------------------------------------------
+   为置顶摘要让位：对话区 / 输入区 / 统计行统一右缩 `--codex-pinned-reserve`。
+
+   用 `max(基准, 留白)` 而不是 `calc(基准 + 留白)`：留白 = 面板宽 + 呼吸缝，
+   它一旦张开就远大于基准内边距（最小 186 + 18），此时正文右缘恰好停在面板
+   左侧 `PINNED_GAP_W` 处——就是「刚好不遮挡」；收起时 reserve 归零，max()
+   取回基准值，左右内边距重新对称。
+
+   **基准内边距必须走 `--codex-*-pad-x` 变量，不能在这里写死。** 主题会用
+   `padding` 简写覆写 `.codex-chat`（`.mind-main[data-ui-style="minimal"] .codex-chat`
+   是 0,3,0；窄屏的 `.mind-inspector-root.is-work-page .workbench-root .codex-chat`
+   是 0,4,0），都高于这里的 0,2,0，写死的 padding-right 会被整条盖掉，让位直接
+   失效（实测：展开时右内边距仍是 34px，窄窗下正文被面板压住 196px）。
+   所以基准值改由主题声明变量、这里只负责合成最终值，全局只有这一处写
+   padding-right。
+
+   正文和输入区用与摘要相同的时长和曲线平滑调整留白。
+   -------------------------------------------------------------------------- */
+.codex-main-col .codex-chat {
+  padding-right: max(var(--codex-chat-pad-x, 32px), var(--codex-pinned-reserve, 0px));
+  /* 无论有没有溢出都预留滚动条槽：置顶摘要靠它定 `right`，不留的话
+     内容从「不溢出」变成「溢出」时面板会横跳一个滚动条的宽度。
+     槽在 border 与 padding 之间，所以正文可用宽是 `宽 - 槽 - 内边距`。 */
+  scrollbar-gutter: stable;
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
+}
+
+.codex-main-col .codex-composer-wrap {
+  padding-right: max(var(--codex-composer-pad-x, 16px), var(--codex-pinned-reserve, 0px));
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
+}
+
+.codex-main-col .codex-stats-line {
+  padding-right: max(32px, var(--codex-pinned-reserve, 0px));
+  transition: padding-right var(--codex-summary-duration) var(--codex-summary-easing);
+}
+
+.codex-main-col .codex-to-bottom {
+  /* 位置固定，不随置顶摘要呼出收起而左右移动；展开时允许覆盖在其上 */
+  right: var(--codex-to-bottom-right, 32px);
+  transition: none;
+}
+
+.codex-topbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  min-height: 52px;
+  border-bottom: 1.5px dashed var(--codex-line);
+  background: rgba(255, 252, 243, 0.72);
+  backdrop-filter: blur(4px);
+  overflow: visible;
+  z-index: 20;
+}
+
+.codex-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.codex-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  background: var(--codex-tape-blue);
+  padding: 3px 9px 2px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.codex-chat {
+  /* 左右内边距的**基准值**。主题若要改它，请覆写这个变量而不要用 `padding`
+     简写——`.codex-main-col .codex-chat` 那条让位规则（见上文）靠
+     `max(基准, 留白)` 合成最终的 padding-right，主题简写会把合成结果整个盖掉。 */
+  --codex-chat-pad-x: 32px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px var(--codex-chat-pad-x) 8px;
+  position: relative;
+}
+
+.codex-chat-inner {
+  max-width: 780px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  /* 对话正文可选中复制。全局 `body { user-select: none }` 是为桌宠/窗口拖拽
+     时不误选文字，但消息正文与工具输出必须能抹黑选中，否则整段回复复制不了。
+     选中高亮沿用系统默认色——自定义 ::selection 要同时覆盖「元素自身」与
+     「后代元素」两种匹配，且半透明背景在深色主题下对比不足，收益不抵风险。 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ===================== 对话定位轨（左侧小横杠） ===================== */
+
+/* 包一层是为了给定位轨一个"只覆盖对话区"的定位基准（不含顶栏与输入区） */
+.codex-chat-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 滚动锚点：零高度标记，定位轨据此判断"当前停留的是哪一轮" */
+.codex-turn-anchor {
+  display: block;
+  height: 0;
+  scroll-margin-top: 12px;
+}
+
+/* 轨道本身撑满对话区高度（好让内层横杠列有可比较的 max-height），横杠列在其中垂直居中。
+   注意：**不能在这一层裁剪** —— 预览卡是向右伸出轨道的绝对定位子元素，clip 会把它切掉。 */
+.codex-rail {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  bottom: 0;
+  width: 30px;
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  /* 轨道本身不拦事件，只有横杠可点 —— 否则左侧这条会挡住正文的选词与点击 */
+  pointer-events: none;
+}
+
+/* 横杠列：只在这里裁剪，超长会话时最多铺满对话区高度 */
+.codex-rail-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.codex-rail-tick {
+  flex: 0 0 auto;
+  display: block;
+  height: 2px;
+  min-height: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: var(--codex-line);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: width 0.18s cubic-bezier(0.22, 1, 0.36, 1), background 0.14s ease;
+}
+
+.codex-rail-tick.on {
+  background: var(--codex-ink);
+}
+
+/* 轮次多时收紧节奏，尽量让整列容得下（见 .codex-rail-col 的 max-height） */
+.codex-rail.dense .codex-rail-tick {
+  height: 1.5px;
+  min-height: 1.5px;
+}
+
+.codex-rail.dense .codex-rail-col {
+  gap: 2px;
+}
+
+.codex-rail.dense2 .codex-rail-tick {
+  height: 1px;
+  min-height: 1px;
+}
+
+.codex-rail.dense2 .codex-rail-col {
+  gap: 1px;
+}
+
+/* 悬停预览：手账主题下是便签（暖纸 + 虚线描边 + 纸胶带） */
+.codex-rail-pop {
+  position: absolute;
+  left: 100%;
+  margin-left: 4px;
+  width: 272px;
+  transform: translateY(-50%);
+  z-index: 2;
+  padding: 9px 13px 11px;
+  border-radius: 12px 8px 12px 8px;
+  border: 1.5px dashed var(--codex-line);
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+  color: var(--codex-ink);
+  pointer-events: none;
+  animation: codex-rail-pop-in 0.14s ease-out;
+}
+
+.codex-rail-pop::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 20px;
+  width: 54px;
+  height: 16px;
+  border-radius: 2px;
+  background: var(--codex-tape-yellow);
+  transform: rotate(-3.5deg);
+  pointer-events: none;
+}
+
+/* 首行：用户消息，单行省略号 */
+.codex-rail-pop-user {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--codex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 其后：智能体最终总结，最多 3 行 */
+.codex-rail-pop-summary {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--codex-ink-soft);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+@keyframes codex-rail-pop-in {
+  from { opacity: 0; transform: translateY(-50%) translateX(-4px); }
+  to { opacity: 1; transform: translateY(-50%) translateX(0); }
+}
+
+/* 布局窄于此时对话区只剩四百来像素，预览卡（272px）会溢到右侧检查器上 —— 直接隐藏轨道 */
+@media (max-width: 940px) {
+  .codex-rail { display: none; }
+}
+
+.codex-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  padding: 40px 20px;
+}
+
+.codex-hero {
+  text-align: center;
+}
+
+.codex-hero-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--codex-ink);
+}
+
+.codex-hero-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  background: var(--codex-tape-blue);
+  padding: 2px 9px 1px;
+  border-radius: 999px;
+  font-family: var(--codex-mono);
+  letter-spacing: 1px;
+}
+
+.codex-hero-sub {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--codex-ink-faint);
+}
+
+/* ===================== 输入区：线格纸手账卡片 ===================== */
+
+.codex-composer-wrap {
+  /* 与 `--codex-chat-pad-x` 同理：基准值走变量，让位规则才压得住主题的简写。 */
+  --codex-composer-pad-x: 16px;
+  flex-shrink: 0;
+  padding: 0 var(--codex-composer-pad-x) 10px;
+}
+
+/* Shared width container for empty-state and conversation composers. */
+.codex-composer-inner {
+  max-width: 780px;
+  margin: 0 auto;
+  container-type: inline-size;
+}
+
+.codex-composer {
+  position: relative;
+  z-index: 30;
+  border: 1px solid var(--codex-line);
+  border-radius: 12px 14px 12px 14px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+  padding-top: 12px;
+  /* 下拉菜单是输入框子组件，必须允许溢出显示，否则会被裁切 */
+  overflow: visible;
+}
+
+/* 顶部纸胶带 */
+.codex-composer::before {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 150px;
+  height: 24px;
+  transform: translateX(-50%) rotate(-2deg);
+  background: var(--codex-tape-pink);
+  opacity: 0.65;
+  pointer-events: none;
+}
+
+/* 焦点提示放在「卡片」这一层，而不是里面的 textarea 上。
+   textarea 自身那圈 2px accent 描边已去掉（见 MindInspectorThemes.css 的例外段）：
+   手账主题的 accent 是印章青蓝，画在卡片内里像一个凭空出现的蓝框。
+   这里改用描边色变化——不引入新颜色，纸感也不破坏。 */
+.codex-composer:focus-within {
+  border-color: var(--codex-ink-faint);
+}
+
+.codex-composer-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 16px;
+}
+
+.codex-composer-textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  min-height: 48px;
+  max-height: 130px;
+  padding: 8px 0;
+  font-family: var(--codex-font);
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--codex-ink);
+  caret-color: var(--codex-accent);
+  /* 输入框保持纯白纸面，不需要笔记本横线 */
+  background-image: none;
+}
+
+.codex-composer-textarea::placeholder {
+  color: var(--codex-ink-faint);
+  font-style: italic;
+}
+
+/* ===================== 富文本输入区（ComposerEditor） ===================== */
+
+/* 形态与原来的 textarea 对齐（高度、行高、内边距），只是内容变成了块序列。
+   块类沿用 .codex-md-*，所以粘贴进来的 markdown 与上方消息区长得一样。 */
+.codex-composer-editor {
+  --composer-editor-padding-y: 8px;
+  flex: 1;
+  min-height: 48px;
+  max-height: 130px;
+  overflow-y: auto;
+  padding: var(--composer-editor-padding-y) 0;
+  /* 与上方消息区同字体。这里必须显式写出来：`.codex-md`（在文件更后面）也设了
+     font-family，同优先级下源码顺序靠后的它会把这条覆盖掉 —— 与其依赖顺序，
+     不如直接指向同一个变量，意图才明确。 */
+  font-family: var(--codex-md-font);
+  color: var(--codex-ink);
+  caret-color: var(--codex-accent);
+  outline: none;
+  /* 与对话区一致：正文可抹黑选中 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 空文档时的占位符。标记由 JS 直接写在 dataset 上（不走 React state，
+   否则每次按键都会重渲染，光标会被弹走）。 */
+.codex-composer-editor { position: relative; }
+.codex-composer-editor[data-empty='true']::before {
+  position: absolute;
+  top: var(--composer-editor-padding-y);
+  left: 0;
+  content: attr(data-placeholder);
+  color: var(--codex-ink-faint);
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* 输入区里块间距比消息正文更紧凑，一行一行贴着写才顺手 */
+.codex-composer-editor > * {
+  margin: 0 0 6px;
+}
+
+.codex-composer-editor > *:last-child {
+  margin-bottom: 0;
+}
+
+.codex-composer-editor > ul,
+.codex-composer-editor > ol {
+  padding-inline-start: 22px;
+}
+
+/* 格式浮卡（抹黑选中后出现；portal 到 body，fixed 定位） */
+.codex-composer-bubble {
+  position: fixed;
+  transform: translateX(-50%);
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--codex-line);
+  border-radius: 999px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-composer-bubble-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-composer-bubble-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-composer-bubble-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 3px;
+  background: var(--codex-line);
+}
+
+.codex-composer-bubble-typewrap {
+  position: relative;
+}
+
+.codex-composer-bubble-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+  white-space: nowrap;
+}
+
+.codex-composer-bubble-type:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-composer-bubble-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-composer-bubble-item {
+  padding: 5px 9px;
+  border-radius: 7px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--codex-ink-soft);
+  white-space: nowrap;
+}
+
+.codex-composer-bubble-item:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-composer-bubble-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+}
+
+.codex-composer-bubble-link input {
+  width: 190px;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--codex-ink);
+}
+
+.codex-composer-bubble-link button {
+  display: inline-flex;
+  align-items: center;
+  color: var(--codex-ink-soft);
+}
+
+.codex-composer-bubble-link button:hover {
+  color: var(--codex-accent-deep);
+}
+
+.codex-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px 8px;
+  flex-wrap: nowrap;
+}
+
+/* ===================== 文件引用（@-mention） ===================== */
+
+.codex-fileref-rail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 0;
+  flex-wrap: wrap;
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.codex-fileref-rail-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+}
+
+.codex-fileref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-accent-soft);
+  font-size: 11px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-fileref-name {
+  font-weight: 600;
+  color: var(--codex-accent-deep);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.codex-fileref-path {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--codex-mono);
+  font-size: 10px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-fileref-remove {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.codex-fileref-remove:hover {
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+}
+
+.codex-at-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--codex-accent-deep);
+  border-bottom: 1px dashed var(--codex-line);
+}
+
+.codex-msg-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.codex-msg-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 320px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-accent-soft);
+  font-family: var(--codex-mono);
+  font-size: 10px;
+  color: var(--codex-ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.codex-msg-ref-error {
+  color: var(--codex-danger);
+}
+
+.codex-composer-left,
+.codex-composer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.codex-composer-right {
+  margin-left: auto;
+}
+
+.codex-icon-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink);
+  cursor: pointer;
+  border: 1px solid rgba(178, 130, 42, 0.2);
+  box-shadow: var(--codex-shadow-sm);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.codex-icon-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-send-btn {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  border: none;
+  background: var(--codex-accent);
+  color: #fffaf0;
+  cursor: pointer;
+  box-shadow: 0 3px 8px rgba(63, 97, 121, 0.35);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.codex-send-btn:hover {
+  background: var(--codex-accent-deep);
+  transform: translateY(-1px);
+}
+
+.codex-send-btn:disabled {
+  background: var(--codex-line);
+  color: var(--codex-ink-faint);
+  cursor: default;
+  box-shadow: none;
+  opacity: 0.7;
+}
+
+.codex-send-btn.codex-stop {
+  background: var(--codex-warm);
+  box-shadow: 0 3px 8px rgba(179, 64, 47, 0.28);
+}
+
+/* 语音输入按钮（发送按钮左侧） */
+.codex-voice-btn {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  cursor: pointer;
+  border: 1px solid var(--codex-line);
+  box-shadow: var(--codex-shadow-sm);
+  margin-right: 8px;
+  transition: transform 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.codex-voice-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--codex-shadow-md);
+}
+
+.codex-voice-btn.recording {
+  background: var(--codex-warm);
+  border-color: rgba(179, 64, 47, 0.3);
+  color: #fffaf0;
+  animation: codex-voice-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes codex-voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(179, 64, 47, 0.35); }
+  50% { box-shadow: 0 0 0 5px rgba(179, 64, 47, 0.12); }
+}
+
+/* ===================== 消息流 ===================== */
+
+.codex-msg {
+  margin: 12px 0;
+}
+
+/* 消息行 + 悬浮操作 */
+.codex-msg-row {
+  position: relative;
+}
+
+/* 消息操作条：气泡下方独立一行（文档流内），悬浮时淡入；
+   不再绝对定位悬浮于气泡右上角，彻底避免遮挡正文 */
+.codex-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: max-content;
+  margin-top: 3px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line);
+  box-shadow: var(--codex-shadow-sm);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.14s ease;
+}
+
+/* 用户消息气泡右对齐，操作条跟随右对齐 */
+.codex-msg-actions-end {
+  margin-left: auto;
+}
+
+.codex-msg-row:hover .codex-msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.codex-msg-act {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-msg-act:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-msg-act.active {
+  background: var(--codex-accent);
+  color: #fffaf0;
+}
+
+.codex-msg-user {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  /* 垂直间距由消息下方的操作条区域提供，气泡自身不再占边距 */
+  margin: 0;
+}
+
+.codex-msg-user-bubble {
+  max-width: min(560px, 84%);
+  padding: 9px 15px 10px;
+  border-radius: 4px 14px 10px 14px;
+  background: #fff7d6;
+  border: 1px solid #e8d89a;
+  box-shadow: var(--codex-shadow-sm);
+  font-size: 14.5px;
+  line-height: 24px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--codex-ink);
+  position: relative;
+}
+
+/* 用户便签胶带 */
+.codex-msg-user-bubble::before {
+  content: '';
+  position: absolute;
+  top: -9px;
+  left: 18px;
+  width: 66px;
+  height: 18px;
+  background: var(--codex-tape-pink);
+  opacity: 0.8;
+  transform: rotate(-4deg);
+  pointer-events: none;
+}
+
+.codex-msg-assistant {
+  /* 垂直间距由消息下方的操作条区域提供，气泡自身不再占边距 */
+  margin: 0;
+  color: var(--codex-ink);
+  font-size: 14.5px;
+  line-height: 27px;
+  word-break: break-word;
+}
+
+/* ===================== Markdown 正文排版 ===================== */
+
+/* 尺度：字号 F 为基准，块间距 S = F/4，标题按 1.5/1.25/1.125/1 递减，
+   段落、列表、代码块之间留白逐级放大，保证长回复的阅读节奏。
+
+   字体与行距是按手写体调的：Ma Shan Zheng 的笔画比黑体「满」，同字号下字面更大、
+   重心更散，行距沿用原来的 1.62 会显得挤成一团，所以给到 1.78；字距也松一档。
+   代码块与表格仍是等宽/常规字体，不跟着手写。 */
+.codex-md {
+  --md-fs: 15px;
+  --md-s: 4px;
+  /* 正文阅读宽度：约 45 个中文字/行（15px 字号下 680 / 15 ≈ 45）；
+     代码块与表格可突破此限占满整列 */
+  --md-measure: 680px;
+  font-family: var(--codex-md-font);
+  font-size: var(--md-fs);
+  line-height: 1.78;
+  letter-spacing: 0.012em;
+  color: var(--codex-ink);
+  word-break: break-word;
+  /* 关掉「合成粗体」（synthetic bold）。
+     Ma Shan Zheng 在 @font-face 里只声明了 font-weight: 400，所以 strong / 表头
+     写 700 时浏览器会**自己把笔画描粗**：中文勉强能看，拉丁字母会糊成一坨、
+     粗细还忽轻忽重（字母越窄越明显，因为描边宽度是固定的）。
+     这道开关现在**主要保中文**：中文栈里所有族都只有 400，强调改由 strong 的
+     荧光笔底承担 —— 与一二级标题同一套手法，风格一致。
+     西文不受影响，它前移到 Georgia / Times New Roman（自带 700）之后本来就
+     匹配得到真字面，压根轮不到合成 —— 所以 strong 里的英文仍然是真粗体，
+     别把这条当成「把加粗关掉了」。
+     只关 weight 不关 style：em 的斜体同样没有真字形，但合成斜体在 handwriting 上
+     观感尚可，一并关掉会让 *斜* 彻底失去标记，那比轻微失真更糟。
+     极简主题换回无衬线（Segoe UI / PingFang SC / Microsoft YaHei 都有真粗体），
+     不存在合成，这条对它无影响 —— 那边该粗还是真粗。 */
+  font-synthesis-weight: none;
+}
+
+.codex-md > *:first-child { margin-top: 0; }
+.codex-md > *:last-child { margin-bottom: 0; }
+
+.codex-md-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 12px 0;
+  border-radius: 8px;
+}
+
+/* 新到达的文字渐显；只改透明度，保持光标、换行和滚动位置稳定。 */
+.codex-stream-fade {
+  animation: codex-stream-fade 420ms cubic-bezier(.2, .65, .3, 1) both;
+}
+@keyframes codex-stream-fade {
+  from { opacity: .15; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .codex-stream-fade { animation: none; }
+}
+
+/* 正文块收窄到阅读宽度；宽块（代码/表格）保持整列 */
+.codex-md-p,
+.codex-md-h,
+.codex-md-ul,
+.codex-md-ol,
+.codex-md-quote {
+  max-width: var(--md-measure);
+}
+
+/* 文件预览使用整个面板宽度，包括就地编辑和分页只读视图。 */
+.codex-src .codex-md {
+  --md-measure: none;
+}
+
+.codex-md-p { margin: 0 0 10px; }
+
+/* 标题走装饰手写体（西文 Caveat + 中文 Ma Shan Zheng）。字重用变量而不是写死 700：
+   手写体只有 400 一个字重，写 700 会被浏览器合成粗体，笔画糊成一坨。 */
+.codex-md-h {
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  letter-spacing: 0.02em;
+  color: var(--codex-ink);
+}
+.codex-md-h1 { font-size: calc(var(--md-fs) * 1.55); line-height: 1.3; margin: 4px 0 12px; }
+.codex-md-h2 { font-size: calc(var(--md-fs) * 1.3); line-height: 1.35; margin: 20px 0 8px; }
+.codex-md-h3 { font-size: calc(var(--md-fs) * 1.15); line-height: 1.4; margin: 17px 0 6px; }
+/* 四~六级标题与正文同字号，字重又压回了 400（手写体加不了粗），所以改用强调色
+   与正文区分 —— 否则它们会跟普通段落长得一模一样。 */
+.codex-md-h4, .codex-md-h5, .codex-md-h6 {
+  font-size: var(--md-fs);
+  color: var(--codex-accent-deep);
+  margin: 14px 0 4px;
+}
+/* 一二级标题压一道荧光笔。手写体没法靠加粗拉层级，就用这道底把标题「划」出来 ——
+   手账里最常见的强调法，也和便签、胶带那套色板是一路的。
+   `width: fit-content` 是必须的：标题是块级，不收回宽度就会把整条 680px 全刷上色。 */
+.codex-md-h1,
+.codex-md-h2 {
+  width: fit-content;
+  padding: 0 2px;
+  background-image: linear-gradient(transparent 62%, var(--codex-tape-yellow) 62%);
+  background-size: 100% 1lh;
+  background-repeat: repeat-y;
+}
+
+.codex-md-ul, .codex-md-ol { margin: 0 0 10px; padding-inline-start: 22px; }
+.codex-md-ul { list-style-type: disc; }
+.codex-md-ol { list-style-type: decimal; }
+.codex-md-ul .codex-md-ul { list-style-type: circle; }
+.codex-md-ul .codex-md-ul .codex-md-ul { list-style-type: square; }
+.codex-md-li { margin: 4px 0; padding-inline-start: 2px; }
+/* 项目符号用强调色，与正文黑字拉开一档 */
+.codex-md-li::marker { color: var(--codex-accent); font-weight: 700; }
+.codex-md-li > .codex-md-ul, .codex-md-li > .codex-md-ol { margin: 3px 0 0; }
+.codex-md-li > .codex-md-p:last-child { margin-bottom: 0; }
+
+/* 任务清单：无项目符号，前置方框；完成后整条转灰 */
+.codex-md-tasklist { padding-inline-start: 2px; list-style: none; }
+.codex-md-li.codex-md-task {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-inline-start: 0;
+}
+.codex-md-taskbox {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  /* 与首行文字垂直居中：li 是 align-items:flex-start，所以这里要手动让位。
+     (行高 1.78 × 15px = 26.7px − 方框 15px) / 2 ≈ 6px —— 行距改成 1.78 后
+     原来的 4px 会让方框偏高约 2px。 */
+  margin-top: 6px;
+  border: 1.5px solid var(--codex-line);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: transparent;
+}
+.codex-md-task[data-checked] .codex-md-taskbox {
+  background: var(--codex-success-soft);
+  border-color: var(--codex-success);
+  color: var(--codex-success);
+}
+.codex-md-task-body { flex: 1; min-width: 0; }
+.codex-md-task[data-checked] .codex-md-task-body { color: var(--codex-ink-faint); }
+
+/* 引用块做成一张便签贴纸：淡蓝胶带底 + 左侧强调条。
+   底色用 --codex-tape-*（手账/极简 × 明/暗 四种组合都定义了值），不写死颜色。 */
+.codex-md-quote {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 8px 14px 8px 16px;
+  border-radius: 4px 10px 10px 4px;
+  background: var(--codex-tape-blue);
+  color: var(--codex-ink-soft);
+}
+.codex-md-quote::after {
+  content: '';
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 4px 0 0 4px;
+  background: var(--codex-accent);
+}
+.codex-md-quote > *:last-child { margin-bottom: 0; }
+
+.codex-md-hr {
+  margin: 22px 0;
+  border: 0;
+  border-top: 1px dashed var(--codex-line);
+}
+
+.codex-md-code {
+  padding: 1.5px 5px;
+  border-radius: 5px;
+  background: rgba(83, 125, 150, 0.1);
+  border: 1px solid rgba(83, 125, 150, 0.14);
+  font-family: var(--codex-mono);
+  font-size: 0.88em;
+  /* .codex-md 给正文加了 0.012em 字距（为手写体），等宽代码必须清掉，
+     否则每个字符都被撑开、列对不齐 */
+  letter-spacing: normal;
+  color: var(--codex-accent-deep);
+}
+
+/* 便利贴：手账主题下代码块做成「贴在纸上的一张便签」。
+   只动三件事 —— 底色换成暖黄、圆角收方（便签是纸片不是药丸）、抬起一点阴影。
+   头部那条灰带也一并去掉（见下），否则它看着像「带工具栏的窗口」而不是一张纸。
+   极简主题在 MindInspectorThemes.css 里把这几样全部还原。 */
+.codex-md-codeblock {
+  margin: 10px 0 14px;
+  border: 1px solid var(--codex-note-line);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--codex-note-bg);
+  box-shadow: var(--codex-note-shadow);
+}
+.codex-md-codeblock-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px 3px 12px;
+  /* 便签是**一张纸**：头部不铺底色，只留一道暖色细线把语言标签和代码分开。
+     原先的 --panel-bg-surface 灰带会把这张纸切成「工具栏 + 内容」两截，
+     「一张便签」的错觉就没了。复制按钮靠 :hover 自带底色，不需要常驻的带子。 */
+  background: transparent;
+  border-bottom: 1px solid var(--codex-note-line);
+}
+.codex-md-codeblock-lang {
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  /* 走便利贴专用的一档（见调色板注释）：直接沿用 --codex-ink-faint 会在暖黄底上掉到 3:1 以下 */
+  color: var(--codex-note-ink-faint);
+}
+.codex-md-codeblock-copy {
+  border: none;
+  background: transparent;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.codex-md-codeblock-copy:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+.codex-md-pre {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: transparent;
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  /* 同上：清掉继承来的正文手写字距 */
+  letter-spacing: normal;
+  color: var(--codex-ink);
+}
+.codex-md-pre code { font-family: inherit; }
+
+.codex-md-table-wrap { margin: 10px 0 14px; overflow-x: auto; }
+.codex-md-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+.codex-md-th {
+  text-align: left;
+  /* 表头也走手写体，和标题呼应；字重同样交给变量（不能写死 700，手写体会被合成粗体）。
+     少了加粗，就靠手写体 + 强调色 + 一道浅底 + 更重的下边框四样把表头立起来。 */
+  font-family: var(--codex-md-hand);
+  font-weight: var(--codex-md-h-weight);
+  letter-spacing: 0.02em;
+  padding: 6px 12px 6px 0;
+  border-bottom: 1px solid var(--codex-line);
+  background: var(--panel-bg-surface);
+  color: var(--codex-accent-deep);
+  white-space: nowrap;
+}
+.codex-md-td {
+  padding: 7px 12px 7px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--codex-line-light);
+}
+/* 隔行浅底：表格行多时眼睛不容易串行。底色取 --panel-bg-surface，
+   两套主题、明暗模式都自适应。 */
+.codex-md-tr:nth-child(even) .codex-md-td { background: var(--panel-bg-surface); }
+.codex-md-tr:last-child .codex-md-td { border-bottom: none; }
+.codex-md-th:last-child, .codex-md-td:last-child { padding-right: 0; }
+
+.codex-md-link {
+  color: var(--codex-accent-deep);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.codex-md-link:hover { color: var(--codex-accent); }
+
+/* 本地文件链接卡片：图标 + 标签，点击在侧边栏预览打开 */
+.codex-md-filelink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 1px 8px 1px 6px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--codex-accent-deep);
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+  vertical-align: baseline;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.codex-md-filelink:hover {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-accent);
+}
+.codex-md-filelink-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--codex-accent);
+}
+.codex-md-filelink[data-file-kind="code"] .codex-md-filelink-icon { color: #b56342; }
+.codex-md-filelink[data-file-kind="style"] .codex-md-filelink-icon { color: #7c5aa6; }
+.codex-md-filelink[data-file-kind="data"] .codex-md-filelink-icon { color: #4f7f58; }
+.codex-md-filelink[data-file-kind="image"] .codex-md-filelink-icon { color: #a84f73; }
+.codex-md-filelink[data-file-kind="text"] .codex-md-filelink-icon { color: #4d7692; }
+.codex-md-filelink-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-md-li .codex-md-filelink { margin-top: 1px; margin-bottom: 1px; }
+
+/* 文件引用块里的行号与增删统计（正文链接与「修改文件」清单共用） */
+.codex-filelink-line {
+  flex: none;
+  color: var(--codex-ink-faint);
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+}
+.codex-filelink-stats {
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+  margin-left: 2px;
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+}
+.codex-filelink-add { color: var(--codex-success); }
+.codex-filelink-del { color: var(--codex-danger); }
+.codex-md-filelink:disabled { cursor: default; }
+
+/* 助手回复末尾的「修改文件」清单：宿主按工具执行结果生成，不是模型自述 */
+.codex-changed-files {
+  margin: 8px 0 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 10px;
+  background: var(--codex-paper-deep);
+}
+.codex-changed-files-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--codex-ink-soft);
+  font-size: 12px;
+  font-weight: 500;
+}
+.codex-changed-files-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.codex-md strong {
+  /* 字重分两路，别把它当成「纸感主题里这条没用」：
+     西文落在 Georgia / Times New Roman，**有真 700 字面**，这条真变粗；
+     中文落在 Ma Shan Zheng，只有 400，且 .codex-md 已关掉合成粗体，这条
+     老实解析到 400 —— 中文的强调全靠下面那道荧光笔底。
+     保留 700 是为了语义正确 + 极简主题（无衬线、有真粗体）该粗就粗。 */
+  font-weight: 700;
+  /* 纸感主题里**中文的强调全靠这道荧光笔底**：没有字重可用，就把要强调的一段
+     「划」出来 —— 手账里最常见的强调法，和一二级标题的底、便签、胶带是一路的。
+     西文侧真变粗，这道底只是顺带同色（两路共用一条规则，观感一致）。
+     极简主题里 tape-yellow 是浅灰，那里还有真粗体顶着，这道底只是很淡的一层。 */
+  background-image: linear-gradient(transparent 58%, var(--codex-tape-yellow) 58%);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.codex-md del { color: var(--codex-ink-faint); }
+
+.codex-msg-error {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 14px 0;
+  padding: 9px 12px;
+  border: 1px dashed var(--codex-warm);
+  border-radius: 10px;
+  background: var(--codex-warm-soft);
+  color: var(--codex-danger);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.codex-msg-error .codex-msg-error-text {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.codex-msg-error-main {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.codex-msg-error-actions {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.codex-msg-error-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--codex-danger);
+  font: inherit;
+  line-height: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.codex-msg-error-link:hover { opacity: 0.8; }
+.codex-msg-error-link:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 2px; }
+.codex-msg-error-link:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.codex-msg-error-details {
+  width: 100%;
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--codex-warm);
+}
+
+.codex-msg-error-details time { font-size: 12px; }
+.codex-msg-error-details pre { margin: 6px 0 0; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* 宿主中性状态提示（上下文压缩等）：与 error 同构但用中性色，
+   语义是「告知」而非「报错」，不能借用错误样式。 */
+.codex-msg-notice {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 14px 0;
+  padding: 9px 12px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 10px;
+  background: var(--codex-paper-deep);
+  color: var(--codex-ink-soft);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.codex-msg-notice .codex-msg-notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.codex-msg-images {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 智能体图片消息（send_image 工具）：左对齐 + 竖向排列缩略图与说明 */
+.codex-msg-images-assistant {
+  justify-content: flex-start;
+}
+
+.codex-msg-assistant-with-images {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.codex-msg-img-btn {
+  width: 92px;
+  height: 92px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid var(--codex-line);
+  overflow: hidden;
+  cursor: zoom-in;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+}
+
+.codex-msg-img-btn img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 富文本代码块 */
+.codex-pre {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--codex-line-light);
+  background: #fdf8ec;
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  line-height: 21px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--codex-ink-soft);
+  box-shadow: inset 0 1px 3px rgba(59, 52, 40, 0.06);
+}/* 工具活动采用无外框的摘要行与缩进详情；所有主题共用这一种结构。 */
+.codex-tool-row, .codex-tool-activity { margin: 4px 0; min-width: 0; }
+.codex-tool-header, .codex-tool-activity-header {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 32px;
+  padding: 6px 4px; border: 0; border-radius: 5px; background: transparent;
+  color: var(--codex-ink-soft); font: inherit; font-size: 12px; line-height: 20px;
+  text-align: left; cursor: pointer;
+}
+.codex-tool-activity-header { flex-wrap: wrap; row-gap: 2px; }
+.codex-tool-header:hover, .codex-tool-activity-header:hover { background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-tool-header:focus-visible, .codex-tool-activity-header:focus-visible { outline: 2px solid var(--codex-accent); outline-offset: -2px; }
+.codex-tool-label { flex: 0 0 auto; max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
+.codex-tool-target, .codex-tool-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-soft); }
+.codex-tool-duration { flex-shrink: 0; font: 10px var(--codex-mono); color: var(--codex-ink-faint); }
+.codex-tool-status, .codex-tool-activity-status { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; white-space: nowrap; }
+.codex-tool-status-run, .codex-tool-activity-status-run { color: var(--codex-accent); }
+/* 完成态保持中性：整屏绿色会让失败/运行中失去重点。 */
+.codex-tool-status-ok, .codex-tool-activity-status-ok { color: var(--codex-ink-faint); }
+.codex-tool-status-err, .codex-tool-row.failed .codex-tool-label { color: var(--codex-danger); }
+.codex-tool-activity-label { min-width: 0; max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--codex-ink); }
+/* 摘要行按“类别 + 数量”排列，窄窗口允许换行；不再截断成一句泛化描述。 */
+.codex-activity-summary { flex: 1 1 240px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 6px; max-width: none; overflow: visible; white-space: normal; color: var(--codex-ink-soft); }
+.codex-activity-fact { white-space: nowrap; font-size: 12px; line-height: 20px; }
+.codex-activity-sep { color: var(--codex-ink-faint); opacity: .55; }
+.codex-tool-activity-fail { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 11px; line-height: 20px; color: var(--codex-danger); }
+.codex-tool-activity-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11px var(--codex-mono); color: var(--codex-ink-faint); }
+.codex-tool-chevron { display: inline-flex; flex-shrink: 0; color: var(--codex-ink-soft); opacity: .35; transition: opacity .15s ease; }
+.codex-tool-row:hover .codex-tool-chevron,
+.codex-tool-row.expanded .codex-tool-chevron,
+.codex-tool-row:focus-within .codex-tool-chevron { opacity: 1; }
+
+/* 展开后的筛选条与阶段标题：用极轻的控件把长过程切短。 */
+.codex-activity-filters { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 0 6px; }
+.codex-activity-filter {
+  padding: 1px 6px; border: 1px solid var(--codex-line-light); border-radius: 5px;
+  background: transparent; color: var(--codex-ink-faint); font: inherit;
+  font-size: 10.5px; line-height: 16px; cursor: pointer;
+}
+.codex-activity-filter:hover { color: var(--codex-ink-soft); border-color: var(--codex-line); background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-activity-filter.active { color: var(--codex-ink); border-color: var(--codex-line); background: var(--codex-accent-soft); }
+.codex-activity-filter:focus-visible { outline: 1px solid var(--codex-accent); outline-offset: 1px; }
+.codex-activity-filter-empty { padding: 6px 0 8px; color: var(--codex-ink-faint); font-size: 11.5px; }
+
+.codex-activity-phase { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; color: var(--codex-ink-faint); font-size: 11px; line-height: 18px; }
+.codex-activity-phase-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: var(--codex-ink-faint); opacity: .5; }
+.codex-activity-phase[data-phase='edit'] .codex-activity-phase-dot { background: var(--codex-accent); opacity: .8; }
+.codex-activity-phase[data-phase='verify'] .codex-activity-phase-dot { background: var(--codex-success); opacity: .8; }
+.codex-activity-phase-name { flex-shrink: 0; color: var(--codex-ink-soft); font-weight: 600; letter-spacing: .02em; }
+.codex-activity-phase-meta { flex-shrink: 0; font-family: var(--codex-mono); font-size: 10.5px; }
+.codex-activity-phase-fail { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; color: var(--codex-danger); font-size: 10.5px; }
+.codex-activity-phase-rule { flex: 1; height: 1px; margin-left: 2px; background: var(--codex-line-light); }
+.codex-no-result-row { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 4px; color: var(--codex-ink-faint); font-size: 11.5px; line-height: 20px; }
+.codex-no-result-row > svg { flex-shrink: 0; }
+
+/* 超长过程虚拟化：展开组内独立滚动，不再把整页对话撑长。 */
+.codex-activity-list { min-width: 0; }
+.codex-activity-list.virtual {
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+.codex-activity-vrow { min-width: 0; }
+.codex-tool-activity-chevron { transform: rotate(-90deg); transition: transform .2s ease; }
+.codex-tool-activity.expanded .codex-tool-activity-chevron { transform: rotate(0); }
+.codex-tool-activity-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows .2s ease, opacity .2s ease; }
+.codex-tool-activity-reveal.open { grid-template-rows: 1fr; opacity: 1; }
+.codex-tool-activity-body { min-height: 0; overflow: hidden; border-left: 1px solid var(--codex-line-light); margin: 3px 0 5px 10px; padding-left: 12px; }
+.codex-tool-activity-body .codex-tool-row { margin: 1px 0; }
+.codex-tool-activity-current { padding: 0 10px 8px 30px; font-size: 11px; color: var(--codex-ink-soft); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+
+/* 思考块：折叠态只留一行预览；展开后内容自适应、超过 240px 内部滚动。 */
+.codex-thought {
+  min-width: 0;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--codex-paper-card) 78%, transparent);
+}
+.codex-thought-head { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--codex-ink-faint); font-size: 11px; line-height: 18px; }
+.codex-thought-head > svg { flex-shrink: 0; }
+.codex-thought-label { flex-shrink: 0; color: var(--codex-ink-soft); }
+.codex-thought-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.codex-thought-toggle {
+  flex-shrink: 0; padding: 0 2px; border: 0; border-radius: 3px; background: transparent;
+  color: var(--codex-ink-faint); font: inherit; font-size: 11px; line-height: 18px; cursor: pointer;
+}
+.codex-thought-toggle:hover { color: var(--codex-ink); background: var(--panel-bg-hover, rgba(83,125,150,.05)); }
+.codex-thought-toggle:focus-visible { outline: 1px solid var(--codex-accent); outline-offset: 1px; }
+.codex-thought-body {
+  min-width: 0;
+  margin-top: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: var(--codex-ink-soft);
+}
+.codex-thought-body .codex-md { font-size: 12.5px; line-height: 1.65; color: var(--codex-ink-soft); }
+
+.codex-tool-detail, .codex-tool-body { padding: 5px 4px 10px 25px; }
+.codex-tool-summary { padding: 0 4px 6px 25px; font-size: 12px; }
+.codex-tool-io { min-width: 0; overflow: hidden; }
+.codex-inout-row { display: grid; grid-template-columns: 1fr max-content; column-gap: 8px; align-items: start; padding: 5px 0; }
+.codex-inout-badge { justify-self: end; font-size: 10px; color: var(--codex-ink-faint); margin-top: 2px; user-select: none; }
+.codex-inout-cell { min-width: 0; }
+.codex-inout-divider { height: 6px; }
+.codex-inout-pre { margin: 0; padding: 2px 0; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11.5px/1.65 var(--codex-mono); }
+.codex-inout-pre-err { color: var(--codex-danger); }
+
+/* JSON 语法高亮配色（暖纸色系内取值） */
+.codex-inout-k { color: #7a5fa3; } /* 键 */
+.codex-inout-c { color: #9a8f7d; } /* 冒号 */
+.codex-inout-s { color: #8a6d3b; } /* 字符串 */
+.codex-inout-n { color: #3f6179; } /* 数字 */
+.codex-inout-w { color: #b2822a; }/* true/false/null */
+/* 工具调用紧凑摘要行（非文件工具默认可见，无需展开即可了解参数/结果要点） */
+
+
+.codex-tool-summary-arg {
+  color: var(--codex-ink-soft);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-tool-summary-res {
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-tool-summary-err {
+  color: var(--codex-danger);
+}
+
+/* 工具轮次预算耗尽提示条（继续 / 补充说明后继续 / 停止） */
+.codex-budget-banner {
+  margin: 0 0 10px;
+  border: 1.5px solid var(--codex-warning);
+  border-radius: 10px 12px 10px 12px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  padding: 10px 14px;
+}
+
+.codex-budget-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.codex-budget-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--codex-warning);
+}
+
+.codex-budget-sub {
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+  font-family: var(--codex-mono);
+}
+
+.codex-budget-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-budget-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.codex-budget-chip {
+  font-size: 11.5px;
+  font-family: var(--codex-mono);
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--codex-tape-blue);
+  color: var(--codex-ink-soft);
+}
+
+.codex-budget-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.codex-budget-file {
+  font-size: 11px;
+  font-family: var(--codex-mono);
+  color: var(--codex-ink-faint);
+  background: #fbf4e4;
+  border: 1px solid var(--codex-line-light);
+  padding: 1px 7px;
+  border-radius: 6px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-budget-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--codex-accent);
+}
+
+.codex-budget-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.codex-budget-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--codex-line);
+  border-radius: 8px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  font-size: 12.5px;
+  font-family: var(--codex-font);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.codex-budget-btn:hover {
+  background: rgba(83, 125, 150, 0.08);
+  border-color: var(--codex-line-strong);
+}
+
+.codex-budget-btn.primary {
+  background: var(--codex-accent);
+  border-color: var(--codex-accent);
+  color: #fff;
+}
+
+.codex-budget-btn.primary:hover {
+  filter: brightness(1.08);
+  background: var(--codex-accent);
+}
+
+.codex-budget-btn.ghost {
+  border-color: transparent;
+  color: var(--codex-ink-faint);
+}
+
+.codex-budget-btn.ghost:hover {
+  color: var(--codex-danger);
+  border-color: var(--codex-danger-soft);
+  background: var(--codex-danger-soft);
+}
+
+.codex-file-banner {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  background: #fbf4e4;
+  border-bottom: 1px solid var(--codex-line-light);
+  font-family: var(--codex-mono);
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-file-banner-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--codex-ink);
+}
+
+.codex-file-banner-tag {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink-soft);
+}
+
+.codex-fold-btn {
+  display: block;
+  width: 100%;
+  padding: 5px 2px;
+  border: none;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--codex-font);
+}
+
+.codex-fold-btn:hover {
+  color: var(--codex-ink-soft);
+}
+
+.codex-diff-line {
+  padding: 0 14px;
+  min-height: 22px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+  line-height: 22px;
+}
+
+.codex-diff-add { background: var(--codex-success-soft); color: var(--codex-success); }
+.codex-diff-del { background: var(--codex-danger-soft); color: var(--codex-danger); }
+.codex-diff-hunk { background: var(--codex-warning-soft); color: var(--codex-warning); }
+.codex-diff-meta { background: #fbf4e4; color: var(--codex-ink-faint); }
+
+.codex-numbered-line {
+  display: flex;
+  min-height: 22px;
+  line-height: 22px;
+  white-space: pre;
+  font-family: var(--codex-mono);
+  font-size: 12.5px;
+}
+
+.codex-numbered-gutter {
+  flex-shrink: 0;
+  width: 46px;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--codex-ink-faint);
+  user-select: none;
+}
+
+.codex-thinking {
+  margin: 14px 0;
+  padding: 10px 14px;
+  border: 1px dashed var(--codex-line);
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  width: fit-content;
+  max-width: 100%;
+}
+
+.codex-thinking-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-thinking-chain {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--codex-line);
+  color: var(--codex-ink-faint);
+  font-size: 12.5px;
+  line-height: 21px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.codex-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.codex-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--codex-ink-faint);
+  display: inline-block;
+  animation: codex-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.codex-dots i:nth-child(2) { animation-delay: 0.15s; }
+.codex-dots i:nth-child(3) { animation-delay: 0.3s; }
+
+.codex-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 15px;
+  margin-left: 2px;
+  background: var(--codex-ink-soft);
+  vertical-align: text-bottom;
+  animation: codex-cursor-blink 1s step-start infinite;
+}
+
+/* ===================== 右侧：检查器 ===================== */
+
+.codex-inspector {
+  width: 360px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--codex-paper-card);
+  border-left: 2px dashed var(--codex-line);
+  position: relative;
+  z-index: 2;
+  /* 收起靠宽度归零 + 裁切，而不是 display:none —— display 不可过渡。
+     内层保持展开宽度，所以动画期间内容是「整块滑出去」；若让内容跟着变窄
+     逐帧重排，终端（xterm）和代码预览会明显抖动，宽度归零时还可能算出 0 列。 */
+  overflow: hidden;
+  transition: width 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+              border-left-width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 内层固定展开宽度，由外层的 overflow:hidden 负责裁切 */
+.codex-inspector-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 auto;
+  min-height: 0;
+  /* 高度锚定到外层：flex-shrink 为 0，若高度只由内容决定，长列表会把内层撑
+     得比右栏更高，被外层的 overflow:hidden 裁掉，且内层/列表都不产生滚动条。 */
+  height: 100%;
+}
+
+/* 右侧栏整体收纳：宽度由 inline style 收到 0，这里只收掉边框和交互 */
+.codex-inspector.collapsed {
+  border-left-width: 0;
+  pointer-events: none;
+}
+
+.codex-inspector::before {
+  content: '';
+  position: absolute;
+  top: 24px;
+  right: -16px;
+  width: 110px;
+  height: 24px;
+  background: var(--codex-tape-blue);
+  transform: rotate(34deg);
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.codex-inspector-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 2px;
+  padding: 10px 18px 0;
+  border-bottom: 1.5px dashed var(--codex-line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+/* 页签过多时横向滚动，不显示滚动条 */
+.codex-inspector-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.codex-inspector-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px 9px;
+  border-radius: 10px 10px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  background: transparent;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+/* 未选中页签的悬浮高亮。原先**整条规则都不存在** —— 五个页签在两套主题下
+   悬浮时计算样式一个像素都不变（用户报的「五个 tab 在两种主题下都缺少高亮」）。
+   颜色与紧邻的会话列表行 / 文件树节点同一支纸蓝，层级也一致：比静止态亮、
+   比选中的那一档（实底 `--codex-paper` + 虚线框）轻。
+   `:not(.active)` 是刻意的：选中页签已经有实底 + 虚线框，再叠一层悬浮色会
+   让「当前在哪一页」变得含糊，也会盖掉它与下方内容区连成一片的那道缝。 */
+.codex-inspector-tab:hover:not(.active) {
+  background: rgba(83, 125, 150, 0.07);
+  color: var(--codex-ink-soft);
+}
+
+.codex-inspector-tab.active {
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  border: 1.5px dashed var(--codex-line);
+  border-bottom-color: var(--codex-paper);
+  margin-bottom: -1.5px;
+}
+
+.codex-inspector-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.codex-info-card {
+  border: 1px solid var(--codex-line-light);
+  border-radius: 10px 12px 10px 12px;
+  background: var(--codex-paper);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+.codex-info-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--codex-ink-soft);
+  margin-bottom: 8px;
+}
+
+.codex-info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-info-row .codex-info-key {
+  color: var(--codex-ink-faint);
+}
+
+.codex-info-row .codex-info-value {
+  color: var(--codex-ink);
+  font-weight: 600;
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+}
+
+/* ===================== 上下文空间卡片（概览页） ===================== */
+
+.codex-context-percent {
+  margin-left: auto;
+  font-family: var(--codex-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--codex-accent-deep);
+}
+
+.codex-context-figures {
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+  margin-bottom: 8px;
+}
+
+/* 占用条：总长 = provider 上报的精确占用百分比；分段按构成比例着色 */
+.codex-context-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(59, 52, 40, 0.08);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.codex-context-seg {
+  height: 100%;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.codex-ctx-system { background: #7a5fa3; }
+.codex-ctx-tools { background: #3f6179; }
+.codex-ctx-messages { background: #8a6d3b; }
+
+/* 构成明细：色块 + 标签 + 估算 token */
+.codex-context-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-context-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-context-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.codex-context-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-context-tokens {
+  font-family: var(--codex-mono);
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+}
+
+/* ===================== 变更页（右侧检查器） ===================== */
+
+.codex-changes-empty {
+  padding: 4px 0 2px;
+  font-size: 12.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.codex-changes-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-changes-item:hover {
+  background: rgba(83, 125, 150, 0.08);
+}
+
+.codex-changes-item.selected {
+  background: var(--codex-accent-soft);
+}
+
+/* 文件类型图标：语言 / 格式的官方 logo（public/icons/languages/） */
+.codex-file-lang {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  display: block;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+}
+
+.codex-changes-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--codex-mono);
+  font-size: 12px;
+}
+
+.codex-changes-stats {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+}
+
+.codex-changes-add {
+  color: var(--codex-success);
+}
+
+.codex-changes-rem {
+  color: var(--codex-danger);
+}
+
+.codex-changes-none {
+  color: var(--codex-ink-faint);
+}
+
+.codex-changes-diff {
+  margin-top: 8px;
+  border-top: 1px dashed var(--codex-line-light);
+  padding-top: 8px;
+}
+
+.codex-changes-no-diff {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+}
+
+/* 终端面板 */
+.codex-terminal-pane {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.codex-terminal-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 4px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  scrollbar-width: none;
+}
+
+.codex-terminal-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.codex-terminal-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+.codex-terminal-tab.active {
+  color: var(--codex-accent-deep);
+  background: var(--codex-accent-soft);
+}
+
+.codex-terminal-tab .codex-terminal-close {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 1px;
+  border-radius: 4px;
+  line-height: 0;
+}
+
+.codex-terminal-tab .codex-terminal-close:hover {
+  color: var(--codex-danger);
+}
+
+.codex-terminal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px;
+  background: var(--panel-elevated);
+}
+
+.codex-terminal-slot {
+  position: absolute;
+  inset: 0;
+  padding: 8px;
+}
+
+.codex-terminal-slot > div {
+  width: 100%;
+  height: 100%;
+}
+
+/* ===================== 下拉菜单 ===================== */
+
+.codex-dropdown {
+  position: relative;
+  display: inline-flex;
+}
+
+.codex-dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 29px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(255, 252, 243, 0.65);
+  border: 1px solid var(--codex-line-light);
+  color: var(--codex-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--codex-shadow-sm);
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.codex-dropdown-trigger:hover {
+  background: #fffcf3;
+  border-color: var(--codex-line);
+}
+
+.codex-dropdown-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 无工作模型却尝试发送时的高亮框（脉动圆环引导注意力） */
+.codex-dropdown-trigger.codex-model-highlight {
+  border-color: var(--codex-warm);
+  animation: codex-model-highlight-pulse 1.1s ease-in-out infinite;
+}
+@keyframes codex-model-highlight-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--codex-warm-soft), var(--codex-shadow-sm); }
+  50% { box-shadow: 0 0 0 6px var(--codex-warm-soft), var(--codex-shadow-sm); }
+}
+
+.codex-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 120;
+  min-width: 224px;
+  max-width: 320px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 5px;
+  border-radius: 12px 14px 12px 14px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-lg);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 输入框底部的下拉列表向上展开，避免被窗口底部裁切 */
+.codex-composer .codex-dropdown-menu {
+  top: auto;
+  bottom: calc(100% + 7px);
+}
+
+/* 靠近右侧边缘的下拉列表向右对齐，避免被滚动容器右边界截断 */
+.codex-topbar-actions .codex-dropdown-menu,
+.codex-composer-right .codex-dropdown-menu {
+  left: auto;
+  right: 0;
+}
+
+.codex-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: none;
+  background: transparent;
+  color: var(--codex-ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.codex-dropdown-item:hover,
+.codex-dropdown-item.selected {
+  background: rgba(83, 125, 150, 0.08);
+}
+
+.codex-dropdown-item .codex-dropdown-hint {
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+  line-height: 17px;
+  white-space: normal;
+}
+
+.codex-dropdown-sep {
+  height: 1px;
+  background: var(--codex-line-light);
+  margin: 4px 3px;
+}
+
+.codex-dropdown-label {
+  padding: 6px 9px 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--codex-ink-faint);
+}
+
+/* 模型下拉框空状态：未配置工作模型 → 引导去设置页 */
+.codex-dropdown-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 9px 10px;
+}
+.codex-dropdown-empty-text {
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+  line-height: 1.5;
+}
+.codex-dropdown-empty-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.codex-dropdown-empty-btn:hover {
+  background: rgba(83, 125, 150, 0.18);
+}
+
+/* ===================== 斜杠命令 ===================== */
+
+.codex-slash-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 280px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 5px;
+  border-radius: 12px 14px 12px 14px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-lg);
+  display: flex;
+  flex-direction: column;
+}
+
+.codex-slash-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: none;
+  background: transparent;
+  color: var(--codex-ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.codex-slash-item:hover,
+.codex-slash-item.selected {
+  background: rgba(83, 125, 150, 0.08);
+}
+
+.codex-slash-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.codex-slash-title {
+  font-weight: 600;
+}
+
+.codex-slash-desc {
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-slash-cmd {
+  font-family: var(--codex-mono);
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--codex-paper);
+  flex-shrink: 0;
+}
+
+.codex-slash-empty {
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--codex-ink-faint);
+}
+
+/* ===================== 附件 / 灯箱 / 拖拽 ===================== */
+
+.codex-attachment-rail {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  padding: 2px 10px 4px 16px;
+}
+
+.codex-attachment-rail::-webkit-scrollbar { display: none; }
+
+.codex-attachment-item {
+  position: relative;
+  flex: 0 0 62px;
+  width: 62px;
+  height: 62px;
+}
+
+.codex-attachment-thumb {
+  width: 62px;
+  height: 62px;
+  padding: 0;
+  border-radius: 12px 9px 12px 9px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  overflow: hidden;
+  cursor: zoom-in;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+.codex-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.codex-attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: var(--codex-ink-soft);
+  color: var(--codex-paper-card);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  line-height: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.codex-attachment-item:hover .codex-attachment-remove {
+  opacity: 1;
+}
+
+.codex-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(246, 239, 225, 0.94);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.codex-drop-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  color: var(--codex-ink);
+  text-align: center;
+  padding: 0 40px;
+}
+
+.codex-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+}
+
+.codex-lightbox-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(39, 33, 28, 0.45);
+  backdrop-filter: blur(3px);
+}
+
+.codex-lightbox-img {
+  position: relative;
+  max-width: min(100%, 1600px);
+  max-height: calc(100vh - 80px);
+  object-fit: contain;
+  border-radius: 10px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-lg);
+  cursor: zoom-out;
+}
+
+/* ===================== 统计行 / 回到底部 ===================== */
+
+.codex-stats-line {
+  flex-shrink: 0;
+  text-align: center;
+  max-width: 780px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2px 32px 4px;
+  font-size: 11.5px;
+  line-height: 1.8;
+  color: var(--codex-ink-faint);
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  user-select: none;
+}
+
+/* 右侧概览中的统计内容完整展示，不做截断 */
+.codex-stats-card .codex-stats-line {
+  padding: 4px 2px;
+  text-align: left;
+  font-size: 12px;
+}
+
+.codex-to-bottom {
+  position: absolute;
+  /* 基准 `right`（主题可覆写变量）。位置固定，不随置顶摘要呼出收起移动——
+     展开时按钮会浮在面板上方（z-index 高于面板），即「可以覆盖在卡片上」。 */
+  --codex-to-bottom-right: 32px;
+  right: var(--codex-to-bottom-right);
+  bottom: 132px;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--codex-shadow-md);
+  z-index: 4;
+}
+
+/* ===================== 队列 ===================== */
+
+.codex-queue {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 0 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-queue-card {
+  border: 1px solid var(--codex-line);
+  border-radius: 12px 12px 0 0;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+}
+
+.codex-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  min-height: 34px;
+}
+
+.codex-queue-head .codex-queue-label {
+  font-size: 10.5px;
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+  letter-spacing: 1px;
+}
+
+.codex-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 4px 5px 4px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--codex-ink-soft);
+  box-shadow: inset 0 1px 0 var(--codex-line-light);
+}
+
+.codex-queue-num {
+  font-size: 10.5px;
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+}
+
+.codex-queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-queue-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.codex-queue-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+}
+
+.codex-queue-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+.codex-queue-btn-send {
+  color: var(--codex-accent);
+}
+
+.codex-queue-btn-remove:hover {
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+}
+
+/* ===================== 深色模式局部修正 ===================== */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .workbench-root .codex-new-btn:hover,
+  :root[data-theme="dark"] .workbench-root .codex-new-btn:hover,
+  :root:not([data-theme="light"]) .workbench-root .codex-new-caret:hover,
+  :root:not([data-theme="light"]) .workbench-root .codex-new-caret.open,
+  :root[data-theme="dark"] .workbench-root .codex-new-caret:hover,
+  :root[data-theme="dark"] .workbench-root .codex-new-caret.open {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-empty-note,
+  :root[data-theme="dark"] .workbench-root .codex-empty-note {
+    background: rgba(43, 36, 30, 0.6);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-topbar,
+  :root[data-theme="dark"] .workbench-root .codex-topbar {
+    background: rgba(43, 36, 30, 0.78);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-msg-user-bubble,
+  :root[data-theme="dark"] .workbench-root .codex-msg-user-bubble {
+    background: #3a3126;
+    border-color: #6b5b48;
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-pre,
+  :root[data-theme="dark"] .workbench-root .codex-pre {
+    background: var(--panel-code-block);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-file-banner,
+  :root[data-theme="dark"] .workbench-root .codex-file-banner {
+    background: var(--panel-code-banner);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-diff-meta,
+  :root[data-theme="dark"] .workbench-root .codex-diff-meta {
+    background: var(--panel-code-banner);
+    color: var(--codex-ink-faint);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-dropdown-trigger,
+  :root[data-theme="dark"] .workbench-root .codex-dropdown-trigger {
+    background: rgba(43, 36, 30, 0.65);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-dropdown-trigger:hover,
+  :root[data-theme="dark"] .workbench-root .codex-dropdown-trigger:hover {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-composer,
+  :root[data-theme="dark"] .workbench-root .codex-composer {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-session-search,
+  :root[data-theme="dark"] .workbench-root .codex-session-search {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-session-tools-panel,
+  :root[data-theme="dark"] .workbench-root .codex-session-tools-panel {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-group-menu,
+  :root[data-theme="dark"] .workbench-root .codex-group-menu {
+    background: var(--codex-paper-card);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-workspace-chip,
+  :root[data-theme="dark"] .workbench-root .codex-workspace-chip {
+    background: var(--codex-paper);
+  }
+  :root:not([data-theme="light"]) .workbench-root .codex-workspace-chip:hover,
+  :root[data-theme="dark"] .workbench-root .codex-workspace-chip:hover {
+    background: var(--codex-paper-card);
+  }
+}
+
+:root[data-theme="dark"] .workbench-root .codex-new-btn:hover,
+:root[data-theme="dark"] .workbench-root .codex-new-caret:hover,
+:root[data-theme="dark"] .workbench-root .codex-new-caret.open { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-empty-note { background: rgba(43, 36, 30, 0.6); }
+:root[data-theme="dark"] .workbench-root .codex-topbar { background: rgba(43, 36, 30, 0.78); }
+:root[data-theme="dark"] .workbench-root .codex-msg-user-bubble { background: #3a3126; border-color: #6b5b48; }
+:root[data-theme="dark"] .workbench-root .codex-pre { background: var(--panel-code-block); }
+:root[data-theme="dark"] .workbench-root .codex-file-banner { background: var(--panel-code-banner); }
+:root[data-theme="dark"] .workbench-root .codex-diff-meta { background: var(--panel-code-banner); color: var(--codex-ink-faint); }
+:root[data-theme="dark"] .workbench-root .codex-dropdown-trigger { background: rgba(43, 36, 30, 0.65); }
+:root[data-theme="dark"] .workbench-root .codex-dropdown-trigger:hover { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-composer { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-session-search { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-session-tools-panel { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-group-menu { background: var(--codex-paper-card); }
+:root[data-theme="dark"] .workbench-root .codex-workspace-chip { background: var(--codex-paper); }
+:root[data-theme="dark"] .workbench-root .codex-workspace-chip:hover { background: var(--codex-paper-card); }
+
+/* ===================== 动画 ===================== */
+
+@keyframes codex-spin { to { transform: rotate(360deg); } }
+@keyframes codex-breathe { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+@keyframes codex-dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+@keyframes codex-cursor-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.codex-spin { animation: codex-spin 1s linear infinite; }
+.codex-breathe { animation: codex-breathe 1.2s ease-in-out infinite; }
+
+/* ===================== 目标/计划条（GoalBar） ===================== */
+
+.codex-goalplan-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 760px;
+  margin: 0 auto 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--codex-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--codex-paper-card) 82%, transparent);
+  box-shadow: var(--codex-shadow-sm);
+}
+
+.codex-goalplan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.codex-goalplan-seed {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--codex-accent);
+}
+
+.codex-goalplan-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--codex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===================== 轨迹面板（TrajectoryPanel） ===================== */
+
+.codex-trajectory-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 轨迹页：高度锚定后列表自己滚，头部工具条与时间线保持固定。
+   这里保留 pane 的 overflow-y:auto 作为兜底 —— 万一上层高度链断了，
+   内容撑开时至少还能整体滚，不会整块被右栏的 overflow:hidden 裁掉。 */
+.codex-inspector-pane.codex-trajectory-pane {
+  min-height: 0;
+}
+
+.codex-trajectory {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.codex-trajectory-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 10px;
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.codex-trajectory-fold {
+  flex-shrink: 0;
+  border: 1px dashed var(--codex-line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.codex-trajectory-fold:hover {
+  color: var(--codex-ink);
+  border-color: var(--codex-accent);
+}
+
+.codex-trajectory-table {
+  flex: 1;
+  /* 0 会让列表被压没；给个下限，详情展开时列表仍留三行可见 */
+  min-height: 84px;
+  overflow-y: auto;
+  /* 滚到尽头不要把滚动传导给外层面板 */
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* 这里原先为了「让滑块显眼一点」声明了 `scrollbar-width: thin` +
+     `scrollbar-color: var(--panel-scrollbar-hover)` —— 但那两行恰恰是滑块太淡的
+     **原因**：声明了标准属性，Chromium 就改用原生滚动条、把本文件里那套
+     `::-webkit-scrollbar` 样式全废掉。现在统一走 `.codex-theme ::-webkit-scrollbar`
+     （12px 胶囊 + `--panel-scrollbar`，比原生细、比原来那版显眼），这里什么都不用写。 */
+  border: 1px solid var(--codex-line-light);
+  border-radius: 10px;
+  background: var(--codex-paper);
+  box-shadow: var(--codex-shadow-sm);
+  padding: 4px;
+}
+
+.codex-trajectory-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  /* 行是列表里的 flex 项，默认可收缩：不锁死的话行数一多就会被挤扁，
+     而不是撑出滚动高度。 */
+  flex-shrink: 0;
+  text-align: left;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  /* 与工作过程工具行共用同一档字号 / 行高，右侧台账不再像另一套系统。 */
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.codex-trajectory-row:hover {
+  background: color-mix(in srgb, var(--codex-accent) 8%, transparent);
+}
+
+.codex-trajectory-row:focus-visible {
+  outline: 2px solid var(--codex-accent);
+  outline-offset: -2px;
+}
+
+.codex-trajectory-row.selected {
+  background: color-mix(in srgb, var(--codex-accent) 16%, transparent);
+  outline: 1px dashed var(--codex-accent);
+}
+
+.codex-trajectory-row[data-turn-start] {
+  margin-top: 4px;
+  border-top: 1px dashed var(--codex-line);
+  border-radius: 0 0 6px 6px;
+}
+
+.codex-trajectory-row[data-kind='user'] {
+  margin-top: 0;
+  border-top: none;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--codex-accent) 6%, transparent);
+}
+
+.codex-trajectory-turn {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--codex-accent);
+  font-variant-numeric: tabular-nums;
+  min-width: 26px;
+}
+
+.codex-trajectory-kind {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--codex-mono);
+}
+
+.codex-trajectory-kind.user { color: var(--codex-accent); background: color-mix(in srgb, var(--codex-accent) 14%, transparent); }
+.codex-trajectory-kind.assistant { color: var(--codex-warm); background: color-mix(in srgb, var(--codex-warm) 14%, transparent); }
+.codex-trajectory-kind.tool { color: var(--codex-ink-soft); background: color-mix(in srgb, var(--codex-ink-soft) 14%, transparent); }
+.codex-trajectory-kind.error { color: var(--codex-danger); background: color-mix(in srgb, var(--codex-danger) 14%, transparent); }
+
+.codex-trajectory-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-trajectory-text.error { color: var(--codex-danger); }
+
+.codex-trajectory-tool-name {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--codex-ink);
+}
+
+.codex-trajectory-tool-args {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--codex-ink-soft);
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+}
+
+.codex-trajectory-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--codex-ink-soft);
+}
+
+.codex-trajectory-result.failed { color: var(--codex-danger); }
+
+.codex-trajectory-arrow {
+  color: var(--codex-ink-faint);
+  margin: 0 3px;
+}
+
+.codex-trajectory-duration {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--codex-ink-faint);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--codex-mono);
+}
+
+.codex-trajectory-collapsed .codex-trajectory-text {
+  color: var(--codex-ink-faint);
+  font-style: italic;
+}
+
+/* 行详情面板（点击行展开，固定在台账底部） */
+.codex-trajectory-detail {
+  flex-shrink: 0;
+  margin-top: 10px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 10px;
+  background: var(--codex-paper);
+  box-shadow: var(--codex-shadow-sm);
+  max-height: 40%;
+  overflow-y: auto;
+}
+
+.codex-trajectory-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px dashed var(--codex-line);
+  position: sticky;
+  top: 0;
+  background: var(--codex-paper);
+}
+
+.codex-trajectory-detail-loc {
+  flex: 1;
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.codex-trajectory-close {
+  border: none;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.codex-trajectory-close:hover { color: var(--codex-danger); }
+
+.codex-trajectory-section {
+  padding: 8px 10px;
+}
+
+.codex-trajectory-section + .codex-trajectory-section {
+  border-top: 1px dashed var(--codex-line);
+}
+
+.codex-trajectory-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  color: var(--codex-ink-faint);
+  margin-bottom: 6px;
+}
+
+.codex-trajectory-section pre {
+  margin: 0;
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--codex-ink);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* 头部工具区（搜索 + 折叠）。宽窄由右栏决定：
+   统计文字先被压缩，剩下的宽度全部给搜索框；窄到装不下时整行换行，
+   搜索框仍独占该行剩余宽度。 */
+.codex-trajectory-head {
+  flex-wrap: wrap;
+}
+
+/* 统计文字可压缩（默认 min-width:auto 会顶住不缩，搜索框就吃不到空间） */
+.codex-trajectory-head > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-trajectory-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.codex-trajectory-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  /* 吃掉工具区剩余宽度；下限保证窄栏下输入区仍可用 */
+  flex: 1 1 auto;
+  min-width: 88px;
+  border: 1px dashed var(--codex-line);
+  border-radius: 8px;
+  padding: 2px 6px;
+  color: var(--codex-ink-faint);
+  background: transparent;
+}
+
+.codex-trajectory-search:focus-within {
+  border-color: var(--codex-accent);
+  color: var(--codex-accent);
+}
+
+.codex-trajectory-search input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 11px;
+  color: var(--codex-ink);
+  font-family: inherit;
+}
+
+.codex-trajectory-search input::placeholder {
+  color: var(--codex-ink-faint);
+}
+
+.codex-trajectory-search button {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  padding: 1px;
+}
+
+.codex-trajectory-search button:hover { color: var(--codex-danger); }
+
+/* 聚焦区间外 / 搜索未命中的行变暗 */
+.codex-trajectory-row[data-focus='outside'] {
+  opacity: 0.35;
+}
+
+/* 虚拟滚动行 */
+.codex-trajectory-table.virtual {
+  padding: 4px 4px;
+}
+
+/* 虚拟列表的撑高容器：行全部绝对定位，它的内容高度是 0，
+   不锁死就会被 flex 压成 0 高 —— 那样列表没有滚动高度，等于滚不动。 */
+.codex-trajectory-table.virtual > div {
+  flex-shrink: 0;
+}
+
+/* 键盘滚动：聚焦后方向键 / PageUp / PageDown 生效 */
+.codex-trajectory-table:focus-visible {
+  outline: 1px dashed var(--codex-accent);
+  outline-offset: 1px;
+}
+
+/* 这张表的滚动条不再单开一套：走 `.codex-theme ::-webkit-scrollbar` 的统一样式
+   （原来这里是 8px + `--panel-scrollbar-hover` 当底色，比别处粗一档、颜色也更重，
+   在同一个面板里两种滚动条并排出现，看着像没做完）。 */
+
+.codex-trajectory-vrow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+}
+
+.codex-trajectory-vrow .codex-trajectory-row {
+  flex: 1;
+}
+
+/* ===================== 时间线缩略图（TrajectoryTimeline） ===================== */
+
+.codex-timeline {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-bottom: 10px;
+}
+
+.codex-timeline-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  width: 22px;
+  font-size: 9px;
+  color: var(--codex-ink-faint);
+  text-align: right;
+  user-select: none;
+}
+
+.codex-timeline-track {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 46px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: var(--codex-paper);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+  cursor: crosshair;
+  touch-action: none;
+  outline: none;
+}
+
+.codex-timeline-track[data-panning] {
+  cursor: grabbing;
+}
+
+/* 域容器：内部色块按全量域绝对定位，容器整体平移/缩放呈现视口 */
+.codex-timeline-domain {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+
+.codex-timeline-domain[data-animate='true'] {
+  transition: left 0.3s ease, width 0.3s ease;
+}
+
+.codex-timeline-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.codex-timeline-reset {
+  border: 1px dashed var(--codex-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  font-size: 9.5px;
+  padding: 1px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.codex-timeline-reset:hover {
+  color: var(--codex-ink);
+  border-color: var(--codex-accent);
+}
+
+.codex-timeline-track:focus-visible {
+  border-color: var(--codex-accent);
+}
+
+.codex-timeline-span {
+  position: absolute;
+  top: calc(var(--lane) * 33.33% + 2px);
+  height: calc(33.33% - 4px);
+  border-radius: 2px;
+  min-width: 2px;
+  pointer-events: auto;
+}
+
+.codex-timeline-span[data-kind='user'] { background: var(--codex-accent); }
+.codex-timeline-span[data-kind='assistant'] { background: var(--codex-warm); }
+.codex-timeline-span[data-kind='tool'] { background: color-mix(in srgb, var(--codex-ink-soft) 75%, transparent); }
+.codex-timeline-span[data-kind='error'] { background: var(--codex-danger); }
+
+.codex-timeline-span[data-error='true'] {
+  background: var(--codex-danger);
+}
+
+.codex-timeline-span[data-current='true'] {
+  outline: 1.5px solid var(--codex-ink);
+  outline-offset: 0;
+  z-index: 2;
+}
+
+.codex-timeline-span[data-selected='false'] {
+  opacity: 0.35;
+}
+
+.codex-timeline-span[data-search-match='false'] {
+  opacity: 0.25;
+}
+
+.codex-timeline-span[data-search-match='true'] {
+  box-shadow: 0 0 0 1px var(--codex-warm);
+}
+
+.codex-timeline-turn {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--codex-accent) 55%, transparent);
+  pointer-events: none;
+}
+
+.codex-timeline-selection {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--codex-accent) 18%, transparent);
+  border-left: 1.5px solid var(--codex-accent);
+  border-right: 1.5px solid var(--codex-accent);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.codex-timeline-selection[data-drafting='true'] {
+  background: color-mix(in srgb, var(--codex-accent) 28%, transparent);
+}
+
+.codex-timeline-mode {
+  align-self: center;
+  font-size: 9px;
+  color: var(--codex-ink-faint);
+  font-family: var(--codex-mono);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.codex-goalplan-muted {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-goalplan-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--codex-tape-yellow);
+  color: var(--codex-ink-soft);
+}
+
+.codex-goalplan-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 4px 10px;
+  border: 1px solid var(--codex-line);
+  border-radius: 8px;
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  font-size: 12.5px;
+  font-family: var(--codex-font);
+}
+
+.codex-goalplan-btn {
+  flex-shrink: 0;
+  padding: 3px 12px;
+  border: 1px solid var(--codex-line);
+  border-radius: 8px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink-soft);
+  font-size: 12px;
+  font-family: var(--codex-font);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.codex-goalplan-btn:hover:not(:disabled) {
+  background: rgba(83, 125, 150, 0.08);
+  border-color: var(--codex-line-strong);
+}
+
+.codex-goalplan-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.codex-goalplan-btn.primary {
+  background: var(--codex-accent);
+  border-color: var(--codex-accent);
+  color: #fff;
+}
+
+.codex-goalplan-btn.ghost {
+  border-color: transparent;
+  color: var(--codex-ink-faint);
+}
+
+.codex-goalplan-btn.ghost:hover:not(:disabled) {
+  color: var(--codex-danger);
+  border-color: var(--codex-danger-soft);
+  background: var(--codex-danger-soft);
+}
+
+/* ===================== 工作流可视化卡片（WorkflowVizCard） ===================== */
+
+.codex-wf-card {
+  max-width: 760px;
+  margin: 6px auto;
+  border: 1px solid var(--codex-line);
+  border-radius: 12px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+}
+
+.codex-wf-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.codex-wf-seed {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.codex-wf-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-wf-count {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-wf-chips {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.codex-wf-chip {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.codex-wf-chip.ok {
+  background: rgba(74, 107, 74, 0.12);
+  color: var(--codex-success);
+}
+
+.codex-wf-chip.fail {
+  background: var(--codex-danger-soft);
+  color: var(--codex-danger);
+}
+
+.codex-wf-progress {
+  height: 4px;
+  background: var(--codex-line-light);
+}
+
+.codex-wf-progress-bar {
+  height: 100%;
+  border-radius: 0 2px 2px 0;
+  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.codex-wf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.codex-wf-cluster {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: #fdf8ec;
+}
+
+.codex-wf-cluster-tag {
+  font-size: 11px;
+  color: var(--codex-accent);
+  font-weight: 600;
+}
+
+.codex-wf-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-family: var(--codex-mono);
+  font-size: 12px;
+}
+
+.codex-wf-step-idx {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--codex-line-light);
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+}
+
+.codex-wf-step-tool {
+  flex-shrink: 0;
+  color: var(--codex-ink);
+  font-weight: 600;
+}
+
+.codex-wf-step-status {
+  flex-shrink: 0;
+  font-weight: 700;
+}
+
+.codex-wf-step-summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===================== LSP 语义导航卡片（LspVizCard） ===================== */
+
+.codex-lsp-card {
+  max-width: 760px;
+  margin: 6px auto;
+  border: 1px solid var(--codex-line);
+  border-radius: 12px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+}
+
+.codex-lsp-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.codex-lsp-seed {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--codex-accent);
+}
+
+.codex-lsp-count {
+  flex: 1;
+  text-align: left;
+  font-size: 11.5px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-lsp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.codex-lsp-hover {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--codex-ink-soft);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: var(--codex-mono);
+}
+
+.codex-lsp-empty {
+  font-size: 12px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-lsp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  border: 1px solid var(--codex-line-light);
+  border-radius: 8px;
+  background: #fdf8ec;
+}
+
+.codex-lsp-file {
+  font-family: var(--codex-mono);
+  font-size: 11.5px;
+  color: var(--codex-ink);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-lsp-loc {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 8px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: var(--codex-mono);
+  font-size: 12px;
+  text-align: left;
+}
+
+.codex-lsp-loc:hover {
+  background: rgba(83, 125, 150, 0.1);
+}
+
+.codex-lsp-loc-pos {
+  color: var(--codex-accent);
+}
+
+.codex-lsp-loc-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+}
+
+
+/* ===== 工作智能体独立待办（右侧检查器，只读展示） ===== */
+.codex-worktodo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.codex-worktodo-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--codex-paper-2, rgba(0,0,0,0.02));
+  font-size: 12.5px;
+  color: var(--codex-ink);
+}
+
+.codex-worktodo-title {
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.codex-worktodo-status {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+}
+
+.codex-worktodo-status-pending {
+  color: var(--codex-ink-faint);
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.codex-worktodo-status-in_progress {
+  color: #b7791f;
+  background: rgba(183, 121, 31, 0.14);
+  animation: codex-blink 1.2s ease-in-out infinite;
+}
+
+.codex-worktodo-status-completed {
+  color: var(--codex-ink-faint);
+  text-decoration: line-through;
+  opacity: 0.8;
+}
+
+/* ===== 工作智能体询问卡片（选择题） ===== */
+
+.codex-ask-card {
+  border: 1px solid rgba(183, 121, 31, 0.4);
+  border-radius: 10px;
+  background: rgba(183, 121, 31, 0.06);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.codex-ask-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--codex-accent, #b7791f);
+}
+
+.codex-ask-multi {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(183, 121, 31, 0.16);
+}
+
+.codex-ask-question {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--codex-ink);
+}
+
+.codex-ask-context {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--codex-ink-faint);
+  border-left: 2px solid rgba(128, 128, 128, 0.3);
+  padding-left: 7px;
+  white-space: pre-wrap;
+}
+
+.codex-ask-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.codex-ask-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 7px;
+  background: transparent;
+  padding: 6px 9px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.codex-ask-option:hover {
+  border-color: rgba(183, 121, 31, 0.55);
+  background: rgba(183, 121, 31, 0.07);
+}
+
+.codex-ask-option.active {
+  border-color: var(--codex-accent, #b7791f);
+  background: rgba(183, 121, 31, 0.13);
+}
+
+.codex-ask-option-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--codex-ink);
+}
+
+.codex-ask-option-desc {
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--codex-ink-faint);
+}
+
+.codex-ask-custom {
+  width: 100%;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--codex-ink);
+  font-size: 11.5px;
+  padding: 5px 8px;
+}
+
+.codex-ask-custom:focus {
+  outline: none;
+  border-color: var(--codex-accent, #b7791f);
+}
+
+.codex-ask-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.codex-ask-submit,
+.codex-ask-skip {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.codex-ask-submit {
+  background: var(--codex-accent, #b7791f);
+  color: #fff;
+}
+
+.codex-ask-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.codex-ask-skip {
+  background: transparent;
+  border-color: rgba(128, 128, 128, 0.3);
+  color: var(--codex-ink-faint);
+}
+
+.codex-ask-skip:hover {
+  color: var(--codex-ink);
+}
+
+.codex-ask-error {
+  font-size: 10px;
+  line-height: 1.4;
+  color: #c0392b;
+}
+
+/* ===== 页内错误提示条 ===== */
+
+.codex-page-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--codex-danger-soft);
+  border: 1px solid rgba(179, 64, 47, 0.28);
+  color: var(--codex-danger);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.codex-page-error-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.codex-page-error-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-danger);
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.codex-page-error-close:hover {
+  opacity: 1;
+  background: rgba(179, 64, 47, 0.12);
+}
+
+/* ===== 子 agent 运行指示条 ===== */
+
+.codex-subagent-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.09);
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+}
+
+.codex-subagent-depth {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+}
+
+/* ===== 子 agent 运行指示条 ===== */
+
+.codex-subagent-depth {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(128, 128, 128, 0.16);
+}
+
+@keyframes codex-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ===== show_widget 可视化组件卡片 ===== */
+
+.codex-widgets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.codex-widget-card {
+  border: 1px solid var(--codex-line);
+  border-radius: 12px;
+  background: var(--codex-paper-card);
+  overflow: hidden;
+  box-shadow: var(--codex-shadow-sm);
+}
+
+.codex-widget-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--codex-line-light);
+  background: var(--codex-tape-blue);
+}
+
+.codex-widget-card-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--codex-ink);
+  font-family: var(--codex-font);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-widget-card-toggle {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--codex-ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: var(--codex-font);
+}
+
+.codex-widget-card-toggle:hover {
+  background: rgba(59, 52, 40, 0.08);
+  color: var(--codex-ink);
+}
+
+.codex-widget-card-body {
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+  background: transparent;
+}
+
+.codex-widget-card-body svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.codex-widget-card-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 14px;
+  color: var(--codex-danger);
+  font-size: 13px;
+  font-family: var(--codex-font);
+}
+
+.codex-widget-source {
+  margin: 0;
+  border-radius: 0;
+  border-top: 1px solid var(--codex-line-light);
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* ==========================================================================
+   置顶摘要（PinnedSummary）—— 主工作区右侧的信息列
+   --------------------------------------------------------------------------
+   两块独立可折叠卡片：
+     ① 环境信息 —— git 仓库状态 + 提交 / 比较操作
+     ② 来源     —— 插件 / 技能 / MCP 汇总
+   定位：绝对贴在 `.codex-main-col` 的右边缘、**对话滚动条的左侧**（`right` 取
+   实测滚动条宽度 `--codex-sb-w`），所以滚动条始终在它右边。宽度取自祖先给的
+   `--codex-pinned-w`，对话区 / 输入区 / 统计行则靠 `--codex-pinned-reserve`
+   右缩同样的量——面板浮在那块留白上，不盖住任何正文。
+   面板保持展开宽度，只用 clip-path 上下揭开与收起。正文和输入区同步平滑调整横向留白。
+   与正文之间**不画分隔线**：面板自己就是主工作区的一部分，靠卡片自身的描边
+   和留白区分即可。
+   ========================================================================== */
+
+.codex-pinned {
+  position: absolute;
+  top: 0;
+  right: var(--codex-sb-w, 12px);
+  bottom: 0;
+  /* 固定展开宽度，显隐只改变纵向可见区。 */
+  width: var(--codex-pinned-w-expanded, 250px);
+  /* 裁剪面板内容，显隐方向由 clip-path 决定。 */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* 内层保持固定宽度，避免纵向揭开期间重排。 */
+  align-items: flex-end;
+  /* 纵向显隐。展开态写 `inset(0 0 0 0)` 而不是 `none` —— 两端形状一致才可插值。
+     收起态底边内缩 100% ⇒ 可见高度归零；展开时底边从顶边一路降到底边，
+     即「从上往下揭开」；收起时反向，即「从下往上收掉」。 */
+  clip-path: inset(0 0 0 0);
+  transition: clip-path var(--codex-summary-duration) var(--codex-summary-easing),
+              /* visibility 是阶跃插值：0→1 之间都算 visible，所以配相同动画时长的延迟
+                 就能让它「动画播完才真正隐藏」，既不影响过渡又退出 tab 序列。 */
+              visibility 0s linear 0s;
+}
+
+/* 收起态：纵向可见区归零，同时断开交互并退出 tab 序列。 */
+.codex-pinned.collapsed {
+  pointer-events: none;
+  visibility: hidden;
+  clip-path: inset(0 0 100% 0);
+  transition: clip-path var(--codex-summary-duration) var(--codex-summary-easing),
+              visibility 0s linear var(--codex-summary-duration);
+}
+
+/* 内层固定为展开宽度，收起期间也保持。 */
+.codex-pinned-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  width: var(--codex-pinned-w-expanded, 250px);
+  padding: 14px 12px 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+/* 置顶摘要内层也不单开滚动条：它只有 250px 宽，原先是 6px / 圆角 3px 的细条，
+   和旁边对话区那套完全不是一个形状。统一走 `.codex-theme ::-webkit-scrollbar`。 */
+
+/* 拖拽调宽期间关掉过渡：主工作区宽度每帧都在变，面板宽度与四处留白也跟着重算，
+   不关的话全被缓动拖住，和两侧边栏一样变成「橡皮筋追鼠标」。 */
+.codex-main-body.resizing .codex-pinned,
+.codex-main-body.resizing .codex-main-col .codex-chat,
+.codex-main-body.resizing .codex-main-col .codex-composer-wrap,
+.codex-main-body.resizing .codex-main-col .codex-stats-line,
+.codex-main-body.resizing .codex-main-col .codex-to-bottom {
+  transition: none;
+}
+
+.codex-pinned-card {
+  pointer-events: auto;
+  border: 1px solid var(--codex-line);
+  border-radius: 10px 12px 10px 12px;
+  /* 极简主题下 --codex-pinned-bg 被覆写成纯白（见 MindInspectorThemes.css）；
+     其余主题退回纸卡色，顺带修掉「深色手账里卡片还是奶油色」的老问题。 */
+  background: var(--codex-pinned-bg, var(--codex-paper-card));
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.codex-pinned-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+  color: var(--codex-ink-soft);
+  text-align: left;
+  transition: background 0.15s ease;
+}
+.codex-pinned-head:hover {
+  background: var(--codex-paper-deep);
+}
+.codex-pinned-head-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 环境信息卡收起时的「有未提交改动」提示点 */
+.codex-pinned-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--codex-warm);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--codex-warm-soft);
+}
+
+.codex-pinned-body {
+  padding: 2px 10px 8px;
+  border-top: 1px dashed var(--codex-line-light);
+  /* 卡内不再自己滚：面板是整列高的，滚动交给 `.codex-pinned-inner`。
+     两层滚动条叠在一起会让「比较分支」那种长列表很难操作。 */
+  overflow: visible;
+}
+
+/* ---------- 键值行 ---------- */
+
+.codex-pinned-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3.5px 0;
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+}
+
+.codex-pinned-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--codex-ink-faint);
+  flex-shrink: 0;
+}
+
+.codex-pinned-val {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--codex-ink);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-val.mono {
+  font-family: var(--codex-mono);
+  font-size: 11px;
+}
+
+.codex-pinned-muted {
+  color: var(--codex-ink-faint);
+  font-weight: 500;
+  font-size: 11px;
+}
+.codex-pinned-clean {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--codex-success);
+}
+
+/* diff 增删：+N 绿 / -M 红，与编辑器 diff 的通用约定一致 */
+.codex-diff-add,
+.codex-diff-del {
+  font-style: normal;
+  font-family: var(--codex-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+.codex-diff-add {
+  color: var(--codex-success);
+}
+.codex-diff-del {
+  color: var(--codex-danger);
+}
+
+.codex-pinned-ahead {
+  font-style: normal;
+  color: var(--codex-success);
+  font-weight: 700;
+  font-size: 11px;
+}
+.codex-pinned-behind {
+  font-style: normal;
+  color: var(--codex-warning);
+  font-weight: 700;
+  font-size: 11px;
+}
+
+/* ---------- 最近提交 ---------- */
+
+.codex-pinned-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-top: 5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--panel-subtle-bg);
+  font-size: 11px;
+  overflow: hidden;
+}
+.codex-pinned-hash {
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  color: var(--codex-accent-deep);
+  flex-shrink: 0;
+}
+.codex-pinned-subject {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-time {
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+/* ---------- 操作区 ---------- */
+
+.codex-pinned-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  flex-wrap: wrap;
+}
+
+.codex-pinned-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px 8px 6px 8px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink-soft);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.codex-pinned-btn:hover:not(:disabled) {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-accent);
+  color: var(--codex-accent-deep);
+}
+.codex-pinned-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.codex-pinned-btn.primary {
+  background: var(--codex-accent-soft);
+  border-color: var(--codex-accent);
+  color: var(--codex-accent-deep);
+}
+.codex-pinned-btn.active {
+  background: var(--codex-tape-blue);
+  border-color: var(--codex-accent);
+}
+
+.codex-pinned-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--codex-ink-faint);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.codex-pinned-icon-btn:hover {
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+}
+
+/* ---------- 内联表单（提交 / 比较） ---------- */
+
+.codex-pinned-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+
+.codex-pinned-input,
+.codex-pinned-select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 7px;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  font-family: inherit;
+  font-size: 11.5px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.codex-pinned-input:focus,
+.codex-pinned-select:focus {
+  border-color: var(--codex-accent);
+}
+.codex-pinned-input::placeholder {
+  color: var(--codex-ink-faint);
+}
+
+.codex-pinned-form-row {
+  display: flex;
+  gap: 5px;
+}
+.codex-pinned-form-row .codex-pinned-btn {
+  flex: 1;
+  justify-content: center;
+}
+
+/* ---------- 比较结果 ---------- */
+
+.codex-pinned-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+}
+.codex-pinned-diff-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--codex-ink-soft);
+  flex-wrap: wrap;
+}
+.codex-pinned-diff-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
+}
+
+/* ---------- 提示 / 结果 ---------- */
+
+.codex-pinned-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 0 4px;
+  color: var(--codex-ink-faint);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.codex-pinned-hint.err {
+  color: var(--codex-danger);
+}
+
+.codex-pinned-result {
+  margin-top: 8px;
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: var(--codex-success-soft);
+  font-size: 11px;
+}
+.codex-pinned-result.err {
+  background: var(--codex-danger-soft);
+}
+.codex-pinned-result-step {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+}
+.codex-pinned-result-name {
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  flex-shrink: 0;
+}
+.codex-pinned-result-out {
+  flex: 1;
+  min-width: 0;
+  color: var(--codex-ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-result-err {
+  margin-top: 4px;
+  color: var(--codex-danger);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.codex-pinned-foot {
+  margin-top: 6px;
+  color: var(--codex-ink-faint);
+  font-size: 10px;
+  text-align: right;
+}
+
+/* ---------- 来源明细 ---------- */
+
+.codex-pinned-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+.codex-pinned-list-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+  overflow: hidden;
+}
+.codex-pinned-list-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 插件信任状态点：绿=已信任生效，黄=清单变更待重认，灰=未信任 */
+.codex-trust-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.codex-trust-dot.trusted {
+  background: var(--codex-success);
+}
+.codex-trust-dot.changed {
+  background: var(--codex-warning);
+}
+.codex-trust-dot.untrusted {
+  background: var(--codex-ink-faint);
+}
+
+/* ---------- 工作树（隔离执行）---------- */
+
+/* 卡内的次级折叠区：一条虚线把它与上方状态区隔开，靠左侧竖线建立
+   「这是子列表」的层次，不再额外套一层卡片边框。 */
+.codex-pinned-sub {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--codex-line-light);
+}
+.codex-pinned-subhead {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--codex-ink-soft);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.codex-pinned-subhead:hover {
+  color: var(--codex-ink);
+}
+.codex-pinned-sub-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-pinned-sub-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding-left: 7px;
+  border-left: 1px solid var(--codex-line-light);
+}
+
+/* 一棵工作树：首行名字 + 标记，次行分支名或游离状态 */
+.codex-pinned-wt {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.codex-pinned-wt-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.codex-pinned-wt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--codex-ink-soft);
+}
+.codex-pinned-wt-tag {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--codex-line-light);
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.codex-pinned-wt-tag.warn {
+  background: var(--codex-warning-soft);
+  color: var(--codex-warning);
+}
+.codex-pinned-wt-meta {
+  color: var(--codex-ink-faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-unified-pages { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.codex-unified-tabbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px 0; border-bottom: 1px solid var(--codex-line-light); }
+.codex-unified-tabs { display: flex; flex: 1; min-width: 0; align-items: center; gap: 4px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.codex-unified-tabs::-webkit-scrollbar { display: none; }
+.codex-unified-tabs .codex-unified-tab-host,
+.codex-unified-tabs .embedded-browser-tabs,
+.codex-unified-tabs .codex-preview-tabbar,
+.codex-unified-tabs .codex-preview-tabs { display: contents; }
+.codex-unified-tabs .codex-preview-full-toggle { display: none; }
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab) {
+  box-sizing: border-box; display: flex; align-items: center; gap: 6px;
+  flex: 0 0 200px; width: 200px; min-width: 0; max-width: 200px; height: 34px;
+  margin: 0; padding: 0 8px; border: 0; border-bottom: 2px solid transparent;
+  border-radius: 8px 8px 0 0; color: var(--codex-ink-faint); background: transparent;
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab):hover { background: var(--codex-accent-soft); }
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab).active {
+  border-bottom-color: var(--codex-accent); color: var(--codex-ink); background: var(--codex-accent-soft);
+}
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-unified-tab) > button:first-child {
+  display: flex; flex: 1; align-items: center; gap: 6px; min-width: 0; height: 100%; padding: 0;
+  border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab) span {
+  flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left;
+}
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab) svg { flex-shrink: 0; }
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab) > button:last-child:not(:first-child) {
+  display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer;
+}
+.codex-unified-tabs :is(.embedded-browser-tab, .codex-preview-tab, .codex-unified-tab) > button:last-child:not(:first-child):hover { background: var(--codex-line-light); }
+.codex-unified-tabs > .codex-unified-new-page {
+  display: grid; place-items: center; box-sizing: border-box;
+  flex: 0 0 28px; width: 28px; height: 28px; min-width: 28px; padding: 0;
+}
+.codex-unified-tabs .embedded-browser-tabs > button { flex-shrink: 0; }

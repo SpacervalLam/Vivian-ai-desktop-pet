@@ -1,0 +1,71 @@
+[
+  {
+    "id": "fonts",
+    "label": "手写字体",
+    "version": "1.0.0",
+    "files": [
+      "fonts/ma-shan-zheng.woff2"
+    ]
+  },
+  {
+    "id": "stickers",
+    "label": "内置贴纸",
+    "version": "1.3.0",
+    "files": [
+      "stickers/vivian_happy_01-v2.webp",
+      "stickers/vivian_shy_01-v2.webp",
+      "stickers/vivian_curious_01-v2.webp",
+      "stickers/vivian_proud_01-v2.webp",
+      "stickers/vivian_thanks_01-v2.webp",
+      "stickers/vivian_cheer_01-v2.webp",
+      "stickers/vivian_laugh_01-v2.webp",
+      "stickers/vivian_okay_01-v2.webp",
+      "stickers/vivian_wave_01-v2.webp",
+      "stickers/vivian_sleepy_01-v2.webp",
+      "stickers/vivian_surprise_01-v2.webp",
+      "stickers/vivian_heart_01-v2.webp",
+      "stickers/nana_happy_01-v2.webp",
+      "stickers/nana_shy_01-v2.webp",
+      "stickers/nana_curious_01-v2.webp",
+      "stickers/nana_proud_01-v2.webp",
+      "stickers/nana_thanks_01-v2.webp",
+      "stickers/nana_cheer_01-v2.webp",
+      "stickers/nana_laugh_01-v2.webp",
+      "stickers/nana_okay_01-v2.webp",
+      "stickers/nana_wave_01-v2.webp",
+      "stickers/nana_sleepy_01-v2.webp",
+      "stickers/nana_surprise_01-v2.webp",
+      "stickers/nana_heart_01-v2.webp",
+      "stickers/vivian_ds_plead_01-v2.webp",
+      "stickers/vivian_ds_question_01-v2.webp",
+      "stickers/vivian_ds_peek_01-v2.webp",
+      "stickers/vivian_ds_cry_01-v2.webp",
+      "stickers/vivian_ds_angry_01-v2.webp"
+    ]
+  },
+  {
+    "id": "browser-runtime",
+    "label": "浏览器自动化运行时",
+    "version": "1.64.1",
+    "dev_root": "src-tauri/browser-runtime",
+    "files": [
+      "node.exe",
+      "host.mjs",
+      "task.mjs",
+      "runtime.json",
+      "node_modules/playwright-core/package.json",
+      "node_modules/playwright-core/lib/bootstrap.js",
+      "node_modules/playwright-core/lib/coreBundle.js",
+      "node_modules/playwright-core/lib/utilsBundle.js",
+      "node_modules/playwright/package.json",
+      "node_modules/playwright/lib/index.js",
+      "node_modules/playwright/lib/matchers/expect.js",
+      "node_modules/@playwright/test/package.json"
+    ],
+    "download": {
+      "filename": "Vivian-browser-runtime-1.64.1.zip",
+      "url": "https://github.com/SpacervalLam/Vivian-ai-desktop-pet/releases/latest/download/Vivian-browser-runtime-1.64.1.zip",
+      "approx_mb": 23
+    }
+  }
+]

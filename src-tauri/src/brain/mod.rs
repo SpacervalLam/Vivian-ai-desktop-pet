@@ -1,0 +1,87 @@
+//! Vivian Brain 子系统。
+//!
+//! 模块清单（按职责分组）：
+//! - [`brain`]：Brain 主控（编排各子系统）
+//! - [`cognitive_tick`]：统一认知循环（6 阶段流水线，替换双 tick）
+//! - [`callbacks`]：回调系统（CallbackManager 流式片段与工具调用收集器）
+//! - [`chat_chain`]：BrainChatChain 高层管道封装
+//! - [`json_parser`]：流式 JSON 解析器
+//! - [`rate_limiter`]：Token bucket 限流器
+//! - [`scheduler`]：任务调度器
+//! - [`interruption_controller`]：中断控制器
+//! - [`smart_app_classifier`]：智能应用分类器
+//! - [`augment_reply_service`]：回复增强服务
+//! - [`control_action_executor`]：桌宠自控动作执行器（chat 产出 桌宠 模型控制指令）
+
+pub mod async_reflection;
+pub mod augment_reply_service;
+pub mod action_planner;
+pub mod brain;
+pub mod budget;
+pub mod callbacks;
+pub mod chat_chain;
+pub mod cognitive_tick;
+pub mod resident;
+pub(crate) mod interaction_runtime;
+pub(crate) mod resident_tasks;
+pub mod control_action_executor;
+pub mod interruption_controller;
+pub mod jobs;
+pub mod json_parser;
+pub mod plan_mode;
+pub mod rate_limiter;
+pub mod scheduler;
+pub mod reminder_delivery;
+pub mod smart_app_classifier;
+pub mod subagent_context;
+pub mod coding_agent;
+pub mod coding_input_queue;
+pub mod coding_cancel;
+pub mod coding_workflow;
+pub mod coding_workflow_capture;
+pub mod coding_compaction;
+pub mod coding_io;
+pub mod work_harness;
+pub mod work_memory_cache;
+pub mod coding_memory_persistence;
+pub mod coding_memory_navigation;
+pub mod coding_session_store;
+pub mod coding_session_cache;
+pub mod coding_memory_records;
+pub mod coding_memory_queue;
+pub mod coding_subagent;
+pub mod work_contract;
+pub mod work_context;
+pub mod work_jobs;
+pub mod work_task_status;
+pub mod work_facts;
+pub mod work_loops;
+pub mod work_loops_tick;
+pub mod work_route_stats;
+pub mod history_search;
+pub mod agent_presets;
+pub mod task_service;
+pub mod tool_leak_filter;
+pub mod topic_signal;
+pub mod workflow;
+pub mod work_question;
+pub mod work_notices;
+pub mod work_stage;
+
+// 主要导出（保持向后兼容）
+pub use brain::Brain;
+pub use callbacks::CallbackManager;
+pub use chat_chain::BrainChatChain;
+pub use cognitive_tick::{CognitiveTickPhase, CognitiveTickResult, CognitiveTickRunner, PhaseDecision};
+pub use subagent_context::{SubagentContext, SubagentTask};
+pub use task_service::{TaskEvent, TaskEventKind, TaskService, TaskStatus, MAX_TASK_STEPS};
+pub use work_question::{
+    WorkQuestionAnswer, WorkQuestionOption, WorkQuestionRegistry, WorkQuestionRequest,
+    global_work_question_registry,
+};
+pub mod reference_research;
+pub mod coding_event_log;
+pub mod coding_event_capture;
+
+pub mod work_memory;
+pub mod work_instructions;

@@ -1,0 +1,12 @@
+[
+  {
+    "name": "xiaohongshu",
+    "query_modifier": "小红书",
+    "focus_hint": "小红书书单、阅读、生活方式、审美与手作话题"
+  },
+  {
+    "name": "weibo",
+    "query_modifier": "site:weibo.com 微博热搜",
+    "focus_hint": "微博文化、艺术、阅读热搜与流行表达"
+  }
+]

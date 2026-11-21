@@ -1,0 +1,1576 @@
+//! 待办事项工具 - add_todo / list_todo / complete_todo / update_todo / delete_todo
+//!
+//! 持久化到 `%APPDATA%\Vivian\todo\todos.json`。
+//! 与 Scheduler 联动：设置 due_date 时自动创建定时提醒。
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Emitter};
+
+use crate::brain::scheduler::Scheduler;
+use crate::brain::scheduler::ScheduledTask;
+use crate::brain::scheduler::TaskType;
+use crate::tools::ToolSystem;
+use crate::tools::types::{
+    PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
+    ToolRiskTier,
+};
+use crate::utils::path::get_user_data_dir;
+
+/// 待办条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub completed: bool,
+    #[serde(default = "default_priority")]
+    pub priority: u32,
+    pub created_at: i64,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    #[serde(default)]
+    pub due_date: Option<String>,
+    /// 事件本身的开始时间（如典礼 09:00），与 due_date（提醒触发时间）分离。
+    /// 提醒时间通常应早于事件时间，预留路程与准备时间。
+    #[serde(default)]
+    pub event_time: Option<String>,
+    /// 关联的定时提醒任务 ID（Scheduler 联动）
+    #[serde(default)]
+    pub reminder_id: Option<String>,
+    #[serde(default)]
+    pub agreement: Option<crate::memory::ongoing_tasks::AgreementRef>,
+}
+
+fn default_priority() -> u32 {
+    1
+}
+
+/// 待办列表持久化结构
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct TodoFile {
+    items: Vec<TodoItem>,
+    saved_at: f64,
+}
+
+/// 全局待办列表
+static TODO_LIST: Lazy<Arc<RwLock<TodoFile>>> =
+    Lazy::new(|| Arc::new(RwLock::new(TodoFile::default())));
+
+/// 全局 AppHandle（由 lib.rs setup 注入，用于 emit 事件给前端）
+static APP_HANDLE: Lazy<RwLock<Option<AppHandle>>> = Lazy::new(|| RwLock::new(None));
+
+/// 全局 Scheduler（由 state.rs::initialize 注入，用于联动定时提醒）
+static SCHEDULER: Lazy<RwLock<Option<Arc<Scheduler>>>> = Lazy::new(|| RwLock::new(None));
+
+/// 注入 AppHandle（lib.rs setup 调用）
+pub fn set_app_handle(handle: AppHandle) {
+    *APP_HANDLE.write() = Some(handle);
+}
+
+/// 注入 Scheduler（state.rs::initialize 调用）
+pub fn set_scheduler(scheduler: Arc<Scheduler>) {
+    *SCHEDULER.write() = Some(scheduler);
+}
+
+/// 获取全局 Scheduler（供 scheduler_tools 复用）
+pub fn get_scheduler() -> Option<Arc<Scheduler>> {
+    SCHEDULER.read().clone()
+}
+
+/// emit scheduler:changed 事件（供 scheduler_tools 调用）
+///
+/// 归属由任务自身的 `char_id` 决定（取消/暂停/恢复时任务仍在调度器中）：
+/// 空串表示无归属（如用户在 Todo 窗口手动创建），前端据此不弹 toast。
+pub fn emit_scheduler_changed(action: &str, task_id: &str) {
+    let character_id = get_scheduler()
+        .and_then(|s| s.get_task(task_id))
+        .map(|t| t.char_id.clone())
+        .unwrap_or_default();
+    emit_event(
+        "scheduler:changed",
+        &json!({
+            "action": action,
+            "task_id": task_id,
+            "character_id": character_id,
+            "source": "tool",
+        }),
+    );
+}
+
+fn todo_file_path() -> std::path::PathBuf {
+    let dir = get_user_data_dir().join("todo");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("todos.json")
+}
+
+/// 从磁盘加载待办列表（若文件存在）
+pub fn load_todo_list() {
+    let path = todo_file_path();
+    if !path.exists() {
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        if !content.trim().is_empty() {
+            if let Ok(file) = serde_json::from_str::<TodoFile>(&content) {
+                *TODO_LIST.write() = file;
+            }
+        }
+    }
+}
+
+/// 清空所有待办（内存 + 持久化文件）
+/// 供 factory_reset 调用：先取消所有关联的定时提醒，再清空内存列表，最后删除磁盘文件
+pub fn clear_all_todos() {
+    // 取消所有关联的 scheduler reminder，避免遗留孤儿任务
+    let reminder_ids: Vec<String> = {
+        let list = TODO_LIST.read();
+        list.items
+            .iter()
+            .filter_map(|t| t.reminder_id.clone())
+            .collect()
+    };
+    if let Some(scheduler) = get_scheduler() {
+        for rid in reminder_ids {
+            scheduler.remove_task(&rid);
+        }
+    }
+    // 清空内存列表
+    {
+        let mut list = TODO_LIST.write();
+        list.items.clear();
+        list.saved_at = chrono::Local::now().timestamp_millis() as f64 / 1000.0;
+    }
+    // 删除磁盘文件
+    let path = todo_file_path();
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    tracing::info!("[todo] 已清空所有待办（factory_reset）");
+}
+
+fn save_todo_list() {
+    // 持读锁直接序列化，避免克隆整个 TodoFile
+    let (json, path) = {
+        let file = TODO_LIST.read();
+        let json = serde_json::to_string_pretty(&*file).unwrap_or_default();
+        (json, todo_file_path())
+    };
+    if !json.is_empty() {
+        let _ = crate::utils::fs::write_atomic(&path, &json);
+    }
+}
+
+fn now_ts() -> i64 {
+    chrono::Local::now().timestamp()
+}
+
+fn gen_id() -> String {
+    uuid::Uuid::new_v4().to_string()[..8].to_string()
+}
+
+/// emit 事件给前端（若 AppHandle 已注入）
+fn emit_event(event: &str, payload: &Value) {
+    if let Some(handle) = APP_HANDLE.read().clone() {
+        let _ = handle.emit(event, payload);
+    }
+}
+
+/// 解析 due_date → Unix 时间戳
+///
+/// 支持三种格式（复用 Scheduler 的 parse_time_spec）：
+/// - ISO 8601 日期时间: "2024-01-15T10:30:00", "2024-01-15T10:30"
+/// - 纯日期: "2024-01-15"（默认当日 09:00）
+/// - ISO 8601 持续时间: "PT2M"（2分钟后）, "PT2H30M"
+///
+/// 当解析后的时间已过时返回 None，避免入库后被 Scheduler 立即触发并标记 Completed。
+fn parse_due_date(due_date: &str) -> Option<f64> {
+    let ts = crate::brain::scheduler::parse_time_spec(due_date).ok()?;
+    let now = chrono::Local::now().timestamp() as f64;
+    if ts <= now {
+        tracing::warn!(
+            due_date,
+            "[Todo] due_date 时间已过，跳过创建提醒"
+        );
+        return None;
+    }
+    Some(ts)
+}
+
+/// 为待办创建/更新定时提醒，返回 reminder_id
+fn schedule_reminder_for(title: &str, due_date: &str, character_id: &str) -> Option<String> {
+    let ts = parse_due_date(due_date)?;
+    let scheduler = SCHEDULER.read().clone()?;
+    let msg = format!("待办提醒：{}", title);
+    let rid = scheduler.schedule_reminder(msg.clone(), ts);
+    // emit scheduler:changed 事件（action=added），归属与待办操作发起方一致
+    emit_event(
+        "scheduler:changed",
+        &json!({
+            "action": "added",
+            "task": {
+                "id": rid,
+                "task_type": "reminder",
+                "scheduled_time": ts,
+                "message": msg,
+            },
+            "character_id": character_id,
+            "source": "todo",
+        }),
+    );
+    Some(rid)
+}
+
+/// 取消关联的定时提醒（若存在）
+fn cancel_reminder(reminder_id: &Option<String>) {
+    if let Some(rid) = reminder_id {
+        if let Some(scheduler) = SCHEDULER.read().clone() {
+            scheduler.remove_task(rid);
+        }
+    }
+}
+
+/// emit todo:changed 事件
+///
+/// `character_id` 为待办操作发起方的角色归属：LLM 工具调用路径传入发起角色，
+/// UI 窗口手动操作传入空串（前端据此不弹 toast）。
+fn emit_todo_changed(action: &str, item: &TodoItem, character_id: &str) {
+    emit_event(
+        "todo:changed",
+        &json!({
+            "action": action,
+            "item": item,
+            "character_id": character_id,
+        }),
+    );
+}
+
+// ===== 公开 CRUD API（供 commands/todo.rs 调用）=====
+
+/// 添加待办（含 Scheduler 联动）
+///
+/// `event_time`: 事件本身的开始时间；`due_date`: 提醒触发时间（通常早于 event_time）。
+pub fn add_todo_item(
+    title: &str,
+    description: &str,
+    priority: u32,
+    due_date: Option<&str>,
+    event_time: Option<&str>,
+    character_id: &str,
+) -> Result<TodoItem, String> {
+    add_todo_item_with_agreement(title,description,priority,due_date,event_time,character_id,None)
+}
+
+pub fn resolve_agreement_ref(character: &str, id: &str) -> Result<crate::memory::ongoing_tasks::AgreementRef,String> {
+    let memory = crate::character_registry::get_memory_manager(character).ok_or("约定所属角色不可用")?;
+    let item = memory.get_memories_by_ids(&[id.to_string()]).pop().ok_or("约定已不存在")?;
+    let task = crate::memory::ongoing_tasks::task(&item).ok_or("这条记录不是关注与约定")?;
+    if item.metadata["memory_owner"] != character || task.status != crate::memory::ongoing_tasks::Status::Active {
+        return Err("约定尚未启用或已经暂停、停止".into());
+    }
+    Ok(crate::memory::ongoing_tasks::AgreementRef{character_id:character.into(),id:id.into(),title:task.title})
+}
+
+pub fn add_todo_item_with_agreement(title: &str, description: &str, priority: u32,
+    due_date: Option<&str>, event_time: Option<&str>, character_id: &str,
+    agreement: Option<crate::memory::ongoing_tasks::AgreementRef>) -> Result<TodoItem,String> {
+    if title.trim().is_empty() { return Err("具体待办标题不能为空".into()); }
+    let agreement = agreement.map(|link|resolve_agreement_ref(&link.character_id,&link.id)).transpose()?;
+    if let Some(link) = &agreement {
+        if let Some(existing) = TODO_LIST.read().items.iter().find(|item|
+            !item.completed && item.agreement.as_ref().is_some_and(|old|old.id==link.id && old.character_id==link.character_id)
+                && item.title.trim()==title.trim()).cloned() {
+            return Ok(existing);
+        }
+    }
+    let mut reminder_id = None;
+    if let Some(dd) = due_date {
+        if !dd.is_empty() {
+            reminder_id = schedule_reminder_for(title, dd, character_id);
+        }
+    }
+
+    let item = TodoItem {
+        id: gen_id(),
+        title: title.to_string(),
+        description: description.to_string(),
+        completed: false,
+        priority: priority.clamp(1, 3),
+        created_at: now_ts(),
+        completed_at: None,
+        due_date: due_date.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        event_time: event_time.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        reminder_id,
+        agreement,
+    };
+
+    {
+        let mut list = TODO_LIST.write();
+        if let Some(link)=&item.agreement {
+            if let Some(existing)=list.items.iter().find(|old|!old.completed && old.title.trim()==title.trim()
+                && old.agreement.as_ref().is_some_and(|origin|origin.id==link.id && origin.character_id==link.character_id)).cloned() {
+                cancel_reminder(&item.reminder_id); return Ok(existing);
+            }
+        }
+        let mut next = list.clone();
+        next.items.push(item.clone());
+        next.saved_at = chrono::Local::now().timestamp_millis() as f64;
+        if let Err(error) = crate::utils::fs::write_atomic(&todo_file_path(),&serde_json::to_string_pretty(&next).map_err(|e|e.to_string())?) {
+            cancel_reminder(&item.reminder_id);
+            return Err(error.to_string());
+        }
+        *list = next;
+    }
+    emit_todo_changed("added", &item, character_id);
+    Ok(item)
+}
+
+/// 更新待办（含 Scheduler 联动）
+///
+/// `due_date`: `None` = 不修改，`Some("")` = 清除，`Some("date")` = 设置
+/// `event_time`: 同上，但 event_time 不联动 Scheduler（无提醒）。
+pub fn update_todo_item(
+    id: &str,
+    title: Option<&str>,
+    description: Option<&str>,
+    priority: Option<u32>,
+    due_date: Option<&str>,
+    event_time: Option<&str>,
+    character_id: &str,
+) -> Result<TodoItem, String> {
+    let mut list = TODO_LIST.write();
+    let found = list.items.iter_mut().find(|it| it.id == id);
+    match found {
+        Some(it) => {
+            if let Some(t) = title {
+                it.title = t.to_string();
+            }
+            if let Some(d) = description {
+                it.description = d.to_string();
+            }
+            if let Some(p) = priority {
+                it.priority = p.clamp(1, 3);
+            }
+            if let Some(et) = event_time {
+                it.event_time = if et.is_empty() { None } else { Some(et.to_string()) };
+            }
+            if let Some(dd) = due_date {
+                let new_due = if dd.is_empty() {
+                    None
+                } else {
+                    Some(dd.to_string())
+                };
+                let old_due = it.due_date.clone();
+                if new_due != old_due {
+                    // due_date 变更：取消旧 reminder
+                    cancel_reminder(&it.reminder_id);
+                    it.reminder_id = None;
+                    // 创建新 reminder
+                    if let Some(ref nd) = new_due {
+                        it.reminder_id = schedule_reminder_for(&it.title, nd, character_id);
+                    }
+                    it.due_date = new_due;
+                }
+            }
+            let updated = it.clone();
+            drop(list);
+            save_todo_list();
+            emit_todo_changed("updated", &updated, character_id);
+            Ok(updated)
+        }
+        None => Err(format!("未找到 id={}", id)),
+    }
+}
+
+/// 标记待办完成（取消关联的 reminder）
+pub fn complete_todo_item(id: &str, character_id: &str) -> Result<TodoItem, String> {
+    let mut list = TODO_LIST.write();
+    let mut next = list.clone();
+    let found = next.items.iter_mut().find(|it| it.id == id);
+    match found {
+        Some(it) => {
+            it.completed = true;
+            it.completed_at = Some(now_ts());
+            let reminder = it.reminder_id.take();
+            let updated = it.clone();
+            next.saved_at=chrono::Local::now().timestamp_millis() as f64;
+            crate::utils::fs::write_atomic(&todo_file_path(),&serde_json::to_string_pretty(&next).map_err(|e|e.to_string())?)
+                .map_err(|e|e.to_string())?;
+            *list=next;
+            drop(list);
+            cancel_reminder(&reminder);
+            emit_todo_changed("completed", &updated, character_id);
+            Ok(updated)
+        }
+        None => Err(format!("未找到 id={}", id)),
+    }
+}
+
+/// 删除待办（取消关联的 reminder）
+pub fn delete_todo_item(id: &str, character_id: &str) -> bool {
+    let mut list = TODO_LIST.write();
+    let before = list.items.len();
+    let removed_item = list.items.iter().find(|it| it.id == id).cloned();
+    list.items.retain(|it| it.id != id);
+    let removed = before != list.items.len();
+    drop(list);
+    if removed {
+        if let Some(item) = removed_item {
+            cancel_reminder(&item.reminder_id);
+        }
+        save_todo_list();
+        emit_event(
+            "todo:changed",
+            &json!({
+                "action": "deleted",
+                "item": { "id": id },
+                "character_id": character_id,
+            }),
+        );
+    }
+    removed
+}
+
+/// 列出待办
+pub fn list_todo_items(include_completed: bool, priority_filter: Option<u32>) -> Vec<TodoItem> {
+    let list = TODO_LIST.read();
+    list.items
+        .iter()
+        .filter(|it| {
+            if !include_completed && it.completed {
+                return false;
+            }
+            if let Some(p) = priority_filter {
+                if it.priority != p {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn agreement_todo_context(character:&str, agreements:&std::collections::HashSet<String>) -> Vec<Value> {
+    TODO_LIST.read().items.iter().filter(|item|item.agreement.as_ref().is_some_and(|link|
+        link.character_id==character && agreements.contains(&link.id)))
+        .take(16).map(|item|json!({"id":item.id,"title":item.title,"completed":item.completed,"agreement_id":item.agreement.as_ref().map(|link|&link.id)})).collect()
+}
+
+/// 整表替换待办（全量替换语义）。
+///
+/// `items` 为新的待办列表（保留传入的 id 若存在，否则生成新 id）。
+/// 旧的未完成项被移除；已完成项保留历史但不在新列表（传入方应携带完整列表）。
+/// 返回替换后的完整待办列表。
+pub fn replace_todo_items(items: Vec<TodoItem>, character_id: &str) -> Vec<TodoItem> {
+    let mut list = TODO_LIST.write();
+
+    // 取消被移除项的关联提醒（保留项无需动）
+    let old_ids: std::collections::HashSet<String> =
+        list.items.iter().map(|it| it.id.clone()).collect();
+    let keep_ids: std::collections::HashSet<String> =
+        items.iter().map(|it| it.id.clone()).collect();
+    for it in &list.items {
+        if !keep_ids.contains(&it.id) {
+            cancel_reminder(&it.reminder_id);
+        }
+    }
+    drop(old_ids);
+
+    let now = now_ts();
+    let normalized: Vec<TodoItem> = items
+        .into_iter()
+        .map(|mut it| {
+            if it.agreement.is_none() {
+                it.agreement = list.items.iter().find(|old|old.id==it.id).and_then(|old|old.agreement.clone());
+            }
+            if it.id.is_empty() {
+                it.id = gen_id();
+            }
+            if it.created_at == 0 {
+                it.created_at = now;
+            }
+            it
+        })
+        .collect();
+
+    list.items = normalized.clone();
+    list.saved_at = chrono::Local::now().timestamp_millis() as f64;
+    drop(list);
+    save_todo_list();
+
+    // 事件：整表替换（前端据此刷新）
+    emit_event(
+        "todo:changed",
+        &json!({
+            "action": "replaced",
+            "items": normalized,
+            "character_id": character_id,
+        }),
+    );
+    normalized
+}
+
+/// Complete handling logic when Scheduler task triggers (called by state.rs callback).
+///
+/// Dispatches by task_type:
+/// - **Reminder**: Send system desktop notification + emit `chat:assistant_message` (chat bubble + history)
+/// - **ToolCall**: Call ToolSystem to execute tool, emit result as chat bubble to frontend
+///
+/// Both types additionally emit `scheduler:changed` (action=triggered) to refresh frontend task list.
+pub async fn handle_task_trigger(task: ScheduledTask, tool_system: Arc<ToolSystem>) -> Result<String, String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    let app_handle = match APP_HANDLE.read().clone() {
+        Some(h) => h,
+        None => {
+            tracing::warn!(
+                "[Scheduler] 任务 {} 触发但 AppHandle 未注入，无法呈现",
+                task.id
+            );
+            return Err("提醒投递服务尚未初始化".into());
+        }
+    };
+
+    match task.task_type {
+        TaskType::Reminder => {
+            use tauri::Manager;
+            let state = app_handle.state::<Arc<crate::state::AppState>>();
+            let character_id = if task.char_id.is_empty() { state.active_character_id.read().clone() } else { task.char_id.clone() };
+            let language = state.config.read().get_all().base.language;
+            let context = crate::brain::reminder_delivery::ReminderContext::new(task.scheduled_time, crate::brain::scheduler::now_ts_public(), &task.delivery);
+            let mut text = context.wording(task.message.as_deref().unwrap_or("定时提醒"), &character_id, &language);
+            if let Some(advance) = task.metadata["advance_minutes"].as_u64().filter(|n| *n > 0) {
+                text.push_str(&if language.starts_with("zh") { format!("（提前 {advance} 分钟提醒）") }
+                    else if language.starts_with("ja") { format!("（{advance}分前のお知らせ）") }
+                    else { format!(" ({advance} minutes ahead)") });
+            }
+            let (delivery_id, receipt) = crate::brain::reminder_delivery::register_receipt();
+            let notice = match state.scheduler.record_reminder_notice(&task, character_id.clone(), text.clone(), delivery_id.clone()) {
+                Ok(notice) => notice,
+                Err(error) => { crate::brain::reminder_delivery::discard_receipt(&delivery_id); return Err(error); }
+            };
+            if notice.acknowledged_at.is_some() {
+                crate::brain::reminder_delivery::discard_receipt(&delivery_id);
+                return Ok(text);
+            }
+            let emitted = app_handle.emit("reminder:deliver", json!({
+                "delivery_id":delivery_id, "task_id":task.id, "character_id":character_id,
+                "content":text, "context":context, "notice":notice,
+            }));
+            let accepted = if emitted.is_ok() {
+                matches!(tokio::time::timeout(std::time::Duration::from_secs(8), receipt).await, Ok(Ok(())))
+            } else { false };
+            crate::brain::reminder_delivery::discard_receipt(&delivery_id);
+            if !accepted {
+                // OS acceptance is a confirmed transport handoff, never evidence of reading.
+                let remind_title = format!("{} 提醒", crate::cross_character::display_name(&character_id));
+                app_handle.notification().builder().title(remind_title.as_str()).body(&text).show().map_err(|e| e.to_string())?;
+            }
+            return Ok(text);
+        }
+        TaskType::ToolCall => {
+            let tool_name = match task.tool_name.as_deref() {
+                Some(n) => n.to_string(),
+                None => {
+                    tracing::warn!(
+                        "[Scheduler] ToolCall 任务 {} 缺少 tool_name，跳过执行",
+                        task.id
+                    );
+                    return Err("定时工具任务缺少 tool_name".into());
+                }
+            };
+            let args = task.tool_arguments.clone();
+
+            // 走完整执行管线（沙箱/权限/确认），定时任务不再"可信跳过"。
+            // 用任务记录的 char_id 构造上下文，使工具调用能路由回正确的角色窗口。
+            let context = ToolUseContext::default().with_char_id(task.char_id.clone());
+            let result =
+                crate::tools::execute_tool_use(&tool_name, args, &tool_system, &context, None)
+                    .await;
+
+            let success = result.success;
+            let content = if result.success {
+                let detail = result
+                    .data
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default())
+                    .unwrap_or_default();
+                if detail.is_empty() {
+                    format!("定时任务已执行：{}", tool_name)
+                } else {
+                    format!("定时任务已执行 {}：{}", tool_name, detail)
+                }
+            } else {
+                format!(
+                    "定时任务 {} 执行失败：{}",
+                    tool_name,
+                    result.error.unwrap_or_else(|| "未知错误".to_string())
+                )
+            };
+
+            let _ = app_handle.emit(
+                "chat:assistant_message",
+                json!({
+                    "content": content,
+                    "timestamp": chrono::Local::now().to_rfc3339(),
+                }),
+            );
+
+            emit_event(
+                "scheduler:changed",
+                &json!({
+                    "action": "triggered",
+                    "task": task,
+                    "character_id": task.char_id,
+                }),
+            );
+            return if success { Ok(content) } else { Err(content) };
+        }
+    }
+}
+
+// ===== add_todo 工具 =====
+
+pub struct AddTodoTool;
+
+impl AddTodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AddTodoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for AddTodoTool {
+    fn name(&self) -> &str {
+        "add_todo"
+    }
+
+    fn description(&self) -> &str {
+        "Add a todo item. priority: 1(normal)/2(important)/3(urgent). event_time: when the event itself starts (e.g. ceremony at 09:00). due_date: when the reminder should fire — set it EARLIER than event_time, allowing travel and preparation time based on what you know about the user's commute and habits; if unknown, ask. Both support: specific datetime (2024-01-15T10:30:00), date only (2024-01-15, defaults to 09:00), or duration (PT2M=2min later, PT2H=2hr later). A reminder is created at due_date; if the time has already passed no reminder is created."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "添加待办事项。priority：1(普通)/2(重要)/3(紧急)。event_time：事件本身的开始时间（如典礼 09:00 开始）。due_date：提醒触发时间——应早于 event_time，结合你对用户住址、通勤、作息的了解预留路程与准备时间，不确定就先问用户。两者格式：具体时间（2024-01-15T10:30:00）、纯日期（2024-01-15，默认 09:00）、持续时间（PT2M=2分钟后，PT2H=2小时后）。会在 due_date 时间点创建提醒；若时间已过则不创建。",
+            "ja" => "ToDoアイテムを追加する。priority：1(通常)/2(重要)/3(緊急)。event_time：イベント自体の開始時刻（例：式典が09:00開始）。due_date：リマインダーを発火させる時刻——event_timeより早く設定し、ユーザーの住所・通勤・生活リズムに基づいて移動と準備の時間を見込む。不明ならユーザーに尋ねる。両者の形式：特定時刻（2024-01-15T10:30:00）、日付のみ（2024-01-15、09:00）、継続時間（PT2M=2分後、PT2H=2時間後）。due_dateの時点でリマインダーを作成（時刻経過済みなら作成しない）。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "加个待办\n记一下要做的事\n把这个加到清单\n别让我忘了",
+            "en" => "add this to my todo list\nremind me to do this\nput it on the list",
+            "ja" => "ToDoに追加して\nやることリストに入れて\n忘れないようにメモ",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Todo title"},
+                "description": {"type": "string", "description": "Detailed description (optional)"},
+                "priority": {"type": "integer", "description": "Priority 1-3", "minimum": 1, "maximum": 3, "default": 1},
+                "event_time": {"type": "string", "description": "When the event itself starts (e.g. 2024-01-15T10:30:00). Optional."},
+                "due_date": {"type": "string", "description": "When the reminder fires (earlier than event_time to allow travel/prep). Supports: specific datetime (2024-01-15T10:30:00), date only (2024-01-15, defaults to 09:00), or duration (PT2M=2min, PT2H=2hr). Optional."}
+            },
+            "required": ["title"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "待办标题"},
+                    "description": {"type": "string", "description": "详细描述（可选）"},
+                    "priority": {"type": "integer", "description": "优先级 1-3", "minimum": 1, "maximum": 3, "default": 1},
+                    "event_time": {"type": "string", "description": "事件本身的开始时间（如 2024-01-15T10:30:00）。可选。"},
+                    "due_date": {"type": "string", "description": "提醒触发时间（应早于 event_time，预留路程与准备）。支持：具体时间（2024-01-15T10:30:00）、纯日期（2024-01-15，默认 09:00）、持续时间（PT2M=2分钟后，PT2H=2小时后）。可选。"}
+                },
+                "required": ["title"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "ToDoタイトル"},
+                    "description": {"type": "string", "description": "詳細な説明（任意）"},
+                    "priority": {"type": "integer", "description": "優先度 1-3", "minimum": 1, "maximum": 3, "default": 1},
+                    "event_time": {"type": "string", "description": "イベント自体の開始時刻（例 2024-01-15T10:30:00）。任意。"},
+                    "due_date": {"type": "string", "description": "リマインダー発火時刻（event_timeより早く、移動と準備を見込む）。対応形式：特定時刻（2024-01-15T10:30:00）、日付のみ（2024-01-15、09:00）、継続時間（PT2M=2分後、PT2H=2時間後）。任意。"}
+                },
+                "required": ["title"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        match input.get("title").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => ValidationResult::success(Some(input.clone())),
+            _ => ValidationResult::failure("title 是必填项且不能为空", 2),
+        }
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let description = args
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let priority = args.get("priority").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+        let due_date = args.get("due_date").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let event_time = args.get("event_time").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let agreement = match args.get("agreement_id").and_then(Value::as_str).filter(|s|!s.is_empty()) {
+            Some(id) => match resolve_agreement_ref(&ctx.char_id,id) {
+                Ok(link)=>Some(link), Err(error)=>return ToolResult::standard_error(&error,None,None),
+            }, None=>None,
+        };
+        let item = match add_todo_item_with_agreement(
+            &title,
+            &description,
+            priority,
+            due_date.as_deref(),
+            event_time.as_deref(),
+            &ctx.char_id,
+            agreement,
+        ) { Ok(item)=>item,Err(error)=>return ToolResult::standard_error("待办保存失败",Some(&error),None) };
+
+        // due_date 已提供但 reminder_id 为 None：说明指定时间已过，提醒被跳过
+        let message = if due_date.as_deref().is_some_and(|s| !s.is_empty())
+            && item.reminder_id.is_none()
+        {
+            "待办已添加，但 due_date 指定的时间已过，未创建定时提醒。请用 update_todo 设置一个未来的时间。"
+        } else {
+            "已添加待办"
+        };
+
+        ToolResult::standard_success(
+            message,
+            Some(json!({ "id": item.id, "title": item.title, "priority": item.priority, "reminder_id": item.reminder_id })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    /// 权限风险等级：写入本地文件 / 持久化数据
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    /// 始终全量加载（核心工具）
+    fn always_load(&self) -> bool {
+        true
+    }
+
+    /// 搜索提示
+    fn search_hint(&self) -> &str {
+        "create todo task"
+    }
+}
+
+// ===== list_todo =====
+
+pub struct ListTodoTool;
+
+impl ListTodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ListTodoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ListTodoTool {
+    fn name(&self) -> &str {
+        "list_todo"
+    }
+
+    fn description(&self) -> &str {
+        "List todo items. Optional include_completed (default false, only shows incomplete)."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "列出待办事项。可选 include_completed（默认 false，仅显示未完成项）。",
+            "ja" => "ToDoアイテムを一覧表示する。オプション include_completed（デフォルト false、未完了のみ表示）。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "我还有什么没做\n看看待办\n清单上有什么\n还有几件事",
+            "en" => "what's left on my list\nshow me my todos\nwhat do I still need to do",
+            "ja" => "まだ何が残ってる\nToDoを見せて\nやる残りは",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "include_completed": {"type": "boolean", "default": false},
+                "priority_filter": {"type": "integer", "description": "Filter by priority (optional)"}
+            }
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "include_completed": {"type": "boolean", "default": false},
+                    "priority_filter": {"type": "integer", "description": "按优先级过滤（可选）"}
+                }
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "include_completed": {"type": "boolean", "default": false},
+                    "priority_filter": {"type": "integer", "description": "優先度で絞り込む（任意）"}
+                }
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, _input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        ValidationResult::success(None)
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        let include_completed = args
+            .get("include_completed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let priority_filter = args.get("priority_filter").and_then(|v| v.as_u64()).map(|p| p as u32);
+
+        let filtered = list_todo_items(include_completed, priority_filter);
+        // 合并两次读锁为一次，避免重复加锁
+        let (total, pending) = {
+            let file = TODO_LIST.read();
+            let total = file.items.len();
+            let pending = file.items.iter().filter(|it| !it.completed).count();
+            (total, pending)
+        };
+        let completed = total - pending;
+
+        ToolResult::standard_success(
+            &format!("共 {} 条（未完成 {}，已完成 {}）", filtered.len(), pending, completed),
+            Some(json!({
+                "items": filtered,
+                "total": total,
+                "pending": pending,
+                "completed": completed,
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    /// 权限风险等级：读取本地文件 / 持久化数据，无写入
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    /// 始终全量加载（核心工具）
+    fn always_load(&self) -> bool {
+        true
+    }
+
+    /// 搜索提示
+    fn search_hint(&self) -> &str {
+        "list todo tasks"
+    }
+}
+
+// ===== complete_todo =====
+
+pub struct CompleteTodoTool;
+
+impl CompleteTodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CompleteTodoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for CompleteTodoTool {
+    fn name(&self) -> &str {
+        "complete_todo"
+    }
+
+    fn description(&self) -> &str {
+        "Mark a todo as completed. Pass in id. Automatically cancels the associated scheduled reminder."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "将待办事项标记为已完成。传入 id。自动取消关联的定时提醒。",
+            "ja" => "ToDoアイテムを完了としてマークする。id を渡す。関連付けられたスケジュール済みリマインダーを自動的にキャンセルする。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "这个做完了\n标记完成\n划掉这一条",
+            "en" => "mark this done\nI finished this one\ncheck it off",
+            "ja" => "これは終わった\n完了にして\nチェックを入れて",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Todo ID"}
+            },
+            "required": ["id"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "待办 ID"}
+                },
+                "required": ["id"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "ToDo ID"}
+                },
+                "required": ["id"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        match input.get("id").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => ValidationResult::success(Some(input.clone())),
+            _ => ValidationResult::failure("id 是必填项", 2),
+        }
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        match complete_todo_item(&id, &ctx.char_id) {
+            Ok(item) => ToolResult::standard_success(
+                "已完成待办",
+                Some(json!({ "id": id, "title": item.title })),
+            ),
+            Err(e) => ToolResult::standard_error("待办不存在", Some(&e), None),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    /// 权限风险等级：写入本地文件 / 持久化数据
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+}
+
+// ===== manage_todo =====
+
+pub struct ManageTodoTool;
+
+impl ManageTodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ManageTodoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// manage_todo 的 action 解析。
+///
+/// 新调用走 `action`；旧名别名（`add_todo` / `complete_todo` / `update_todo`）
+/// 只有旧参数形状：items → 整表替换，id → 完成，title → 新增。
+fn effective_todo_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_string();
+    }
+    if args.get("items").is_some() {
+        "replace".to_string()
+    } else if args.get("id").is_some() {
+        "complete".to_string()
+    } else if args.get("title").is_some() {
+        "add".to_string()
+    } else {
+        String::new()
+    }
+}
+
+#[async_trait]
+impl Tool for ManageTodoTool {
+    fn name(&self) -> &str {
+        "manage_todo"
+    }
+
+    fn description(&self) -> &str {
+        "Create, complete, update, delete, or replace todo items.\
+         Actions: add (title required), complete (id), update (id + fields), delete (id), \
+         replace (items). Use list_todo to read the current list. agreement_id links an add action to an active standing agreement; only concrete finite actions belong here. Ordinary collection progress uses maintain_agreement."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "创建、完成、修改、删除或整表替换待办。\
+             action：add（需要 title）、complete（id）、update（id + 字段）、delete（id）、\
+             replace（items）。要读取当前清单请用 list_todo。",
+            "ja" => "ToDo の作成・完了・更新・削除・一括置換を行う。\
+             action：add（title 必須）、complete（id）、update（id + 各フィールド）、\
+             delete（id）、replace（items）。現在の一覧は list_todo で読む。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "整理一下待办\n待办清单管理\n改改我的清单",
+            "en" => "manage my todo list\nreorganize my tasks\ntidy up the list",
+            "ja" => "ToDoを整理して\nタスクを管理して\nリストをまとめて",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "Action to perform"},
+                "id": {"type": "string", "description": "Todo id (complete / update / delete)"},
+                "agreement_id": {"type":"string", "description":"Optional active standing-agreement ID for a concrete add action; completing the todo leaves its agreement active"},
+                "title": {"type": "string", "description": "Title (add required; update optional)"},
+                "description": {"type": "string", "description": "Description (add / update)"},
+                "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Priority 1-3 (add / update)"},
+                "due_date": {"type": "string", "description": "Due time (add / update). Supports datetime, date, or duration; empty string clears on update."},
+                "event_time": {"type": "string", "description": "Event start time (add / update)"},
+                "items": {
+                    "type": "array",
+                    "description": "Full replacement list (action=replace)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                            "completed": {"type": "boolean"},
+                            "event_time": {"type": "string"},
+                            "due_date": {"type": "string"}
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "要执行的操作"},
+                    "id": {"type": "string", "description": "待办 ID（complete / update / delete）"},
+                    "agreement_id": {"type":"string", "description":"add 可选：所属的活跃关注与约定 ID。只记录具体行动，完成待办不结束约定"},
+                    "title": {"type": "string", "description": "标题（add 必填；update 可选）"},
+                    "description": {"type": "string", "description": "描述（add / update）"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "优先级 1-3（add / update）"},
+                    "due_date": {"type": "string", "description": "提醒时间（add / update）。支持具体时间、纯日期或持续时间；update 传空字符串清除。"},
+                    "event_time": {"type": "string", "description": "事件开始时间（add / update）"},
+                    "items": {
+                        "type": "array",
+                        "description": "整表替换清单（action=replace）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                                "completed": {"type": "boolean"},
+                                "event_time": {"type": "string"},
+                                "due_date": {"type": "string"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["action"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "complete", "update", "delete", "replace"], "description": "実行するアクション"},
+                    "id": {"type": "string", "description": "ToDo ID（complete / update / delete）"},
+                    "agreement_id": {"type":"string", "description":"add の任意項目：有効な約束の ID。具体的な作業のみ。ToDo 完了後も約束は継続"},
+                    "title": {"type": "string", "description": "タイトル（add では必須、update では任意）"},
+                    "description": {"type": "string", "description": "説明（add / update）"},
+                    "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "優先度 1-3（add / update）"},
+                    "due_date": {"type": "string", "description": "期限時間（add / update）。特定時刻・日付・継続時間に対応。update で空文字列はクリア。"},
+                    "event_time": {"type": "string", "description": "イベント開始時刻（add / update）"},
+                    "items": {
+                        "type": "array",
+                        "description": "一括置換リスト（action=replace）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string"},
+                                "description": {"type": "string"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3},
+                                "completed": {"type": "boolean"},
+                                "event_time": {"type": "string"},
+                                "due_date": {"type": "string"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["action"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_todo_action(input);
+        match action.as_str() {
+            "add" => AddTodoTool.validate_input(input, ctx).await,
+            "complete" => CompleteTodoTool.validate_input(input, ctx).await,
+            "replace" => UpdateTodoTool.validate_input(input, ctx).await,
+            "update" | "delete" => match input.get("id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => ValidationResult::success(Some(input.clone())),
+                _ => ValidationResult::failure("id 是必填项", 2),
+            },
+            "" => ValidationResult::failure("action 是必填项", 2),
+            other => ValidationResult::failure(
+                &format!(
+                    "action 必须是 add / complete / update / delete / replace（收到 {}）",
+                    other
+                ),
+                2,
+            ),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_todo_action(input).as_str() {
+            "add" => AddTodoTool.check_permissions(input, ctx).await,
+            "complete" => CompleteTodoTool.check_permissions(input, ctx).await,
+            "replace" => UpdateTodoTool.check_permissions(input, ctx).await,
+            "delete" => PermissionResult::ask("删除待办事项不可逆，需要用户确认"),
+            _ => PermissionResult::allow(),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_todo_action(&args);
+        match action.as_str() {
+            "add" => return AddTodoTool.call(args, ctx).await,
+            "complete" => return CompleteTodoTool.call(args, ctx).await,
+            "replace" => return UpdateTodoTool.call(args, ctx).await,
+            _ => {}
+        }
+        let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+        match action.as_str() {
+            "update" => {
+                let title = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let description = args.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let priority = args.get("priority").and_then(|v| v.as_u64()).map(|p| p as u32);
+                let due_date = args.get("due_date").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let event_time = args.get("event_time").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                match update_todo_item(
+                    &id,
+                    title.as_deref(),
+                    description.as_deref(),
+                    priority,
+                    due_date.as_deref(),
+                    event_time.as_deref(),
+                    &ctx.char_id,
+                ) {
+                    Ok(item) => ToolResult::standard_success(
+                        "已更新待办",
+                        Some(json!({ "id": item.id, "reminder_id": item.reminder_id })),
+                    ),
+                    Err(e) => ToolResult::standard_error("待办不存在", Some(&e), None),
+                }
+            }
+            "delete" => {
+                if delete_todo_item(&id, &ctx.char_id) {
+                    ToolResult::standard_success("已删除待办", Some(json!({ "id": id })))
+                } else {
+                    ToolResult::standard_error(
+                        "待办不存在",
+                        Some(&format!("未找到 id={}", id)),
+                        None,
+                    )
+                }
+            }
+            _ => ToolResult::standard_error(
+                "不支持的 action",
+                Some("action 必须是 add / complete / update / delete / replace"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    /// 权限风险等级：写入本地文件 / 持久化数据
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    /// 始终全量加载（核心工具）
+    fn always_load(&self) -> bool {
+        true
+    }
+
+    /// 搜索提示
+    fn search_hint(&self) -> &str {
+        "update delete todo"
+    }
+}
+
+// ===== update_todo（整表替换） =====
+
+/// 整表替换待办（update_todo）：一次调用覆盖整个待办列表。
+///
+/// 与 add/complete/manage 的增量操作互补——当 LLM 需要重排/重构待办清单时，
+/// 直接传入完整的目标列表，旧列表整体替换（保留的 id 不变，其余清理）。
+pub struct UpdateTodoTool;
+
+impl UpdateTodoTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for UpdateTodoTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for UpdateTodoTool {
+    fn name(&self) -> &str {
+        "update_todo"
+    }
+
+    fn description(&self) -> &str {
+        "Replace the entire todo list. items: array of {title, description?, priority?, completed?, due_date?, event_time?}. This fully replaces all existing todos — pass the complete desired list (existing items you want to keep must be re-included, with matching title/id). Use when reordering or restructuring the todo list."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "整表替换待办列表。items：{title, description?, priority?, completed?, due_date?, event_time?} 数组。此操作会完全替换所有现有待办——必须传入完整的目标列表（想保留的条目要重新包含）。用于重排或重构待办清单。",
+            "ja" => "ToDoリスト全体を置き換える。items：{title, description?, priority?, completed?, due_date?, event_time?} の配列。既存の全ToDoを完全に置き換える——完全な目標リストを渡す必要がある（残したい項目は再含めること）。並べ替えや再構成に使用。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "改一下那个待办\n更新待办\n把那条改改",
+            "en" => "update that todo\nchange that item on my list\nedit the todo",
+            "ja" => "ToDoを更新して\nあの項目を修正して\nリストを編集して",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Todo title"},
+                            "description": {"type": "string", "description": "Detailed description (optional)"},
+                            "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Priority 1-3, default 1"},
+                            "completed": {"type": "boolean", "description": "Whether the todo is completed"},
+                            "event_time": {"type": "string", "description": "When the event itself starts (optional)"},
+                            "due_date": {"type": "string", "description": "Due time (optional). Supports: specific datetime (2024-01-15T10:30:00), date only (2024-01-15, defaults to 09:00), or duration (PT2M=2min, PT2H=2hr)."}
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            "required": ["items"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "待办标题"},
+                                "description": {"type": "string", "description": "详细描述（可选）"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "优先级 1-3，默认 1"},
+                                "completed": {"type": "boolean", "description": "是否已完成"},
+                                "event_time": {"type": "string", "description": "事件本身的开始时间（可选）"},
+                                "due_date": {"type": "string", "description": "截止时间（可选）。支持：具体时间（2024-01-15T10:30:00）、纯日期（2024-01-15，默认 09:00）、持续时间（PT2M=2分钟后，PT2H=2小时后）。"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "title": {"type": "string", "description": "ToDoタイトル"},
+                                "description": {"type": "string", "description": "詳細な説明（任意）"},
+                                "priority": {"type": "integer", "minimum": 1, "maximum": 3, "description": "優先度 1-3、デフォルト 1"},
+                                "completed": {"type": "boolean", "description": "完了しているか"},
+                                "event_time": {"type": "string", "description": "イベント自体の開始時刻（任意）"},
+                                "due_date": {"type": "string", "description": "期限時間（任意）。対応形式：特定時刻（2024-01-15T10:30:00）、日付のみ（2024-01-15、09:00）、継続時間（PT2M=2分後、PT2H=2時間後）。"}
+                            },
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        match input.get("items").and_then(|v| v.as_array()) {
+            Some(arr) if !arr.is_empty() => ValidationResult::success(Some(input.clone())),
+            Some(_) => ValidationResult::failure("items 不能为空数组", 2),
+            None => ValidationResult::failure("items 是必填项", 2),
+        }
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let items: Vec<TodoItem> = args
+            .get("items")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| {
+                let title = v
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let due_date = v.get("due_date").and_then(|d| d.as_str()).map(|s| s.to_string());
+                let event_time = v.get("event_time").and_then(|d| d.as_str()).map(|s| s.to_string());
+                let mut reminder_id = None;
+                if let Some(ref dd) = due_date {
+                    if !dd.is_empty() {
+                        reminder_id = schedule_reminder_for(&title, dd, &ctx.char_id);
+                    }
+                }
+                TodoItem {
+                    id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    title,
+                    description: v
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    completed: v.get("completed").and_then(|c| c.as_bool()).unwrap_or(false),
+                    priority: v.get("priority").and_then(|p| p.as_u64()).unwrap_or(1) as u32,
+                    created_at: v.get("created_at").and_then(|c| c.as_i64()).unwrap_or(0),
+                    completed_at: v
+                        .get("completed_at")
+                        .and_then(|c| c.as_i64()),
+                    due_date,
+                    event_time,
+                    reminder_id,
+                    agreement: None,
+                }
+            })
+            .collect();
+
+        if items.is_empty() {
+            return ToolResult::standard_error("items 不能为空", Some("至少保留一项待办"), None);
+        }
+
+        let replaced = replace_todo_items(items, &ctx.char_id);
+        ToolResult::standard_success(
+            &format!("待办列表已整表替换，共 {} 条", replaced.len()),
+            Some(json!({ "items": replaced })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
+    }
+
+    /// 权限风险等级：写入本地文件 / 持久化数据
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    /// 始终全量加载（核心工具）
+    fn always_load(&self) -> bool {
+        true
+    }
+
+    /// 搜索提示
+    fn search_hint(&self) -> &str {
+        "replace todo list update all"
+    }
+}
+
+pub(crate) fn publish_scheduler_changed(character_id: &str) {
+    emit_event("scheduler:changed", &json!({"action":"execution_settled", "character_id":character_id}));
+}
+
+#[cfg(test)]
+mod agreement_link_tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires an explicitly isolated VIVIAN_TEST_DATA_DIR; uses the process todo list"]
+    fn agreement_link_completion_persists_without_ending_parent_and_context_stays_owned() {
+        let root=std::path::PathBuf::from(std::env::var_os("VIVIAN_TEST_DATA_DIR").expect("run with isolated test data"));
+        assert!(root.starts_with(std::env::temp_dir()),"test storage must be in the OS temporary directory");
+        let owner=format!("agreement-linked-{}",uuid::Uuid::new_v4());
+        let memory=crate::memory::MemoryManager::new(&crate::config::AppConfig::default(),&owner).unwrap();
+        let id=memory.create_agreement("番剧清单","维护看番记录","用户提到追番进展").unwrap().unwrap();
+        let item:TodoItem=serde_json::from_value(json!({"id":"linked-action","title":"补齐旧记录","created_at":1,
+            "agreement":{"character_id":owner,"id":id,"title":"番剧清单"}})).unwrap();
+        let foreign:TodoItem=serde_json::from_value(json!({"id":"foreign-action","title":"另一个角色的行动","created_at":1,
+            "agreement":{"character_id":"other","id":id,"title":"别人的约定"}})).unwrap();
+        replace_todo_items(vec![item,foreign],"");
+        let completed=complete_todo_item("linked-action","").unwrap();
+        assert!(completed.completed);assert_eq!(completed.agreement.as_ref().unwrap().id,id);
+        load_todo_list();assert!(list_todo_items(true,None).iter().any(|item|item.id=="linked-action"&&item.completed));
+        let parent=memory.get_memories_by_ids(&[id.clone()]).pop().unwrap();
+        assert_eq!(crate::memory::ongoing_tasks::task(&parent).unwrap().status,crate::memory::ongoing_tasks::Status::Active);
+        let context=agreement_todo_context(&owner,&[id].into_iter().collect());
+        assert_eq!(context.len(),1);assert_eq!(context[0]["id"],"linked-action");
+        let legacy:TodoItem=serde_json::from_value(json!({"id":"legacy","title":"旧待办","created_at":1})).unwrap();
+        assert!(legacy.agreement.is_none());
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_todo_arguments_infer_actions() {
+        assert_eq!(effective_todo_action(&json!({"title": "买菜"})), "add");
+        assert_eq!(effective_todo_action(&json!({"id": "t1"})), "complete");
+        assert_eq!(effective_todo_action(&json!({"items": []})), "replace");
+        assert_eq!(effective_todo_action(&json!({"action": "delete", "id": "t1"})), "delete");
+        assert_eq!(effective_todo_action(&json!({})), "");
+    }
+}

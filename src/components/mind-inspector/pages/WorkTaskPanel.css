@@ -1,0 +1,394 @@
+/* 任务坞与任务轨：沿用工作页的暖纸手账变量，不新增色板。 */
+
+/* 全局「需要你」条：安静时不出现，出现时只占一行到三行。 */
+.work-attention {
+  --work-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --work-open: 400ms;
+  --work-close: 350ms;
+  margin: 0 0 8px;
+  border: 1px solid var(--codex-line);
+  border-left: 3px solid var(--codex-warm);
+  border-radius: 9px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+}
+.work-attention-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 13px;
+  color: var(--codex-ink);
+  cursor: pointer;
+  text-align: left;
+}
+.work-attention-head:hover { background: var(--codex-accent-soft); }
+.work-attention-mark {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 2px;
+  background: var(--codex-warm);
+}
+.work-attention-title { font-weight: 600; }
+.work-attention-counts { display: flex; gap: 5px; margin-left: auto; }
+.work-attention-count {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line-light);
+  color: var(--codex-ink-soft);
+  background: var(--codex-paper);
+}
+.work-attention-count.is-input { color: var(--codex-warning); border-color: var(--codex-warning); }
+.work-attention-count.is-review { color: var(--codex-warm); border-color: var(--codex-warm); }
+.work-attention-count.is-failed { color: var(--codex-ink-soft); }
+.work-attention-chevron { color: var(--codex-ink-faint); font-size: 11px; }
+.work-attention-rows {
+  border-top: 1px solid var(--codex-line-light);
+  padding: 3px 5px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: work-attention-in var(--work-close) var(--work-ease);
+}
+.work-attention-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  color: var(--codex-ink);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--work-close) var(--work-ease);
+}
+.work-attention-row:hover { background: var(--codex-accent-soft); }
+.work-attention-row.is-current { cursor: default; }
+.work-attention-task {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.work-attention-label { font-size: 10.5px; color: var(--codex-ink-soft); flex: none; }
+.work-attention-session {
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--codex-ink-faint);
+  flex: none;
+}
+.work-attention-row:not(.is-current):hover .work-attention-session::after { content: ' →'; }
+.work-attention-more {
+  align-self: flex-start;
+  margin: 2px 6px 0;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 11px;
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.work-attention-more:hover { color: var(--codex-ink); }
+@keyframes work-attention-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .work-attention-rows { animation: none; }
+  .work-attention-row { transition: none; }
+}
+
+.work-task-dock {
+  margin: 0 0 8px;
+  border: 1px solid var(--codex-line);
+  border-radius: 9px;
+  background: var(--codex-paper-card);
+  box-shadow: var(--codex-shadow-sm);
+  overflow: hidden;
+}
+.work-task-dock-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  font-family: var(--codex-font);
+  font-size: 13px;
+  color: var(--codex-ink);
+  cursor: pointer;
+}
+.work-task-dock-toggle:hover { background: var(--codex-accent-soft); }
+.work-task-dock-chevron { color: var(--codex-ink-faint); }
+.work-task-dock-rows {
+  border-top: 1px solid var(--codex-line-light);
+  padding: 3px 6px 5px;
+}
+.work-task-dock-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  font-size: 12.5px;
+}
+.work-task-dock-row:hover { background: var(--codex-accent-soft); }
+.work-task-dock-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.work-task-dock-label,
+.work-task-dock-more {
+  font-size: 11px;
+  color: var(--codex-ink-faint);
+}
+
+.work-task-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.work-task-dot-run { background: var(--codex-accent); }
+.work-task-dot-input { background: var(--codex-warning); }
+.work-task-dot-review { background: var(--codex-warm); }
+.work-task-dot-done { background: var(--codex-success); }
+
+/* 概览页内的任务轨：外框/标题直接复用 `.codex-info-card` / `.codex-info-title`，
+   这里只补纵向布局与卡片内的滚动上限。 */
+.work-task-rail {
+  display: flex;
+  flex-direction: column;
+  max-height: 340px;
+}
+.work-task-buckets { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.work-task-bucket {
+  font-family: var(--codex-font);
+  font-size: 12px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper-card);
+  color: var(--codex-ink-soft);
+  cursor: pointer;
+}
+.work-task-bucket.active {
+  background: var(--codex-ink);
+  border-color: var(--codex-ink);
+  color: var(--codex-paper);
+}
+.work-task-bucket-n {
+  margin-left: 4px;
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  opacity: .75;
+}
+.work-task-cards { overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 7px; }
+.work-task-card {
+  position: relative;
+  background: var(--codex-paper-card);
+  border: 1px solid var(--codex-line-light);
+  border-radius: 9px;
+  padding: 9px 10px;
+  box-shadow: var(--codex-shadow-sm);
+  cursor: pointer;
+}
+.work-task-card:hover { box-shadow: var(--codex-shadow-md); }
+.work-task-card-top { display: flex; align-items: center; gap: 7px; }
+.work-task-card-title { font-size: 13px; line-height: 1.4; }
+.work-task-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  color: var(--codex-ink-faint);
+}
+.work-task-attention {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--codex-warm);
+  box-shadow: 0 0 0 3px var(--codex-warm-soft);
+}
+.work-task-card-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--codex-line);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--codex-ink-soft);
+  cursor: default;
+}
+.work-task-detail-line + .work-task-detail-line { margin-top: 4px; }
+.work-task-actions { display: flex; gap: 6px; margin-top: 9px; }
+.work-task-btn {
+  font-family: var(--codex-font);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--codex-line);
+  background: var(--codex-paper);
+  color: var(--codex-ink);
+  cursor: pointer;
+}
+.work-task-btn.primary {
+  background: var(--codex-success);
+  border-color: var(--codex-success);
+  color: #fff;
+}
+.work-task-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 任务活动时间线：只展示宿主记录的里程碑，不铺工具调用流水。 */
+.work-task-timeline {
+  margin: 7px 0 6px;
+  padding: 6px 0 2px;
+  border-top: 1px dashed var(--codex-line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.work-task-timeline-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--codex-ink-soft);
+}
+.work-task-timeline-dot {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--codex-line);
+  transform: translateY(-1px);
+}
+.work-task-timeline-dot.is-created { background: var(--codex-accent); }
+.work-task-timeline-dot.is-settled { background: var(--codex-warm); }
+.work-task-timeline-dot.is-accepted { background: var(--codex-success); }
+.work-task-timeline-dot.is-rejected { background: var(--codex-warning); }
+.work-task-timeline-dot.is-failed { background: var(--codex-warning); }
+.work-task-timeline-dot.is-canceled { background: var(--codex-ink-faint); }
+.work-task-timeline-dot.is-restarted { background: var(--codex-warning); }
+.work-task-timeline-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.work-task-timeline-time {
+  flex: none;
+  font-family: var(--codex-mono);
+  font-size: 10px;
+  color: var(--codex-ink-faint);
+}
+
+/* 消息内任务卡：紧跟派发工具结果的一行，与任务坞 / 任务轨同源同色。 */
+.work-task-inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 0 8px 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--codex-line-light);
+  border-left: 3px solid var(--codex-accent);
+  border-radius: 7px;
+  background: var(--codex-paper-card);
+  font-family: var(--codex-font);
+  font-size: 12px;
+  color: var(--codex-ink-soft);
+  max-width: 560px;
+}
+.work-task-inline[data-bucket="needs_review"] { border-left-color: var(--codex-warm); }
+.work-task-inline[data-bucket="closed"] { border-left-color: var(--codex-danger); }
+.work-task-inline-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--codex-ink);
+}
+.work-task-inline-label { margin-left: auto; flex: none; font-size: 11px; color: var(--codex-ink-faint); }
+
+/* 任务坞 hover 动作：默认不占位，鼠标进到行里才浮出来。 */
+.work-task-dock-acts { display: flex; gap: 6px; opacity: 0; flex: none; }
+.work-task-dock-row:hover .work-task-dock-acts,
+.work-task-dock-row:focus-within .work-task-dock-acts { opacity: 1; }
+.work-task-dock-act {
+  font-family: var(--codex-font);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--codex-accent-soft);
+  color: var(--codex-accent-deep);
+  cursor: pointer;
+}
+.work-task-dock-act:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 运行中的最新一步 / 等待输入的那一个问题 */
+.work-task-latest-step {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--codex-accent-deep);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.work-task-latest-step.is-blocked {
+  white-space: normal;
+  color: var(--codex-warning);
+}
+
+/* 详情：授权快照与补充输入 */
+.work-task-mandate {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border: 1px dashed var(--codex-line);
+  border-radius: 6px;
+  background: var(--codex-paper);
+}
+.work-task-mandate-head { font-size: 11.5px; color: var(--codex-ink); }
+.work-task-mandate-line {
+  margin-top: 3px;
+  font-family: var(--codex-mono);
+  font-size: 10.5px;
+  color: var(--codex-ink-faint);
+  overflow-wrap: anywhere;
+}
+.work-task-question { margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--codex-line); }
+.work-task-input {
+  width: 100%;
+  margin-top: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--codex-line);
+  border-radius: 6px;
+  background: var(--codex-paper-card);
+  color: var(--codex-ink);
+  font-family: var(--codex-font);
+  font-size: 12.5px;
+  resize: vertical;
+}
+.work-task-input:focus { outline: none; border-color: var(--codex-accent); }
+.work-task-btn.ghost { background: transparent; color: var(--codex-ink-soft); }

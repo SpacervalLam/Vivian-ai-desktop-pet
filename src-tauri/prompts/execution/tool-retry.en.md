@@ -1,0 +1,1 @@
+The previous draft mentioned using tools but did not supply valid tool call JSON. For an authorized operation, choose an available matching tool and provide complete arguments in the required JSON format. If no tool fits or required information is missing, state the concrete limitation.

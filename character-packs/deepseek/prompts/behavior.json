@@ -1,0 +1,61 @@
+{
+  "proactive_feedback_positive": 0.002,
+  "proactive_feedback_negative": 0.003,
+  "mood_driven_need_threshold": 0.85,
+  "mood_driven_loneliness_threshold": 0.75,
+  "intimacy_cooldown_multiplier": 0.8,
+  "quiet_mode_threshold": 5,
+  "mood_expression_cooldown_secs": 30,
+  "tick_jitter": {
+    "min": 0.95,
+    "max": 1.45
+  },
+  "timing_weights": {
+    "idle": 0.25,
+    "schedule": 0.1,
+    "time": 0.1,
+    "cooldown": 0.3,
+    "frequency": 0.25
+  },
+  "trigger_modifiers": {
+    "threshold_mult": 1.1,
+    "cooldown_mult": 1.25,
+    "probability_mult": 0.85
+  },
+  "speech_desire": {
+    "base_growth": 0.055,
+    "ignored_boost": 0.015,
+    "user_busy_decay": 0.065,
+    "threshold": 0.55,
+    "reset_on_speak": true,
+    "initial_desire": 0.12
+  },
+  "arbitration": {
+    "priority": 3,
+    "reluctance": 3.2,
+    "yield_delay_secs": 45.0
+  },
+  "mood_drift": {
+    "base_valence": 0.48,
+    "volatility": 0.18,
+    "recovery_rate": 0.035,
+    "irritation_growth": 0.035,
+    "joy_decay": 0.025,
+    "initial_phase": 1.5707963267948966
+  },
+  "trigger_affinity": {
+    "mood_driven": 0.9,
+    "icebreaker": 0.8,
+    "welcome_back": 1.05,
+    "spontaneous": 0.75,
+    "hourly_greeting": 0.35,
+    "idle_greeting": 0.65,
+    "health_reminder": 0.4,
+    "window_trigger": 0.9,
+    "topic_extension": 1.45,
+    "memory_recall": 1.1,
+    "teasing_response": 1.3,
+    "cross_character_reply": 1.1,
+    "bystander_interjection": 0.65
+  }
+}

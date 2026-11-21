@@ -1,0 +1,5 @@
+export const stickerTranslations = {
+  'zh-CN': { happy: '开心', shy: '害羞', curious: '好奇', proud: '得意', thanks: '谢谢', cheer: '加油', laugh: '笑了', okay: '好呀', wave: '挥手', sleepy: '困啦', surprise: '惊喜', heart: '喜欢', peek: '探头', plead: '恳求', question: '疑问', comfort: '安慰', think: '思考', apology: '抱歉', content: '满足', listen: '倾听', cry: '委屈哭泣', angry: '气鼓鼓', custom: '自定义' },
+  en: { happy: 'Happy', shy: 'Shy', curious: 'Curious', proud: 'Proud', thanks: 'Thank you', cheer: 'You can do it', laugh: 'Laughing', okay: 'Okay', wave: 'Waving', sleepy: 'Sleepy', surprise: 'Delighted', heart: 'Love', peek: 'Peeking', plead: 'Pleading', question: 'Question', comfort: 'Comfort', think: 'Thinking', apology: 'Sorry', content: 'Content', listen: 'Listening', cry: 'Crying', angry: 'Pouting', custom: 'Custom' },
+  ja: { happy: 'うれしい', shy: '照れる', curious: '気になる', proud: '得意げ', thanks: 'ありがとう', cheer: 'がんばって', laugh: '笑っちゃった', okay: 'いいよ', wave: '手を振る', sleepy: 'ねむい', surprise: 'うれしい驚き', heart: '好き', peek: 'ちらっ', plead: 'お願い', question: '疑問', comfort: 'なぐさめ', think: '考え中', apology: 'ごめんね', content: '満足', listen: '聞いてるよ', cry: '泣く', angry: 'ぷんぷん', custom: 'カスタム' },
+};

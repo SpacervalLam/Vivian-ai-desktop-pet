@@ -1,0 +1,1624 @@
+//! Wallpaper Engine 工具 - 列出/切换/控制动态壁纸
+//!
+//! 通过 Wallpaper Engine 的 CLI 命令行接口（`wallpaper64.exe -control ...`）控制壁纸。
+//! 壁纸列表通过扫描 Steam Workshop 目录的 `project.json` 获得。
+//!
+//! ## 实现要点
+//! - **Steam 库查找**：注册表 `HKCU\Software\Valve\Steam\SteamPath` → 默认路径
+//!   → 解析 `libraryfolders.vdf` 找到所有库
+//! - **Wallpaper Engine 可执行文件查找**：在各 Steam 库的 `steamapps\common\wallpaper_engine\`
+//!   目录下查找，优先匹配正在运行的 Wallpaper Engine 进程位数（wallpaper32.exe /
+//!   wallpaper64.exe），未运行时回退 64 → 32
+//! - **壁纸列表**：扫描 `steamapps\workshop\content\431960\<workshop_id>\project.json`
+//! - **CLI 调用**：`wallpaper64.exe -control openWallpaper -file <folder>\project.json`
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::tools::types::{
+    PermissionResult, Tool, ToolCategory, ToolResult, ToolUseContext, ValidationResult,
+    ToolRiskTier,
+};
+use crate::utils::process::silent_command;
+
+/// Wallpaper Engine 在 Steam 中的 App ID
+const WALLPAPER_ENGINE_APP_ID: &str = "431960";
+
+fn read_wallpaper_environment(exe: &Path) -> crate::world::desktop_state::WallpaperState {
+    use crate::world::desktop_state::{configured_wallpapers, WallpaperState};
+    let mut state = WallpaperState { observed_at: chrono::Utc::now().timestamp(),
+        source: "wallpaper_engine_config".into(), ..WallpaperState::default() };
+    let config = exe.parent().map(|dir| dir.join("config.json"))
+        .and_then(|path| std::fs::read(path).ok()).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    if let Some(config) = config {
+        state.monitors = configured_wallpapers(&config, &std::env::var("USERNAME").unwrap_or_default());
+        for item in &mut state.monitors {
+            if let Some(folder) = Path::new(&item.file).parent() {
+                item.title = std::fs::read(folder.join("project.json")).ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    .and_then(|project| project["title"].as_str().map(str::to_owned));
+            }
+        }
+        state.primary = state.monitors.iter().find(|item| item.monitor.eq_ignore_ascii_case("Monitor0")).cloned()
+            .or_else(|| (state.monitors.len() == 1).then(|| state.monitors[0].clone()));
+    }
+    state
+}
+
+/// Background sampling reads configuration without spawning a CLI window every tick.
+pub fn refresh_wallpaper_environment() {
+    let state = find_wallpaper_engine_exe().filter(|_| is_wallpaper_engine_running())
+        .map(|exe| read_wallpaper_environment(&exe)).unwrap_or_else(|| crate::world::desktop_state::WallpaperState {
+            observed_at: chrono::Utc::now().timestamp(), source:"unavailable".into(),
+            ..Default::default()
+        });
+    *crate::world::desktop_state::WALLPAPER.write() = state;
+}
+
+// ============================================================================
+// 解析层：Steam / Wallpaper Engine 路径与壁纸元数据
+// ============================================================================
+
+/// 壁纸信息（从 project.json 解析）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WallpaperInfo {
+    /// Workshop ID（也是壁纸文件夹名）
+    pub workshop_id: String,
+    /// 壁纸标题
+    pub title: String,
+    /// 壁纸描述
+    pub description: String,
+    /// 壁纸类型（scene / video / web / application / url）
+    pub wallpaper_type: String,
+    /// 入口文件相对路径
+    pub entry_file: String,
+    /// 标签
+    pub tags: Vec<String>,
+    /// 壁纸文件夹完整路径（用于 `-control openWallpaper`）
+    pub folder_path: String,
+}
+
+/// 查找 Wallpaper Engine 的可执行文件路径
+///
+/// 优先匹配正在运行的 Wallpaper Engine 进程位数（CLI 必须使用与运行实例相同位数
+/// 的 exe 才能生效），未运行时回退 wallpaper64.exe → wallpaper32.exe。
+/// 返回 `None` 表示未找到 Wallpaper Engine 安装。
+pub fn find_wallpaper_engine_exe() -> Option<PathBuf> {
+    let libs = find_steam_libraries()?;
+
+    // 检测正在运行的 Wallpaper Engine 进程位数
+    let prefer_32 = is_wallpaper_engine_32bit_running();
+
+    let (first, second) = if prefer_32 {
+        ("wallpaper32.exe", "wallpaper64.exe")
+    } else {
+        ("wallpaper64.exe", "wallpaper32.exe")
+    };
+
+    for lib in &libs {
+        let dir = lib
+            .join("steamapps")
+            .join("common")
+            .join("wallpaper_engine");
+        let preferred = dir.join(first);
+        if preferred.exists() {
+            return Some(preferred);
+        }
+        let fallback = dir.join(second);
+        if fallback.exists() {
+            return Some(fallback);
+        }
+    }
+    None
+}
+
+/// 检测当前运行的 Wallpaper Engine 是否为 32 位版本（wallpaper32.exe）
+fn is_wallpaper_engine_32bit_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+    );
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.processes().values().any(|p| {
+        p.name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("wallpaper32.exe")
+    })
+}
+
+/// 检测 Wallpaper Engine 是否正在运行（wallpaper32.exe 或 wallpaper64.exe）
+fn is_wallpaper_engine_running() -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+    let mut sys = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::new()),
+    );
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.processes().values().any(|p| {
+        let name = p.name().to_string_lossy().to_lowercase();
+        name == "wallpaper32.exe" || name == "wallpaper64.exe"
+    })
+}
+
+/// 查找所有 Steam 库路径（含主库 + libraryfolders.vdf 中的附加库）
+pub fn find_steam_libraries() -> Option<Vec<PathBuf>> {
+    let steam_path = find_steam_install_dir()?;
+    let mut libs: Vec<PathBuf> = vec![steam_path.clone()];
+
+    // 解析 libraryfolders.vdf 找到其他库
+    let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
+    if let Ok(content) = std::fs::read_to_string(&vdf_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            // 形如：    "path"        "D:\\SteamLibrary"
+            if trimmed.starts_with("\"path\"") {
+                if let Some(p) = extract_second_quoted(trimmed) {
+                    let path = PathBuf::from(&p);
+                    if path.exists() && !libs.contains(&path) {
+                        libs.push(path);
+                    }
+                }
+            }
+        }
+    }
+    Some(libs)
+}
+
+/// 查找 Steam 安装目录：注册表 → 默认路径
+fn find_steam_install_dir() -> Option<PathBuf> {
+    if let Some(p) = read_steam_registry_path() {
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let default = PathBuf::from("C:\\Program Files (x86)\\Steam");
+    if default.exists() {
+        Some(default)
+    } else {
+        None
+    }
+}
+
+/// 从注册表 `HKCU\Software\Valve\Steam` 读取 `SteamPath`
+fn read_steam_registry_path() -> Option<PathBuf> {
+    let output = silent_command("reg")
+        .args(["query", "HKCU\\Software\\Valve\\Steam", "/v", "SteamPath"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // 输出形如：
+    //     SteamPath    REG_SZ    C:\Program Files (x86)\Steam
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("SteamPath") && trimmed.contains("REG_SZ") {
+            // 取 REG_SZ 之后的部分
+            if let Some(idx) = trimmed.find("REG_SZ") {
+                let rest = trimmed[idx + "REG_SZ".len()..].trim();
+                if !rest.is_empty() {
+                    return Some(PathBuf::from(rest));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从 `"key"        "value"` 行中提取第二个引号对中的内容
+fn extract_second_quoted(line: &str) -> Option<String> {
+    let parts: Vec<&str> = line.split('"').collect();
+    // split('"') 得到 ["    ", "path", "        ", "D:\\SteamLibrary", ""]
+    // 索引 3 是第二个引号对的值
+    if parts.len() >= 4 {
+        let v = parts[3].trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+    None
+}
+
+/// 扫描所有 Steam 库的 Wallpaper Engine workshop 目录，列出所有壁纸
+///
+/// 每个子文件夹对应一个壁纸（以 workshop ID 命名），读取其中的 `project.json` 获取元数据。
+/// 返回结果按标题升序排列。
+pub fn list_wallpapers() -> Vec<WallpaperInfo> {
+    let mut wallpapers = Vec::new();
+    let Some(libs) = find_steam_libraries() else {
+        return wallpapers;
+    };
+    for lib in &libs {
+        let workshop_dir = lib
+            .join("steamapps")
+            .join("workshop")
+            .join("content")
+            .join(WALLPAPER_ENGINE_APP_ID);
+        if !workshop_dir.exists() {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&workshop_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let workshop_id = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if workshop_id.is_empty() {
+                continue;
+            }
+            let project_json = path.join("project.json");
+            match parse_wallpaper_project(&project_json, &workshop_id) {
+                Ok(info) => wallpapers.push(info),
+                Err(e) => tracing::debug!(
+                    "[wallpaper] 跳过壁纸 {} 元数据解析失败: {}",
+                    workshop_id,
+                    e
+                ),
+            }
+        }
+    }
+    // 按标题排序（不区分大小写）
+    wallpapers.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    wallpapers
+}
+
+/// 解析单个壁纸的 `project.json`
+fn parse_wallpaper_project(
+    project_json: &Path,
+    workshop_id: &str,
+) -> Result<WallpaperInfo, String> {
+    let content = std::fs::read_to_string(project_json)
+        .map_err(|e| format!("读取 project.json 失败: {}", e))?;
+    let value: Value =
+        serde_json::from_str(&content).map_err(|e| format!("解析 project.json 失败: {}", e))?;
+    let title = value
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未命名壁纸")
+        .to_string();
+    let description = value
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let wallpaper_type = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let entry_file = value
+        .get("file")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tags: Vec<String> = value
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let folder_path = project_json
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    Ok(WallpaperInfo {
+        workshop_id: workshop_id.to_string(),
+        title,
+        description,
+        wallpaper_type,
+        entry_file,
+        tags,
+        folder_path,
+    })
+}
+
+/// 按 workshop_id 查找壁纸文件夹路径
+pub fn find_wallpaper_by_id(workshop_id: &str) -> Option<PathBuf> {
+    let libs = find_steam_libraries()?;
+    for lib in &libs {
+        let candidate = lib
+            .join("steamapps")
+            .join("workshop")
+            .join("content")
+            .join(WALLPAPER_ENGINE_APP_ID)
+            .join(workshop_id);
+        if candidate.exists() && candidate.join("project.json").exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+// ============================================================================
+// 工具 1：WallpaperListTool - 列出所有已安装壁纸
+// ============================================================================
+
+/// wallpaper_list 工具 - 列出所有已安装的 Wallpaper Engine 壁纸
+pub struct WallpaperListTool;
+
+impl WallpaperListTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WallpaperListTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for WallpaperListTool {
+    fn name(&self) -> &str {
+        "wallpaper_list"
+    }
+
+    fn description(&self) -> &str {
+        "List all Wallpaper Engine wallpapers installed by the user.\
+         This is the first step of the wallpaper switching flow: call this tool to get the wallpaper list, obtain the workshop_id from the result,\
+         then call wallpaper_set to switch.\n\
+         Each item in the returned structure contains workshop_id / title / type / tags / folder_path.\n\
+         \n\
+         Strategy for using the filter parameter:\n\
+         - When the user describes using the exact word from the wallpaper title (e.g. the user says \"Hina\" and the title contains \"Hina\"), pass filter to do a backend substring match and reduce the returned volume.\n\
+         - When the user uses a semantically related description (e.g. the user says \"Weathering with You\" but the wallpaper title is \"Hodaka and Hina's Sky\" or \"Tokyo Rain\"), **do not pass filter**; fetch the full list and let you (the LLM) do the semantic association match — the backend substring match cannot recognize common knowledge like \"Hodaka/Hina are characters from Weathering with You\", only you can.\n\
+         - When unsure, prefer not to pass filter (use next_offset to fetch remaining pages before concluding no match).\n\
+         \n\
+         Handling multiple matches: do not return a candidate list for the user to choose; let you (the LLM) autonomously pick the most relevant one.\
+         Selection priority: exact title match > title contains match > tag match > semantic association match; when relevance is equal, prefer the video type (animated wallpapers look better)."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "列出用户已安装的所有 Wallpaper Engine 壁纸。这是壁纸切换流程的第一步：调用此工具获取壁纸列表，\
+         从结果中获取 workshop_id，再调用 wallpaper_set 进行切换。\n\
+         返回结构中每项包含 workshop_id / title / type / tags / folder_path。\n\
+         \n\
+         filter 参数的使用策略：\n\
+         - 当用户描述使用了壁纸标题中的精确词（例如用户说\"Hina\"且标题包含\"Hina\"），传入 filter 做后端子串匹配以减少返回量。\n\
+         - 当用户使用语义相关描述（例如用户说\"天气之子\"但壁纸标题是\"Hodaka and Hina's Sky\"或\"Tokyo Rain\"），**不要传 filter**；\
+         获取完整列表让你（LLM）做语义关联匹配——后端子串匹配无法识别\"Hodaka/Hina 是天气之子角色\"这类常识，只有你能识别。\n\
+         - 不确定时优先不传 filter（根据 next_offset 继续翻页，遍历完成前不能判定没有匹配壁纸）。\n\
+         \n\
+         处理多重匹配：不要返回候选列表让用户选择；让你（LLM）自主挑选最相关的一个。\
+         选择优先级：标题精确匹配 > 标题包含匹配 > 标签匹配 > 语义关联匹配；当相关性相当时，优先选择 video 类型（动态壁纸视觉效果更好）。",
+            "ja" => "ユーザーがインストールしたすべての Wallpaper Engine 壁紙を一覧表示する。これは壁紙切り替えフローの最初のステップ：\
+         このツールを呼び出して壁紙リストを取得し、結果から workshop_id を得て、wallpaper_set を呼び出して切り替える。\n\
+         返却構造の各項目には workshop_id / title / type / tags / folder_path が含まれる。\n\
+         \n\
+         filter パラメータの使用戦略：\n\
+         - ユーザーが壁紙タイトルの正確な単語を使用した場合（例：ユーザーが\"Hina\"と言い、タイトルに\"Hina\"が含まれる）、filter を渡してバックエンドの部分一致を行い、返却量を減らす。\n\
+         - ユーザーが意味的に関連する説明を使用した場合（例：ユーザーが\"天気の子\"と言うが、壁紙タイトルは\"Hodaka and Hina's Sky\"や\"Tokyo Rain\"）、**filter を渡さない**；\
+         完全なリストを取得してあなた（LLM）が意味的関連マッチを行う——バックエンドの部分一致は\"Hodaka/Hina は天気の子のキャラクター\"という常識を認識できず、あなただけが認識できる。\n\
+         - 不確かな場合は filter を渡さないことを優先する（next_offset で残りのページを確認する）。\n\
+         \n\
+         複数マッチの処理：候補リストを返してユーザーに選ばせない；あなた（LLM）が自律的に最も関連するものを一つ選ぶ。\
+         選択優先度：タイトル完全一致 > タイトル含有一致 > タグ一致 > 意味的関連マッチ；関連性が同等の場合、video タイプを優先する（動く壁紙の方が見栄えが良い）。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "有哪些壁纸\n看看壁纸库\n列出壁纸\n都有什么图",
+            "en" => "what wallpapers are available\nshow me the wallpapers\nlist wallpapers",
+            "ja" => "壁紙一覧を見せて\nどんな壁紙がある\n壁紙をリストして",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "filter": {
+                    "type": "string",
+                    "description": "Filter by title or tag (case-insensitive substring match, optional).\
+                     Note: filter is a backend string match and cannot recognize semantic associations (e.g. \"Weathering with You\" -> \"Hodaka and Hina\").\
+                     For semantic association scenarios, leave filter empty to fetch the full list and let the LLM do the matching itself."
+                },
+                "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return, default 50. When filter is not provided, it's recommended to keep the default value.",
+                    "minimum": 1
+                }
+            }
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "按标题或标签过滤（不区分大小写的子串匹配，可选）。\
+                         注意：filter 是后端字符串匹配，无法识别语义关联（例如\"天气之子\" -> \"Hodaka and Hina\"）。\
+                         对于语义关联场景，留空 filter 以获取完整列表，让 LLM 自行匹配。"
+                    },
+                    "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
+                    "limit": {
+                        "type": "integer",
+                        "description": "返回结果的最大数量，默认 50。未提供 filter 时，建议保持默认值。",
+                        "minimum": 1
+                    }
+                }
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "filter": {
+                        "type": "string",
+                        "description": "タイトルまたはタグでフィルタ（大文字小文字を区別しない部分一致、オプション）。\
+                         注意：filter はバックエンドの文字列マッチであり、意味的関連（例：\"天気の子\" -> \"Hodaka and Hina\"）を認識できない。\
+                         意味的関連シナリオでは、filter を空にして完全なリストを取得し、LLM にマッチングを行わせる。"
+                    },
+                    "offset": {"type": "integer", "minimum": 0, "description": "Result offset; use next_offset from the previous page. Default 0."},
+                    "limit": {
+                        "type": "integer",
+                        "description": "返却結果の最大数、デフォルト 50。filter が指定されていない場合、デフォルト値を維持することを推奨。",
+                        "minimum": 1
+                    }
+                }
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let mut data = input.clone();
+        if data.get("limit").is_none() {
+            data["limit"] = json!(50);
+        }
+        ValidationResult::success(Some(data))
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::allow()
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        let filter = args.get("filter").and_then(|v| v.as_str()).unwrap_or("");
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50) as usize;
+
+        // 先确认 Wallpaper Engine 已安装
+        let exe_found = find_wallpaper_engine_exe().is_some();
+        if !exe_found {
+            return ToolResult::standard_error(
+                "未找到 Wallpaper Engine 安装。请确认已通过 Steam 安装 Wallpaper Engine。",
+                Some("WallpaperEngineNotFound"),
+                None,
+            );
+        }
+
+        let mut wallpapers = list_wallpapers();
+        let total = wallpapers.len();
+
+        // 过滤
+        if !filter.is_empty() {
+            let filter_lower = filter.to_lowercase();
+            wallpapers.retain(|w| {
+                w.title.to_lowercase().contains(&filter_lower)
+                    || w.tags.iter().any(|t| t.to_lowercase().contains(&filter_lower))
+            });
+        }
+        let filtered_count = wallpapers.len();
+
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let wallpapers: Vec<_> = wallpapers.into_iter().skip(offset).take(limit).collect();
+
+        // 序列化为紧凑视图（避免 description 过长污染 LLM 上下文）
+        let current = crate::world::desktop_state::WALLPAPER.read().clone();
+        let items: Vec<Value> = wallpapers
+            .iter()
+            .map(|w| {
+                json!({
+                    "workshop_id": w.workshop_id,
+                    "title": w.title,
+                    "type": w.wallpaper_type,
+                    "tags": w.tags,
+                    "folder_path": w.folder_path,
+                    "is_current": if crate::world::desktop_state::fresh(&current, chrono::Utc::now().timestamp()) {
+                        current.primary.as_ref().map(|item| crate::world::desktop_state::same_wallpaper(&item.file, &Path::new(&w.folder_path).join("project.json").to_string_lossy()))
+                    } else { None },
+                })
+            })
+            .collect();
+
+        ToolResult::standard_success(
+            &format!("共 {} 个壁纸（过滤后 {}，返回 {}）", total, filtered_count, items.len()),
+            Some(json!({
+                "wallpapers": items,
+                "current_wallpaper": current,
+                "total_installed": total,
+                "filtered_count": filtered_count,
+                "returned": items.len(),
+                "filter": filter,
+                "offset": offset,
+                "next_offset": if offset.saturating_add(items.len()) < filtered_count {
+                    Some(offset.saturating_add(items.len()))
+                } else { None },
+            })),
+        )
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Media
+    }
+
+    /// 权限风险等级：读取本地文件 / 持久化数据，无写入
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsRead
+    }
+
+    // 长尾工具：延迟加载，需通过 tool_search 唤起
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn search_hint(&self) -> &str {
+        "wallpaper list and switch"
+    }
+}
+
+// ============================================================================
+// 工具 2：WallpaperSetTool - 切换壁纸
+// ============================================================================
+
+/// wallpaper_set 工具 - 切换到指定壁纸
+///
+/// 通过 Wallpaper Engine CLI `-control openWallpaper -file <folder>\project.json` 切换壁纸，
+/// 切换后读回活动配置验证是否改为另一个壁纸项目。
+/// 支持三种定位方式（按优先级）：
+/// 1. `workshop_id`：从 wallpaper_list 获取的 ID
+/// 2. `folder_path`：壁纸文件夹完整路径
+/// 3. `title`：壁纸标题（需先扫描匹配，模糊匹配第一个）
+pub struct WallpaperSetTool;
+
+impl WallpaperSetTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WallpaperSetTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for WallpaperSetTool {
+    fn name(&self) -> &str {
+        "wallpaper_set"
+    }
+
+    fn description(&self) -> &str {
+        "Switch the wallpaper currently playing in Wallpaper Engine. This is the second step of the wallpaper switching flow,\
+         typically used after calling wallpaper_list to get candidate wallpapers.\n\
+         Three ways to locate a wallpaper (in priority order, pass one only):\n\
+         1. workshop_id (recommended): obtained from the return value of wallpaper_list; most stable and unaffected by Steam library migration.\n\
+         2. folder_path: full path to the wallpaper folder (the directory containing project.json).\n\
+         3. title: fuzzy match by wallpaper title; no need to call wallpaper_list first, but you lose the ability to let the user pick from candidates.\n\
+         Note: do not fabricate workshop_id; it must come from the real return value of wallpaper_list.\n\
+         When multiple matches exist, autonomously pick the most relevant one and switch directly; do not pop a dialog or return candidates for the user to pick.\n\
+         \n\
+         IMPORTANT: Only goal_completed=true and changed=true establish completion; success alone can mean command sent. Do NOT call any further tools\
+         (especially web_search for \"higher resolution wallpapers\" or similar). Just reply to the user with the result."
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "切换 Wallpaper Engine 当前正在播放的壁纸。这是壁纸切换流程的第二步，\
+         通常在调用 wallpaper_list 获取候选壁纸后使用。\n\
+         三种壁纸定位方式（按优先级顺序，只传一个）：\n\
+         1. workshop_id（推荐）：从 wallpaper_list 的返回值获取；最稳定，不受 Steam 库迁移影响。\n\
+         2. folder_path：壁纸文件夹的完整路径（包含 project.json 的目录）。\n\
+         3. title：按壁纸标题模糊匹配；无需先调用 wallpaper_list，但你将失去让用户从候选中选择的能力。\n\
+         注意：不要编造 workshop_id；它必须来自 wallpaper_list 的真实返回值。\n\
+         当存在多重匹配时，自主选择最相关的一个并直接切换；不要弹出对话框或返回候选让用户选择。\n\
+         \n\
+         重要：仅 goal_completed=true 且 changed=true 才表示已确认完成；success 也可能仅代表命令发送。不要再调用任何其他工具\
+         （特别是 web_search 查找\"更高分辨率壁纸\"等）。只需向用户回复结果。",
+            "ja" => "Wallpaper Engine で現在再生中の壁紙を切り替える。これは壁紙切り替えフローの2番目のステップで、\
+         通常 wallpaper_list を呼び出して候補壁紙を取得した後に使用する。\n\
+         壁紙の特定方法は3通り（優先度順、1つだけ渡す）：\n\
+         1. workshop_id（推奨）：wallpaper_list の戻り値から取得；最も安定しており、Steam ライブラリの移行の影響を受けない。\n\
+         2. folder_path：壁紙フォルダの完全パス（project.json を含むディレクトリ）。\n\
+         3. title：壁紙タイトルでファジーマッチ；wallpaper_list を先に呼び出す必要はないが、ユーザーに候補から選ばせる機能は失われる。\n\
+         注意：workshop_id をでっち上げないこと；wallpaper_list の実際の戻り値から来る必要がある。\n\
+         複数マッチが存在する場合、自律的に最も関連するものを選んで直接切り替える；ダイアログをポップアップしたり候補を返してユーザーに選ばせたりしない。\n\
+         \n\
+         重要：goal_completed=true と changed=true の場合のみ完了。success だけでは送信済みの場合がある。（特に\"より高解像度の壁紙\"を探す web_search など）\
+         他のツールを呼び出さないこと。ユーザーに結果を返答するだけ。",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "换个壁纸\n把桌面换成那张\n设置壁纸\n换成这个图",
+            "en" => "change the wallpaper\nset this as my background\nswitch the desktop image",
+            "ja" => "壁紙を変えて\nこれを壁紙にして\nデスクトップをこの画像に",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "workshop_id": {
+                    "type": "string",
+                    "description": "Wallpaper Workshop ID (recommended). Must come from the return value of wallpaper_list; do not fabricate."
+                },
+                "folder_path": {
+                    "type": "string",
+                    "description": "Full path to the wallpaper folder (the directory containing project.json)"
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Fuzzy match by wallpaper title (case-insensitive). No need to call wallpaper_list first; suitable when the user explicitly specifies a title."
+                }
+            }
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "壁纸的 Workshop ID（推荐）。必须来自 wallpaper_list 的返回值；不要编造。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "壁纸文件夹的完整路径（包含 project.json 的目录）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "按壁纸标题模糊匹配（不区分大小写）。无需先调用 wallpaper_list；适用于用户明确指定标题的场景。"
+                    }
+                }
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "壁紙の Workshop ID（推奨）。wallpaper_list の戻り値から取得する必要がある；でっち上げないこと。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "壁紙フォルダの完全パス（project.json を含むディレクトリ）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "壁紙タイトルでファジーマッチ（大文字小文字を区別しない）。wallpaper_list を先に呼び出す必要はない；ユーザーが明示的にタイトルを指定した場合に適している。"
+                    }
+                }
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, _ctx: &ToolUseContext) -> ValidationResult {
+        let has_id = input
+            .get("workshop_id")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let has_path = input
+            .get("folder_path")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let has_title = input
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !has_id && !has_path && !has_title {
+            return ValidationResult::failure(
+                "必须提供 workshop_id / folder_path / title 之一",
+                2,
+            );
+        }
+        ValidationResult::success(Some(input.clone()))
+    }
+
+    async fn check_permissions(&self, _input: &Value, _ctx: &ToolUseContext) -> PermissionResult {
+        PermissionResult::ask("更换桌面壁纸需要用户确认")
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolUseContext) -> ToolResult {
+        let workshop_id = args.get("workshop_id").and_then(|v| v.as_str());
+        let folder_path_arg = args.get("folder_path").and_then(|v| v.as_str());
+        let title = args.get("title").and_then(|v| v.as_str());
+
+        tracing::info!("[wallpaper_set] resolving workshop_id={:?} title={:?} folder_path={:?}",
+            workshop_id, title, folder_path_arg);
+        // 1. 解析壁纸文件夹路径
+        let target_folder: PathBuf = if let Some(id) = workshop_id.filter(|s| !s.is_empty()) {
+            match find_wallpaper_by_id(id) {
+                Some(p) => p,
+                None => {
+                    return ToolResult::standard_error(
+                        &format!("未找到传入的 workshop_id={} 对应的壁纸；这不代表此前列表中的同名壁纸不存在。请使用 wallpaper_list 返回的真实 ID 重试。", id),
+                        Some("WallpaperNotFound"),
+                        Some(json!({"workshop_id": id, "title": title, "next_action": "Use the exact workshop_id from the verified wallpaper_list result; do not infer the wallpaper is absent from a failed ID lookup."})),
+                    );
+                }
+            }
+        } else if let Some(p) = folder_path_arg.filter(|s| !s.is_empty()) {
+            let path = PathBuf::from(p);
+            if !path.exists() {
+                return ToolResult::standard_error(
+                    &format!("壁纸文件夹不存在: {}", p),
+                    Some("WallpaperNotFound"),
+                    Some(json!({"folder_path": p})),
+                );
+            }
+            if !path.join("project.json").exists() {
+                return ToolResult::standard_error(
+                    &format!("路径不是有效的 Wallpaper Engine 壁纸（缺少 project.json）: {}", p),
+                    Some("InvalidWallpaperPath"),
+                    Some(json!({"folder_path": p})),
+                );
+            }
+            path
+        } else if let Some(t) = title.filter(|s| !s.is_empty()) {
+            // 模糊匹配标题
+            let wallpapers = list_wallpapers();
+            let t_lower = t.to_lowercase();
+            let matched = wallpapers
+                .iter()
+                .find(|w| w.title.to_lowercase() == t_lower)
+                .or_else(|| {
+                    wallpapers
+                        .iter()
+                        .find(|w| w.title.to_lowercase().contains(&t_lower))
+                });
+            match matched {
+                Some(w) => PathBuf::from(&w.folder_path),
+                None => {
+                    return ToolResult::standard_error(
+                        &format!("未找到标题匹配的壁纸: {}", t),
+                        Some("WallpaperNotFound"),
+                        Some(json!({"title": t})),
+                    );
+                }
+            }
+        } else {
+            return ToolResult::standard_error(
+                "未提供 workshop_id / folder_path / title",
+                Some("InvalidInput"),
+                None,
+            );
+        };
+
+        // 2. 查找 Wallpaper Engine 可执行文件
+        let exe = match find_wallpaper_engine_exe() {
+            Some(p) => p,
+            None => {
+                return ToolResult::standard_error(
+                    "未找到 Wallpaper Engine 安装。请确认已通过 Steam 安装 Wallpaper Engine。",
+                    Some("WallpaperEngineNotFound"),
+                    None,
+                );
+            }
+        };
+
+        // 3. 预检：确认 Wallpaper Engine 进程正在运行
+        if !is_wallpaper_engine_running() {
+            return ToolResult::standard_error(
+                "Wallpaper Engine 未运行。请先启动 Wallpaper Engine 后再切换壁纸。",
+                Some("WallpaperEngineNotRunning"),
+                Some(json!({"exe": exe.to_string_lossy()})),
+            );
+        }
+
+        // 4. 调用 CLI: wallpaper64.exe -control openWallpaper -file <project.json 路径>
+        //    官方文档要求 -file 指向 project.json / 视频文件 / index.html，不能传文件夹
+        let project_json = target_folder.join("project.json");
+        let file_str = project_json.to_string_lossy().to_string();
+
+        // Compare actual project identity before issuing any side effect, even if the model ignored the prompt.
+        let previous = get_current_wallpaper_path(&exe);
+        if previous.as_ref().is_some_and(|current| crate::world::desktop_state::same_wallpaper(current, &file_str)) {
+            return ToolResult::standard_error(
+                "目标就是当前壁纸，没有执行切换。用户要求换一张时，请排除当前项目并选择其他候选。",
+                Some("AlreadyCurrentWallpaper"),
+                Some(json!({"current_wallpaper":previous, "target":file_str, "changed":false})),
+            );
+        }
+
+        let mut cmd = silent_command(&exe);
+        cmd.arg("-control")
+            .arg("openWallpaper")
+            .arg("-file")
+            .arg(&file_str);
+
+        match cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id();
+                tracing::info!(
+                    "[wallpaper_set] 已发送切换壁纸命令: {} (pid={})",
+                    file_str,
+                    pid
+                );
+            }
+            Err(e) => {
+                return ToolResult::standard_error(
+                    &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                    Some("WallpaperCliFailed"),
+                    Some(json!({
+                        "exe": exe.to_string_lossy(),
+                        "wallpaper_file": file_str,
+                        "error": e.to_string(),
+                    })),
+                );
+            }
+        }
+
+        // Only a readback supports completion. Sending the command is not proof of a change.
+        let exe_clone = exe.clone();
+        let observed = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let observed = get_current_wallpaper_path(&exe_clone);
+            observed
+        }).await.unwrap_or(None);
+        wallpaper_switch_result(previous.as_deref(), observed.as_deref(), &file_str, true)
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Media
+    }
+
+    /// 权限风险等级：执行进程或改变系统状态
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    // 长尾工具：延迟加载，需通过 tool_search 唤起
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn search_hint(&self) -> &str {
+        "switch wallpaper"
+    }
+
+    fn is_destructive(&self) -> bool {
+        false
+    }
+
+    // Completion is set per receipt, only after readback confirms a different project.
+    fn signals_goal_completion(&self) -> bool {
+        false
+    }
+}
+
+// ============================================================================
+// 工具 3：WallpaperControlTool - 统一壁纸控制（pause/stop/close/toggle_mute/next/previous）
+// ============================================================================
+
+/// 统一壁纸控制工具：通过 action 参数分发到不同的 CLI 控制命令。
+///
+/// 整合原有的 6 个壁纸控制工具（pause/stop/close/toggle_mute/next/previous），
+/// 减少 tool 数量与 token 开销。
+pub struct WallpaperControlTool;
+
+impl WallpaperControlTool {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WallpaperControlTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 内部壁纸播放状态追踪（true = 正在播放）
+///
+/// CLI 无法查询实际状态，初始假设壁纸正在播放（Wallpaper Engine 默认行为）。
+static WALLPAPER_PLAYING: AtomicBool = AtomicBool::new(true);
+
+/// 内部壁纸静音状态追踪（true = 已静音）
+static WALLPAPER_MUTED: AtomicBool = AtomicBool::new(false);
+
+/// 壁纸历史栈：记录切换前的壁纸 project.json 路径，用于 wallpaper_previous 回退
+///
+/// CLI 不支持原生"换回上一张"，需应用层维护。
+/// wallpaper_set 读回确认变化后，将原壁纸压栈，
+/// wallpaper_previous 弹栈调用 openWallpaper 切换回去。
+/// 容量上限 20，防止内存无限增长。
+static WALLPAPER_HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const WALLPAPER_HISTORY_MAX: usize = 20;
+
+/// 获取主屏已配置的壁纸路径，同时刷新环境缓存。
+///
+/// 返回 None 表示获取失败或无壁纸。
+fn get_current_wallpaper_path(exe: &Path) -> Option<String> {
+    // CLI stdout is unavailable in some WE builds; keep configuration evidence labelled as such.
+    let state = read_wallpaper_environment(exe);
+    let path = state.primary.as_ref().map(|item| item.file.clone());
+    *crate::world::desktop_state::WALLPAPER.write() = state;
+    path
+}
+
+fn wallpaper_switch_result(previous: Option<&str>, observed: Option<&str>, target: &str, record_history: bool) -> ToolResult {
+    use crate::world::desktop_state::{verify_switch, SwitchVerification};
+    let verification = verify_switch(previous, observed, target);
+    let changed = verification == SwitchVerification::Changed;
+    if changed {
+        if record_history {
+            if let Some(previous) = previous { push_wallpaper_history(previous.to_string()); }
+        }
+        let mut result = ToolResult::standard_success("已读回确认壁纸配置切换到了另一个项目。", Some(json!({
+            "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
+            "verification_status":"verified_configuration", "verification_source":"wallpaper_engine_config",
+            "changed":true, "desktop_visual_observed":false
+        })));
+        result.goal_completed = true;
+        result
+    } else {
+        ToolResult::standard_success("壁纸切换请求已提交。", Some(json!({
+            "wallpaper_file":target, "previous_wallpaper":previous, "observed_wallpaper":observed,
+            "verification_status":if verification == SwitchVerification::Unverifiable { "unverifiable" } else { "unverified" },
+            "changed":null, "command_sent":true, "desktop_visual_observed":false
+        })))
+    }
+}
+
+#[cfg(test)]
+mod switch_result_tests {
+    use super::*;
+
+    #[test]
+    fn unconfirmed_switch_is_unknown_not_a_negative_observation() {
+        for observed in [None, Some("F:/old/scene.pkg")] {
+            let result = wallpaper_switch_result(Some("F:/old/scene.pkg"), observed, "F:/new/project.json", false);
+            assert!(result.success);
+            assert!(!result.goal_completed);
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["data"]["data"]["command_sent"], true);
+            assert!(value["data"]["data"]["changed"].is_null());
+            assert_eq!(value["data"]["data"]["desktop_visual_observed"], false);
+        }
+    }
+
+    #[test]
+    fn confirmed_configuration_is_a_positive_result_with_its_actual_scope() {
+        let result = wallpaper_switch_result(Some("F:/old/scene.pkg"), Some("F:/new/scene.pkg"), "F:/new/project.json", false);
+        assert!(result.goal_completed);
+        let value = serde_json::to_value(result).unwrap();
+        assert_eq!(value["data"]["data"]["changed"], true);
+        assert_eq!(value["data"]["data"]["verification_source"], "wallpaper_engine_config");
+        assert_eq!(value["data"]["data"]["desktop_visual_observed"], false);
+    }
+}
+
+/// 将壁纸路径压入历史栈
+fn push_wallpaper_history(path: String) {
+    let mut history = WALLPAPER_HISTORY.lock();
+    // 避免连续重复
+    if history.last().map(|p| p.as_str()) == Some(path.as_str()) {
+        return;
+    }
+    if history.len() >= WALLPAPER_HISTORY_MAX {
+        history.remove(0);
+    }
+    history.push(path);
+}
+
+/// 从历史栈弹出最近一张壁纸路径
+fn pop_wallpaper_history() -> Option<String> {
+    let mut history = WALLPAPER_HISTORY.lock();
+    history.pop()
+}
+
+/// 合并壁纸工具的 action 解析。
+///
+/// 新调用走 `action`；旧名别名（`wallpaper_list` / `wallpaper_set`）只有旧参数形状：
+/// 带 workshop_id / folder_path / title 视为设置，其余视为列出。
+fn effective_wallpaper_action(args: &Value) -> String {
+    if let Some(action) = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|action| !action.is_empty())
+    {
+        return action.to_string();
+    }
+    if ["workshop_id", "folder_path", "title", "path", "file_path"]
+        .iter()
+        .any(|key| args.get(*key).is_some())
+    {
+        "set".to_string()
+    } else {
+        "list".to_string()
+    }
+}
+
+/// 旧别名参数规范化：`set_wallpaper` 历史参数可能是 path / file_path，
+/// 合并后统一映射成 `folder_path`。
+fn normalize_wallpaper_args(args: &Value) -> Value {
+    let mut mapped = args.clone();
+    if mapped.get("folder_path").is_none() {
+        if let Some(path) = mapped.get("path").or_else(|| mapped.get("file_path")).cloned() {
+            mapped["folder_path"] = path;
+        }
+    }
+    mapped
+}
+
+#[async_trait]
+impl Tool for WallpaperControlTool {
+    fn name(&self) -> &str {
+        "wallpaper_control"
+    }
+
+    fn description(&self) -> &str {
+        "Control wallpaper playback in Wallpaper Engine via a unified action parameter.\
+         Supported actions:\n\
+         - pause: pause or resume wallpaper playback (toggles; first call pauses, next call resumes)\n\
+         - stop: stop all wallpapers (completely unloads wallpapers; the desktop returns to a solid color or static background)\n\
+         - close: close wallpaper on a specified monitor or all monitors (unload but keep Wallpaper Engine process)\n\
+         - toggle_mute: toggle mute/unmute of all wallpapers (first call mutes, next call unmutes)\n\
+         - next: switch to the next wallpaper in the playlist (requires playlist configured)\n\
+         - previous: switch back to the previous wallpaper (uses an internal history stack)\n\
+         - list: enumerate available wallpapers (optional filter / limit)\n\
+         - set: apply a wallpaper by workshop_id / folder_path / title\n\
+         \n\
+         Optional monitor parameter (for close and next): specifies a 0-based monitor index.\
+         If omitted, the action applies to all monitors.\n\
+         \n\
+         Typical scenarios:\n\
+         - pause: user says \"pause wallpaper\" or \"the wallpaper is too dazzling\"\n\
+         - stop: user says \"turn off wallpaper\", \"clear the desktop\"\n\
+         - close: user says \"close wallpaper on second monitor\"\n\
+         - toggle_mute: user says \"mute wallpaper\" or \"wallpaper is too loud\"\n\
+         - next: user says \"next wallpaper\", \"switch to another one\"\n\
+         - previous: user says \"switch back to the previous one\", \"the one before was better\""
+    }
+
+    fn description_in(&self, lang: &str) -> &str {
+        match lang {
+            "zh" => "通过统一的 action 参数控制 Wallpaper Engine 中壁纸的播放。\
+         支持的动作：\n\
+         - pause：暂停或继续壁纸播放（切换式；第一次调用暂停，下次调用继续）\n\
+         - stop：停止所有壁纸（完全卸载壁纸；桌面恢复为纯色或静态背景）\n\
+         - close：关闭指定显示器或所有显示器的壁纸（卸载壁纸但保留 Wallpaper Engine 进程）\n\
+         - toggle_mute：切换所有壁纸的静音状态（第一次调用静音，下次调用取消静音）\n\
+         - next：切换到播放列表中的下一张壁纸（需要配置播放列表）\n\
+         - previous：换回上一张壁纸（通过应用层维护的历史栈实现）\n\
+         - list：列出可用壁纸（可选 filter / limit）\n\
+         - set：按 workshop_id / folder_path / title 应用某张壁纸\n\
+         \n\
+         可选 monitor 参数（仅对 close 和 next 有效）：指定从 0 开始的显示器索引。省略则对所有显示器生效。\n\
+         \n\
+         典型场景：\n\
+         - pause：用户说\"暂停壁纸\"或\"壁纸太晃眼\"\n\
+         - stop：用户说\"关闭壁纸\"、\"清空桌面\"\n\
+         - close：用户说\"关掉副屏壁纸\"\n\
+         - toggle_mute：用户说\"静音壁纸\"或\"壁纸声音太大了\"\n\
+         - next：用户说\"换下一张\"、\"换个别的\"\n\
+         - previous：用户说\"换回上一张\"、\"刚才那张更好看\"",
+            "ja" => "統一された action パラメータで Wallpaper Engine の壁紙再生を制御する。\
+         サポートされるアクション：\n\
+         - pause：壁紙再生の一時停止または再開（トグル式；最初の呼び出しで一時停止、次の呼び出しで再開）\n\
+         - stop：すべての壁紙を停止（壁紙を完全にアンロード；デスクトップは単色または静的背景に戻る）\n\
+         - close：指定したモニターまたはすべてのモニターの壁紙を閉じる（壁紙をアンロードするが Wallpaper Engine プロセスは維持）\n\
+         - toggle_mute：すべての壁紙のミュート状態を切り替える（最初の呼び出しでミュート、次の呼び出しでミュート解除）\n\
+         - next：プレイリストの次の壁紙に切り替える（プレイリストの設定が必要）\n\
+         - previous：前の壁紙に戻る（アプリケーション層の履歴スタックで実現）\n\
+         - list：利用可能な壁紙を一覧（任意で filter / limit）\n\
+         - set：workshop_id / folder_path / title で壁紙を適用\n\
+         \n\
+         オプション monitor パラメータ（close と next のみ有効）：0 始まりのモニターインデックスを指定。省略時はすべてのモニターに適用。\n\
+         \n\
+         典型的なシナリオ：\n\
+         - pause：ユーザーが\"壁紙を一時停止\"や\"壁紙がまぶしすぎる\"と言った時\n\
+         - stop：ユーザーが\"壁紙を消して\"\"デスクトップをきれいに\"と言った時\n\
+         - close：ユーザーが\"サブモニターの壁紙を消して\"と言った時\n\
+         - toggle_mute：ユーザーが\"壁紙をミュート\"や\"壁紙の音が大きすぎる\"と言った時\n\
+         - next：ユーザーが\"次の壁紙\"\"別のに変えて\"と言った時\n\
+         - previous：ユーザーが\"前の壁紙に戻して\"\"さっきのの方が良かった\"と言った時",
+            _ => self.description(),
+        }
+    }
+
+    fn usage_corpus(&self, lang: &str) -> &'static str {
+        match lang {
+            "zh" => "下一张壁纸\n切换壁纸\n壁纸轮播\n换一张",
+            "en" => "next wallpaper\nswitch to another wallpaper\nrotate the wallpaper",
+            "ja" => "次の壁紙\n壁紙を切り替えて\n別の壁紙にして",
+            _ => "",
+        }
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                    "description": "Control action to perform. list enumerates available wallpapers; set applies a wallpaper (requires workshop_id / folder_path / title)."
+                },
+                "monitor": {
+                    "type": "number",
+                    "description": "Monitor index (0-based, only for close and next actions). If omitted, applies to all monitors."
+                },
+                "workshop_id": {
+                    "type": "string",
+                    "description": "Wallpaper Workshop ID for action=set. Must come from wallpaper list results; do not fabricate."
+                },
+                "folder_path": {
+                    "type": "string",
+                    "description": "Wallpaper folder path (containing project.json) for action=set."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Fuzzy match by wallpaper title for action=set."
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "Optional title filter for action=list."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of wallpapers to list, default 50."
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    fn parameters_schema_in(&self, lang: &str) -> Value {
+        match lang {
+            "zh" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                        "description": "要执行的控制动作。list 列出可用壁纸；set 应用某张壁纸（需要 workshop_id / folder_path / title）。"
+                    },
+                    "monitor": {
+                        "type": "number",
+                        "description": "显示器索引（从 0 开始，仅对 close 和 next 动作有效）。省略则对所有显示器生效。"
+                    },
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "action=set 时的壁纸 Workshop ID，必须来自列表结果，不要编造。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "action=set 时的壁纸文件夹路径（包含 project.json）。"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "action=set 时按标题模糊匹配。"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "action=list 时的可选题名过滤。"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "action=list 时最多列出多少张，默认 50。"
+                    }
+                },
+                "required": ["action"]
+            }),
+            "ja" => json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "stop", "close", "toggle_mute", "next", "previous", "list", "set"],
+                        "description": "実行する制御アクション。list は壁紙一覧、set は指定壁紙の適用（workshop_id / folder_path / title が必要）。"
+                    },
+                    "monitor": {
+                        "type": "number",
+                        "description": "モニターインデックス（0 始まり、close と next アクションのみ有効）。省略時はすべてのモニターに適用。"
+                    },
+                    "workshop_id": {
+                        "type": "string",
+                        "description": "action=set の壁紙 Workshop ID。一覧の戻り値から取得し、捏造しないこと。"
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "action=set の壁紙フォルダパス（project.json を含む）。"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "action=set でタイトルによる曖昧一致。"
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "action=list の任意タイトルフィルター。"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "action=list の最大件数、デフォルト 50。"
+                    }
+                },
+                "required": ["action"]
+            }),
+            _ => self.parameters_schema(),
+        }
+    }
+
+    async fn validate_input(&self, input: &Value, ctx: &ToolUseContext) -> ValidationResult {
+        let action = effective_wallpaper_action(input);
+        let normalized = normalize_wallpaper_args(input);
+        match action.as_str() {
+            "list" => WallpaperListTool.validate_input(input, ctx).await,
+            "set" => WallpaperSetTool.validate_input(&normalized, ctx).await,
+            other if matches!(other, "pause" | "stop" | "close" | "toggle_mute" | "next" | "previous") => {
+                ValidationResult::success(None)
+            }
+            other => ValidationResult::failure(
+                &format!("不支持的 action: {}（可选：pause / stop / close / toggle_mute / next / previous / list / set）", other),
+                2,
+            ),
+        }
+    }
+
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        match effective_wallpaper_action(input).as_str() {
+            "list" => PermissionResult::allow(),
+            "set" => WallpaperSetTool.check_permissions(&normalize_wallpaper_args(input), ctx).await,
+            _ => PermissionResult::ask("控制壁纸（暂停/停止/静音等）需要用户确认"),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolUseContext) -> ToolResult {
+        let action = effective_wallpaper_action(&args);
+        match action.as_str() {
+            "list" => return WallpaperListTool.call(args, ctx).await,
+            "set" => return WallpaperSetTool.call(normalize_wallpaper_args(&args), ctx).await,
+            _ => {}
+        }
+        let monitor = args.get("monitor").and_then(|v| v.as_i64());
+
+        let exe = match find_wallpaper_engine_exe() {
+            Some(p) => p,
+            None => {
+                return ToolResult::standard_error(
+                    "未找到 Wallpaper Engine 安装。",
+                    Some("WallpaperEngineNotFound"),
+                    None,
+                );
+            }
+        };
+
+        match action.as_str() {
+            // 暂停/继续：切换内部状态，发送 pause 或 play
+            "pause" => {
+                let was_playing = WALLPAPER_PLAYING.fetch_xor(true, Ordering::SeqCst);
+                let control = if was_playing { "pause" } else { "play" };
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control").arg(control);
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        let action_desc = if was_playing { "暂停" } else { "继续播放" };
+                        tracing::info!(
+                            "[wallpaper_control:pause] 已发送{}命令 (pid={})",
+                            action_desc,
+                            pid
+                        );
+                        ToolResult::standard_success(
+                            &format!("已发送{}壁纸命令", action_desc),
+                            Some(json!({
+                                "exe": exe.to_string_lossy(),
+                                "pid": pid,
+                                "action": control,
+                            })),
+                        )
+                    }
+                    Err(e) => {
+                        // 发送失败，回滚内部状态
+                        WALLPAPER_PLAYING.fetch_xor(true, Ordering::SeqCst);
+                        ToolResult::standard_error(
+                            &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                            Some("WallpaperCliFailed"),
+                            None,
+                        )
+                    }
+                }
+            }
+            // 停止所有壁纸
+            "stop" => {
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control").arg("stop");
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        ToolResult::standard_success(
+                            "已发送停止所有壁纸命令",
+                            Some(json!({
+                                "exe": exe.to_string_lossy(),
+                                "pid": pid,
+                            })),
+                        )
+                    }
+                    Err(e) => ToolResult::standard_error(
+                        &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                        Some("WallpaperCliFailed"),
+                        None,
+                    ),
+                }
+            }
+            // 关闭指定显示器的壁纸
+            "close" => {
+                if !is_wallpaper_engine_running() {
+                    return ToolResult::standard_error(
+                        "Wallpaper Engine 未运行。",
+                        Some("WallpaperEngineNotRunning"),
+                        Some(json!({"exe": exe.to_string_lossy()})),
+                    );
+                }
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control").arg("closeWallpaper");
+                if let Some(m) = monitor {
+                    cmd.arg("-monitor").arg(m.to_string());
+                }
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        let scope = if let Some(m) = monitor {
+                            format!("显示器 {}", m)
+                        } else {
+                            "所有显示器".to_string()
+                        };
+                        tracing::info!(
+                            "[wallpaper_control:close] 已关闭 {} 的壁纸 (pid={})",
+                            scope,
+                            pid
+                        );
+                        ToolResult::standard_success(
+                            &format!("已关闭{}的壁纸", scope),
+                            Some(json!({
+                                "exe": exe.to_string_lossy(),
+                                "pid": pid,
+                                "monitor": monitor,
+                            })),
+                        )
+                    }
+                    Err(e) => ToolResult::standard_error(
+                        &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                        Some("WallpaperCliFailed"),
+                        None,
+                    ),
+                }
+            }
+            // 静音切换
+            "toggle_mute" => {
+                let was_unmuted = !WALLPAPER_MUTED.fetch_xor(true, Ordering::SeqCst);
+                let control = if was_unmuted { "mute" } else { "unmute" };
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control").arg(control);
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        let action_desc = if was_unmuted { "已静音" } else { "已取消静音" };
+                        tracing::info!(
+                            "[wallpaper_control:toggle_mute] {} 所有壁纸 (pid={})",
+                            action_desc,
+                            pid
+                        );
+                        ToolResult::standard_success(
+                            &format!("{}所有壁纸", action_desc),
+                            Some(json!({
+                                "exe": exe.to_string_lossy(),
+                                "pid": pid,
+                                "muted": was_unmuted,
+                            })),
+                        )
+                    }
+                    Err(e) => ToolResult::standard_error(
+                        &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                        Some("WallpaperCliFailed"),
+                        None,
+                    ),
+                }
+            }
+            // 下一张壁纸
+            "next" => {
+                if !is_wallpaper_engine_running() {
+                    return ToolResult::standard_error(
+                        "Wallpaper Engine 未运行。",
+                        Some("WallpaperEngineNotRunning"),
+                        Some(json!({"exe": exe.to_string_lossy()})),
+                    );
+                }
+                let before = read_wallpaper_environment(&exe);
+                let previous = match monitor {
+                    Some(index) => before.monitors.iter().find(|item| item.monitor == format!("Monitor{index}")),
+                    None => before.primary.as_ref(),
+                }.map(|item| item.file.clone());
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control").arg("nextWallpaper");
+                if let Some(m) = monitor {
+                    cmd.arg("-monitor").arg(m.to_string());
+                }
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        tracing::info!(
+                            "[wallpaper_control:next] 已切换到下一张壁纸 (pid={}, monitor={:?})",
+                            pid,
+                            monitor
+                        );
+                        let exe_clone = exe.clone();
+                        let observed = tokio::task::spawn_blocking(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            let state = read_wallpaper_environment(&exe_clone);
+                            let observed = match monitor {
+                                Some(index) => state.monitors.iter().find(|item| item.monitor == format!("Monitor{index}")),
+                                None => state.primary.as_ref(),
+                            }.map(|item| item.file.clone());
+                            *crate::world::desktop_state::WALLPAPER.write() = state;
+                            observed
+                        }).await.unwrap_or(None);
+                        wallpaper_switch_result(previous.as_deref(), observed.as_deref(), observed.as_deref().unwrap_or(""), true)
+                    }
+                    Err(e) => ToolResult::standard_error(
+                        &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                        Some("WallpaperCliFailed"),
+                        None,
+                    ),
+                }
+            }
+            // 上一张壁纸（应用层历史栈）
+            "previous" => {
+                if !is_wallpaper_engine_running() {
+                    return ToolResult::standard_error(
+                        "Wallpaper Engine 未运行。",
+                        Some("WallpaperEngineNotRunning"),
+                        Some(json!({"exe": exe.to_string_lossy()})),
+                    );
+                }
+                let current = get_current_wallpaper_path(&exe);
+                let previous_path = match pop_wallpaper_history() {
+                    Some(p) => p,
+                    None => {
+                        return ToolResult::standard_error(
+                            "没有更早的壁纸记录。历史栈为空，无法换回上一张。",
+                            Some("WallpaperHistoryEmpty"),
+                            Some(json!({
+                                "exe": exe.to_string_lossy(),
+                                "history_size": 0,
+                            })),
+                        );
+                    }
+                };
+                tracing::info!(
+                    "[wallpaper_control:previous] 从历史栈弹出: {}",
+                    previous_path
+                );
+                let mut cmd = silent_command(&exe);
+                cmd.arg("-control")
+                    .arg("openWallpaper")
+                    .arg("-file")
+                    .arg(&previous_path);
+                match cmd.spawn() {
+                    Ok(child) => {
+                        let pid = child.id();
+                        tracing::info!(
+                            "[wallpaper_control:previous] 已换回上一张壁纸: {} (pid={})",
+                            previous_path,
+                            pid
+                        );
+                        let exe_clone = exe.clone();
+                        let observed = tokio::task::spawn_blocking(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(1500));
+                            get_current_wallpaper_path(&exe_clone)
+                        }).await.unwrap_or(None);
+                        if crate::world::desktop_state::verify_switch(current.as_deref(), observed.as_deref(), &previous_path)
+                            != crate::world::desktop_state::SwitchVerification::Changed {
+                            push_wallpaper_history(previous_path.clone());
+                        }
+                        wallpaper_switch_result(current.as_deref(), observed.as_deref(), &previous_path, false)
+                    }
+                    Err(e) => ToolResult::standard_error(
+                        &format!("启动 Wallpaper Engine CLI 失败: {}", e),
+                        Some("WallpaperCliFailed"),
+                        Some(json!({
+                            "wallpaper_file": previous_path,
+                            "error": e.to_string(),
+                        })),
+                    ),
+                }
+            }
+            _ => ToolResult::standard_error(
+                &format!("不支持的 action: {}", action),
+                Some("InvalidAction"),
+                None,
+            ),
+        }
+    }
+
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Media
+    }
+
+    /// 权限风险等级：执行进程或改变系统状态
+    fn risk(&self) -> ToolRiskTier {
+        ToolRiskTier::FsWrite
+    }
+
+    // 长尾工具：延迟加载，需通过 tool_search 唤起
+    fn should_defer(&self) -> bool {
+        true
+    }
+
+    fn search_hint(&self) -> &str {
+        "pause stop close mute next previous wallpaper control"
+    }
+
+    fn signals_goal_completion(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_wallpaper_arguments_infer_actions_and_paths() {
+        assert_eq!(effective_wallpaper_action(&json!({})), "list");
+        assert_eq!(effective_wallpaper_action(&json!({"title": "星空"})), "set");
+        assert_eq!(effective_wallpaper_action(&json!({"path": "D:/wp"})), "set");
+        assert_eq!(effective_wallpaper_action(&json!({"action": "next"})), "next");
+        let normalized = normalize_wallpaper_args(&json!({"path": "D:/wp"}));
+        assert_eq!(normalized["folder_path"], json!("D:/wp"));
+        let kept = normalize_wallpaper_args(&json!({"folder_path": "D:/wp2", "path": "D:/wp"}));
+        assert_eq!(kept["folder_path"], json!("D:/wp2"));
+    }
+}
+
+

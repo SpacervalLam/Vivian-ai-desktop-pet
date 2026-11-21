@@ -1,0 +1,2360 @@
+//! 聊天命令 - 消息发送、流式响应与生成控制
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::Timelike;
+use serde_json::json;
+use tauri::{Emitter, Manager, State};
+
+use crate::error::VivianResult;
+use crate::memory::types::MemoryType;
+use crate::resilience::classify_llm_error_from_str;
+use crate::state::AppState;
+use crate::types::response::{AiResponse, MessageImage};
+
+fn err_str(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+pub(crate) fn emit_channel_activity(app: &tauri::AppHandle, character_id: &str, channel: &str) {
+    if matches!(channel, "wechat" | "direct" | "broadcast") {
+        let _ = app.emit(
+            "chat:channel_activity",
+            json!({ "character_id": character_id, "channel": channel }),
+        );
+    }
+}
+
+/// 等待角色 `think_lock` 的上限。
+///
+/// 正常排队只需要等待「前一个请求的 think 时长」（典型 3–30s，含工具调用可能更久）。
+/// 超过该上限说明持锁方已经卡死（例如在持有 Mind / 记忆锁时死锁），此时**必须放弃等待
+/// 并回一个终态事件**：无超时的 `lock().await` 会让本次请求永久挂起，既不回包也不报错，
+/// 前端会一直停在「思考中」，而且之后所有消息都会被静默吞掉。
+const THINK_LOCK_WAIT: Duration = Duration::from_secs(90);
+
+/// 会话关闭时触发 Episode 封包，让经历边界对齐会话边界
+///
+/// 从 Conversation 提取 topic/timestamps/memory_ids，调 EpisodeStore::seal_episode。
+/// 若 EpisodeStore 未初始化或会话无记忆，静默跳过。
+fn seal_episode_on_close(
+    brain: &crate::brain::Brain,
+    conv: &crate::conversation::Conversation,
+) {
+    let Some(ep_store) = brain.memory.episode_store() else {
+        return;
+    };
+    let memory_ids = crate::conversation::CONVERSATION_MANAGER.get_session_memory_ids(&conv.id);
+    if memory_ids.is_empty() && conv.rounds == 0 {
+        return;
+    }
+    // timestamps 至少包含会话起止时间，importances 用默认值
+    let timestamps = vec![conv.created_at, conv.last_active_at];
+    let importances = vec![0.5];
+    let topic = if conv.topic.is_empty()
+        || conv.topic == "(无话题)"
+        || conv.topic == crate::conversation::manager::TOPIC_PENDING
+    {
+        None
+    } else {
+        Some(conv.topic.clone())
+    };
+    let episode = ep_store.seal_episode(
+        memory_ids,
+        &timestamps,
+        &importances,
+        topic,
+        None,
+        &[],
+    );
+    tracing::debug!(
+        "[Episode] 会话 {} 封包为 Episode {}",
+        conv.id,
+        episode.episode_id
+    );
+
+    // 会话关闭时清空工作记忆：本会话的临时想法已封包为 Episode，
+    // 不应残留到下一会话的 prompt 中污染上下文。
+    brain.mind.clear_working_memory();
+}
+
+// At most one optional close judgment per character; new input cancels the old one.
+static CLOSE_JOBS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>> =
+    once_cell::sync::Lazy::new(Default::default);
+fn cancel_close(character: &str) {
+    if let Some(job) = CLOSE_JOBS.lock().remove(character) { job.abort(); }
+}
+fn schedule_close(state: &AppState, brain: crate::brain::Brain, lock: Arc<tokio::sync::Mutex<()>>,
+    character: &str, message: &str, reply: &str) {
+    let Some(conv) = crate::conversation::CONVERSATION_MANAGER.get("user", character).filter(|c| c.is_alive()) else { return; };
+    let router = state.model_router.read().as_ref().map(|router| Arc::new(router.clone()));
+    let history: Vec<String> = brain.dialogue.get_history().iter().rev().take(6)
+        .map(|m| m.content.clone()).collect::<Vec<_>>().into_iter().rev().collect();
+    let message = message.to_owned(); let reply = reply.to_owned();
+    let priority = state.session_coordinator.background_priority();
+    let input_revision = priority.revision();
+    let mut jobs = CLOSE_JOBS.lock();
+    if let Some(old) = jobs.remove(character) { old.abort(); }
+    let job = tokio::spawn(async move {
+        let judge = crate::dialogue::intent_judge::IntentJudge::new(router);
+        let reason = if let Some(reason) = judge.judge_close_reason(&message, &history).await { Some(reason) }
+            else { judge.judge_close_reason(&reply, &history).await };
+        let Some(reason) = reason else { return; };
+        // The generation lock protects presence and working-memory side effects too.
+        let closed = {
+            let Ok(_guard) = lock.try_lock() else { return; };
+            if priority.revision() != input_revision { return; }
+            let Some(closed) = crate::conversation::CONVERSATION_MANAGER.close_if_current(&conv.id, conv.user_turn_revision, reason) else { return; };
+            seal_episode_on_close(&brain, &closed);
+            if matches!(reason, crate::conversation::CloseReason::Interrupted | crate::conversation::CloseReason::GoodBye) {
+                let _ = brain.presence.transition(crate::presence::PresenceState::Busy, crate::presence::PresenceChangeReason::UserLeft);
+            }
+            closed
+        };
+        maybe_mark_open_loop(&closed, &brain).await;
+    });
+    jobs.insert(character.into(), job);
+}
+
+/// 校验主 LLM API 是否已配置
+///
+/// 主 LLM API（`config.ai` 的 api_key / endpoint / model）是必须配置的；
+/// 未配置时返回 false，调用方应发送 `chat:config_error` 事件并终止流程。
+fn main_api_configured(state: &AppState) -> bool {
+    if let Some(router) = state.model_router.read().as_ref() {
+        return router.has_main_provider();
+    }
+    false
+}
+
+/// 查询主 LLM API 是否已配置（前端启动门控与配置引导用）
+#[tauri::command]
+pub fn is_main_api_configured(state: State<'_, Arc<AppState>>) -> bool {
+    main_api_configured(&state)
+}
+
+/// 发送消息并获取完整响应
+#[tauri::command]
+pub async fn send_message(
+    state: State<'_, Arc<AppState>>,
+    message: String,
+    character_id: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let char_id = character_id
+        .clone()
+        .unwrap_or_else(|| state.active_character_id.read().clone());
+
+    if message.trim().is_empty() {
+        return Err("消息不能为空".to_string());
+    }
+
+    if !state.is_initialized() {
+        return Err("智能体正在初始化，请稍候...".to_string());
+    }
+
+    let _foreground = state.session_coordinator.background_priority().enter();
+
+    // 主 LLM API 必须配置，否则发 `chat:config_error` 并终止
+    if !main_api_configured(&state) {
+        let _ = app.emit(
+            "chat:config_error",
+            json!({ "reason": "no_main_api", "character_id": &char_id }),
+        );
+        return Err("MAIN_API_NOT_CONFIGURED".to_string());
+    }
+
+    let instance = state.get_character(character_id.as_deref())?;
+    let brain = instance.brain.clone();
+    emit_channel_activity(&app, &char_id, "wechat");
+    cancel_close(&char_id);
+
+    let pending_input = state.session_coordinator.signal_user_input(&char_id);
+    state.interrupt_companion_execution(&char_id);
+
+    // 串行化 brain.think，与流式路径共用 brain_lock。
+    // 等待必须有上限：持锁方一旦卡死，无超时的 lock().await 会让本请求永久挂起。
+    let _brain_lock = instance.think_lock.clone();
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] think_lock 等待超过 {}s，放弃本次请求（持锁方疑似卡死）",
+                char_id,
+                THINK_LOCK_WAIT.as_secs()
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次消息已放弃。请重试；若反复出现请重启应用。",
+                    "character_id": &char_id,
+                }),
+            );
+            return Err("THINK_LOCK_TIMEOUT".to_string());
+        }
+    };
+    state.reset_generation_cancel(&char_id);
+
+    // 临时开启路由回退事件发送
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(true);
+    }
+
+    // ── 会话生命周期：获取或创建 User↔Agent 会话 ──
+    let conv = crate::conversation::CONVERSATION_MANAGER
+        .start_or_continue("user", &char_id, &message)
+        .unwrap_or_else(|| {
+            crate::conversation::CONVERSATION_MANAGER.force_new_session("user", &char_id, &message)
+        });
+    crate::conversation::CONVERSATION_MANAGER.touch_user_message(&char_id);
+    crate::conversation::CONVERSATION_MANAGER.set_user_channel(&char_id, "wechat");
+    brain.presence.record_user_interaction();
+    let _session_guard = state.session_coordinator.enter_user_turn(
+        &char_id,
+        &conv.id,
+        &brain.memory,
+        &brain.dialogue,
+    );
+    pending_input.admitted();
+
+    // ── World Model：从用户消息抽取预期回归时间 ──
+    brain.world_state.ingest_dialogue(&message);
+    // 获取焦点租约：think 期间屏蔽其他角色的主动打断
+    let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&char_id);
+    let result: VivianResult<AiResponse> = brain.think(&message, false).await;
+    drop(_focus_lease);
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(false);
+    }
+
+    // ── 会话生命周期：think 完成后更新会话状态 + 意图判断 close 检测 ──
+    {
+        let response_mode = result.as_ref().ok().map(|r| r.response_mode.clone()).unwrap_or_else(|| "speak".to_string());
+        let reply_text = result.as_ref().ok().map(|r| r.text.clone()).unwrap_or_default();
+        let mode = crate::conversation::ResponseMode::from_str(&response_mode);
+        let _ = crate::conversation::CONVERSATION_MANAGER.update_after_round(
+            &conv.id,
+            mode,
+            if mode.needs_speech() { Some(&reply_text) } else { None },
+            &message,
+        );
+        schedule_close(&state, brain.clone(), instance.think_lock.clone(), &char_id, &message, &reply_text);
+    }
+    drop(_session_guard);
+
+    drop(_brain_guard);
+
+    let response = result.map_err(err_str)?;
+    // 递增人格卡片轮次计数器（驱动冷却机制）
+    brain.persona.tick_card_turn();
+    serde_json::to_value(&response).map_err(err_str)
+}
+
+/// 词元匹配：ASCII 词按词边界匹配（避免 "banana" 误命中 "nana"），非 ASCII 按子串匹配
+fn token_matched(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    if !needle.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return haystack.contains(needle);
+    }
+    let hay_lower = haystack.to_lowercase();
+    let needle_lower = needle.to_lowercase();
+    let n_len = needle_lower.len();
+    let mut start = 0;
+    while let Some(pos) = hay_lower[start..].find(&needle_lower) {
+        let abs = start + pos;
+        let end = abs + n_len;
+        let before_ok = hay_lower[..abs]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = hay_lower[end..]
+            .chars()
+            .next()
+            .map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = end;
+    }
+    false
+}
+
+/// 群聊点名扫描：消息中出现某在线角色的名字或 ID 即视为点名该角色。
+/// 返回 (当前角色是否被点名, 其他在线角色是否被点名)。
+fn scan_group_addressing(state: &Arc<AppState>, self_id: &str, message: &str) -> (bool, bool) {
+    let chars = state.characters.read();
+    let mut self_named = false;
+    let mut other_named = false;
+    for (id, inst) in chars.iter() {
+        if !*inst.online.read() {
+            continue;
+        }
+        let named = token_matched(message, &inst.name) || token_matched(message, id);
+        if named {
+            if id == self_id {
+                self_named = true;
+            } else {
+                other_named = true;
+            }
+        }
+    }
+    (self_named, other_named)
+}
+
+/// 流式发送消息，通过事件推送响应片段
+///
+/// `stream_id` 由前端生成，贯穿全链路，用于在多消息并发场景下区分
+/// 不同请求的流式输出。后端通过 `brain_lock` 串行化 `brain.think` 调用，
+/// 多条消息按发送顺序排队执行，但流式事件通过 `stream_id` 路由到各自气泡。
+#[tauri::command]
+pub async fn send_message_stream(
+    state: State<'_, Arc<AppState>>,
+    window: tauri::WebviewWindow,
+    message: String,
+    stream_id: String,
+    character_id: Option<String>,
+    channel: Option<String>,
+    whisper: Option<bool>,
+    file_metadata: Option<serde_json::Value>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if channel.as_deref().and_then(crate::sns_store::group_id).is_some(){return Err("请从群聊界面发送消息".into());}
+    if channel.as_deref() == Some("broadcast") || (channel.as_deref() == Some("direct") && !whisper.unwrap_or(false)) {
+        let result = Box::pin(send_spoken_turn(state.inner(), &app, message, file_metadata, None)).await;
+        let _ = app.emit("chat:yielded", json!({"stream_id":stream_id,"character_id":character_id,"channel":channel}));
+        return result.map(|_| ());
+    }
+    let target = character_id.clone().unwrap_or_else(|| state.active_character_id.read().clone());
+    if crate::chat_partner::get(&target).is_some() {
+        crate::chat_partner_policy::validate_origin(window.label(), channel.as_deref().unwrap_or("wechat"))?;
+        if whisper.unwrap_or(false) {
+            return Err("聊天专属角色不支持桌宠悄悄话".into());
+        }
+    }
+    crate::voice_diagnostics::scope_chat(stream_id.clone(),
+        send_message_stream_impl(state.inner(), message, stream_id, character_id, channel, whisper, file_metadata, app, None)).await.map(|_| ())
+}
+
+#[derive(serde::Serialize)]
+pub struct SpokenReply {
+    pub character_id: String,
+    pub reply: String,
+    pub expression: String,
+}
+
+#[tauri::command]
+pub async fn send_spoken_message(
+    state: State<'_, Arc<AppState>>, app: tauri::AppHandle, message: String,
+    file_metadata: Option<serde_json::Value>,
+) -> Result<Vec<SpokenReply>, String> {
+    let result = Box::pin(send_spoken_turn(state.inner(), &app, message, file_metadata, None)).await;
+    if let Err(error) = &result {
+        let _ = app.emit("toast:show", json!({"message":error,"type":"error","duration":8000,"key":uuid::Uuid::new_v4().to_string()}));
+    }
+    result
+}
+
+fn present_listeners(state: &AppState) -> Vec<String> {
+    let mut ids: Vec<_> = state.characters.read().iter()
+        .filter(|(_, character)| *character.online.read() && character.brain.presence.current().is_in_presence())
+        .map(|(id, _)| id.clone()).collect();
+    ids.sort();
+    // Rotate the fallback listener, rather than making one character always answer.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    if !ids.is_empty() {
+        let offset = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % ids.len();
+        ids.rotate_left(offset);
+    }
+    ids
+}
+
+pub(crate) async fn send_spoken_turn(
+    state: &Arc<AppState>, app: &tauri::AppHandle, message: String,
+    file_metadata: Option<serde_json::Value>, visual_evidence: Option<&str>,
+) -> Result<Vec<SpokenReply>, String> {
+    if message.trim().is_empty() { return Err("消息不能为空".into()); }
+    if !state.is_initialized() { return Err("智能体正在初始化，请稍候...".into()); }
+    if crate::companion_quiet::active() { return Err("勿扰模式下已暂停发言，请先关闭勿扰".into()); }
+    if !main_api_configured(state) {
+        let _ = app.emit("chat:config_error", json!({"reason":"no_main_api","channel":"broadcast"}));
+        return Err("主 LLM API 未配置".into());
+    }
+    let listeners = present_listeners(state);
+    if listeners.is_empty() { return Err("当前没有在场角色，可以通过微信留言".into()); }
+    if visual_evidence.is_none() {
+        for id in &listeners {
+            emit_channel_activity(app, id, "broadcast");
+        }
+    }
+    let _foreground = state.session_coordinator.background_priority().enter();
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let heard_replies = parking_lot::Mutex::new(Vec::new());
+    let results = crate::spoken_turn::dispatch(listeners.clone(), |id, required| {
+        let context = crate::spoken_turn::Context { user_id: user_id.clone(), character_id: id.clone(),
+            reply_id: uuid::Uuid::new_v4().to_string(), require_reply: required, heard_replies: heard_replies.lock().clone() };
+        let message = message.clone();
+        let metadata = file_metadata.clone();
+        let heard_replies = &heard_replies;
+        async move {
+            let sid = context.reply_id.clone();
+            let user_id = context.user_id.clone();
+            let _ = app.emit("chat:user_message", json!({"content":message,"timestamp":chrono::Utc::now().to_rfc3339(),"character_id":id,"channel":"broadcast"}));
+            let _ = app.emit("chat:start", json!({"message":message,"stream_id":sid,"character_id":id,"channel":"broadcast","source":"spoken"}));
+            let result = crate::spoken_turn::CURRENT.scope(context,
+                crate::voice_diagnostics::scope_chat(sid.clone(), Box::pin(send_message_stream_impl(
+                    state, message.clone(), sid.clone(), Some(id.clone()), Some("broadcast".into()), None, metadata, app.clone(), visual_evidence)))
+            ).await;
+            if let Err(error) = &result {
+                let _ = app.emit("chat:error", json!({"error":error,"stream_id":sid,"character_id":id,"channel":"broadcast"}));
+            }
+            if let Ok(character) = state.get_character(Some(&id)) {
+                // Silence must not erase what this listener heard. History deduplicates
+                // by utterance_id when the normal chain already recorded this input.
+                let mut input = crate::types::response::ChatMessage::user(&message);
+                input.meta = Some(crate::messages::MessageMeta::user().with_channel("broadcast"));
+                character.brain.dialogue.add_message_with_metadata(input, json!({
+                    "utterance_id":user_id,"channel":"broadcast","speaker":"user","listener":"all",
+                    "perspective":"speaker","knowledge_source":"broadcast",
+                }));
+            }
+            if let Ok(Some(response)) = &result {
+                if !response.text.trim().is_empty() { heard_replies.lock().push((id, response.text.clone())); }
+            }
+            (sid, result)
+        }
+    }, |(_, result)| matches!(result, Ok(Some(response)) if !response.text.trim().is_empty())).await;
+
+    let mut replies = Vec::new();
+    let mut last_error = None;
+    for (speaker, (reply_id, result)) in results {
+        match result {
+            Ok(Some(response)) if !response.text.trim().is_empty() => {
+                // Everyone hears public replies too, including listeners who stayed silent.
+                // Reuse the original reply identity instead of inventing another utterance.
+                let source = state.get_character(Some(&speaker)).ok().and_then(|character|
+                    character.brain.dialogue.get_all_history().ok()).and_then(|history|
+                    history.into_iter().rev().find(|entry| entry.id == reply_id || entry.id == format!("{reply_id}-fallback")));
+                if let Some(source) = source {
+                    for listener in &listeners {
+                        if listener == &speaker { continue; }
+                        if let Ok(character) = state.get_character(Some(listener)) {
+                            let mut heard = crate::types::response::ChatMessage::assistant(&response.text);
+                            heard.timestamp = chrono::DateTime::from_timestamp_millis((source.timestamp * 1000.0) as i64)
+                                .map(|time| time.with_timezone(&chrono::Local));
+                            heard.meta = Some(crate::messages::MessageMeta::assistant().with_channel("broadcast"));
+                            character.brain.dialogue.add_message_with_metadata(heard, json!({
+                                "utterance_id":source.id,"channel":"broadcast","speaker":speaker,"listener":"all",
+                                "perspective":"observer","knowledge_source":"broadcast",
+                            }));
+                        }
+                    }
+                }
+                replies.push(SpokenReply { character_id: speaker, reply: response.text, expression: response.expression });
+            }
+            Err(error) => last_error = Some(error),
+            _ => {}
+        }
+    }
+    if replies.is_empty() { return Err(last_error.unwrap_or_else(|| "本轮未能生成回复，请重试".into())); }
+    Ok(replies)
+}
+
+async fn send_message_stream_impl(
+    state: &Arc<AppState>, message: String, stream_id: String, character_id: Option<String>,
+    channel: Option<String>, whisper: Option<bool>, file_metadata: Option<serde_json::Value>,
+    app: tauri::AppHandle, visual_evidence: Option<&str>,
+) -> Result<Option<AiResponse>, String> {
+    crate::voice_diagnostics::mark_chat("backend_received");
+    let char_id = character_id
+        .clone()
+        .unwrap_or_else(|| state.active_character_id.read().clone());
+    let channel_str = channel.clone().unwrap_or_else(|| "wechat".to_string());
+    let is_whisper = whisper.unwrap_or(false);
+
+    if crate::companion_quiet::active() {
+        let _ = app.emit("chat:cancelled", json!({"stream_id":stream_id,"character_id":char_id,"channel":channel_str}));
+        return Ok(None);
+    }
+    if message.trim().is_empty() {
+        return Err("消息不能为空".to_string());
+    }
+
+    if !state.is_initialized() {
+        return Err("智能体正在初始化，请稍候...".to_string());
+    }
+
+    // 聊天窗口专属角色：不走本机桌宠 Brain，使用独立的轻量会话和片段记忆。
+    // 事件契约与普通角色一致（chat:start / chunk / done），前端无需区分。
+    if let Some(partner) = crate::chat_partner::get(&char_id) {
+        return crate::chat_partner::stream_reply(
+            state,
+            &app,
+            partner,
+            message,
+            stream_id,
+            channel_str,
+            file_metadata,
+        )
+        .await;
+    }
+
+    let _foreground = state.session_coordinator.background_priority().enter();
+
+    // 主 LLM API 必须配置，否则发 `chat:config_error` 并终止
+    if !main_api_configured(&state) {
+        let _ = app.emit(
+            "chat:config_error",
+            json!({ "reason": "no_main_api", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+        );
+        return Ok(None);
+    }
+
+    let instance = match state.get_character(character_id.as_deref()) {
+        Ok(inst) => inst,
+        Err(_) => {
+            let _ = app.emit(
+                "chat:error",
+                json!({ "error": "Brain 未初始化", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+            );
+            return Err("Brain 未初始化".to_string());
+        }
+    };
+    let brain = instance.brain.clone();
+    cancel_close(&char_id);
+
+    let channel_str = brain.presence.current().message_channel(&channel_str).to_string();
+
+    // 广播渠道（broadcast）：用户只说了一遍、当众对在场所有人说的。
+    // 它与 direct 共享"说出口的话"的全部行为（口语化回复、剥离括号动作、在场门禁），
+    // 但语义上多了一层"公开"——这一点在下面多处按渠道分流：
+    //   - 不触发第三者旁观/偷听（那段逻辑只认 direct，见下方旁观记忆块）
+    //   - 用户发言与自己的回复都以 listener="all" + knowledge_source="broadcast" 落账
+    // 这样每个角色记住的都是"他当众说了一次"，而不是"他单独跟我说了一遍"。
+    let is_broadcast = channel_str == "broadcast";
+    // 说出口的渠道：面对面 与 广播 都算（广播是"当着所有人的面说出口"）
+    let is_spoken_channel = channel_str == "direct" || is_broadcast;
+
+    // 渠道限制：direct/broadcast（说出口）在 Offline 状态拒绝；Busy 正常发送但注入忙碌语境
+    let current_presence = brain.presence.current();
+    let is_busy = current_presence == crate::presence::PresenceState::Busy;
+
+    if is_spoken_channel && !(if is_broadcast { brain.presence.current().is_in_presence() } else { brain.presence.can_direct() }) {
+        let hint = match current_presence {
+            crate::presence::PresenceState::Offline => "对方不在，发微信留言",
+            _ => "对方不在场，发微信吧",
+        };
+        let _ = app.emit(
+            "chat:presence_blocked",
+            json!({
+                "stream_id": &stream_id,
+                "character_id": &char_id,
+                "presence": current_presence.as_str(),
+                "hint": hint,
+                "channel": &channel_str,
+            }),
+        );
+        return Ok(None);
+    }
+
+    // Acknowledge input once, before deferral or model work. Image and public turns emit at intake.
+    if !is_broadcast && visual_evidence.is_none() {
+        emit_channel_activity(&app, &char_id, &channel_str);
+    }
+
+    // Busy 状态下微信消息延后处理：角色正在忙，不会立即看到微信
+    if is_busy && channel_str == "wechat" {
+        let _ = app.emit(
+            "chat:busy_deferred",
+            json!({
+                "stream_id": &stream_id,
+                "character_id": &char_id,
+                "channel": &channel_str,
+            }),
+        );
+        // 等待忙碌任务结束（最多 120 秒），期间每 2 秒检查一次状态
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            if brain.presence.current() != crate::presence::PresenceState::Busy {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
+
+    // ── 群聊让位协议 ──
+    // 消息点名了其他在线角色（名字或 ID 出现在消息中）且未点名当前角色时，
+    // 当前角色让位：不生成回复、不唤醒、不写对话历史，仅以旁观视角记录消息后静默结束。
+    // 用户 @ 提及的路由由前端完成，这里补足"裸名点名"（如"Nana你觉得呢"）的场景。
+    if channel_str == "wechat_group" {
+        let (self_named, other_named) = scan_group_addressing(state, &char_id, &message);
+        if other_named && !self_named {
+            tracing::info!(
+                "[GroupYield:{}] 消息点名了其他角色，让位跳过回复",
+                char_id
+            );
+            // 旁观记忆：她看到了这条消息，只是选择不插话
+            let memory = brain.memory.clone();
+            let text = message.clone();
+            tokio::spawn(async move {
+                let meta = serde_json::json!({
+                    "channel": "wechat_group",
+                    "speaker": "user",
+                    "perspective": "observer",
+                });
+                let _ = memory
+                    .add_memory_with_metadata(
+                        &format!("[用户在群聊中对其他角色说] {}", text),
+                        MemoryType::ShortTerm,
+                        0.3,
+                        vec!["group_chat".to_string(), "observer".to_string()],
+                        meta,
+                    )
+                    .await;
+            });
+            let _ = app.emit(
+                "chat:yielded",
+                json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+            );
+            return Ok(None);
+        }
+    }
+
+    if visual_evidence.is_none() {
+        let _ = app.emit(
+            "chat:start",
+            json!({ "message": &message, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+        );
+    }
+
+    // ── 用户交互唤醒：从 Rest/Offline 回到 Online ──
+    // 用户发起对话视为唤醒行为，角色恢复在线。
+    // 注意：wechat 渠道也会唤醒（用户发微信也算交互），但 Rest→Online 只在用户主动发起时触发。
+    if let Some(event) = brain.presence.wake_on_user_interaction() {
+        brain.proactive.signal_waking_up();
+        let memory_text = brain.presence.memory_text(&event);
+        let memory = brain.memory.clone();
+        let text = memory_text;
+        let char_id_for_mem = char_id.clone();
+        tokio::spawn(async move {
+            let meta = serde_json::json!({
+                "channel": "presence",
+                "speaker": char_id_for_mem,
+                "listener": char_id_for_mem,
+                "perspective": "speaker",
+            });
+            let _ = memory
+                .add_memory_with_metadata(&text, MemoryType::ShortTerm, 0.4, vec!["presence_log".to_string(), "assistant".to_string()], meta)
+                .await;
+        });
+        // 通知前端状态变化
+        let _ = app.emit(
+            "presence:changed",
+            json!({
+                "character_id": &char_id,
+                "from": event.from,
+                "to": event.to,
+                "reason": event.reason,
+            }),
+        );
+
+        // 后端联动 桌宠 窗口可见性：
+        // 从 Offline 唤醒时 show 窗口（与 proactive.rs / set_presence_state 保持一致）
+        let from_state = crate::presence::PresenceState::from_str(&event.from);
+        if matches!(from_state, crate::presence::PresenceState::Offline) {
+            if let Some(win) = app.get_webview_window(&char_id) {
+                let _ = win.show();
+                let _ = win.set_focus();
+                tracing::info!(
+                    "[Presence:{}] 用户交互唤醒，后端联动 show 窗口（从 Offline 恢复）",
+                    char_id
+                );
+            }
+        }
+    }
+
+    // ── 跨角色旁观记忆：见下方 brain.think 返回后处理 ──
+    // 旁观记忆需要同时包含用户消息和 AI 回复，必须在 think 完成后才能写入。
+
+    let app_for_emitter = app.clone();
+    crate::voice_diagnostics::begin("chat", &stream_id, "request_to_first_model_chunk");
+    let timing_pending = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let sid_for_emitter = stream_id.clone();
+    let cid_for_emitter = char_id.clone();
+    let channel_for_emitter = channel_str.clone();
+
+    // 括号动作剥离 / 内联表情扫描：广播也是"说出口"的话，走与 direct 相同的文本处理
+    let is_direct_channel = is_spoken_channel;
+
+    // 内联表情/动作标签扫描器：当 inline_expression 启用时，
+    // 拦截流式文本 chunk，剥离 <e>/<m>/<s> 标签并 emit chat:inline_meta 事件，
+    // 让表情/动作在文字流式输出过程中即时切换，无需等待 ExpressionMotionRunnable 的第二次 LLM 调用。
+    let inline_enabled = brain.config.inline_expression.enabled;
+    let mut inline_scanner: Option<Arc<parking_lot::Mutex<crate::pipeline::inline_tag_scanner::InlineTagScanner>>> = None;
+    let mut paren_buffer: Option<Arc<parking_lot::Mutex<String>>> = None;
+    let emitter: crate::pipeline::steps::generation::StreamEmitter = if inline_enabled {
+        let app_for_meta = app.clone();
+        let sid_for_meta = stream_id.clone();
+        let cid_for_meta = char_id.clone();
+        let ch_for_meta = channel_str.clone();
+        let tag_callback: crate::pipeline::inline_tag_scanner::TagCallback =
+            Box::new(move |tag| {
+                let (tag_type, name, dur) = match &tag {
+                    crate::pipeline::inline_tag_scanner::InlineTag::Expression { name, duration_ms } => {
+                        ("expression".to_string(), name.clone(), *duration_ms)
+                    }
+                    crate::pipeline::inline_tag_scanner::InlineTag::Motion { name } => {
+                        ("motion".to_string(), name.clone(), None)
+                    }
+                };
+                let _ = app_for_meta.emit(
+                    "chat:inline_meta",
+                    json!({
+                        "type": tag_type,
+                        "name": name,
+                        "duration_ms": dur,
+                        "stream_id": &sid_for_meta,
+                        "character_id": &cid_for_meta,
+                        "channel": &ch_for_meta,
+                    }),
+                );
+            });
+        let scanner = Arc::new(parking_lot::Mutex::new(
+            crate::pipeline::inline_tag_scanner::InlineTagScanner::new(tag_callback),
+        ));
+        let scanner_for_chunk = scanner.clone();
+        inline_scanner = Some(scanner);
+
+        if is_direct_channel {
+            let buffer = Arc::new(parking_lot::Mutex::new(String::new()));
+            let buf_for_chunk = buffer.clone();
+            paren_buffer = Some(buffer);
+            Arc::new(move |chunk: &str| {
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
+                let mut s = scanner_for_chunk.lock();
+                let after_inline = s.feed(chunk);
+                if !after_inline.is_empty() {
+                    let mut buf = buf_for_chunk.lock();
+                    let (clean, remaining) = crate::utils::filter_parentheses(&after_inline, &buf);
+                    *buf = remaining;
+                    if !clean.is_empty() {
+                        let _ = app_for_emitter.emit(
+                            "chat:chunk",
+                            json!({ "text": clean, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
+                        );
+                    }
+                }
+            })
+        } else {
+            Arc::new(move |chunk: &str| {
+                if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
+                let mut s = scanner_for_chunk.lock();
+                let clean = s.feed(chunk);
+                if !clean.is_empty() {
+                    let _ = app_for_emitter.emit(
+                        "chat:chunk",
+                        json!({ "text": clean, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
+                    );
+                }
+            })
+        }
+    } else if is_direct_channel {
+        let buffer = Arc::new(parking_lot::Mutex::new(String::new()));
+        let buf_for_chunk = buffer.clone();
+        paren_buffer = Some(buffer);
+        Arc::new(move |chunk: &str| {
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
+            let mut buf = buf_for_chunk.lock();
+            let (clean, remaining) = crate::utils::filter_parentheses(chunk, &buf);
+            *buf = remaining;
+            if !clean.is_empty() {
+                let _ = app_for_emitter.emit(
+                    "chat:chunk",
+                    json!({ "text": clean, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
+                );
+            }
+        })
+    } else {
+        Arc::new(move |chunk: &str| {
+            if !chunk.is_empty() && timing_pending.swap(false, std::sync::atomic::Ordering::Relaxed) { crate::voice_diagnostics::finish("chat", &sid_for_emitter, "request_to_first_model_chunk"); crate::voice_diagnostics::mark_chat("first_reply_chunk"); }
+            let _ = app_for_emitter.emit(
+                "chat:chunk",
+                json!({ "text": chunk, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
+            );
+        })
+    };
+
+    // 串行化 brain.think：同一时刻只处理一个请求，避免对话历史/记忆/心理系统并发写入污染。
+    // 排队中的请求在此等待；获取锁后重置取消标志（为当前请求清空上次残留）。
+    // 记录排队时刻：brain.think 完成后用此时刻修正用户消息的 timestamp，
+    // 确保并发发送时用户消息按实际发送顺序排列（而非 think 完成顺序）。
+    let queued_at = chrono::Local::now();
+    let Some(mut input_receipt) = crate::brain::interaction_runtime::receive_user(&app, &brain, &stream_id, &channel_str, &message)? else { return Ok(None); };
+    crate::voice_diagnostics::mark_chat("queue_entered");
+    let pending_input = state.session_coordinator.signal_user_input(&char_id);
+    state.interrupt_companion_execution(&char_id);
+    let _brain_lock = instance.think_lock.clone();
+    // 等待必须有上限：持锁方一旦卡死（例如在持有 Mind / 记忆锁时死锁），
+    // 无超时的 lock().await 会让本请求永久挂起，既不回包也不报错，
+    // 前端会永远停在「思考中」，之后所有消息也会被静默吞掉。
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] think_lock 等待超过 {}s，放弃本次请求 stream_id={}（持锁方疑似卡死）",
+                char_id,
+                THINK_LOCK_WAIT.as_secs(),
+                stream_id
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次消息已放弃。请重试；若反复出现请重启应用。",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": &channel_str,
+                }),
+            );
+            return Ok(None);
+        }
+    };
+    crate::voice_diagnostics::mark_chat("generation_lock_acquired");
+    input_receipt.claim()?;
+    // 排队耗时打点：定位「发出去后久久没有反应」是卡在排队还是卡在 think 内部
+    tracing::info!(
+        "[Chat:{}] 已获得 think_lock stream_id={} 排队等待 {}ms",
+        char_id,
+        stream_id,
+        (chrono::Local::now() - queued_at).num_milliseconds()
+    );
+    if visual_evidence.is_some() && state.is_generation_cancelled(&char_id) {
+        let _ = app.emit("chat:cancelled", json!({"stream_id":stream_id,"character_id":char_id,"channel":channel_str}));
+        return Ok(None);
+    }
+    state.reset_generation_cancel(&char_id);
+
+    // 设置消息渠道标记（影响 dialogue 写入的 metadata.channel）
+    let channel_guard = state.session_coordinator.enter_channel(&brain.dialogue, &channel_str);
+
+    // ── 会话生命周期：获取或创建 User↔Agent 会话 ──
+    let conv = crate::conversation::CONVERSATION_MANAGER
+        .start_or_continue("user", &char_id, &message)
+        .unwrap_or_else(|| {
+            crate::conversation::CONVERSATION_MANAGER.force_new_session("user", &char_id, &message)
+        });
+    crate::conversation::CONVERSATION_MANAGER.touch_user_message(&char_id);
+    crate::conversation::CONVERSATION_MANAGER.set_user_channel(&char_id, &channel_str);
+    brain.presence.record_user_interaction();
+    let _session_guard = state.session_coordinator.enter_user_turn(
+        &char_id,
+        &conv.id,
+        &brain.memory,
+        &brain.dialogue,
+    );
+    pending_input.admitted();
+
+    let emitter_guard = brain.stream_emitter_scope(emitter);
+
+    // 临时开启路由回退事件发送（仅本次用户消息期间）
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(true);
+    }
+    // ── World Model：从用户消息抽取预期回归时间 ──
+    // 用户说"我去洗澡，20分钟" → ExpectationEngine 抽取 20min 预期，存入 UserEntityState。
+    // 后续 proactive tick 检测到用户离开时，用此预期判断是否超时。
+    brain.world_state.ingest_dialogue(&message);
+    // 获取焦点租约：流式 think 期间屏蔽其他角色的主动打断
+    let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&char_id);
+    // Busy 状态下 direct 渠道：注入忙碌被呼唤的语境
+    let think_input = if is_busy && is_spoken_channel {
+        format!("（你从忙碌状态下被用户呼唤）\n{}", message)
+    } else {
+        message.clone()
+    };
+    let mut result: VivianResult<AiResponse> = match visual_evidence {
+        Some(evidence) => brain.think_with_visual_evidence(&think_input, true, evidence).await,
+        None => brain.think(&think_input, true).await,
+    };
+    // A model may still return silence despite the fallback instruction. Repair
+    // only the answer, without storing the user's utterance for a second time.
+    if is_broadcast && crate::spoken_turn::require_reply() && !state.is_generation_cancelled(&char_id)
+        && result.as_ref().is_ok_and(|reply| reply.text.trim().is_empty()) {
+        let directive = format!("{}\nPublic utterance (data): {}", crate::spoken_turn::instruction(), message);
+        result = brain.think_system_directive(&directive).await;
+    }
+    drop(_focus_lease);
+    // 修正用户消息 timestamp 为排队时刻：brain.think 在完成后才写入用户消息，
+    // 默认 timestamp 是 think 完成时刻，并发发送时会导致顺序错乱
+    // （q2 的 timestamp 会大于 a1 的 timestamp）。用排队时刻覆盖确保正确排序。
+    brain.dialogue.patch_last_user_timestamp(queued_at);
+    // 文件消息结构化标记：brain.think 已在对话历史写入用户消息，
+    // 若本次为文件消息，将 kind=file 等元信息追加到刚写入的最后一条用户消息。
+    // patch_last_user_entry_metadata 在 buffer 未命中时会做全文件读写（read_to_string + write），
+    // 移入 spawn_blocking 避免卡住 async 运行时。
+    if let Some(meta) = file_metadata.clone() {
+        let dialogue = brain.dialogue.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            dialogue.patch_last_user_entry_metadata(meta);
+        })
+        .await;
+    }
+
+    // ── 用户内容入向量知识库 ──
+    // 1. 文件消息：把文件提取的文本内容入库（source="user_file"，永不过期）
+    // 2. 网页链接：检测消息中的 URL，异步抓取页面正文入库（source="user_link"）
+    // 两者均为 fire-and-forget，不阻塞主对话流程，失败只记日志。
+    {
+        let memory = brain.memory.clone();
+        let msg_for_kb = message.clone();
+        let char_id_for_kb = char_id.clone();
+        let file_meta_for_kb = file_metadata.clone();
+        tokio::spawn(async move {
+            // 文件入库
+            if let Some(meta) = file_meta_for_kb {
+                if let Some(file_name) = meta.get("file_name").and_then(|v| v.as_str()) {
+                    // 消息格式为 "[文件：filename]\n<文本内容>"，剥离前缀拿到纯文本
+                    let prefix = format!("[文件：{}]\n", file_name);
+                    let content = if msg_for_kb.starts_with(&prefix) {
+                        msg_for_kb[prefix.len()..].to_string()
+                    } else {
+                        msg_for_kb.clone()
+                    };
+                    if !content.trim().is_empty() {
+                        let title = format!("文件：{}", file_name);
+                        match crate::notebook::collected::ingest_collected(
+                            &char_id_for_kb,
+                            &memory,
+                            &title,
+                            &content,
+                            vec!["user_file".to_string()],
+                            "user_file",
+                            Some(-1),
+                        )
+                        .await
+                        {
+                            Some(id) => tracing::info!(
+                                "[Knowledge] 用户文件「{}」已入库，memory_id={}",
+                                file_name,
+                                id
+                            ),
+                            None => tracing::warn!("[Knowledge] 文件入库失败"),
+                        }
+                    }
+                }
+            } else {
+                // URL 抓取入库（仅非文件消息检测，避免与文件消息冲突）
+                if let Some(url) = crate::network::url_fetcher::extract_first_url(&msg_for_kb) {
+                    tracing::info!("[Knowledge] 检测到用户分享链接，开始抓取: {}", url);
+                    match crate::network::url_fetcher::fetch_page(&url).await {
+                        Ok(page) => {
+                            let tags = vec!["user_link".to_string()];
+                            match crate::notebook::collected::ingest_collected(
+                                &char_id_for_kb,
+                                &memory,
+                                &page.title,
+                                &page.text,
+                                tags,
+                                "user_link",
+                                Some(-1),
+                            )
+                            .await
+                            {
+                                Some(id) => tracing::info!(
+                                    "[Knowledge] 用户链接「{}」已入库，memory_id={}",
+                                    page.title,
+                                    id
+                                ),
+                                None => tracing::warn!("[Knowledge] 链接入库失败"),
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "[Knowledge] 抓取链接 {} 失败: {}",
+                            url,
+                            e
+                        ),
+                    }
+                }
+            }
+        });
+    }
+
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(false);
+    }
+
+    // ── 内联扫描器 flush：将跨 chunk 缓冲区的残余文本（不完整的标签前缀）输出 ──
+    if let Some(ref scanner) = inline_scanner {
+        let mut s = scanner.lock();
+        let remaining = s.flush();
+        // The scanner may finish inside narration; its tail must use the same filter as chunks.
+        let remaining = if let Some(ref buffer) = paren_buffer {
+            let mut buf = buffer.lock();
+            let (clean, deferred) = crate::utils::filter_parentheses(&remaining, &buf);
+            *buf = deferred;
+            clean
+        } else {
+            remaining
+        };
+        if !remaining.is_empty() {
+            let _ = app.emit(
+                "chat:chunk",
+                json!({ "text": remaining, "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }),
+            );
+        }
+    }
+
+    // 未闭合的括号内容仍是动作旁白，结束时丢弃，不能作为台词输出。
+    if let Some(ref buffer) = paren_buffer {
+        buffer.lock().clear();
+    }
+
+    // ── 会话生命周期：think 完成后更新会话状态 ──
+    // 根据本轮 response_mode（speak/non_verbal/internal/ignore）更新 Energy/Novelty/Continuation。
+    // 同时做意图判断：若用户或 Agent 输出命中关闭意图 → 立即 close_with_reason。
+    {
+        let response_mode = result.as_ref().ok().map(|r| r.response_mode.clone()).unwrap_or_else(|| "speak".to_string());
+        let reply_text = result.as_ref().ok().map(|r| r.text.clone()).unwrap_or_default();
+        let mode = crate::conversation::ResponseMode::from_str(&response_mode);
+        let _ = crate::conversation::CONVERSATION_MANAGER.update_after_round(
+            &conv.id,
+            mode,
+            if mode.needs_speech() { Some(&reply_text) } else { None },
+            &message,
+        );
+
+        schedule_close(&state, brain.clone(), instance.think_lock.clone(), &char_id, &message, &reply_text);
+    }
+
+    // Capture the completed public turn while its session and generation lock are
+    // still owned. Releasing them first can attach the exchange to the next turn.
+    if !is_whisper && is_spoken_channel && !state.is_generation_cancelled(&char_id) {
+        if let Ok(response) = &result {
+            state.world_provider.environment.record_user_exchange(
+                &char_id, &conv.id, message.trim(), response.text.trim());
+        }
+    }
+
+    // 清理流式回调（避免非流式调用误触发）
+    drop(emitter_guard);
+    // 重置消息渠道标记为默认值
+    drop(channel_guard);
+    drop(_session_guard);
+    let was_cancelled = state.is_generation_cancelled(&char_id);
+    input_receipt.finish(result.is_ok() && !was_cancelled);
+    // 释放串行化锁，让排队中的下一个请求开始执行
+    drop(_brain_guard);
+
+    if was_cancelled {
+        let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
+        return Ok(None);
+    }
+
+    match result {
+        Ok(response) => {
+            let completed_response = response.clone();
+            // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
+            if response.response_mode == "ignore" {
+                tracing::info!(
+                    "[Chat:{}] ignore 模式，结算为空正文: stream_id={}",
+                    char_id,
+                    stream_id
+                );
+                let _ = app.emit("chat:done", json!({ "text": "", "response_mode": "ignore", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
+                return Ok(None);
+            }
+            // 推送 meta 事件：expression/motion（前端提前播放 桌宠 动画）
+            if !response.expression.is_empty() || response.motion != "idle" {
+                let _ = app.emit(
+                    "chat:meta",
+                    json!({
+                        "expression": response.expression,
+                        "expression_duration_ms": response.expression_duration_ms,
+                        "motion": response.motion,
+                        "source": "formal",
+                        "stream_id": &stream_id,
+                        "character_id": &char_id,
+                        "channel": &channel_str,
+                    }),
+                );
+            }
+            let display_text = if is_direct_channel {
+                crate::utils::filter_parentheses_sync(&response.text)
+            } else {
+                response.text.clone()
+            };
+
+            // 微信渠道语音消息：LLM 返回 voice_message=true 时，合成 TTS 音频文件，
+            // 前端以微信风格语音气泡展示（不显示文本），点击可播放。
+            // direct 渠道已有实时 TTS 播放，不需要语音消息模式。
+            let (voice_audio_path, voice_duration) = if response.voice_message
+                && !is_direct_channel
+                && brain.tts.is_enabled()
+            {
+                match brain
+                    .tts
+                    .synthesize_to_file(&display_text, None)
+                    .await
+                {
+                    Ok((path, dur)) => {
+                        // 回写 dialogue 历史 metadata，使刷新历史时能恢复语音气泡
+                        brain.dialogue.patch_last_assistant_entry_metadata(json!({
+                            "kind": "voice",
+                            "audio_path": &path,
+                            "duration": dur,
+                        }));
+                        (Some(path), Some(dur))
+                    }
+                    Err(e) => {
+                        tracing::warn!("[Chat:{}] 语音消息合成失败，回退为文本: {}", char_id, e);
+                        (None, None)
+                    }
+                }
+            } else {
+                (None, None)
+            };
+
+            crate::voice_diagnostics::mark_chat("done_emitted");
+            let _ = app.emit(
+                "chat:done",
+                json!({
+                    "text": display_text,
+                    "sticker": response.sticker,
+                    "motion": response.motion,
+                    "expression": response.expression,
+                    "expression_duration_ms": response.expression_duration_ms,
+                    "emotion_score": response.emotion_score,
+                    "user_emotion": response.user_emotion,
+                    "voice_message": response.voice_message && voice_audio_path.is_some(),
+                    "voice_audio_path": voice_audio_path,
+                    "voice_duration": voice_duration,
+                    "source": "formal",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": &channel_str,
+                }),
+            );
+            // 递增人格卡片轮次计数器（驱动冷却机制）
+            brain.persona.tick_card_turn();
+
+            // ── 第三者旁观记忆（逐条写入带第三人称前缀的独立记忆条目）──
+            // 用户与角色 A 对话时，如果角色 B 在线，B 以旁观者视角记录对话。
+            // 设计原则：
+            // - 用户消息和角色回复分别写入独立记忆条目，而非机械拼接
+            // - 新记忆保存原话，交流双方和旁观来源通过结构化元数据标注
+            // - importance = 原对话 importance × 0.6（旁观价值低于参与）
+            // - metadata 标记 perspective=observer + speaker + listener
+            // - 前端通过 perspective=observer 识别为旁观对话，用说话者主题色半透明节点显示
+            // 悄悄话模式（is_whisper=true）跳过旁观记忆，其他在线角色不会听到此对话
+            // 群聊渠道（wechat_group）跳过旁观记忆，每个角色已通过各自的 send_message_stream 直接记录
+            // 微信私聊（wechat）是角色私有对话，其他角色不应旁观
+            // 广播渠道（broadcast）必须跳过：广播里没有"偷听者"，所有人都是被搭话的听众。
+            // 若在这里为其他角色写旁观记忆，会生成"[User says to Vivian] X"这类条目，
+            // 让每个角色都以为"用户把同一句话分别跟两个人各说了一遍"——这正是广播的语义 bug。
+            // 仅 direct（桌宠一对一面谈）才被其他在线角色旁观
+            if !is_whisper && channel_str == "direct" {
+                let speaker_id = char_id.clone();
+                let user_msg_full = message.trim().to_string();
+                let agent_reply_full = response.text.trim().to_string();
+                // Link observations to the actual adjacent turn pair; never invent source IDs.
+                let observed_sources = brain.dialogue.get_all_history().ok().and_then(|history| {
+                    history.windows(2).rev().find(|pair| {
+                        pair[0].role == "user" && pair[1].role == "assistant"
+                            && pair[0].content.trim() == user_msg_full
+                            && pair[1].content.trim() == agent_reply_full
+                            && pair[0].session_id == pair[1].session_id
+                            && pair[0].metadata["speaker"] == "user"
+                            && pair[1].metadata["speaker"].as_str() == Some(speaker_id.as_str())
+                    }).map(|pair| ((pair[0].id.clone(), pair[0].timestamp), (pair[1].id.clone(), pair[1].timestamp)))
+                });
+                let channel_clone = channel_str.clone();
+                let app_clone = app.clone();
+                // 原对话 importance（取 user/ai 较大值）× 0.6 折扣
+                let base_importance = response.importance_user.max(response.importance_ai);
+                let observer_importance = (base_importance * 0.6).clamp(0.05, 0.85);
+                // 说话角色的名字（用于 roommate_cue 的 from_name 参数）
+                let speaker_name = {
+                    let chars = state.characters.read();
+                    chars
+                        .get(&speaker_id)
+                        .map(|inst| inst.name.clone())
+                        .unwrap_or_else(|| speaker_id.clone())
+                };
+                // 仅提取旁观所需字段，避免克隆整个 HashMap
+                // 主动旁观插话需要额外访问 brain/think_lock/psychology/persona/dialogue
+                let observers: Vec<_> = {
+                    let chars = state.characters.read();
+                    chars
+                        .iter()
+                        .filter(|(id, _)| *id != &speaker_id)
+                        .map(|(id, inst)| {
+                            (
+                                id.clone(),
+                                inst.online.clone(),
+                                inst.brain.memory.clone(),
+                                inst.brain.proactive.clone(),
+                                inst.brain.psychology.clone(),
+                                inst.brain.persona.clone(),
+                                inst.brain.dialogue.clone(),
+                                inst.name.clone(),
+                                inst.brain.clone(),
+                                inst.think_lock.clone(),
+                            )
+                        })
+                        .collect()
+                };
+                let playback_gate = state.playback_gate.clone();
+                let environment_state = state.clone();
+                tokio::spawn(async move {
+                    for (other_id, online_lock, observer_memory, observer_proactive, observer_psychology, observer_persona, observer_dialogue, observer_name, observer_brain, observer_think_lock) in observers {
+                        // 仅在线角色能旁观（Online 状态；Busy/Rest/Offline 不旁观）
+                        if !*online_lock.read() {
+                            continue;
+                        }
+                        // 旁观者视角：用户对说话角色说的话
+                        let user_observation = user_msg_full.clone();
+                        let mut user_meta = json!({
+                            "channel": channel_clone,
+                            "speaker": "user",
+                            "listener": speaker_id,
+                            "perspective": "observer",
+                            "knowledge_source": "observed",
+                            "reliability": "second_hand",
+                            "observer_id": other_id,
+                            "known_by": [other_id],
+                            "utterance_format": "plain",
+                        });
+                        if let Some((source, _)) = &observed_sources {
+                            user_meta["source_message_ids"] = json!([source.0]);
+                            user_meta["source_timestamp"] = json!(source.1);
+                        }
+                        if let Err(e) = observer_memory
+                            .add_memory_with_metadata(
+                                &user_observation,
+                                MemoryType::CasualConversation,
+                                observer_importance,
+                                vec!["dialogue".to_string(), "observer".to_string(), "overheard".to_string(), "bystander".to_string()],
+                                user_meta,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "[Chat] 旁观者 {} 写入用户发言旁观记忆失败: {}",
+                                other_id,
+                                e
+                            );
+                        }
+                        // 旁观者视角：说话角色回复用户的话
+                        let agent_observation = agent_reply_full.clone();
+                        let mut agent_meta = json!({
+                            "channel": channel_clone,
+                            "speaker": speaker_id,
+                            "listener": "user",
+                            "perspective": "observer",
+                            "knowledge_source": "observed",
+                            "reliability": "second_hand",
+                            "observer_id": other_id,
+                            "known_by": [other_id],
+                            "utterance_format": "plain",
+                        });
+                        if let Some((_, source)) = &observed_sources {
+                            agent_meta["source_message_ids"] = json!([source.0]);
+                            agent_meta["source_timestamp"] = json!(source.1);
+                        }
+                        if let Err(e) = observer_memory
+                            .add_memory_with_metadata(
+                                &agent_observation,
+                                MemoryType::CasualConversation,
+                                observer_importance,
+                                vec!["dialogue".to_string(), "observer".to_string(), "overheard".to_string(), "bystander".to_string()],
+                                agent_meta,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "[Chat] 旁观者 {} 写入角色回复旁观记忆失败: {}",
+                                other_id,
+                                e
+                            );
+                        }
+
+                        // 通知前端：在线角色"旁观"了对话
+                        let _ = app_clone.emit(
+                            "presence:overheard",
+                            json!({
+                                "speaker_id": &speaker_id,
+                                "listener_id": other_id,
+                            }),
+                        );
+
+                        if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id) {
+                            continue;
+                        }
+
+                        // 主动旁观插话评估：用轻量 LLM 判断 B 是否有动机插话
+                        // 绕过概率 roll，每次用户普通消息都进行 LLM 判断，提升插话的合理性
+                        // 轻量调用只判断是否插话，不生成内容——插话内容由主对话流程生成
+                        let mood = observer_psychology.compute_mood();
+                        let mood_hint = format!(
+                            "主导情绪：{}，疲劳度：{:.0}",
+                            mood.primary_emotion.as_str(),
+                            mood.fatigue
+                        );
+                        let intimacy = observer_psychology.relationship().intimacy;
+                        let hour = chrono::Local::now().hour();
+                        let lang = observer_persona.get_language();
+                        // 修复情绪参数注入：使用 build_style_prompt_ex 传入主导情绪，让场景选择感知内心
+                        let system_prompt = observer_persona.build_style_prompt_ex(
+                            intimacy,
+                            hour,
+                            Some(mood.primary_emotion.as_str().to_string()),
+                            None,
+                        );
+
+                        // 旁观记忆作为最近对话参考（不含本轮刚写入的，避免时序竞争）
+                        let bystander_memos =
+                            observer_memory.recent_by_tags(&["bystander", "overheard"], 3);
+                        let dialogue_history = bystander_memos
+                            .iter()
+                            .map(|m| m.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+
+                        if let Some(mut interjection) = observer_proactive
+                            .evaluate_active_bystander_interjection(
+                                &user_msg_full,
+                                &agent_reply_full,
+                                &speaker_name,
+                                &mood_hint,
+                                &dialogue_history,
+                                &system_prompt,
+                                intimacy,
+                                &lang,
+                            )
+                            .await
+                        {
+                            // 决定插话：spawn 延迟投递任务，让 A 先说完再插话
+                            let observed_exchange = interjection.observed_exchange.clone();
+                            let app_clone2 = app_clone.clone();
+                            let playback_gate_clone = playback_gate.clone();
+                            let other_id_clone = other_id.clone();
+                            let other_name_clone = observer_name.clone();
+                            let observer_memory_clone = observer_memory.clone();
+                            let observer_dialogue_clone = observer_dialogue.clone();
+                            let observer_brain_clone = observer_brain.clone();
+                            let observer_proactive_clone = observer_proactive.clone();
+                            let observer_think_lock_clone = observer_think_lock.clone();
+                            let environment_state = environment_state.clone();
+                            tokio::spawn(async move {
+                                // 基础延迟：让 A 的气泡/TTS 先显示
+                                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                                // 等待 TTS 播放完成（最多再等 12 秒），避免音频冲突
+                                for _ in 0..24 {
+                                    if !playback_gate_clone.is_playing() {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+
+                                // 调用主对话流程生成插话内容
+                                // 串行化 brain.think，与 send_message_stream 共用 brain_lock。
+                                // 插话只在锁空闲时进入，避免排队抢在用户输入之前。
+                                let _brain_lock = observer_think_lock_clone.clone();
+                                let Ok(_brain_guard) = _brain_lock.try_lock() else { return; };
+
+                                if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id_clone) {
+                                    return;
+                                }
+
+                                let Some(_interjection_turn) = environment_state.session_coordinator.try_enter_proactive_turn(
+                                    &other_id_clone, &observer_memory_clone, &observer_dialogue_clone) else { return; };
+
+                                // 设置渠道为 proactive，让 dialogue 写入标记为主动气泡路径
+                                let prev_channel = observer_dialogue_clone.get_channel();
+                                observer_dialogue_clone.set_channel("proactive");
+
+                                let previous_session = observer_dialogue_clone.get_session_id();
+                                let interjection_session = crate::conversation::CONVERSATION_MANAGER
+                                    .start_or_continue("user", &other_id_clone, "")
+                                    .map(|conv| conv.id);
+                                observer_dialogue_clone.set_session_id(interjection_session.clone());
+                                // 内部指令以 system 身份生成，不写入用户历史或记忆。
+                                let priority = environment_state.session_coordinator.background_priority();
+                                let result = priority.run(observer_brain_clone
+                                    .think_system_directive_with_observation(
+                                        &interjection.directive,
+                                        Some(&observed_exchange),
+                                    )).await;
+
+                                // 恢复渠道
+                                observer_dialogue_clone.set_channel(&prev_channel);
+                                observer_dialogue_clone.set_session_id(previous_session);
+                                drop(_brain_guard);
+
+                                let response = match result {
+                                    Some(Ok(r)) => r,
+                                    None => return,
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            "[Chat] 旁观者 {}({}) 插话生成失败: {}",
+                                            other_name_clone,
+                                            other_id_clone,
+                                            e
+                                        );
+                                        return;
+                                    }
+                                };
+
+                                let text = response.text;
+                                if text.trim().is_empty() {
+                                    tracing::debug!(
+                                        "[Chat] 旁观者 {}({}) 插话生成为空，跳过",
+                                        other_name_clone,
+                                        other_id_clone
+                                    );
+                                    return;
+                                }
+                                let expression = response.expression;
+
+                                // 写入记忆系统
+                                let meta = json!({
+                                    "channel": "proactive",
+                                    "speaker": &other_id_clone,
+                                    "listener": "user",
+                                    "perspective": "speaker",
+                                    "knowledge_source": "direct",
+                                    "content_type": "bystander_interjection",
+                                    "conversation_id": interjection_session,
+                                    "session_id": interjection_session,
+                                });
+                                let _ = observer_memory_clone
+                                    .add_memory_with_metadata(
+                                        &text,
+                                        MemoryType::CasualConversation,
+                                        0.3,
+                                        vec![
+                                            "assistant".to_string(),
+                                            "proactive".to_string(),
+                                            "dialogue_turn".to_string(),
+                                            "bystander_interjection".to_string(),
+                                        ],
+                                        meta,
+                                    )
+                                    .await;
+
+                                if !crate::world::environment_agent::allows_interjection(&environment_state, &other_id_clone) {
+                                    return;
+                                }
+
+                                // emit proactive:bubble 事件，前端监听后 showBubble + TTS
+                                if let Err(error) = app_clone2.emit(
+                                    "proactive:bubble",
+                                    json!({
+                                        "character_id": &other_id_clone,
+                                        "content": &text,
+                                        "expression": &expression,
+                                        "motion": &response.motion,
+                                        "sticker": &response.sticker,
+                                    }),
+                                ) {
+                                    tracing::warn!("[Chat] 旁观插话投递失败: {}", error);
+                                    return;
+                                }
+                                let spoken_at = chrono::Local::now().timestamp() as f64;
+                                interjection.mark_spoken(spoken_at, &text);
+                                observer_proactive_clone.record_active_bystander_spoken(spoken_at);
+                                crate::commands::proactive::touch_last_spoken(&other_id_clone);
+
+                                tracing::info!(
+                                    "[Chat] 旁观者 {}({}) 主动插话: {}",
+                                    other_name_clone,
+                                    other_id_clone,
+                                    text
+                                );
+                            });
+                        }
+                    }
+                });
+            }
+
+            Ok(Some(completed_response))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let error_kind = classify_llm_error_from_str(&msg);
+            let error_type = match &error_kind {
+                crate::resilience::LlmErrorKind::InvalidApiKey => "invalid_api_key",
+                crate::resilience::LlmErrorKind::InsufficientBalance => "insufficient_balance",
+                crate::resilience::LlmErrorKind::QuotaExceeded => "api_quota_exceeded",
+                crate::resilience::LlmErrorKind::RateLimited => "rate_limited",
+                crate::resilience::LlmErrorKind::Timeout => "timeout",
+                crate::resilience::LlmErrorKind::NetworkError => "network_error",
+                crate::resilience::LlmErrorKind::ModelNotFound => "model_not_found",
+                crate::resilience::LlmErrorKind::ContextLengthExceeded => "context_length",
+                crate::resilience::LlmErrorKind::ContentPolicy => "content_policy",
+                crate::resilience::LlmErrorKind::ServerError | crate::resilience::LlmErrorKind::Overloaded => "server_error",
+                crate::resilience::LlmErrorKind::CircuitBreakerOpen => "circuit_breaker",
+                _ if msg.contains("MAIN_API_NOT_CONFIGURED") => "no_main_api",
+                _ => "unknown",
+            };
+            let character_text = crate::engine::feedback::system_error_to_character_text(error_type);
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": &msg,
+                    "character_text": &character_text,
+                    "error_type": error_type,
+                    "error_kind": error_kind,
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": &channel_str,
+                }),
+            );
+            Err(msg)
+        }
+    }
+}
+
+/// 停止指定角色的生成
+#[tauri::command]
+pub async fn stop_generation(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+) -> Result<(), String> {
+    let char_id = character_id
+        .unwrap_or_else(|| state.active_character_id.read().clone());
+    state.set_generation_cancel(&char_id, true);
+    tracing::info!("已请求停止角色 {} 的生成", char_id);
+    Ok(())
+}
+
+/// 用前端渲染时刻的时间戳覆盖最后一条 assistant 消息的 timestamp
+///
+/// 后端持久化 AI 消息时用的是后端构造消息时刻，前端 `chat:done` 渲染时用的是
+/// `Date.now()`。两者不一致会导致 `refreshHistory` 合并时按时间戳过滤保留
+/// 流式消息造成重复。此命令让存储的时间戳与前端渲染时刻对齐。
+#[tauri::command]
+pub async fn update_last_assistant_timestamp(
+    state: State<'_, Arc<AppState>>,
+    character_id: Option<String>,
+    timestamp_ms: i64,
+) -> Result<(), String> {
+    let (dialogue, _, _) =
+        crate::chat_partner::resolve_dialogue(state.inner(), character_id.as_deref())?;
+    tokio::task::spawn_blocking(move || dialogue.patch_last_assistant_timestamp(timestamp_ms))
+        .await
+        .map_err(|e| format!("任务执行失败: {}", e))?;
+    Ok(())
+}
+
+/// 从休息/忙碌状态唤醒角色
+///
+/// 用户通过连续点击 桌宠 模型触发：
+/// 1. 切换 presence 到 Online + 写 presence_log 记忆 + emit presence:changed
+/// 2. 触发一次主交互（brain.think 走完整 chat_chain：心情/表情/记忆/对话历史）
+/// 3. 流式 emit chat:meta / chat:chunk / chat:done（前端 ChatController 接收并展示气泡+TTS）
+///
+/// 与 send_message_stream 的区别：不写用户消息到前端 store，唤醒语境由后端构造注入。
+#[tauri::command]
+pub async fn wake_from_presence(
+    state: State<'_, Arc<AppState>>,
+    app: tauri::AppHandle,
+    character_id: Option<String>,
+    stream_id: String,
+) -> Result<(), String> {
+    let _foreground = state.session_coordinator.background_priority().enter();
+    let char_id = character_id
+        .clone()
+        .unwrap_or_else(|| state.active_character_id.read().clone());
+    let channel_str = "direct";
+
+    if !main_api_configured(&state) {
+        let _ = app.emit(
+            "chat:config_error",
+            json!({ "reason": "no_main_api", "stream_id": &stream_id, "character_id": &char_id, "channel": channel_str }),
+        );
+        return Ok(());
+    }
+
+    let instance = match state.get_character(character_id.as_deref()) {
+        Ok(inst) => inst,
+        Err(_) => {
+            let _ = app.emit(
+                "chat:error",
+                json!({ "error": "Brain 未初始化", "stream_id": &stream_id, "character_id": &char_id, "channel": channel_str }),
+            );
+            return Err("Brain 未初始化".to_string());
+        }
+    };
+    let brain = instance.brain.clone();
+
+    // 切换 presence 状态 + 写 presence_log 记忆 + emit presence:changed
+    let from_state = brain.presence.current();
+    let transition_event = brain.presence.transition(
+        crate::presence::PresenceState::Online,
+        crate::presence::PresenceChangeReason::UserInteraction,
+    );
+
+    // 任务进行中：transition(Online) 被延迟（仅标记 pending_exit_to_online）。
+    // 此时给前端 toast 提示，不进入对话流程（任务结束后会自动切回 Online）。
+    if transition_event.is_none() && brain.presence.has_pending_exit() {
+        let task_kind = if from_state == crate::presence::PresenceState::Busy {
+            "knowledge_acquisition"
+        } else {
+            "memory_consolidation"
+        };
+        let hint = match from_state {
+            crate::presence::PresenceState::Busy => "我手上的事还没做完，等我一下",
+            crate::presence::PresenceState::Rest => "我正在整理记忆，等我做完就好",
+            _ => "等我把手上的事做完",
+        };
+        let _ = app.emit(
+            "presence:wake_deferred",
+            json!({
+                "character_id": &char_id,
+                "stream_id": &stream_id,
+                "from_state": from_state.as_str(),
+                "task": task_kind,
+                "hint": hint,
+            }),
+        );
+        // 必须同时回一个终态事件：前端只认 chat:* 终态来结算这条流并清除「思考中」。
+        // 只发 presence:wake_deferred（前端只弹 toast）会让气泡/桌宠永远停在思考状态。
+        let _ = app.emit(
+            "chat:cancelled",
+            json!({
+                "stream_id": &stream_id,
+                "character_id": &char_id,
+                "channel": channel_str,
+            }),
+        );
+        return Ok(());
+    }
+
+    if let Some(ref ev) = transition_event {
+        let from_ps = crate::presence::PresenceState::from_str(&ev.from);
+        let to_ps = crate::presence::PresenceState::from_str(&ev.to);
+        if matches!(to_ps, crate::presence::PresenceState::Online)
+            && matches!(from_ps, crate::presence::PresenceState::Rest | crate::presence::PresenceState::Offline)
+        {
+            brain.proactive.signal_waking_up();
+        }
+
+        let memory_text = brain.presence.memory_text(ev);
+        let memory = brain.memory.clone();
+        let text = memory_text;
+        let char_id_for_mem = char_id.clone();
+        tokio::spawn(async move {
+            let meta = serde_json::json!({
+                "channel": "presence",
+                "speaker": char_id_for_mem,
+                "listener": char_id_for_mem,
+                "perspective": "speaker",
+            });
+            let _ = memory
+                .add_memory_with_metadata(&text, MemoryType::ShortTerm, 0.4, vec!["presence_log".to_string(), "assistant".to_string()], meta)
+                .await;
+        });
+        let _ = app.emit(
+            "presence:changed",
+            json!({
+                "character_id": &char_id,
+                "from": ev.from,
+                "to": ev.to,
+                "reason": ev.reason,
+            }),
+        );
+
+        // 后端联动 桌宠 窗口可见性：
+        // 从 Offline 唤醒时 show 窗口（与 send_message_stream 路径保持一致）
+        if matches!(from_ps, crate::presence::PresenceState::Offline) {
+            if let Some(win) = app.get_webview_window(&char_id) {
+                let _ = win.show();
+                let _ = win.set_focus();
+                tracing::info!(
+                    "[Presence:{}] 连续点击唤醒，后端联动 show 窗口（从 Offline 恢复）",
+                    char_id
+                );
+            }
+        }
+    }
+
+    // 构造唤醒语境消息（由后端注入，前端不显示用户消息）
+    let message = match from_state {
+        crate::presence::PresenceState::Rest => "（用户通过连续点击把你从休息中唤醒）".to_string(),
+        crate::presence::PresenceState::Busy => "（用户轻轻打断了你正在忙碌的事）".to_string(),
+        _ => "（用户唤回了你的注意）".to_string(),
+    };
+
+    // 创建流式 emitter
+    let app_for_emitter = app.clone();
+    let sid_for_emitter = stream_id.clone();
+    let cid_for_emitter = char_id.clone();
+    let channel_for_emitter = channel_str.to_string();
+    let emitter: crate::pipeline::steps::generation::StreamEmitter =
+        Arc::new(move |chunk: &str| {
+            let _ = app_for_emitter.emit(
+                "chat:chunk",
+                json!({ "text": chunk, "stream_id": sid_for_emitter, "character_id": &cid_for_emitter, "channel": &channel_for_emitter }),
+            );
+        });
+
+    // 串行化 brain.think。唤醒同样要有等待上限，否则角色一旦卡死，
+    // 连续点击桌宠会永远得不到任何回应（连「在忙」的提示都不会出现）。
+    let _brain_lock = instance.think_lock.clone();
+    let _brain_guard = match tokio::time::timeout(THINK_LOCK_WAIT, _brain_lock.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            tracing::warn!(
+                "[Chat:{}] 唤醒时 think_lock 等待超过 {}s，放弃本次唤醒 stream_id={}",
+                char_id,
+                THINK_LOCK_WAIT.as_secs(),
+                stream_id
+            );
+            let _ = app.emit(
+                "chat:error",
+                json!({
+                    "error": "上一个请求长时间未结束，本次唤醒已放弃。请重试；若反复出现请重启应用。",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": channel_str,
+                }),
+            );
+            return Ok(());
+        }
+    };
+    state.reset_generation_cancel(&char_id);
+
+    brain.dialogue.set_channel("direct");
+    brain.set_stream_emitter(Some(emitter));
+
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(true);
+    }
+    // 获取焦点租约：唤醒 think 期间屏蔽其他角色的主动打断
+    let _focus_lease = crate::commands::proactive::FocusLeaseGuard::acquire(&char_id);
+    let result: VivianResult<AiResponse> = brain.think(&message, true).await;
+    drop(_focus_lease);
+    if let Some(router) = state.model_router.read().as_ref() {
+        router.set_emit_enabled(false);
+    }
+
+    brain.set_stream_emitter(None);
+    brain.dialogue.set_channel("wechat");
+    drop(_brain_guard);
+
+    if state.is_generation_cancelled(&char_id) {
+        let _ = app.emit("chat:cancelled", json!({ "stream_id": &stream_id, "character_id": &char_id, "channel": channel_str }));
+        return Ok(());
+    }
+
+    match result {
+        Ok(response) => {
+            // ignore 模式不展示；空文本仍结算流，允许纯贴纸并清理前端 typing 状态。
+            if response.response_mode == "ignore" {
+                tracing::info!(
+                    "[Chat:{}] ignore 模式，结算为空正文: stream_id={}",
+                    char_id,
+                    stream_id
+                );
+                let _ = app.emit("chat:done", json!({ "text": "", "response_mode": "ignore", "stream_id": &stream_id, "character_id": &char_id, "channel": &channel_str }));
+                return Ok(());
+            }
+            if !response.expression.is_empty() || response.motion != "idle" {
+                let _ = app.emit(
+                    "chat:meta",
+                    json!({
+                        "expression": response.expression,
+                        "expression_duration_ms": response.expression_duration_ms,
+                        "motion": response.motion,
+                        "source": "formal",
+                        "stream_id": &stream_id,
+                        "character_id": &char_id,
+                        "channel": channel_str,
+                    }),
+                );
+            }
+            crate::voice_diagnostics::mark_chat("done_emitted");
+            let _ = app.emit(
+                "chat:done",
+                json!({
+                    "text": response.text,
+                    "sticker": response.sticker,
+                    "motion": response.motion,
+                    "expression": response.expression,
+                    "expression_duration_ms": response.expression_duration_ms,
+                    "emotion_score": response.emotion_score,
+                    "user_emotion": response.user_emotion,
+                    "voice_message": false,
+                    "voice_audio_path": null,
+                    "voice_duration": null,
+                    "source": "formal",
+                    "stream_id": &stream_id,
+                    "character_id": &char_id,
+                    "channel": channel_str,
+                }),
+            );
+            brain.persona.tick_card_turn();
+            Ok(())
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = app.emit(
+                "chat:error",
+                json!({ "error": &msg, "stream_id": &stream_id, "character_id": &char_id, "channel": channel_str }),
+            );
+            Err(msg)
+        }
+    }
+}
+
+use crate::visual_evidence::ImageTurnResult;
+
+/// Recognize once, then pass complete evidence to the normal companion/chat stream.
+pub(crate) async fn respond_to_image(
+    state: &Arc<AppState>, app: &tauri::AppHandle, character_id: &str, channel: &str,
+    image: MessageImage, user_message: &str, image_path: Option<&str>, source: &str,
+) -> Result<ImageTurnResult, String> {
+    if crate::companion_quiet::active() { return Err("勿扰模式下已暂停陪伴分析，请先关闭勿扰".into()); }
+    let instance = state.get_character(Some(character_id))?;
+    let channel = if channel == "direct" { "broadcast" } else { channel };
+    let listeners = if channel == "broadcast" {
+        let listeners = present_listeners(state);
+        if listeners.is_empty() { return Err("当前没有在场角色，可以通过微信留言".into()); }
+        Some(listeners)
+    } else {
+        None
+    };
+    if !state.is_initialized() { return Err("智能体正在初始化，请稍候...".into()); }
+    if !main_api_configured(state) { return Err("MAIN_API_NOT_CONFIGURED".into()); }
+    if !state.config.read().get_typed::<bool>("ai.enable_vision", false) { return Err("VISION_NOT_ENABLED".into()); }
+    let router = state.model_router.read().as_ref().cloned().ok_or("模型路由未初始化")?;
+    if let Some(listeners) = listeners {
+        for listener in listeners {
+            emit_channel_activity(app, &listener, channel);
+        }
+    } else {
+        emit_channel_activity(app, character_id, channel);
+    }
+    let stream_id = uuid::Uuid::new_v4().to_string();
+    state.reset_generation_cancel(character_id);
+    if !matches!(channel, "direct" | "broadcast") {
+        let _ = app.emit("chat:start", json!({"message":user_message,"stream_id":stream_id,"character_id":character_id,"channel":channel,"source":"image"}));
+    }
+    let recent = instance.brain.dialogue.get_history().into_iter().rev().take(6)
+        .map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+    let context = if channel == "broadcast" { "用户公开分享了一张图片，在场所有人都会看到。".to_string() }
+        else { format!("最近对话（仅用于理解图片意图）：\n{recent}") };
+    let reply_stream_id = stream_id.clone();
+    let recognition = async {
+        Box::pin(crate::vision::recognize_image(&router, image, &context, Some(character_id))).await.map_err(|error| {
+            let _ = app.emit("chat:error", json!({"error":error,"stream_id":stream_id,"character_id":character_id,"channel":channel}));
+            error
+        })
+    };
+    // Keep the recognition/chat state machines off the WebView IPC thread's
+    // small Windows stack (WER 0xc00000fd in __chkstk when constructing them).
+    Box::pin(crate::visual_evidence::complete_image_turn(recognition, |description| async move {
+        if state.is_generation_cancelled(character_id) {
+            let _ = app.emit("chat:cancelled", json!({"stream_id":reply_stream_id,"character_id":character_id,"channel":channel}));
+            return Ok(String::new());
+        }
+        let mut metadata = json!({"kind":"image","source":source,"channel":channel,"visual_description":description});
+        if let Some(path) = image_path { metadata["image_path"] = json!(path); }
+        if channel == "broadcast" || channel == "direct" {
+            let replies = Box::pin(send_spoken_turn(state, app, user_message.into(), Some(metadata), Some(&description))).await?;
+            Ok(replies.into_iter().map(|reply| reply.reply).collect::<Vec<_>>().join("\n"))
+        } else {
+            let response = Box::pin(send_message_stream_impl(state, user_message.into(), reply_stream_id.clone(), Some(character_id.into()), Some(channel.into()),
+                None, Some(metadata), app.clone(), Some(&description))).await?;
+            Ok(response.map(|r| r.text).unwrap_or_default())
+        }
+    })).await
+}
+
+/// 发送本地图片消息
+#[cfg(test)]
+mod image_future_stack_tests {
+    use super::*;
+    use std::future::Future;
+
+    // Inspect concrete production Future types without constructing app state or
+    // making a vision request. The old inline chain occupied hundreds of KB.
+    #[test]
+    fn image_ipc_futures_fit_small_stacks() {
+        fn image_size<F: Future>(_: impl FnOnce(&'static Arc<AppState>, &'static tauri::AppHandle, &'static str, &'static str,
+            MessageImage, &'static str, Option<&'static str>, &'static str) -> F) -> usize { std::mem::size_of::<F>() }
+        fn command_size<F: Future>(_: impl FnOnce(tauri::WebviewWindow, State<'static, Arc<AppState>>, String, Option<String>, Option<String>, tauri::AppHandle) -> F) -> usize { std::mem::size_of::<F>() }
+        fn frozen_size<F: Future>(_: impl FnOnce(tauri::WebviewWindow, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
+        fn capture_size<F: Future>(_: impl FnOnce(tauri::AppHandle, State<'static, Arc<AppState>>) -> F) -> usize { std::mem::size_of::<F>() }
+        for (name, bytes) in [
+            ("respond_to_image", image_size(respond_to_image)),
+            ("send_image_message", command_size(send_image_message)),
+            ("screen_freeze_analyze", frozen_size(crate::screen_freeze::screen_freeze_analyze)),
+            ("companion_screen_analyze", capture_size(crate::commands::desktop_assistant::companion_screen_analyze)),
+        ] {
+            eprintln!("{name} Future: {bytes} bytes");
+            assert!(bytes < 32 * 1024, "{name} embeds a {bytes}-byte state machine in the IPC caller's stack");
+        }
+    }
+}
+
+/// 发送本地图片消息
+///
+/// 流程：
+/// 1. 读取图片 → base64 data URL，副本保存到 `<user_data_dir>/images/`。
+/// 2. 立即 emit `chat:user_image`，前端渲染用户图片气泡。
+/// 3. vision_describe 识图路由生成完整客观分析（不生成角色回复）。
+/// 4. 完整分析作为本轮证据注入普通对话链，由 companion/chat 生成角色回复。
+/// 5. 正常流式事件、表情、语音和历史落账；图片 metadata 保存完整识别结果。
+/// 6. 把图片描述写入记忆系统（content=description，metadata 携带 image_path）。
+#[tauri::command]
+pub async fn send_image_message(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    source_path: String,
+    character_id: Option<String>,
+    channel: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let char_id = character_id
+        .clone()
+        .unwrap_or_else(|| state.active_character_id.read().clone());
+    let channel_str = channel.unwrap_or_else(|| "wechat".to_string());
+    let channel_str = if channel_str == "direct" { "broadcast".to_string() } else { channel_str };
+
+    if let Some(partner)=crate::chat_partner::get(&char_id) {
+        crate::chat_partner_policy::validate_origin(window.label(), &channel_str)?;
+        return Box::pin(crate::sns_runtime::private_image(state.inner(),&app,partner,source_path,channel_str)).await;
+    }
+
+    let channel_str = state.get_character(Some(&char_id))?.brain.presence.current()
+        .message_channel(&channel_str).to_string();
+
+    // 主 LLM API 必须配置
+    if !main_api_configured(&state) {
+        let _ = app.emit("chat:config_error", json!({ "reason": "no_main_api", "character_id": &char_id, "channel": &channel_str }));
+        return Err("MAIN_API_NOT_CONFIGURED".to_string());
+    }
+
+    // 图片输入功能须启用
+    if !state.config.read().get_typed::<bool>("ai.enable_vision", false) {
+        let _ = app.emit("chat:error", json!({ "reason": "vision_disabled", "character_id": &char_id, "channel": &channel_str }));
+        return Err("VISION_NOT_ENABLED".to_string());
+    }
+
+    let src = std::path::PathBuf::from(&source_path);
+    // 图片读取/复制 + base64 编码均为阻塞操作，移入 spawn_blocking 避免卡住 tokio 工作线程
+    // （大图可达数 MB，base64 编码 CPU 密集）
+    let (mime, b64, rel_path) = tokio::task::spawn_blocking(
+        move || -> Result<(String, String, String), String> {
+            let bytes = match std::fs::read(&src) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err("图片文件不存在".to_string());
+                }
+                Err(e) => return Err(format!("读取图片失败: {}", e)),
+            };
+            let mime = crate::commands::config::detect_image_mime(&bytes).to_string();
+            let b64 = STANDARD.encode(&bytes);
+
+            // 保存副本到用户数据目录 images/ 下
+            let data_dir = crate::utils::path::get_user_data_dir();
+            let images_dir = data_dir.join("images");
+            crate::utils::path::ensure_dir(&images_dir)
+                .map_err(|e| format!("创建图片目录失败: {}", e))?;
+            let ext = src
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("png")
+                .to_lowercase();
+            let saved_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+            let saved_path = images_dir.join(&saved_name);
+            std::fs::write(&saved_path, &bytes).map_err(|e| format!("保存图片失败: {}", e))?;
+            let rel_path = format!("images/{}", saved_name);
+            Ok((mime, b64, rel_path))
+        },
+    )
+    .await
+    .map_err(|e| format!("图片处理任务失败: {}", e))??;
+    let data_url = format!("data:{};base64,{}", mime, b64);
+
+    let now_ts = chrono::Local::now().timestamp_millis() as f64 / 1000.0;
+
+    // 1. 立即推送用户图片消息（前端渲染图片气泡）
+    let image_listeners = if channel_str == "broadcast" { present_listeners(&state) } else { vec![char_id.clone()] };
+    for listener in &image_listeners {
+        let _ = app.emit("chat:user_image", json!({
+            "data_url":data_url,"image_path":rel_path,"timestamp":now_ts,
+            "character_id":listener,"channel":channel_str,
+        }));
+    }
+
+    let image_detail = state.config.read().get_typed::<String>("ai.image_detail", "auto".to_string());
+    let image = MessageImage { media_type: mime, data: b64, url: None, detail: Some(image_detail) };
+    let result = Box::pin(respond_to_image(state.inner(), &app, &char_id, &channel_str, image,
+        "📷 [图片]", Some(&rel_path), "chat")).await?;
+
+    // 6. 识图描述按「对话记忆」落库（content=description，metadata 携带 image_path）
+    //
+    // 这是一轮对话里对图片的观察，不是关于用户的事实：用 short_term 落库后
+    // record_kind 为 dialogue、retention 为 window —— 仍可被检索召回，但不会出现在
+    // 记忆页「长期记忆 · 事实与资料」里，也不会随窗口淘汰之外长期占据事实层。
+    let description_for_memory = result.description.clone();
+    for listener in &image_listeners {
+        let memory_mgr = state
+            .get_character(Some(listener))
+            .ok()
+            .map(|inst| inst.brain.memory.clone());
+        if let Some(memory_mgr) = memory_mgr {
+            let char_id_for_mem = memory_mgr.char_id().to_string();
+            let init_meta = json!({
+                "channel": &channel_str,
+                "speaker": "user",
+                "listener": if channel_str == "broadcast" { "all" } else { char_id_for_mem.as_str() },
+                "perspective": "speaker",
+                "knowledge_source": if channel_str == "broadcast" { "broadcast" } else { "direct" },
+            });
+            match memory_mgr
+                .add_memory_with_metadata(
+                    &description_for_memory,
+                    MemoryType::ShortTerm,
+                    0.4,
+                    vec![
+                        "image".to_string(),
+                        "shared_memory".to_string(),
+                        "user".to_string(),
+                        "assistant".to_string(),
+                    ],
+                    init_meta,
+                )
+                .await
+            {
+                Ok(item) => {
+                    if let Err(e) = memory_mgr.patch_memory_metadata(
+                        &item.id,
+                        json!({
+                            "kind": "image",
+                            "image_path": rel_path,
+                            "source": "chat",
+                            "role": "user",
+                            "memory_type": "short_term",
+                            "semantic_type": "shared_memory",
+                        }),
+                    ) {
+                        tracing::warn!("[send_image_message] 写入图片记忆 metadata 失败: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[send_image_message] 图片记忆写入失败: {}", e);
+                }
+            }
+        }
+
+    }
+    Ok(result.reply)
+}
+
+/// Open Loop 检测的调用包装：从 brain 取出 router 后转发到 conversation 模块
+async fn maybe_mark_open_loop(
+    conv: &crate::conversation::Conversation,
+    brain: &crate::brain::Brain,
+) {
+    crate::conversation::maybe_mark_open_loop(conv, &brain.memory, &brain.router).await;
+}
+
+// ============================================================================
+// 文件拖放：提取文件文本内容
+// ============================================================================
+
+/// 文件提取结果
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FileTextResult {
+    /// 文件名（含扩展名）
+    pub filename: String,
+    /// 提取的文本内容（已截断到 MAX_FILE_TEXT_CHARS）
+    pub text: String,
+    /// 文件类型分类：image / text / pdf / unsupported
+    pub file_type: String,
+    /// 是否因过长被截断
+    pub truncated: bool,
+    /// 原始字符数（截断前）
+    pub original_char_count: usize,
+}
+
+/// 文件文本最大字符数（约 4000 tokens，避免 prompt 过长）
+const MAX_FILE_TEXT_CHARS: usize = 12000;
+
+#[derive(serde::Serialize)]
+pub struct SharedFile {
+    pub path: String,
+    pub filename: String,
+    pub size: u64,
+}
+
+/// Keep an independent copy so a shared attachment survives moving its source.
+#[tauri::command]
+pub async fn save_shared_file(source_path: String,character_id:Option<String>) -> Result<SharedFile, String> {
+    let owner=character_id.as_deref().and_then(crate::chat_partner::get);
+    tokio::task::spawn_blocking(move || {
+        let _files=owner.as_ref().map(|partner|partner.memory_write_lock.lock());
+        if owner.as_ref().is_some_and(|partner|partner.is_deleted()){return Err("好友已删除".into());}
+        let source = std::path::Path::new(&source_path);
+        if !source.is_file() {
+            return Err("请选择文件，不能分享文件夹".to_string());
+        }
+        let filename = source.file_name().ok_or("文件名无效")?;
+        let root=crate::utils::path::get_user_data_dir();
+        let dir=if let Some(owner)=&owner {crate::sns_store::owned_directory(&root,&owner.id,false)?.join("media").join(uuid::Uuid::new_v4().to_string())}
+            else{root.join("attachments").join(uuid::Uuid::new_v4().to_string())};
+        std::fs::create_dir_all(&dir).map_err(|e| format!("保存文件失败：{e}"))?;
+        let target = dir.join(filename);
+        let size = match std::fs::copy(source, &target) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(format!("保存文件失败：{e}"));
+            }
+        };
+        Ok(SharedFile {
+            path: target.to_string_lossy().into_owned(),
+            filename: filename.to_string_lossy().into_owned(),
+            size,
+        })
+    }).await.map_err(|e| format!("保存文件任务失败：{e}"))?
+}
+
+/// 判断文件扩展名属于哪种类型
+pub(crate) fn classify_file_extension(ext: &str) -> &'static str {
+    let ext_lower = ext.to_lowercase();
+    // 图片
+    const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+    if IMAGE_EXTS.contains(&ext_lower.as_str()) {
+        return "image";
+    }
+    // PDF
+    if ext_lower == "pdf" {
+        return "pdf";
+    }
+    // 纯文本 / 代码 / 数据格式
+    const TEXT_EXTS: &[&str] = &[
+        "txt", "md", "markdown", "log", "csv", "tsv", "rtf",
+        // 代码
+        "rs", "py", "js", "ts", "tsx", "jsx", "mjs", "cjs",
+        "go", "java", "c", "cpp", "cc", "cxx", "h", "hpp", "hxx",
+        "cs", "rb", "php", "swift", "kt", "kts", "scala", "sc",
+        "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
+        "sql", "r", "lua", "pl", "vim", "el", "clj", "cljs",
+        "ex", "exs", "erl", "hs", "ml", "mli", "fs", "fsx", "vb",
+        "dart", "groovy", "gradle", "makefile", "mk", "cmake",
+        "dockerfile", "gitignore", "env",
+        // 数据
+        "json", "yaml", "yml", "xml", "toml", "ini", "conf", "cfg",
+        "properties", "gradle", "lock",
+        // 网页
+        "html", "htm", "css", "scss", "sass", "less", "svg",
+    ];
+    if TEXT_EXTS.contains(&ext_lower.as_str()) {
+        return "text";
+    }
+    "unsupported"
+}
+
+/// 用编码检测读取文本文件（兼容 GBK / Shift-JIS 等非 UTF-8 编码）
+pub(crate) fn read_text_with_encoding_detection(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    // 尝试 UTF-8 直接解析
+    if let Ok(s) = std::str::from_utf8(&bytes) {
+        return Ok(s.to_string());
+    }
+    // 非 UTF-8：用 chardetng 检测编码后解码
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(&bytes, true);
+    let encoding = detector.guess(None, true);
+    let (decoded, _, had_errors) = encoding.decode(&bytes);
+    if had_errors {
+        tracing::warn!("[extract_file_text] 编码检测可能有误: {:?}", encoding.name());
+    }
+    Ok(decoded.into_owned())
+}
+
+/// 保存前端拍摄得到的 base64 图片为临时文件，返回临时文件路径。
+///
+/// 前端通过 getUserMedia + canvas 拍照后，将图片以 data URL（base64）形式传入，
+/// 此命令解码后写入系统临时目录，返回完整路径供前端转交给 `send_image_message`。
+///
+/// - `base64_data`：不含 `data:<mime>;base64,` 前缀的纯 base64 字符串
+/// - `mime`：图片 MIME，如 `image/png` / `image/jpeg`，用于决定文件扩展名
+#[tauri::command]
+pub async fn save_temp_image(
+    base64_data: String,
+    mime: String,
+) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(base64_data.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    let ext = match mime.as_str() {
+        "image/png" => "png",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/bmp" => "bmp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+
+    let filename = format!("vivian_capture_{}.{}", uuid::Uuid::new_v4(), ext);
+    let temp_path = std::env::temp_dir().join(filename);
+
+    std::fs::write(&temp_path, &bytes)
+        .map_err(|e| format!("写入临时文件失败: {}", e))?;
+
+    Ok(temp_path.to_string_lossy().to_string())
+}
+
+/// 保存前端录制得到的 base64 语音为持久化文件，返回相对用户数据目录的路径。
+///
+/// 前端通过 `MediaRecorder` 录制音频（webm/ogg 等格式），以 data URL（base64）形式传入，
+/// 此命令解码后写入 `<user_data_dir>/audio/` 目录，返回相对路径（如 `audio/<uuid>.webm`）。
+/// 相对路径会写入对话历史的 metadata.audio_path，供后续播放和历史回看使用。
+///
+/// - `base64_data`：不含 `data:<mime>;base64,` 前缀的纯 base64 字符串
+/// - `mime`：音频 MIME，如 `audio/webm`，用于决定文件扩展名
+#[tauri::command]
+pub async fn save_voice_audio(
+    base64_data: String,
+    mime: String,
+    character_id:Option<String>,
+) -> Result<String, String> {
+    let bytes = STANDARD
+        .decode(base64_data.trim())
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    let ext = match mime.as_str() {
+        "audio/webm" => "webm",
+        "audio/ogg" => "ogg",
+        "audio/mp4" | "audio/m4a" => "m4a",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        _ => "webm",
+    };
+
+    let data_dir=crate::utils::path::get_user_data_dir();
+    let owner=character_id.as_deref().and_then(crate::chat_partner::get);
+    let _files=owner.as_ref().map(|partner|partner.memory_write_lock.lock());
+    if owner.as_ref().is_some_and(|partner|partner.is_deleted()){return Err("好友已删除".into());}
+    let audio_dir=if let Some(owner)=&owner {crate::sns_store::owned_directory(&data_dir,&owner.id,false)?.join("media")}else{data_dir.join("audio")};
+    crate::utils::path::ensure_dir(&audio_dir)
+        .map_err(|e| format!("创建音频目录失败: {}", e))?;
+
+    let saved_name = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+    let saved_path = audio_dir.join(&saved_name);
+    std::fs::write(&saved_path, &bytes)
+        .map_err(|e| format!("保存音频文件失败: {}", e))?;
+
+    let rel_path=saved_path.strip_prefix(&data_dir).map_err(|e|e.to_string())?.to_string_lossy().replace('\\',"/");
+    Ok(rel_path)
+}
+
+/// 提取文件文本内容。
+///
+/// 支持的文件类型：
+/// - **图片**（png/jpg/jpeg/gif/webp/bmp）：返回 `file_type="image"`，前端转走 `send_image_message`
+/// - **PDF**：用 pdf-extract 提取文本
+/// - **纯文本/代码/数据文件**：按编码检测读取（兼容 GBK 等）
+/// - **其他**：返回 `file_type="unsupported"`
+///
+/// 文本内容截断到 `MAX_FILE_TEXT_CHARS`（12000 字符，约 4000 tokens）。
+#[tauri::command]
+pub async fn extract_file_text(source_path: String) -> Result<FileTextResult, String> {
+    let path = std::path::PathBuf::from(&source_path);
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    if !path.is_file() {
+        return Err("文件不存在或不是普通文件".to_string());
+    }
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let file_type = classify_file_extension(ext);
+
+    match file_type {
+        "image" => {
+            // 图片：仅返回分类，前端转走 send_image_message
+            Ok(FileTextResult {
+                filename,
+                text: String::new(),
+                file_type: "image".to_string(),
+                truncated: false,
+                original_char_count: 0,
+            })
+        }
+        "pdf" => {
+            // PDF：用 pdf-extract 提取文本（CPU 密集，放到 blocking 线程）
+            let path_clone = path.clone();
+            let raw_text = tokio::task::spawn_blocking(move || {
+                pdf_extract::extract_text(&path_clone)
+            })
+            .await
+            .map_err(|e| format!("PDF 提取任务失败: {}", e))?
+            .map_err(|e| format!("PDF 文本提取失败: {}", e))?;
+
+            let char_count = raw_text.chars().count();
+            let (text, truncated) = if char_count > MAX_FILE_TEXT_CHARS {
+                let truncated_text: String = raw_text.chars().take(MAX_FILE_TEXT_CHARS).collect();
+                (truncated_text, true)
+            } else {
+                (raw_text, false)
+            };
+
+            Ok(FileTextResult {
+                filename,
+                text,
+                file_type: "pdf".to_string(),
+                truncated,
+                original_char_count: char_count,
+            })
+        }
+        "text" => {
+            let raw_text = read_text_with_encoding_detection(&path)?;
+            let char_count = raw_text.chars().count();
+            let (text, truncated) = if char_count > MAX_FILE_TEXT_CHARS {
+                let truncated_text: String = raw_text.chars().take(MAX_FILE_TEXT_CHARS).collect();
+                (truncated_text, true)
+            } else {
+                (raw_text, false)
+            };
+
+            Ok(FileTextResult {
+                filename,
+                text,
+                file_type: "text".to_string(),
+                truncated,
+                original_char_count: char_count,
+            })
+        }
+        _ => {
+            Ok(FileTextResult {
+                filename,
+                text: String::new(),
+                file_type: "unsupported".to_string(),
+                truncated: false,
+                original_char_count: 0,
+            })
+        }
+    }
+}

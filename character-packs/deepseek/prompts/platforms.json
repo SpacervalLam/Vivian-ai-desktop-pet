@@ -1,0 +1,12 @@
+[
+  {
+    "name": "bilibili",
+    "query_modifier": "site:bilibili.com",
+    "focus_hint": "B站知识区、AI/编程、数码评测、游戏梗"
+  },
+  {
+    "name": "weibo",
+    "query_modifier": "site:weibo.com 微博热搜",
+    "focus_hint": "微博科技数码热搜、AI 话题、网络流行语"
+  }
+]

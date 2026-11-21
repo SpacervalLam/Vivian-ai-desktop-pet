@@ -1,0 +1,4125 @@
+import { useGlobalTheme } from './hooks/useGlobalTheme';
+import { CHARACTER_IDS, characterName, isCharacterId, type CharacterId } from './characters';
+import { characterVisuals } from './characterPackages';
+import CHARACTER_WINDOW_SIZE from './chibi/windowSize.json';
+import ClipboardHint from './components/ClipboardHint';
+import { useCompanionFeedback } from './hooks/useCompanionFeedback';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { getCurrentWindow, currentMonitor, LogicalSize, LogicalPosition, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window';
+import type { Effect } from '@tauri-apps/api/window';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { listen, emit, type UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { useAppStore } from './stores/useAppStore';
+import { useTranslation } from 'react-i18next';
+import {
+  useConfig,
+  useEnvironment,
+  useMood,
+  useProactive,
+  useTTS,
+  useExtractFileText,
+  type FileTextResult,
+} from './hooks/useTauriCommands';
+import type { ProactiveMessage, ProactiveTickContext, TtsConfig } from './types';
+import { ModelCanvas, type ModelRendererHandle } from './components/ModelCanvas';
+import { syncPresenceSnapshot } from './utils/presenceSnapshot';
+import type { ChibiInteraction, PetInteractionMetrics } from './components/ChibiPetCanvas';
+import VideoAnimationLayer from './components/VideoAnimationLayer';
+import SystemTray from './components/SystemTray';
+import type { ToastType, ToastAction } from './components/Toast';
+import { findProviderPresetByEndpoint } from './components/settings/providerPresets';
+import { ChatController } from './controllers/ChatController';
+import { BubbleController } from './controllers/BubbleController';
+import { TtsStreamQueue } from './controllers/TtsStreamQueue';
+import { LifecycleController } from './controllers/LifecycleController';
+import { useHiding } from './hooks/useHiding';
+import type { Corner, HideReason } from './hooks/useHiding';
+import { useSmartPositioning } from './hooks/useSmartPositioning';
+import { useGameCompanion } from './hooks/useGameCompanion';
+import { positioningCoordinator } from './hooks/positioningCoordinator';
+import { FLEE_TAKEOVER_HOLD_MS } from './chibi/fleeTrack';
+import { changeLanguage } from './i18n';
+import type { BubblePosition } from './components/MessageBubble';
+import { getCharacterId } from './characterContext';
+import { stripActions } from './utils/ActionText';
+import { placeBubble } from './utils/bubbleLayout';
+import { bubbleContentKey, STICKER_BUBBLE_SIZE } from './utils/bubbleContent';
+import { raiseWindow, isWindowOnScreen, RAISE_UNLISTEN } from './utils/windowRaiser';
+import { openRoomWindow } from './utils/roomWindow';
+import { buildPetRectQuery, buildPrewarmQuery, emitPetReveal, PET_PREWARM_READY_EVENT, type PetPrewarmReady, type PetRect } from './utils/petReveal';
+import HoldProgressRing from './components/HoldProgressRing';
+
+const ENVIRONMENT_UPDATE_INTERVAL_MS = 30_000;
+/** 兜底轮询间隔（防 pet:action_pending 事件丢失；事件驱动为主，降频减少 IPC） */
+const PET_ACTION_DRAIN_INTERVAL_MS = 2500;
+const IDLE_AWAY_THRESHOLD_SECONDS = 300;
+
+/** 等待 Brain 初始化的超时（毫秒），超时后用兜底问候
+ *  预加载流程包含种子记忆注入与情绪/语义语料嵌入，远程嵌入可能需要较长时间，
+ *  因此超时放宽到 120s；后端 `send_message` 在初始化完成前也会拒绝请求作为双保险。 */
+const APP_READY_TIMEOUT_MS = 120_000;
+
+/** 气泡子窗口尺寸（逻辑像素） */
+const BUBBLE_WINDOW_WIDTH = 340;
+const BUBBLE_WINDOW_HEIGHT = 140;
+/** 气泡动态扩大的高度上下限（流式输出时按文本长度自适应） */
+const BUBBLE_WINDOW_MIN_HEIGHT = 100;
+const BUBBLE_WINDOW_MAX_HEIGHT = 420;
+
+
+/** 长按桌宠打开心智观察器：显示环形进度前的静默期（毫秒） */
+const HOLD_RING_DELAY_MS = 200;
+/** 长按桌宠打开心智观察器的总时长（毫秒） */
+const HOLD_OPEN_TOTAL_MS = 1000;
+/** 长按开始多久后提前去加载心智观察器窗口（毫秒）。
+ *
+ *  窗口的加载（WebView 冷启 + React 挂载 + 首屏数据）是这条链上最慢的一环，
+ *  而长按判定本身要 1s。等到长按成立才去建窗口，用户松手后还得再等一截才看到
+ *  界面；提前起步能把这截等待基本吃干净。0.1s 是个折中：比进度环（0.2s）更早，
+ *  又不至于让「点一下 / 拖走」这类根本不会成立的手势白建窗口。 */
+const HOLD_PREWARM_DELAY_MS = 100;
+/** 预热就绪回执的等待上限（毫秒）：超时就直接按常规路径打开。
+ *  回执本身只是一条事件，丢了（IPC 异常 / 监听未挂上）不该让长按毫无反应——
+ *  宁可少一段入场动画，也不能不打开。 */
+const PREWARM_READY_WAIT_MS = 1200;
+/** 后端 drag:dizzy 事件未带时长时的兜底晕眩时长（毫秒） */
+const DIZZY_FALLBACK_MS = 1500;
+
+/** 根据文本长度估算气泡窗口所需高度（逻辑像素）
+ *
+ *  气泡内文本 maxWidth≈300、padding 10x14、fontSize 14、lineHeight 1.55。
+ *  CJK 与英文混排时按 ~20 字/行估算，同时尊重显式换行。
+ */
+function estimateBubbleHeight(text: string): number {
+  if (!text) return BUBBLE_WINDOW_HEIGHT;
+  const lines = text.split('\n');
+  let totalLines = 0;
+  for (const line of lines) {
+    const len = line.length;
+    totalLines += Math.max(1, Math.ceil(len / 20));
+  }
+  // 每行 ~22px + 上下 padding 20 + 尾巴 8 + 容器边距 16
+  const h = totalLines * 22 + 44;
+  return Math.min(BUBBLE_WINDOW_MAX_HEIGHT, Math.max(BUBBLE_WINDOW_MIN_HEIGHT, h));
+}
+/**
+ * 用户对桌宠的动作 —— 与后端 `generate_pet_reaction` 的 `action` 参数一一对应。
+ *
+ * 前四个来自 ChibiPetCanvas 的点击手势与长按进度环（`rough_click` 是画布判定
+ * 「戳得太频繁/太急」后的结果），后两个来自后端甩飞线程发出的 `drag:dizzy` 事件。
+ */
+type PetAction =
+  | 'single_click'
+  | 'double_click'
+  | 'rough_click'
+  | 'long_press'
+  | 'drag'
+  | 'fast_drag'
+  | 'edge_bounce';
+
+let petSfxContext: AudioContext | null = null;
+
+/** 用户手势内合成一枚极短提示音，不读取文件也不阻塞本地回应。 */
+function playPetTapSound(characterId: CharacterId): void {
+  try {
+    const AudioContextCtor = window.AudioContext
+      || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return;
+    petSfxContext ??= new AudioContextCtor();
+    const ctx = petSfxContext;
+    if (ctx.state === 'suspended') void ctx.resume().catch(() => {});
+    const notes = characterVisuals(characterId).notificationNotes ?? ({ vivian: [880, 1175], nana: [740, 988] }[characterId] ?? [784, 1047]);
+    const startAt = ctx.currentTime;
+    notes.forEach((frequency, index) => {
+      const oscillator = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const noteStart = startAt + index * 0.055;
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(frequency, noteStart);
+      gain.gain.setValueAtTime(0.0001, noteStart);
+      gain.gain.exponentialRampToValueAtTime(0.055, noteStart + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.09);
+      oscillator.connect(gain);
+      gain.connect(ctx.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteStart + 0.1);
+    });
+  } catch {
+    // 音频设备不可用时仍保留文字和动作反馈。
+  }
+}
+
+/** Toast 子窗口尺寸（逻辑像素）—— 覆盖屏幕右下角区域以容纳堆叠 toast */
+const TOAST_WINDOW_WIDTH = 400;
+const TOAST_WINDOW_HEIGHT = 320;
+
+/** 记忆向量重建进度 toast 的固定 key：进度更新原地刷新同一条 toast，避免堆叠 */
+const REBUILD_TOAST_KEY = 864201;
+/** 嵌入模型就绪 toast 的固定 key：防止 listener 泄漏导致重复弹窗时原地刷新 */
+const OLLAMA_READY_TOAST_KEY = 864202;
+
+/** 后端 tool:confirmation_request 事件载荷（原样转发给 toast 子窗口渲染三按钮确认卡片） */
+interface ToolConfirmPayload {
+  request_id: number;
+  tool: string;
+  arguments: unknown;
+  reason: string;
+  risk_level: 'low' | 'medium' | 'high';
+  char_id: string;
+  allow_always_scope: 'persistent' | 'session';
+}
+
+/**
+ * 安全调用 Tauri unlisten 函数。
+ * Tauri v2 的 listen() 在 Rust 端通过 eval() 异步注册 JS 侧监听器，但 invoke 在 eval
+ * 完成前就返回 eventId。若 React StrictMode 在 listen 刚 resolve 时立即清理 effect，
+ * unlisten() 会在 listeners[eventId] 尚未写入时调用 unregisterListener，抛出
+ * "Cannot read properties of undefined (reading 'handlerId')"。unlisten 运行时是 async
+ * 函数（类型标注为 () => void），未 catch 的 rejection 成为 uncaught promise error。
+ */
+function safeUnlisten(fn?: (() => void) | undefined): void {
+  if (!fn) return;
+  try {
+    void Promise.resolve(fn()).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * 等待后端 Brain 初始化完成。
+ * 先查 is_initialized（防止事件已发过后才监听），再监听 app:ready 事件，带超时兜底。
+ */
+async function waitForAppReady(): Promise<void> {
+  const cid = getCharacterId();
+  console.log(`[DIAG] waitForAppReady START, char=${cid}, time=${Date.now()}`);
+  // 快速路径：Brain 可能已初始化完成
+  try {
+    const ready = await invoke<boolean>('is_initialized');
+    console.log(`[DIAG] is_initialized=${ready}, char=${cid}`);
+    if (ready) {
+      console.log(`[DIAG] waitForAppReady FAST PATH done, char=${cid}`);
+      return;
+    }
+  } catch {
+    /* ignore */
+  }
+  // 监听 app:ready 事件
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    void listen('app:ready', finish).then((un) => {
+      // 如果事件已错过，unlisten 后走超时兜底
+      if (done) un();
+      else setTimeout(() => { un(); finish(); }, APP_READY_TIMEOUT_MS);
+    });
+    // 超时兜底，确保 UI 不会永远卡住
+    setTimeout(finish, APP_READY_TIMEOUT_MS);
+  });
+  console.log(`[DIAG] waitForAppReady DONE, char=${cid}, time=${Date.now()}`);
+}
+
+/** GPT-SoVITS 服务就绪等待上限（毫秒）。
+ *  后端 wait_for_health 自身超时 60s，前端略短以便更早走 fallback。 */
+const GPT_SOVITS_READY_TIMEOUT_MS = 30_000;
+/** 轮询间隔（与后端 wait_for_health 一致） */
+const GPT_SOVITS_POLL_INTERVAL_MS = 1_500;
+
+/** 等待 GPT-SoVITS 服务进入 running 状态。
+ *
+ *  仅在配置 engine=gptsovits 且开启 auto_start 时调用：
+ *  auto_start 触发的服务启动是异步的，问候朗读若抢先发起会连接失败。
+ *  running 立即返回；crashed/stopped 或超时则放弃（交给后端 fallback）。 */
+async function waitForGptSoVitsReady(): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < GPT_SOVITS_READY_TIMEOUT_MS) {
+    try {
+      const st = await invoke<{ status: string }>('get_gpt_sovits_service_status');
+      if (st.status === 'running') {
+        console.log(`[Lifecycle] GPT-SoVITS 就绪, 耗时 ${Date.now() - start}ms`);
+        return;
+      }
+      if (st.status === 'crashed' || st.status === 'stopped') {
+        console.warn(`[Lifecycle] GPT-SoVITS 状态=${st.status}, 放弃等待走 fallback`);
+        return;
+      }
+    } catch {
+      /* 查询失败继续轮询 */
+    }
+    await new Promise((r) => setTimeout(r, GPT_SOVITS_POLL_INTERVAL_MS));
+  }
+  console.warn(`[Lifecycle] GPT-SoVITS 等待超时(${GPT_SOVITS_READY_TIMEOUT_MS}ms), 走 fallback`);
+}
+
+/** 已打开的子窗口引用追踪。
+ *  防止 JS 侧 WebviewWindow 引用被 GC 回收，同时用于陈旧引用检测：
+ *  getByLabel 可能返回已关闭但未清理的窗口引用，isVisible() 可区分活性。 */
+const CHILD_WINDOWS = new Map<string, WebviewWindow>();
+
+/** 已注册过关闭清理的子窗口 label。
+ *  openWindow 的"复用已有窗口"路径可能被反复调用（右键菜单/快捷键/聚焦恢复），
+ *  onCloseRequested 是追加式订阅，不去重的话每次调用都多挂一个监听器
+ *  （长驻进程内无界累积）。窗口真正关闭时在清理回调里摘除本标记。 */
+const CLOSE_CLEANUP_REGISTERED = new Set<string>();
+
+/** 共享子窗口集合：任一角色右键菜单打开的都是同一实例。
+ *  这些窗口在顶部提供 Vivian / Nana / 综合 三视图切换，不绑定具体角色。
+ *  其余子窗口（bubble/toast）按角色隔离，各自独立。 */
+// 注：room（3D 公寓）不在其中——它有独立的固定全屏/无边框/透明形态，
+// 走 utils/roomWindow 的专用入口，不走这里的通用 openWindow。
+const SHARED_SUBWINDOWS = new Set(['chat', 'config', 'memory', 'input']);
+
+/** 子窗口 label 生成。
+ *  - 共享子窗口（chat/config/memory）：返回 base label，所有角色复用同一实例
+ *  - 角色私有子窗口（bubble/toast）：按 `${charId}_${base}` 前缀隔离 */
+function charScopedLabel(base: string): string {
+  if (SHARED_SUBWINDOWS.has(base)) return base;
+  return `${getCharacterId() ?? 'main'}_${base}`;
+}
+
+/** 自显形窗口的兜底超时：子窗口若因事件丢失或脚本异常始终没显形，到这个点强制显示，
+ *  避免窗口永远不出现（长按看起来毫无反应）。1600ms 是给 webview 冷启动留的余量。 */
+const SELF_REVEAL_FALLBACK_MS = 1600;
+
+/** 给「显形归子窗口」的窗口挂一个兜底显形。
+ *
+ *  子窗口负责显形是入场动画的前提（先摆好首帧再让窗口出现），代价是显形这条链
+ *  多了一环：事件没送到、或它自己脚本异常，窗口就会一直不出现。这里补一个超时兜底，
+ *  到点还没在屏上就自己把它放出来——宁可直接显形、没有动画，也不能让长按没反应。
+ *  最小化也算「没在屏上」，所以还原要在 show 之前。
+ *
+ *  show 之后必须补 setFocus：show / unminimize 是投递到主线程队列的即发即忘操作，
+ *  而 tao 的 set_focus 同步读窗口的影子标志决定是否激活，不等状态落定就会静默
+ *  空转——窗口会回到屏幕上却停在 Z 序后排（看得见、点不到前面）。 */
+function armSelfRevealFallback(win: WebviewWindow): void {
+  window.setTimeout(() => {
+    void (async () => {
+      try {
+        if (await isWindowOnScreen(win)) return;
+        await win.unminimize();
+        await win.show();
+        // 等可见标志落定再激活，否则 setFocus 会被 tao 的 is_visible 门跳过
+        for (let i = 0; i < 12; i++) {
+          if (await isWindowOnScreen(win)) break;
+          await new Promise((resolve) => window.setTimeout(resolve, 10));
+        }
+        await win.setFocus();
+      } catch {
+        /* 窗口已销毁 */
+      }
+    })();
+  }, SELF_REVEAL_FALLBACK_MS);
+}
+
+/** 创建中的窗口：label → 创建落地（`tauri://created` / `tauri://error`）的 promise。
+ *
+ *  Tauri 的窗口创建是异步的：`new WebviewWindow()` 返回时 label 还没进 Rust 侧的
+ *  窗口注册表，这段时间里 `getByLabel` 查不到它、`CHILD_WINDOWS` 里却已经有引用。
+ *  若第二个调用者在这段窗口期走到「查注册表」那一步，就会用同一个 label 再建一次，
+ *  必然报 label 冲突，对外表现是「点了毫无反应」。
+ *
+ *  预热正好把这段窗口期放大了：窗口在长按 0.1s 时开始建，长按 1s 成立时才去打开，
+ *  两个动作分处不同的调用栈，靠「碰巧建完了」是不可靠的。所以这里显式等它落地。 */
+const WINDOW_CREATION = new Map<string, Promise<void>>();
+
+/** 等创建落地的最长时间（毫秒）：创建卡死时不能把后续调用一起拖住 */
+const WINDOW_CREATION_TIMEOUT_MS = 3000;
+
+/** 桌宠窗口当前的矩形（物理像素）；取不到返回 null（调用方退化为无入场动画） */
+async function readPetRect(): Promise<PetRect | null> {
+  try {
+    const petWin = getCurrentWindow();
+    const [pos, size] = await Promise.all([petWin.outerPosition(), petWin.outerSize()]);
+    return { x: pos.x, y: pos.y, w: size.width, h: size.height };
+  } catch {
+    return null;
+  }
+}
+
+/** 销毁一个「预热出来但没派上用场」的窗口。
+ *
+ *  长按中止（松手 / 拖动超容差）时调用：这个窗口是那次长按的私产，长按没成立就
+ *  不该留下任何东西——既不能显示，也不该在后台常驻（心智观察器是整页应用，
+ *  白留一份 webview 的内存不划算）。下一次长按会重新预热，成本已经被 0.9s 的
+ *  提前量吸收掉了。
+ *
+ *  一道保险：窗口若已经被别的入口摆上屏（长按期间用户又从托盘点了一次），
+ *  就不再销毁——那已经是用户要看的东西，不能替他关掉。
+ *
+ *  调用前提：句柄来自「预热时 getByLabel 查不到、于是新建」的那条路，所以关掉的
+ *  一定是本次预热自己建的窗口。已存在（被最小化 / hide）的窗口走的是认领分支，
+ *  压根不会拿到这里来销毁——那种窗口里有用户可能没保存的输入。 */
+async function destroyPrewarmedWindow(win: WebviewWindow): Promise<void> {
+  try {
+    if (await isWindowOnScreen(win)) return;
+    await win.close();
+  } catch {
+    /* 已销毁 / IPC 失败：无需处理 */
+  }
+}
+
+/** 一次长按预热会话。
+ *
+ *  生命周期：长按 0.1s 时开一个会话（建窗口 / 认领已有窗口），长按 1s 成立时
+ *  「放行」（走常规打开路径让它显形），中途松手则「作废」（销毁自己建的窗口）。
+ *  会话号随 URL 带给子窗口、再随就绪回执带回来，用于把回执对上号
+ *  （memory 是共享窗口，两个角色桌宠可能各有一场预热，回执只该被发起者认领）。 */
+interface MemoryPrewarmSession {
+  session: number;
+  /** 预热链（建窗口 / 认领已有窗口）；放行前先等它落地，避免与创建抢跑 */
+  chain: Promise<void>;
+  /** 本次会话新建出来的窗口句柄，创建完成后回填。
+   *  为 null 有两种含义：还没回填，或这次是「认领已有窗口」（本来就没有要销毁的东西）。 */
+  win: WebviewWindow | null;
+  /** 子窗口已挂好 `pet:reveal` 监听（或内容早已加载完）——此时发显形事件才不会丢 */
+  childReady: boolean;
+  /** 长按已成立，在等子窗口就绪 */
+  committed: boolean;
+  /** 会话已作废（长按中止） */
+  aborted: boolean;
+  /** 等就绪回执的兜底定时器（回执丢了也得能打开） */
+  readyTimer: number | null;
+}
+
+/** 作废一场预热会话。
+ *
+ *  `session.win` 还没回填（窗口正在创建）时不在这里销毁——预热链 await 到句柄后
+ *  会看到 `aborted` 并就地销毁，那里才不会和创建抢跑。 */
+function abortPrewarmSession(session: MemoryPrewarmSession): void {
+  session.aborted = true;
+  if (session.readyTimer !== null) {
+    window.clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+  }
+  if (session.win) void destroyPrewarmedWindow(session.win);
+}
+
+/** 放掉一场预热会话：腾出会话位、清等待定时器、执行长按动作（真正打开/收起窗口）。
+ *
+ *  抽成模块函数是为了让「长按成立」与「子窗口回执」两条路径共用同一套收尾——
+ *  它们分处不同的回调与 effect，写成组件内闭包会互相看不见对方。
+ *  会话位已经不是它了（被新长按顶掉 / 已作废）就什么都不做。 */
+function finishPrewarm(
+  slot: { current: MemoryPrewarmSession | null },
+  session: MemoryPrewarmSession,
+  action: () => void,
+): void {
+  if (slot.current !== session) return;
+  slot.current = null;
+  if (session.readyTimer !== null) {
+    window.clearTimeout(session.readyTimer);
+    session.readyTimer = null;
+  }
+  action();
+}
+
+/** 透明无边框窗口在首次显示前挂上非客户区绘制保护。
+ *
+ *  Windows 仍会给 `decorations:false` 的窗口绘制非客户区（标题栏）。透明窗口上这层
+ *  像素不会被 WebView 内容覆盖，会表现为窗口顶部多出一条原生标题栏，并压掉一截
+ *  客户区。必须在窗口第一次 `show()` 之前挂保护，否则标题栏已经画进窗口表面。 */
+async function guardBorderless(label: string): Promise<void> {
+  try { await invoke('guard_borderless_window', {label}); } catch { /* 非 Windows / 旧后端：忽略 */ }
+}
+
+/** 创建或聚焦独立窗口。
+ *  复用判定：`isVisible()` 抛异常才说明引用已失效（窗口已销毁），此时丢弃引用重新创建；
+ *  它返回 false 只说明窗口被 hide 过，仍然复用——raiseWindow 负责把它 show 回来。
+ *  窗口已存在却去重建是走不通的（label 冲突），所以「存在即复用」是唯一安全的规则。
+ *
+ *  返回值：最终落到这个 label 上的窗口（新建或复用），创建失败时为 null。
+ *  绝大多数调用方只关心副作用，忽略即可；预热需要它来在会话作废时销毁自己建的那个。 */
+async function openWindow(
+  label: string,
+  view: string,
+  title: string,
+  width: number,
+  height: number,
+  options: {
+    resizable?: boolean;
+    transparent?: boolean;
+    decorations?: boolean;
+    shadow?: boolean;
+    /** 是否始终置顶（仅状态面板等需置顶的窗口传 true，其余默认 false） */
+    alwaysOnTop?: boolean;
+    /** 原生窗口效果（Mica/Acrylic 等），用于实现 OS 级毛玻璃模糊 */
+    windowEffects?: { effects: Effect[]; color?: string };
+    minWidth?: number;
+    minHeight?: number;
+    /** 是否全屏覆盖（无边框 + 透明 + 占满屏幕） */
+    fullscreen?: boolean;
+      /** 追加到子窗口 URL 的额外 query（如 guide=1） */
+      extraQuery?: string;
+    /**
+     * 由子窗口自己决定显形时机——两条路径都不代它显形：创建时不自动 show，
+     * 复用时也**不**还原/显示（只做 Z 序与焦点）。
+     * 用于「先摆好首帧再出现」的入场动画：心智观察器从桌宠矩形长到全屏时，
+     * 若沿用「created 即 show」会先闪一帧全屏大图；已被最小化时更明显——
+     * 先还原一次再播一遍入场，就是呼出了两回。超时未显形时有兜底显示。
+     */
+    selfReveal?: boolean;
+    /**
+     * 预热模式：窗口建出来加载，但**连兜底显形都不挂**。
+     *
+     *  与 selfReveal 的区别就在那个兜底：兜底的前提是「这个窗口本来就该出现，
+     *  只是显形链慢/断了」；而预热窗口该不该出现取决于长按成不成立，此刻还没有
+     *  答案——挂上兜底就成了「长按没成立，窗口自己冒出来」。所以预热期间一律
+     *  不上屏，显形改由调用方在长按成立后驱动（那时走的是复用路径，兜底照常挂）。
+     */
+    prewarm?: boolean;
+    /**
+     * 窗口已经打开且可见时的回调——取代「只聚焦就返回」的默认行为。
+     *
+     * 不传则维持原样（提升 Z 序 + 聚焦）。需要重播入场动画的窗口传它：
+     * 复用已有窗口既不能 navigate（会整页 reload、丢掉当前页签与输入），
+     * 也不能重建（label 冲突），所以只能由子窗口收到通知后自己再播一遍。
+     */
+    onExisting?: (win: WebviewWindow) => void;
+  } = {},
+  t?: (key: string) => string,
+  retryOnCreationFailure = true,
+): Promise<WebviewWindow | null> {
+  // 按角色区分 label，避免多角色窗口的子窗口冲突
+  const fullLabel = charScopedLabel(label);
+
+  // 有同 label 的窗口正在创建 → 先等它落地（否则下面的注册表查询查不到它，
+  // 会走到重名重建那条死路，详见 WINDOW_CREATION 的说明）
+  const inFlight = WINDOW_CREATION.get(fullLabel);
+  if (inFlight) await inFlight;
+
+  // 预热窗口的显形完全由调用方驱动，兜底显形一律不挂
+  const selfReveal = options.selfReveal ?? false;
+  const armRevealFallback = selfReveal && !options.prewarm;
+
+  // 仅活性探测失败时清理引用。隐藏窗口的 isVisible() 返回 false，提到前台失败时仍应保留窗口。
+  // 1. 检查追踪缓存：窗口仍在存活 → 直接聚焦
+  const tracked = CHILD_WINDOWS.get(fullLabel);
+  if (tracked) {
+    let alive = false;
+    try {
+      await tracked.isVisible();
+      alive = true;
+    } catch {
+      // 窗口已销毁，isVisible 抛异常 → 清理缓存
+      alive = false;
+    }
+    if (alive) {
+      await raiseWindow(tracked, label, selfReveal).catch(() => {});
+      options.onExisting?.(tracked);
+      if (armRevealFallback) armSelfRevealFallback(tracked);
+      return tracked;
+    }
+    CHILD_WINDOWS.delete(fullLabel);
+  }
+
+  // 2. 检查 Tauri 运行时注册表（捕获 getByLabel 返回的陈旧引用）
+  try {
+    const existing = await WebviewWindow.getByLabel(fullLabel);
+    if (existing) {
+      let alive = false;
+      try {
+        await existing.isVisible();
+        alive = true;
+      } catch {
+        // 陈旧引用：窗口已关闭但标签未清理 → 继续创建新窗口
+        alive = false;
+      }
+      if (alive) {
+        // 窗口确实还活着 → 纳入追踪并聚焦
+        CHILD_WINDOWS.set(fullLabel, existing);
+        if (!CLOSE_CLEANUP_REGISTERED.has(fullLabel)) {
+          CLOSE_CLEANUP_REGISTERED.add(fullLabel);
+          void existing.onCloseRequested(() => {
+            CHILD_WINDOWS.delete(fullLabel);
+            CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
+            const u = RAISE_UNLISTEN.get(label);
+            if (u) { u(); RAISE_UNLISTEN.delete(label); }
+          });
+        }
+        await raiseWindow(existing, label, selfReveal).catch(() => {});
+        options.onExisting?.(existing);
+        if (armRevealFallback) armSelfRevealFallback(existing);
+        return existing;
+      }
+    }
+  } catch {
+    // getByLabel 异常 → 继续创建新窗口
+  }
+
+  // 3. 创建新窗口
+  const resizable = options.resizable ?? true;
+  const transparent = options.transparent ?? false;
+  const isFullscreen = label === 'memory' || (options.fullscreen ?? false);
+  try {
+    let creationFailed = false;
+    const win = new WebviewWindow(fullLabel, {
+      // 共享子窗口不绑定 character_id，由窗口内部三视图切换决定数据源
+      url: SHARED_SUBWINDOWS.has(label)
+        ? `/?view=${view}${options.extraQuery ? `&${options.extraQuery}` : ''}`
+        : `/?view=${view}&character_id=${getCharacterId() ?? ''}${options.extraQuery ? `&${options.extraQuery}` : ''}`,
+      title,
+      fullscreen: label === 'memory',
+      maximizable: label !== 'memory',
+      width: isFullscreen ? screen.width : width,
+      height: isFullscreen ? screen.height : height,
+      resizable: isFullscreen ? false : resizable,
+      decorations: isFullscreen ? false : (options.decorations ?? true),
+      transparent: isFullscreen ? true : transparent,
+      alwaysOnTop: options.alwaysOnTop ?? false,
+      center: true,
+      shadow: isFullscreen ? false : (options.shadow ?? true),
+      minWidth: isFullscreen ? undefined : (options.minWidth ?? (resizable ? 320 : width)),
+      minHeight: isFullscreen ? undefined : (options.minHeight ?? (resizable ? 300 : height)),
+      maxWidth: isFullscreen ? undefined : (resizable ? undefined : width),
+      maxHeight: isFullscreen ? undefined : (resizable ? undefined : height),
+      windowEffects: options.windowEffects,
+      visible: false,
+      // 启用 Tauri 原生拖放，通过 onDragDropEvent 获取文件路径
+      // （HTML5 File.path 在 Tauri v2 已移除，需用原生事件获取路径）
+      dragDropEnabled: true,
+    });
+
+    // 4. 追踪引用 + 注册关闭清理
+    CHILD_WINDOWS.set(fullLabel, win);
+    CLOSE_CLEANUP_REGISTERED.add(fullLabel);
+    void win.onCloseRequested(() => {
+      CHILD_WINDOWS.delete(fullLabel);
+      CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
+      const u = RAISE_UNLISTEN.get(label);
+      if (u) { u(); RAISE_UNLISTEN.delete(label); }
+    });
+    // 5. 窗口创建后显示（visible:false 创建，webview 就绪后 show）
+    if (selfReveal) {
+      // 显形交给子窗口（入场动画需要先把首帧摆成桌宠大小再 show）
+      win.once('tauri://created', () => { void guardBorderless(fullLabel); });
+      if (armRevealFallback) armSelfRevealFallback(win);
+    } else {
+      win.once('tauri://created', () => {
+        // 先挂非客户区保护再显示：透明窗口一旦带着标题栏显示，那层像素就擦不掉了
+        void guardBorderless(fullLabel).then(() => win.show().catch(() => {}));
+      });
+    }
+    win.once('tauri://error', (e) => {
+      creationFailed = true;
+      // A failed WebView must not remain cached as an open inspector window.
+      if (CHILD_WINDOWS.get(fullLabel) === win) {
+        CHILD_WINDOWS.delete(fullLabel);
+        CLOSE_CLEANUP_REGISTERED.delete(fullLabel);
+      }
+      console.error(`[openWindow] 窗口 "${fullLabel}" 创建失败:`, e);
+    });
+
+    // 6. 登记「创建中」：任一落地信号（含超时）都会解开等待者
+    let settleCreation: () => void = () => {};
+    const creation = new Promise<void>((resolve) => { settleCreation = resolve; });
+    WINDOW_CREATION.set(fullLabel, creation);
+    let creationTimer: number | undefined;
+    const settleOnce = () => {
+      if (creationTimer !== undefined) {
+        window.clearTimeout(creationTimer);
+        creationTimer = undefined;
+      }
+      if (WINDOW_CREATION.get(fullLabel) === creation) WINDOW_CREATION.delete(fullLabel);
+      settleCreation();
+    };
+    win.once('tauri://created', settleOnce);
+    win.once('tauri://error', settleOnce);
+    creationTimer = window.setTimeout(settleOnce, WINDOW_CREATION_TIMEOUT_MS);
+
+    await creation;
+    if (creationFailed) {
+      // Retry an explicit open once, without turning cancelled prewarming into a visible window.
+      if (retryOnCreationFailure && !options.prewarm) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250));
+        return openWindow(label, view, title, width, height, options, t, false);
+      }
+      return null;
+    }
+    return win;
+  } catch (err) {
+    console.error(`[openWindow] 创建窗口 "${fullLabel}" 失败:`, err);
+    return null;
+  }
+}
+
+export default function App() {
+  // 拆分 selector 订阅，避免全量订阅导致 App 频繁重渲染：
+  // BubbleController 打字机 35ms 一次 setCurrentBubble，全量订阅会触发 ~28次/秒重渲染。
+  // 渲染相关字段使用独立 selector；actions 与回调内读取的字段改用 useAppStore.getState() 即时获取。
+  const currentBubble = useAppStore((s) => s.currentBubble);
+  const settledBubbles = useAppStore((s) => s.settledBubbles);
+  const bubbleCrossCharacter = useAppStore((s) => s.bubbleCrossCharacter);
+  const bubbleListenerName = useAppStore((s) => s.bubbleListenerName);
+  // 桌宠自身心情状态（energy=精力 0-100，focus=专注力 0-100，由后端 3s 心跳刷新）
+  const currentMood = useAppStore((s) => s.currentMood);
+  const { t } = useTranslation();
+  const moodApi = useMood();
+  const configApi = useConfig();
+  const ttsApi = useTTS();
+  const proactiveApi = useProactive();
+  const environmentApi = useEnvironment();
+
+  const diagCharId = getCharacterId();
+  useEffect(() => {
+    console.log(`[DIAG] App mounted, char_id=${diagCharId}, label=${getCurrentWindow().label}, time=${Date.now()}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useGlobalTheme();
+
+  const petRef = useRef<ModelRendererHandle | null>(null);
+  useCompanionFeedback(petRef);
+  const [modelReady, setModelReady] = useState(false);
+
+  // 当前角色的在场状态（online/busy/rest/offline），驱动 桌宠行为（表情/闭眼/鼠标跟随/隐藏到角落）+ tick 降频
+  const [presenceState, setPresenceState] = useState<string | null>(null);
+  // 贴边窗口状态与在场状态正交：物理/避让/漫步只在完整窗口时运行。
+  const dockState = useAppStore(state => state.dockState);
+  // presenceState 的 ref 镜像，供定时器回调读取最新值
+  const presenceStateRef = useRef<string | null>(null);
+  useEffect(() => { presenceStateRef.current = presenceState; }, [presenceState]);
+  // 唤醒点击计数器：rest 状态需 3 次连续点击、busy 状态 1 次即唤醒
+  const wakeClickRef = useRef<{ count: number; lastTime: number }>({ count: 0, lastTime: 0 });
+  /** 基础窗口尺寸（模型加载后按比例计算，缩放基于此） */
+  const baseWindowSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
+  /** 当前用户缩放因子 */
+  const windowScaleRef = useRef(1.0);
+  /** 缩放目标值（滚轮事件同步写入，异步循环读取） */
+  const targetScaleRef = useRef(1.0);
+  /** 缓存的窗口中心点（物理像素），滚动会话期间不重新读取 */
+  const scaleCenterRef = useRef<{ cx: number; cy: number; factor: number } | null>(null);
+  /** 滚动停止后清除中心缓存 */
+  const scaleIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 缩放 debounce 计时器：累积滚动事件，100ms 内无新事件才执行 resize，避免中间帧闪烁 */
+  const scaleDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 视频动画演出层是否在播放（播放期间隐藏 桌宠本体） */
+  const [videoActive, setVideoActive] = useState(false);
+  const game = useGameCompanion(modelReady);
+  useEffect(() => { if (game.active) setVideoActive(false); }, [game.active]);
+  /** Ollama 就绪 toast 是否已弹出（每个应用生命周期只弹一次） */
+  const ollamaToastedRef = useRef(false);
+  const quietModeRef = useRef(false);
+  /**
+   * 最近一次 LLM 错误 toast 的时间戳。
+   *
+   * 启动问候失败与 LLM 调用失败常常是同一根因（问候本身要走主 LLM），
+   * 两条路径各弹一次会让用户看到两条说同一件事的 toast，用它做短窗抑制。
+   */
+  const lastLlmErrorToastAtRef = useRef(0);
+  // 全屏应用聚焦时自动贴边（受智能避让开关控制），在场状态单独处理休息和离线。
+  // 暴露 hiddenCorner（驱动角落感知按钮）、requestRestore（按钮点击召回 + 唤醒）、
+  // hideForSleep / restoreFromSleep（Rest 时退到角落）
+  // hideForOffline / restoreFromOffline（Offline 时真正 hide_window，从托盘/快捷键唤回）
+  // 智能避让同时负责寻找遮挡较少的位置。
+  const [smartPositioningEnabled, setSmartPositioningEnabled] = useState(true);
+  const [desktopPhysicsEnabled, setDesktopPhysicsEnabled] = useState(false);
+  // 心情注意力联动总开关（pet_render.always_follow_mouse）
+  const [alwaysFollowMouse, setAlwaysFollowMouse] = useState(true);
+  // 心情驱动的注视激活态：精力与专注力同时高于阈值时激活（实时看鼠标），回落则关闭
+  // 使用滞回（HIGH=60 / LOW=35）避免 3s 心情心跳带来的频繁抖动切换
+  const [moodFollowActive, setMoodFollowActive] = useState(false);
+  const moodFollowActiveRef = useRef(false);
+  const MOOD_FOLLOW_ENERGY_HIGH = 60;
+  const MOOD_FOLLOW_ENERGY_LOW = 35;
+  const MOOD_FOLLOW_FOCUS_HIGH = 60;
+  const MOOD_FOLLOW_FOCUS_LOW = 35;
+  /** 桌宠**开始离场**（退角落 / 离线）时要执行的钩子 —— 目前用于收起气泡。
+   *
+   *  用 ref 传给 useHiding：它的 hide 闭包在 mount 时就固定了（依赖表只有 petRef），
+   *  直接传函数会永远拿到首次渲染的旧闭包（同 requestRestoreRef 等既有惯例）。 */
+  const petHideHookRef = useRef<(() => void) | null>(null);
+  const {
+    hiddenCorner,
+    hideReason,
+    requestRestore,
+    hideForSleep,
+    restoreFromSleep,
+    hideForOffline,
+    restoreFromOffline,
+  } = useHiding(petRef, modelReady, smartPositioningEnabled && presenceState === 'online' && !game.active, petHideHookRef, quietModeRef);
+  useSmartPositioning(petRef, modelReady, smartPositioningEnabled && presenceState === 'online' && dockState === 'Off' && !desktopPhysicsEnabled && !game.active);
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    let revision = 0;
+    const apply = (active: boolean) => {
+      quietModeRef.current = active;
+      document.documentElement.style.visibility = active ? 'hidden' : '';
+      if (active) {
+        BubbleController.closeAll();
+        void getCurrentWindow().hide().catch(() => {});
+        void invoke('stop_speaking', { characterId: getCharacterId() }).catch(() => {});
+      }
+    };
+    void (async () => {
+      const stop = await listen<{ active: boolean }>('companion:quiet-changed', event => {
+        if (!disposed) { revision++; apply(event.payload.active); }
+      });
+      if (disposed) { stop(); return; }
+      cleanup = stop;
+      const before = revision;
+      const current = await invoke<{ active: boolean }>('companion_quiet_status');
+      if (!disposed && revision === before) apply(current.active);
+    })().catch(() => {});
+    return () => { disposed = true; cleanup?.(); document.documentElement.style.visibility = ''; };
+  }, []);
+
+  // 活动追踪 refs
+  const lastActivityRef = useRef<number>(Date.now());
+  const lastUserMessageRef = useRef<number>(Date.now());
+  const activeWindowRef = useRef<string>('');
+  const lastActiveWindowRef = useRef<string>('');
+  const dragDistanceRef = useRef<number>(0);
+  const lastBubbleFromProactiveRef = useRef<number>(0);
+  // 主动对话流式文本累积
+  const proactiveStreamTextRef = useRef<string>('');
+  // 其他角色最近发言时间戳（毫秒），用于延迟本角色 tick 避免同时发言
+  const otherSpokenAtRef = useRef<number>(0);
+  // 跨角色冷却时长（毫秒），由后端 effective_cross_cooldown_ms 动态下发
+  const crossCooldownMsRef = useRef<number>(15_000);
+  const ttsConfigRef = useRef<TtsConfig | null>(null);
+  const [proactiveStarted, setProactiveStarted] = useState<boolean>(false);
+  // 主动对话 tick 间隔（毫秒），由 proactive.tick_interval 配置项驱动
+  const proactiveTickIntervalRef = useRef<number>(10_000);
+  // 拖拽表情联动：标记当前是否处于用户拖拽会话，以及拖拽表情是否已应用
+  const dragSessionRef = useRef<boolean>(false);
+  const dragExpressionAppliedRef = useRef<boolean>(false);
+  // 逃离途中延后开启拖动的定时器句柄（见 handleBackgroundMouseDown）
+  const dragDeferTimerRef = useRef<number | null>(null);
+  // 左键此刻是否按着（前端视角）：延后开拖的定时器据此判断「人还按着吗」
+  const dragPressAliveRef = useRef<boolean>(false);
+  // 晕乎乎临时表情的回落定时器句柄（快速拖动 / 甩飞撞边共用）
+  const dizzyTimerRef = useRef<number | null>(null);
+  // 长按打开心智观察器：会话是否进行中 / 延迟计时器句柄
+  const holdActiveRef = useRef(false);
+  const holdTimerRef = useRef<number | undefined>(undefined);
+  // 长按触发时刻：用于吞掉触发后紧跟的 click 余波（不触发摸头台词）
+  const holdCompletedAtRef = useRef(0);
+  const holdStartedAtRef = useRef(0);
+  // 长按进度环挂载位置（client 坐标）；null = 未显示
+  const [holdRingPos, setHoldRingPos] = useState<{ x: number; y: number } | null>(null);
+  // 长按触发的动作（打开心智观察器），由下方 openMemory 定义后回填
+  const holdActionRef = useRef<() => void>(() => {});
+  // 长按提前加载心智观察器（预热）：当前会话 / 起跑计时器 / 会话号序列。
+  // 预热动作也走 ref 回填（同 holdActionRef）——startHold 定义在 prewarmMemory 之前，
+  // 直接用会撞上暂时性死区，而这个回调又几乎不换身份，没必要进依赖表。
+  const prewarmRef = useRef<MemoryPrewarmSession | null>(null);
+  const prewarmTimerRef = useRef<number | undefined>(undefined);
+  const prewarmActionRef = useRef<() => void>(() => {});
+  const prewarmSeqRef = useRef(0);
+
+  // 气泡子窗口管理：currentBubble 变化时创建/更新/隐藏气泡窗口
+  // currentBubble 是单一数据源（涵盖普通气泡、流式气泡、追加气泡）
+  const bubbleReadyRef = useRef(false);
+  const bubbleCreatingRef = useRef(false);
+  const bubbleSyncRef = useRef({ busy: false, dirty: false, height: BUBBLE_WINDOW_HEIGHT, measuredKey: '', measuredHeight: 0, appliedSize: '', appliedPosition: '' });
+
+  // Toast 子窗口管理：屏幕右下角的透明、点击穿透窗口
+  const toastReadyRef = useRef<boolean>(false);
+  // 窗口未就绪时缓存的 toast 请求
+  const pendingToastRef = useRef<Array<{ message: string; type: ToastType; duration: number; key?: number; action?: ToastAction; owner?: string }>>([]);
+  // 窗口未就绪时缓存的工具确认请求（载荷原样转发给 toast 子窗口）
+  const pendingConfirmRef = useRef<ToolConfirmPayload[]>([]);
+  // Keep completed IDs across toast window recreation and in-flight recovery snapshots.
+  const completedConfirmRef = useRef(new Set<number>());
+
+  /** 把缓存的待发请求全部推给 toast 窗口，并清空缓存。
+   *
+   *  toast 窗口是「需要才建、用完即毁」的，所以这个函数不止在首屏挂载时调用：
+   *  每次新建窗口后（`toast:ready` 到达时，或事件丢失时的超时兜底）都要重放一遍，
+   *  否则等待期间攒下的请求会跟着上一个窗口一起消失。 */
+  const flushPendingToasts = useCallback(() => {
+    toastReadyRef.current = true;
+    const pending = pendingToastRef.current;
+    pendingToastRef.current = [];
+    for (const p of pending) {
+      void emit('toast:show', { message: p.message, type: p.type, duration: p.duration, key: p.key, action: p.action, character_id: p.owner });
+    }
+    const pendingConfirms = pendingConfirmRef.current;
+    pendingConfirmRef.current = [];
+    for (const c of pendingConfirms) {
+      if (!completedConfirmRef.current.has(c.request_id)) void emit('toast:confirm', c);
+    }
+  }, []);
+
+  // `toast:ready` 事件丢失时的兜底定时器句柄（toast 窗口会反复建毁，每次都要重新武装）
+  const toastReadyFallbackRef = useRef<number | null>(null);
+  // 兜底逻辑要能回调 ensureToastWindow，但 ensureToastWindow 内部又会武装本定时器——
+  // 直接进依赖会构成循环定义。用 ref 打断：每次渲染同步最新引用，语义等价且无环。
+  const ensureToastWindowRef = useRef<() => Promise<void>>(async () => {});
+  const armToastReadyFallback = useCallback(() => {
+    if (toastReadyFallbackRef.current !== null) window.clearTimeout(toastReadyFallbackRef.current);
+    toastReadyFallbackRef.current = window.setTimeout(() => {
+      toastReadyFallbackRef.current = null;
+      void (async () => {
+        if (toastReadyRef.current) return;
+        // 补发前必须确认窗口还在。
+        //
+        // 窗口是「用完即毁」的，而 close 是异步 IPC：一条新 toast 完全可能落在
+        // 「close 已发起、窗口尚未销毁」的空档里——此时 showToast sees 窗口存在
+        // 就不重建，close-requested 又已把 ready 复位成 false，请求进了 pending。
+        // 1s 后若无脑补发，就等于 emit 给一个死窗口：这条丢失还算轻，更糟的是
+        // flushPendingToasts 会把 ready 重新置 true，而此后不会再有 close 事件
+        // 来复位它 —— **之后每一条 toast 都会静默丢失**，应用看起来像坏了。
+        // 窗口不在就重建一轮（ensureToastWindow 内部会自行重新武装）。
+        const alive = await WebviewWindow.getByLabel(charScopedLabel('toast')).catch(() => null);
+        if (!alive) {
+          await ensureToastWindowRef.current();
+          return;
+        }
+        flushPendingToasts();
+      })();
+    }, 1000);
+  }, [flushPendingToasts]);
+
+  /** 创建 Toast 子窗口（首次惰性创建），定位到屏幕右下角并设置点击穿透 */
+  const ensureToastWindow = useCallback(async (): Promise<void> => {
+    const toastLabel = charScopedLabel('toast');
+    const existing = await WebviewWindow.getByLabel(toastLabel);
+    if (existing) {
+      // 已存在：可能正处在「刚建好、还没 ready」的窗口化阶段，兜底照样武装一次。
+      // （若已就绪，定时器触发后看到 ready=true 会直接空跑，无副作用）
+      armToastReadyFallback();
+      return;
+    }
+    // 先取屏幕尺寸，用于窗口高度（固定为屏幕的一半）+ 定位到右下角。
+    // 半屏高是 ToastWindow 容量管理的前提：可用空间是确定的，新 toast 放不下时就先让
+    // 最老的平滑退出再入场；若高度跟着内容伸缩，增删条目与重新测高之间必有一帧错位，
+    // 那一帧里顶部的 toast 就会被窗口边界裁掉。
+    let screenW = 0;
+    let screenH = 0;
+    try {
+      const monitor = await currentMonitor();
+      if (monitor) {
+        const factor = monitor.scaleFactor;
+        screenW = monitor.size.width / factor;
+        screenH = monitor.size.height / factor;
+      }
+    } catch {
+      /* ignore */
+    }
+    const toastHeight = screenH > 0 ? Math.round(screenH / 2) : TOAST_WINDOW_HEIGHT;
+    // 直接使用构造函数返回的实例（getByLabel 在窗口未完全创建时可能返回 null）
+    toastReadyRef.current = false;
+    const win = new WebviewWindow(toastLabel, {
+      url: `/?view=toast&character_id=${getCharacterId() ?? ''}`,
+      title: 'Vivian Toast',
+      width: TOAST_WINDOW_WIDTH,
+      height: toastHeight,
+      resizable: false,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      shadow: false,
+      focus: false,
+      visible: false,
+    });
+    // 窗口创建完成后再定位：setPosition 在窗口未 ready 时会静默失败，
+    // 导致 toast 窗口停在 Tauri 默认位置（屏幕左上角），用户会看到一个错误的左侧 toast
+    win.once('tauri://created', async () => {
+      try {
+        // 透明无边框窗口：先挂非客户区保护再显示，避免顶部出现原生标题栏
+        await guardBorderless(toastLabel);
+        if (screenW > 0 && screenH > 0) {
+          await win.setPosition(
+            new LogicalPosition(screenW - TOAST_WINDOW_WIDTH, screenH - toastHeight),
+          );
+        }
+        await win.setIgnoreCursorEvents(true);
+      } catch {
+        /* ignore */
+      }
+    });
+    win.once('tauri://error', (e) => {
+      console.error('[ensureToastWindow] toast 窗口创建失败:', e);
+    });
+    // 窗口用完会自己 close（内容清空即销毁，见 ToastWindow 的可见性 effect）。
+    // 这里必须把就绪标志复位：否则下一条 toast 会因 toastReadyRef 仍为 true
+    // 而直接 emit 给一个已被销毁的窗口，消息无声消失——用户看到的是
+    // 「点了没反应」。窗口是可反复建毁的，所以监听挂在每次新建出来的实例上。
+    // 窗口用完会自己 close（内容清空即销毁，见 ToastWindow 的可见性 effect）。
+    // 角色窗口靠 toast 窗口 close 前自报的 `toast:closed` 复位就绪标志（见下方
+    // 监听）——刻意不在这里对 `win` 注册 onCloseRequested：那是跨窗口句柄，
+    // 实测会让非活跃角色的窗口消失。
+    armToastReadyFallback();
+  }, [armToastReadyFallback]);
+
+  // 同步最新引用，供上面的兜底定时器回调（打破与 ensureToastWindow 的定义循环）
+  ensureToastWindowRef.current = ensureToastWindow;
+
+  /** 创建微信消息横幅窗口（首次惰性创建），常驻隐藏，由 wechat:message_banner 事件触发显示 */
+  const ensureMessageBannerWindow = useCallback(async (): Promise<void> => {
+    const label = 'message_banner';
+    const existing = await WebviewWindow.getByLabel(label);
+    if (existing) return;
+    new WebviewWindow(label, {
+      url: `/?view=message_banner`,
+      title: 'Vivian Message Banner',
+      width: 400,
+      height: 160,
+      resizable: false,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      shadow: false,
+      focus: false,
+      visible: false,
+    }).once('tauri://created', function () { void guardBorderless(label); });
+  }, []);
+
+  /** 显示一条 toast（窗口就绪时直接 emit，未就绪时缓存并触发窗口创建）。
+   *  传入固定 `key` 可原地更新同一条 toast；`duration <= 0` 表示持久显示（不自动关闭）。
+   *
+   *  **`key` 的语义是「这条有身份，后续会用同一个值再来更新它」**，只给需要原地刷新的
+   *  条目（如重建进度的固定 key）。一次性提示不要传 key——曾经的默认值 `Date.now()`
+   *  看似无害，实际做了两件坏事：同一毫秒发出的两条 toast 会撞上同一个 key 而互相顶掉；
+   *  而接收侧的跨窗口去重又会把「带 key 的条目」整体豁免，导致同一条文案在两只桌宠上
+   *  各弹一条。需要 key 时请传一个跨次调用稳定的常量。
+   *
+   *  `owner` 决定这条 toast 弹到哪个角色的窗口：
+   *  - `undefined`（默认）：归属当前窗口角色。用于本窗口自己发起的事件
+   *    （文件拖放、语音未开启等），以及 payload 已带 character_id 的定向事件。
+   *  - `null`：显式声明「无归属」。用于全局事件——它们被广播给每个角色窗口，
+   *    若各自都按自身角色 emit，同一条文案就会在每个 toast 窗口各弹一次。
+   *    无归属的 toast 统一由主角色的 toast 窗口呈现（见 ToastWindow 的归属判定）。 */
+  const showToast = useCallback(
+    (message: string, type: ToastType = 'info', duration: number = 3000, key?: number, action?: ToastAction, owner?: string | null) => {
+      // 归属解析：显式指定优先；`null` 与「当前窗口无角色」都归一为 undefined（无归属），
+      // 由接收侧按主角色窗口收敛。
+      const ownerId = owner === undefined ? (getCharacterId() ?? undefined) : (owner ?? undefined);
+
+      if (toastReadyRef.current) {
+        void emit('toast:show', { message, type, duration, key, character_id: ownerId, action });
+      } else {
+        pendingToastRef.current.push({ message, type, duration, key, action, owner: ownerId });
+        void ensureToastWindow();
+      }
+    },
+    [ensureToastWindow],
+  );
+
+  // 注册 toast:ready / toast:closed 监听并创建 toast 子窗口
+  // （必须先 await listen 再创建窗口，避免竞态：
+  // 若窗口先创建，ToastWindow emit('toast:ready') 时本窗口的监听器可能尚未注册，事件丢失）
+  //
+  // 监听器是**常驻**的：toast 窗口用完即毁，这里要接住每一次重建后的 ready，
+  // 以及每一次销毁前的 closed。
+  // 补发逻辑已抽成 flushPendingToasts（ready 回调与超时兜底共用），
+  // 超时兜底的重新武装在 ensureToastWindow 内——那是唯一知道「又建了一个新窗口」的地方。
+  useEffect(() => {
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    void (async () => {
+      unlistens.push(await listen<{ character_id?: string }>('toast:ready', (e) => {
+        if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+        flushPendingToasts();
+      }));
+      // toast 窗口 close 前自报离场。没有它就绪标志会一直是 true，
+      // 之后每条 toast 都会 emit 给一个已被销毁的窗口——静默丢失，且再无事件
+      // 能复位。emit 是全局广播，必须按 character_id 过滤掉另一个角色的窗口。
+      unlistens.push(await listen<{ character_id?: string }>('toast:closed', (e) => {
+        if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+        toastReadyRef.current = false;
+      }));
+      if (cancelled) { unlistens.forEach((u) => u()); return; }
+      console.log(`[DIAG] listen registered: toast:ready/closed, char=${getCharacterId()}`);
+      // 监听器注册完成后再创建窗口
+      void ensureToastWindow();
+    })();
+    return () => { cancelled = true; unlistens.forEach((u) => u()); };
+  }, [ensureToastWindow, flushPendingToasts]);
+
+  // 监听后台记忆向量重建进度：切换嵌入模型后设置窗口立即关闭，
+  // 重建由后端 spawn 任务执行，进度经事件推送到这里，用常驻 toast 实时展示。
+  useEffect(() => {
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    void (async () => {
+      const unProgress = await listen<{ current: number; total: number }>('memory:rebuild_progress', (e) => {
+        const { current, total } = e.payload ?? { current: 0, total: 0 };
+        // 向量重建是全局操作（不隶属任何角色），而事件会广播给每个角色窗口。
+        // 显式声明无归属（owner=null）交由主角色窗口呈现；否则每个角色窗口都按
+        // 自身身份 emit 一条，同一条进度会在每只桌宠的 toast 窗口各弹一次。
+        showToast(t('config.rebuilding_embeddings_progress', { current, total }), 'info', 0, REBUILD_TOAST_KEY, undefined, null);
+      });
+      const unDone = await listen<{ rebuilt: number; total: number }>('memory:rebuild_done', (e) => {
+        const rebuilt = e.payload?.rebuilt ?? 0;
+        showToast(t('config.toast_rebuild_ok', { count: rebuilt }), 'success', 4000, REBUILD_TOAST_KEY, undefined, null);
+      });
+      if (cancelled) { safeUnlisten(unProgress); safeUnlisten(unDone); return; }
+      unlistens.push(unProgress, unDone);
+    })();
+    return () => { cancelled = true; for (const un of unlistens) un(); };
+  }, [showToast, t]);
+
+  /** 计算气泡窗口位置（贴合主窗口上方或下方），返回逻辑坐标 + 朝向
+   *
+   *  `height` 用于动态扩大场景：流式输出时根据文本长度传入更大的高度，
+   *  以此重新计算 y 坐标（上方模式 y 上移，下方模式 y 不变）。
+   */
+  const computeBubbleWindowPosition = useCallback(async (height: number = BUBBLE_WINDOW_HEIGHT): Promise<{
+    x: number;
+    y: number;
+    position: BubblePosition;
+    anchorX: number;
+    factor: number;
+  } | null> => {
+    try {
+      const win = getCurrentWindow();
+      const [pos, size, factor] = await Promise.all([
+        win.outerPosition(),
+        win.outerSize(),
+        win.scaleFactor(),
+      ]);
+      const monitor = await currentMonitor();
+      if (!monitor) return null;
+
+      return { ...placeBubble({
+        x: pos.x / factor, y: pos.y / factor, width: size.width / factor, height: size.height / factor,
+      }, {
+        x: monitor.position.x / factor, y: monitor.position.y / factor,
+        width: monitor.size.width / factor, height: monitor.size.height / factor,
+      }, BUBBLE_WINDOW_WIDTH, height), factor };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /** Serialize layout writes and coalesce updates to the latest store snapshot. */
+  const emitBubbleShow = useCallback(async () => {
+    if (quietModeRef.current) {
+      void WebviewWindow.getByLabel(charScopedLabel('bubble')).then(window => window?.hide()).catch(() => {});
+      return;
+    }
+    const sync = bubbleSyncRef.current;
+    sync.dirty = true;
+    if (sync.busy || !bubbleReadyRef.current) return;
+    sync.busy = true;
+    try {
+      while (sync.dirty && bubbleReadyRef.current) {
+        sync.dirty = false;
+        const state = useAppStore.getState();
+        const bubbleWin = await WebviewWindow.getByLabel(charScopedLabel('bubble'));
+        if (!bubbleWin) return;
+        const count = state.settledBubbles.length + (state.currentBubble ? 1 : 0);
+        if (!count) {
+          await bubbleWin.emit('bubble:sync', { text: state.currentBubble, settled: [], character_id: getCharacterId() });
+          await bubbleWin.hide();
+          continue;
+        }
+        const estimated = state.settledBubbles.reduce((sum, bubble) => sum + (bubble.sticker ? STICKER_BUBBLE_SIZE : estimateBubbleHeight(bubble.text)), 0)
+          + (state.currentBubble ? estimateBubbleHeight(state.currentBubble) : 0) + 8 * (count - 1) + 16;
+        // Reuse the actual height while new text renders, then resize on its measurement.
+        const requestedHeight = sync.measuredHeight || estimated;
+        const monitor = await currentMonitor();
+        const factor = await getCurrentWindow().scaleFactor();
+        sync.height = Math.max(48, Math.min(requestedHeight, (monitor?.size.height ?? 1080) / factor - 8));
+        const posInfo = await computeBubbleWindowPosition(sync.height);
+        if (!posInfo) continue;
+        const sizeKey = `${BUBBLE_WINDOW_WIDTH}:${sync.height}:${posInfo.factor}`;
+        const positionKey = `${posInfo.x}:${posInfo.y}:${posInfo.factor}`;
+        if (sync.appliedSize !== sizeKey) {
+          await bubbleWin.setSize(new PhysicalSize(Math.round(BUBBLE_WINDOW_WIDTH * posInfo.factor), Math.round(sync.height * posInfo.factor)));
+          sync.appliedSize = sizeKey;
+        }
+        if (sync.appliedPosition !== positionKey) {
+          await bubbleWin.setPosition(new PhysicalPosition(Math.round(posInfo.x * posInfo.factor), Math.round(posInfo.y * posInfo.factor)));
+          sync.appliedPosition = positionKey;
+        }
+        await bubbleWin.emit('bubble:sync', {
+          text: state.currentBubble,
+          settled: state.settledBubbles,
+          position: posInfo.position,
+          anchor_x: posInfo.anchorX,
+          character_id: getCharacterId(),
+          cross_character: state.bubbleCrossCharacter,
+          listener_name: state.bubbleListenerName,
+        });
+        if (!quietModeRef.current) await bubbleWin.show();
+      }
+    } catch (error) {
+      console.warn('[BubbleWindow] sync failed', error);
+    } finally {
+      sync.busy = false;
+    }
+  }, [computeBubbleWindowPosition]);
+
+  const openQuickInput = useCallback(async (opts?: { broadcast?: boolean; autoVoice?: boolean }): Promise<void> => {
+    await invoke('open_quick_input', { characterId: getCharacterId(), broadcast: true, autoVoice: opts?.autoVoice ?? false });
+  }, []);
+
+  /**
+   * 请求一次桌宠轻量反应。
+   *
+   * 用户对桌宠做出动作时调用：后端用一次极简 prompt（精简人设 + 低权重历史对话窗口
+   * + 本次动作描述）走 `intent_judge` 那档 flash 模型生成一句短反应，同时把这次操作
+   * 作为有意义的用户行为记进统一事件账本。
+   *
+   * 完全静默：未配置模型 / 超时 / 失败时后端返回 null，这里不显示任何气泡，
+   * 也不再回退到写死的固定台词。同类动作的节流在后端做，前端不重复计时。
+   */
+  const requestPetReaction = useCallback((action: PetAction, impact?: number, metrics?: PetInteractionMetrics) => {
+    void invoke<string | null>('generate_pet_reaction', {
+      action,
+      metrics: metrics ?? null,
+      impact: impact ?? null,
+      characterId: getCharacterId() ?? undefined,
+    })
+      .then((text) => {
+        const reply = text?.trim();
+        if (!reply) return;
+        // 生成期间用户可能已经开了新一轮对话：别用桌宠反应盖掉流式气泡
+        if (ChatController.isStreaming) return;
+        BubbleController.showBubble(reply, Math.max(2600, reply.length * 220));
+      })
+      .catch(() => {
+        /* 静默：桌宠反应失败不该打扰用户 */
+      });
+  }, []);
+
+  /**
+   * 单击/双击桌宠：本地短音效 + 一次轻量 AI 反应（取代原先写死的固定台词）。
+   *
+   * `rough_click` 是画布判定「戳烦了」后的结果（短时间内戳得太多或太急），
+   * 表情由画布自己切到生气，这里只负责让台词也跟着换个态度。
+   * 长按（心智观察器）与甩飞晕眩（drag:dizzy）走各自的入口调同一个 requestPetReaction。
+   * 从 rest/busy 唤醒仍由 onModelClick 的连续点击计数负责，不在这里重复处理。
+   */
+  const handleChibiInteraction = useCallback((interaction: ChibiInteraction, metrics?: PetInteractionMetrics) => {
+    // 长按触发打开心智观察器后紧接着的 click 是松手余波，不触发反应
+    if (Date.now() - holdCompletedAtRef.current < 500) return;
+    lastActivityRef.current = Date.now();
+    lastBubbleFromProactiveRef.current = 0;
+
+    // 双击本身会展开侧边聊天窗、有自己的反馈，不叠提示音
+    if (interaction !== 'double_click') {
+      const currentId = getCharacterId();
+      const characterId = isCharacterId(currentId) ? currentId : 'vivian';
+      playPetTapSound(characterId);
+    }
+    requestPetReaction(interaction, undefined, metrics);
+  }, [requestPetReaction]);
+
+  /** Chat is created on demand by the shared native window owner. */
+  const ensureWechatWindow = useCallback(async (opts?: { show?: boolean }): Promise<void> => {
+    if (opts?.show === false) return;
+    await invoke('open_chat_window', { origin: 'chat', panel: null,
+      characterId: getCharacterId() ?? null });
+  }, []);
+  const ensureBubbleWindow = useCallback(async (): Promise<void> => {
+    if (bubbleCreatingRef.current) return;
+    bubbleCreatingRef.current = true;
+    const bubbleLabel = charScopedLabel('bubble');
+    const existing = await WebviewWindow.getByLabel(bubbleLabel);
+    if (existing) { bubbleCreatingRef.current = false; return; }
+
+    bubbleReadyRef.current = false;
+    const bubbleWindow = new WebviewWindow(bubbleLabel, {
+      url: `/?view=bubble&character_id=${getCharacterId() ?? ''}`,
+      title: 'Vivian Bubble',
+      width: BUBBLE_WINDOW_WIDTH,
+      height: BUBBLE_WINDOW_HEIGHT,
+      resizable: false,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      shadow: false,
+      focus: false,
+      visible: false,
+      // 气泡窗口是桌宠窗口的**被拥有窗口**（Windows: owner，macOS: child window，
+      // Linux: transient_for）：桌宠窗口的 label 就是 character_id。
+      // 这样气泡与桌宠处在相邻层级 —— OS 保证被拥有窗口永远紧贴在 owner 之上，
+      // 不会出现桌宠被重新聚焦后盖住气泡、或气泡漂到桌宠下面去的顺序抖动。
+      // （「桌宠隐藏时气泡也不显示」由 useHiding 的 onPetHide 钩子显式完成，见
+      //   hideBubbleWithPet —— 不依赖各平台的 owner 隐藏语义。）
+      parent: getCharacterId() ?? undefined,
+    });
+    void bubbleWindow.once('tauri://created', () => { void guardBorderless(bubbleLabel); });
+    void bubbleWindow.once('tauri://error', () => { bubbleCreatingRef.current = false; });
+    // 等待 BubbleWindow 挂载并发出 bubble:ready（由 useEffect 监听）
+  }, []);
+
+  // Readiness replays the entire current snapshot, including segments created during startup.
+  useEffect(() => {
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    void (async () => {
+      const ready = await listen<{ character_id?: string }>('bubble:ready', (e) => {
+        if (e.payload.character_id !== (getCharacterId() ?? '')) return;
+        bubbleReadyRef.current = true;
+        bubbleCreatingRef.current = false;
+        bubbleSyncRef.current.appliedSize = bubbleSyncRef.current.appliedPosition = '';
+        void emitBubbleShow();
+      });
+      if (cancelled) { ready(); return; }
+      unlistens.push(ready);
+      const measured = await listen<{ character_id: string; key: string; height: number }>('bubble:measured', (e) => {
+        if (e.payload.character_id !== (getCharacterId() ?? '')) return;
+        const state = useAppStore.getState();
+        const key = bubbleContentKey(state.settledBubbles, state.currentBubble);
+        if (key !== e.payload.key) return;
+        const sync = bubbleSyncRef.current;
+        if (sync.measuredKey === e.payload.key && sync.measuredHeight === e.payload.height) return;
+        sync.measuredKey = e.payload.key;
+        sync.measuredHeight = e.payload.height;
+        void emitBubbleShow();
+      });
+      if (cancelled) { measured(); return; }
+      unlistens.push(measured);
+    })();
+    return () => { cancelled = true; for (const unlisten of unlistens) unlisten(); };
+  }, [emitBubbleShow]);
+
+  useEffect(() => {
+    if (!bubbleReadyRef.current) {
+      if (currentBubble !== null || settledBubbles.length) void ensureBubbleWindow();
+      return;
+    }
+    void emitBubbleShow();
+  }, [currentBubble, settledBubbles, bubbleCrossCharacter, bubbleListenerName, emitBubbleShow, ensureBubbleWindow]);
+
+  /** 桌宠离场时气泡必须一起消失。
+   *
+   *  气泡窗口与桌宠是相邻层级（气泡窗口以桌宠窗口为 owner，见 ensureBubbleWindow），
+   *  但「气泡什么时候消失」仍由 currentBubble 上的定时器决定，而那个定时器跑在桌宠窗口
+   *  自己的 webview 里：桌宠一隐藏 / 被全屏应用遮挡，Chromium 就会给它降频甚至挂起，
+   *  计时到点也没人执行 —— 气泡窗口（独立 topmost）于是永久挂在屏幕上收不回来。
+   *  所以桌宠开始离场的这一刻主动 closeAll()：状态与窗口一起归零；桌宠回来时也不会被
+   *  残留的 currentBubble 带回来（恢复后新的气泡仍走 null → 非空的首显路径）。
+   *
+   *  只清状态、不直接 hide 窗口：窗口的显隐统一由下方 currentBubble 的 effect 负责。 */
+  const hideBubbleWithPet = useCallback(() => {
+    BubbleController.closeAll();
+  }, []);
+  useEffect(() => {
+    petHideHookRef.current = hideBubbleWithPet;
+  }, [hideBubbleWithPet]);
+
+  // Bind both user drags and programmatic movement/resize to the same layout pipeline.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    let frame: number | null = null;
+    const reposition = () => {
+      if (!BubbleController.hasActiveBubble || frame !== null) return;
+      frame = requestAnimationFrame(() => { frame = null; void emitBubbleShow(); });
+    };
+    void (async () => {
+      for (const bind of [() => win.onMoved(reposition), () => win.onResized(reposition),
+        () => win.onScaleChanged(reposition)]) {
+        try {
+          const unlisten = await bind();
+          if (cancelled) { unlisten(); return; }
+          unlistens.push(unlisten);
+        } catch { /* Window may have closed during registration. */ }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (frame !== null) cancelAnimationFrame(frame);
+      for (const unlisten of unlistens) unlisten();
+    };
+  }, [emitBubbleShow]);
+
+  // 记录用户活动（鼠标移动、键盘按下、点击）
+  useEffect(() => {
+    const markActive = () => {
+      lastActivityRef.current = Date.now();
+    };
+    window.addEventListener('mousemove', markActive, { passive: true });
+    window.addEventListener('keydown', markActive, { passive: true });
+    window.addEventListener('mousedown', markActive, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', markActive);
+      window.removeEventListener('keydown', markActive);
+      window.removeEventListener('mousedown', markActive);
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (!quietModeRef.current) void getCurrentWindow().show().catch(() => {});
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // 初始化：加载语言、心情、启动问候、TTS 配置、启动主动对话
+  useEffect(() => {
+    void (async () => {
+      console.log(`[DIAG] init useEffect START, char=${getCharacterId()}, time=${Date.now()}`);
+      try {
+        const lang = await configApi.get<string>('base.language').catch(() => '');
+        if (lang) await changeLanguage(lang);
+      } catch {
+        /* ignore */
+      }
+      console.log(`[DIAG] init: lang done, char=${getCharacterId()}`);
+      try {
+        const mood = await moodApi.getCurrent();
+        useAppStore.getState().setMood(mood);
+      } catch {
+        /* ignore */
+      }
+      console.log(`[DIAG] init: mood done, char=${getCharacterId()}`);
+      // 加载用户自定义头像（data URL，null 表示使用默认头像）
+      try {
+        const dataUrl = await invoke<string | null>('get_user_avatar_data_url');
+        useAppStore.getState().setUserAvatarUrl(dataUrl ?? null);
+      } catch {
+        /* ignore */
+      }
+      // 加载 TTS 配置（后端 enabled 是唯一真相源，前端只做镜像）
+      try {
+        ttsConfigRef.current = await ttsApi.getConfig();
+        const ttsOn = !!ttsConfigRef.current?.enabled;
+        useAppStore.getState().setTtsEnabled(ttsOn);
+        TtsStreamQueue.setEnabled(ttsOn);
+      } catch {
+        /* ignore */
+      }
+      console.log(`[DIAG] init: tts done, char=${getCharacterId()}`);
+
+      // 等待后端 Brain 初始化完成（监听 app:ready 事件，带超时兜底）
+      await waitForAppReady();
+      console.log(`[DIAG] init: waitForAppReady returned, char=${getCharacterId()}, time=${Date.now()}`);
+
+
+      // 启动预检未通过（主 LLM / 嵌入服务未配置或本地服务未就绪）时，
+      // 直接打开设置窗口并展示配置说明，不进入问候/主动对话。
+      try {
+        const initialized = await invoke<boolean>('is_initialized');
+        if (!initialized) {
+          console.log(`[DIAG] init: backend not initialized, opening config guide, char=${getCharacterId()}`);
+          openConfig(true);
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // 主 LLM 未配置时跳过问候与主动对话，打开设置页触发配置引导弹窗
+      try {
+        const mainApiConfigured = await invoke<boolean>('is_main_api_configured');
+        if (!mainApiConfigured) {
+          console.log(`[DIAG] init: main LLM not configured, opening config window, char=${getCharacterId()}`);
+          openConfig();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+
+      // 启动问候 - 通过 LifecycleController 统一编排：首次见面判定 + 问候生成 + 持久化
+      // 同步模式：TTS 启用时等语音就绪再显示气泡，音画同步
+      try {
+        const syncGreeting = !!ttsConfigRef.current?.enabled;
+        const result = await LifecycleController.initGreeting({ syncWithAudio: syncGreeting });
+        if (result.greeting) {
+          lastBubbleFromProactiveRef.current = Date.now();
+          if (ttsConfigRef.current?.enabled) {
+            if (
+              ttsConfigRef.current.engine === 'gptsovits' &&
+              ttsConfigRef.current.gpt_sovits_auto_start
+            ) {
+              await waitForGptSoVitsReady();
+            }
+            await TtsStreamQueue.speakSync(result.greeting);
+            LifecycleController.showGreetingBubble(result.greeting);
+          }
+        } else if (result.error) {
+          // 问候失败几乎总是主 LLM 调用失败的同一次故障（问候要走主 LLM），
+          // 而 llm:error 已经就同一个错误弹过提示了。短窗内不再重复，
+          // 否则用户会看到两条说同一件事的 toast。原始错误请查日志。
+          if (Date.now() - lastLlmErrorToastAtRef.current > 3000) {
+            showToast(t('toast.greeting_failed'), 'warning', 6000);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      // 启动主动对话（受 proactive.enabled 配置项控制）
+      try {
+        const proactiveEnabled = await configApi
+          .get<boolean>('proactive.enabled')
+          .catch(() => true);
+        const tickIntervalSec = await configApi
+          .get<number>('proactive.tick_interval')
+          .catch(() => 10);
+        proactiveTickIntervalRef.current = Math.max(
+          1,
+          Math.floor((tickIntervalSec || 10) * 1000),
+        );
+        if (proactiveEnabled) {
+          await proactiveApi.start();
+          setProactiveStarted(true);
+        }
+      } catch {
+        /* ignore */
+      }
+      console.log(`[DIAG] init useEffect COMPLETE, char=${getCharacterId()}, time=${Date.now()}`);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 系统托盘事件（后端触发显示）
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenFn = await listen('tray:show', () => {
+          if (quietModeRef.current) return;
+          void getCurrentWindow().show();
+          positioningCoordinator.triggerSmartCheck?.();
+        });
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+        console.log(`[DIAG] listen registered: tray:show, char=${getCharacterId()}`);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+  }, []);
+
+  // 设置窗口保存后同步语言切换（ConfigWindow 是独立 WebviewWindow，无法直接更新主窗口的 i18n）
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenFn = await listen<{ language: string }>(
+          'config:language-changed',
+          (event) => {
+            const lang = event.payload?.language;
+            if (lang) void changeLanguage(lang);
+          },
+        );
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+  }, []);
+
+  // 智能避让配置：初始加载 + 监听 ConfigWindow 保存后的 config:saved 事件
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        const enabled = await configApi
+          .get<boolean>('window.smart_positioning_enabled')
+          .catch(() => true);
+        setSmartPositioningEnabled(enabled);
+        setDesktopPhysicsEnabled(await configApi.get<boolean>('window.desktop_physics_enabled').catch(() => false));
+      } catch {
+        /* ignore */
+      }
+      try {
+        unlistenFn = await listen('config:saved', async () => {
+          try {
+            const enabled = await configApi
+              .get<boolean>('window.smart_positioning_enabled')
+              .catch(() => true);
+            setSmartPositioningEnabled(enabled);
+            setDesktopPhysicsEnabled(await configApi.get<boolean>('window.desktop_physics_enabled').catch(() => false));
+          } catch {
+            /* ignore */
+          }
+        });
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+  }, [configApi]);
+
+  // 实时看鼠标配置：初始加载 + 监听 config:saved 事件
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    const load = async () => {
+      const enabled = await configApi
+        .get<boolean>('pet_render.always_follow_mouse')
+        .catch(() => false);
+      setAlwaysFollowMouse(!!enabled);
+    };
+    void (async () => {
+      try {
+        await load();
+      } catch {
+        /* ignore */
+      }
+      try {
+        unlistenFn = await listen('config:saved', () => {
+          void load().catch(() => {
+            /* ignore */
+          });
+        });
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+  }, [configApi]);
+
+  // 心情 → 注视行为联动（滞回状态机）：
+  // 桌宠精力充沛且专注（energy/focus ≥ 60）→ 激活实时看鼠标；
+  // 精力或专注任一回落 < 35 → 退回随机张望。中间地带维持原状态，避免抖动。
+  useEffect(() => {
+    const mood = currentMood;
+    if (!mood) return;
+    const energy = mood.energy ?? 0;
+    const focus = mood.focus ?? 0;
+    const prev = moodFollowActiveRef.current;
+    let next = prev;
+    if (!prev && energy >= MOOD_FOLLOW_ENERGY_HIGH && focus >= MOOD_FOLLOW_FOCUS_HIGH) {
+      next = true;
+    } else if (prev && (energy < MOOD_FOLLOW_ENERGY_LOW || focus < MOOD_FOLLOW_FOCUS_LOW)) {
+      next = false;
+    }
+    if (next !== prev) {
+      moodFollowActiveRef.current = next;
+      setMoodFollowActive(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentMood]);
+
+  // Ollama 服务就绪时弹出 toast（每个应用生命周期只弹一次）
+  // 用 ref 持有最新依赖，useEffect 依赖为空数组确保 listener 只注册一次
+  const showToastRef = useRef(showToast);
+  const tRef = useRef(t);
+  showToastRef.current = showToast;
+  tRef.current = t;
+  useEffect(() => {
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenFn = await listen<{
+          model_installed?: boolean;
+          model?: string;
+          permission_denied?: boolean;
+        }>(
+          'ollama:ready',
+          async (event) => {
+            // 提前去重：在 await 之前设置标志，防止并发 listener 同时通过检查
+            if (ollamaToastedRef.current) return;
+            ollamaToastedRef.current = true;
+            try {
+              const source = await configApi.get<string>('memory.embedding.source').catch(() => '');
+              if (source !== 'local') return;
+              const payload = event.payload ?? {};
+              const model =
+                payload.model ??
+                (await configApi.get<string>('memory.embedding.ollama_model').catch(() => 'bge-m3'));
+              if (payload.model_installed) {
+                showToastRef.current(
+                  tRef.current('config.toast_ollama_ready', { model }),
+                  'success',
+                  4000,
+                  OLLAMA_READY_TOAST_KEY,
+                );
+              } else if (payload.permission_denied) {
+                showToastRef.current(
+                  tRef.current('config.toast_ollama_permission_denied', { model }),
+                  'error',
+                  8000,
+                  OLLAMA_READY_TOAST_KEY,
+                );
+              } else {
+                showToastRef.current(
+                  tRef.current('config.toast_ollama_model_missing', { model }),
+                  'warning',
+                  6000,
+                  OLLAMA_READY_TOAST_KEY,
+                );
+              }
+            } catch {
+              /* ignore */
+            }
+          },
+        );
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { safeUnlisten(unlistenFn); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 监听主动对话配置变更（设置窗口保存后触发）：
+  // - 更新 tick_interval（递归 setTimeout 下一次调度自动生效）
+  // - 按 enabled 决定是否 start/stop proactive
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenFn = await listen('proactive:config-changed', async () => {
+          try {
+            const tickIntervalSec = await configApi
+              .get<number>('proactive.tick_interval')
+              .catch(() => 10);
+            proactiveTickIntervalRef.current = Math.max(
+              1,
+              Math.floor((tickIntervalSec || 10) * 1000),
+            );
+            const enabled = await configApi
+              .get<boolean>('proactive.enabled')
+              .catch(() => true);
+            if (enabled && !proactiveStarted) {
+              await proactiveApi.start();
+              setProactiveStarted(true);
+            } else if (!enabled && proactiveStarted) {
+              await proactiveApi.stop();
+              setProactiveStarted(false);
+            }
+          } catch {
+            /* ignore */
+          }
+        });
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proactiveStarted]);
+
+  // 监听 TTS 配置变更（设置窗口保存或托盘语音开关后由后端触发），同步 ttsEnabled
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenFn = await listen<{ enabled: boolean }>(
+          'tts:config-changed',
+          async (event) => {
+            const ttsOn = !!event.payload?.enabled;
+            ttsConfigRef.current = await ttsApi.getConfig().catch(() => ttsConfigRef.current);
+            useAppStore.getState().setTtsEnabled(ttsOn);
+            // setEnabled(false) 内部会 stop()，正在播放的朗读随之打断
+            TtsStreamQueue.setEnabled(ttsOn);
+          },
+        );
+        if (cancelled) { safeUnlisten(unlistenFn); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlistenFn);
+    };
+  }, []);
+
+  // 监听日记写入完成事件，显示 toast
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ character_id?: string; character_name?: string }>('diary:written', (event) => {
+          // 多角色过滤：仅当前角色窗口显示对应角色的日记 toast
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          showToast(t('toast.diary_written', { name: event.payload?.character_name ?? '' }), 'success', 4000, undefined, undefined, event.payload?.character_id || null);
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // 监听主 LLM API 未配置事件（聊天/唤醒问候/日记生成等场景后端校验失败）
+  useEffect(() => {
+    let cancelled = false;
+    const unlistens: Array<() => void> = [];
+    void (async () => {
+      try {
+        const un1 = await listen<{ character_id?: string }>('chat:config_error', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          // 归属原样透传：空归属交给主角色窗口，避免每个角色窗口各弹一条
+          showToast(t('toast.api_not_configured'), 'warning', 6000, undefined, undefined, event.payload?.character_id || null);
+        });
+        if (cancelled) { un1(); return; }
+        unlistens.push(un1);
+        const un2 = await listen<{ character_id?: string }>('llm:not_configured', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          showToast(t('toast.api_not_configured'), 'warning', 6000, undefined, undefined, event.payload?.character_id || null);
+        });
+        if (cancelled) { un2(); return; }
+        unlistens.push(un2);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      for (const un of unlistens) un();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // 监听路由回退事件（路由矩阵中某任务 API 失败，已回退到主 LLM API）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ task_type: string; message_key?: string; error?: string; character_id?: string }>('chat:route_fallback', (event) => {
+          // 归属守卫：有归属时只响应属于本角色的回退；无归属转交主角色窗口（同 llm:error）
+          const owner = event.payload?.character_id;
+          if (owner && owner !== getCharacterId()) return;
+          const taskType = event.payload?.task_type ?? '';
+          const messageKey = event.payload?.message_key;
+          const rawError = event.payload?.error ?? '';
+          const taskLabelMap: Record<string, string> = {
+            companion: t('config.routing_companion'),
+            reasoning: t('config.routing_reasoning'),
+            diary: t('config.routing_diary'),
+            persona_evolution: t('config.routing_persona_evolution'),
+            memory: t('config.routing_memory'),
+            consolidation: t('config.routing_consolidation'),
+            reflection: t('config.routing_reflection'),
+            emotion_analysis: t('config.routing_emotion_analysis'),
+            inner_monologue: t('config.routing_inner_monologue'),
+          };
+          const taskLabel = taskLabelMap[taskType] ?? taskType;
+          let reasonText = '';
+          if (messageKey) {
+            const translated = t(messageKey as any, { error: rawError });
+            if (translated && !translated.includes('llm_error_') && translated !== messageKey) {
+              reasonText = translated;
+            }
+          }
+          if (reasonText) {
+            const shortReason = reasonText.length > 40 ? reasonText.slice(0, 40) + '…' : reasonText;
+            showToast(t('toast.route_fallback_reason', { task: taskLabel, reason: shortReason }), 'warning', 5000, undefined, undefined, owner || null);
+          } else {
+            showToast(t('toast.route_fallback', { task: taskLabel }), 'warning', 5000, undefined, undefined, owner || null);
+          }
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // 监听 LLM 错误事件（所有 LLM provider 均失败时触发，含后台任务）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ task_type: string; message_key: string; error: string; error_kind: string; endpoint: string; character_id?: string }>('llm:error', (event) => {
+          // 归属守卫：**有归属**时只弹给触发本次调用的角色。
+          // 无归属（后台任务未声明角色 / 旧版后端未下发）不丢弃，转交主角色窗口呈现一次——
+          // 严格丢弃会让「余额不足」这类必须让用户知道的错误彻底消失，而广播又会让
+          // 每只桌宠各弹一条。两者之间只有「主角色窗口认领」这一个既不重复也不丢信息的解。
+          const owner = event.payload?.character_id;
+          if (owner && owner !== getCharacterId()) return;
+          const { message_key: messageKey } = event.payload ?? {};
+          if (!messageKey) return;
+          // messageKey 后端下发时**已带 `toast.` 前缀**（如 toast.llm_error_insufficient_balance），
+          // 必须原样查表。此前这里先 replace 掉前缀再查，i18n 永远命中不了，
+          // 导致所有 LLM 错误都退化成通用文案、而厂商分类结果被白白丢掉。
+          const translated = t(messageKey as any);
+          // 未命中 i18n 时回落到通用文案，且不回显原始错误串：厂商响应体里带
+          // request_id、endpoint、计费信息，不适合直接呈现给用户。排查请查日志。
+          const message = translated && !translated.includes('llm_error_')
+            ? translated
+            : t('toast.llm_error_unknown');
+          const kind = event.payload?.error_kind ?? '';
+          // 熔断器打开是本地自我保护，会自行恢复，不打扰用户
+          if (kind === 'circuit_breaker_open') return;
+          lastLlmErrorToastAtRef.current = Date.now();
+          const isPermanent = ['invalid_api_key', 'insufficient_balance', 'quota_exceeded', 'model_not_found', 'region_not_supported', 'permission_denied'].includes(kind);
+          // 欠费 / 配额类错误挂「前往 xx 控制台」动作：endpoint 由 Rust 下发，
+          // 是这次调用实际使用的 provider（含路由回退后的真实厂商），
+          // 据此反查厂商预设拿 consoleUrl 与显示名；custom endpoint 查不到就不挂。
+          let action: ToastAction | undefined;
+          if (kind === 'insufficient_balance' || kind === 'quota_exceeded') {
+            const preset = findProviderPresetByEndpoint(event.payload?.endpoint ?? '');
+            if (preset?.consoleUrl) {
+              action = {
+                kind: 'open_url',
+                url: preset.consoleUrl,
+                label: t('toast.goto_console', { vendor: t(preset.labelKey as any) }),
+              };
+            }
+          }
+          showToast(message, isPermanent ? 'error' : 'warning', isPermanent ? 10000 : 6000, undefined, action, owner || null);
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // 监听待办变更事件（添加/更新/完成/删除时显示 Toast）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ action: string; item: { title?: string; id: string }; character_id?: string }>(
+          'todo:changed',
+          (event) => {
+            // 归属守卫：只弹给发起变更的角色（UI 手动操作无归属，不弹）
+            if (event.payload?.character_id !== getCharacterId()) return;
+            const { action, item } = event.payload;
+            let message = '';
+            switch (action) {
+              case 'added':
+                message = t('toast.todo_added', { title: item.title || '' });
+                break;
+              case 'updated':
+                message = t('toast.todo_updated', { title: item.title || '' });
+                break;
+              case 'completed':
+                message = t('toast.todo_completed', { title: item.title || '' });
+                break;
+              case 'deleted':
+                message = t('toast.todo_deleted');
+                break;
+            }
+            if (message) showToast(message, 'success', 4000);
+          },
+        );
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // 监听定时任务变更事件（添加/触发/取消时显示 Toast）
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ action: string; task: { message?: string }; character_id?: string }>(
+          'scheduler:changed',
+          (event) => {
+            // 归属守卫：只弹给创建该任务的角色（手动创建/旧任务无归属，不弹）
+            if (event.payload?.character_id !== getCharacterId()) return;
+            const { action, task } = event.payload;
+            let message = '';
+            switch (action) {
+              case 'added':
+                message = t('toast.scheduler_added', { message: task.message || '' });
+                break;
+              case 'triggered':
+                message = t('toast.scheduler_triggered', { message: task.message || '' });
+                break;
+              case 'cancelled':
+                message = t('toast.scheduler_cancelled');
+                break;
+            }
+            if (message) showToast(message, 'info', 4000);
+          },
+        );
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t, showToast]);
+
+  // Backend checks actual work-page visibility at the time of the task event.
+  useEffect(() => {
+    let cancelled = false;
+    let stop: (() => void) | undefined;
+    void listen<{ character_id: string; session_id: string; title: string; kind: ToastType }>('work:attention', ({ payload }) => {
+      if (cancelled || payload.character_id !== getCharacterId()) return;
+      showToast(payload.title, payload.kind, 8000, undefined, {
+        kind: 'open_work_session', sessionId: payload.session_id,
+        label: t('mind_inspector.code_open_session', { defaultValue: '查看任务' }),
+      }, payload.character_id);
+    }).then(unlisten => { if (cancelled) unlisten(); else stop = unlisten; }).catch(console.warn);
+    return () => { cancelled = true; stop?.(); };
+  }, [showToast, t]);
+
+  // 监听工具执行确认请求（文件操作、屏幕截取等隐私敏感工具）
+  // 后端 emit tool:confirmation_request → 转发给 toast 子窗口渲染三按钮确认卡片
+  // （拒绝 / 放行一次 / 始终允许），由 toast 窗口 invoke confirm_tool_execution 回传结果
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    let unlistenDone: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenDone = await listen<{ request_id: number }>('toast:confirm_done', ({ payload }) => {
+          completedConfirmRef.current.add(payload.request_id);
+          pendingConfirmRef.current = pendingConfirmRef.current.filter(p => p.request_id !== payload.request_id);
+        });
+        if (cancelled) { safeUnlisten(unlistenDone); return; }
+        unlisten = await listen<ToolConfirmPayload>('tool:confirmation_request', (event) => {
+          const payload = event.payload;
+          if (completedConfirmRef.current.has(payload.request_id)) return;
+          // 仅处理本角色的确认请求（Tauri emit 广播到所有窗口，需按 char_id 过滤）
+          if (payload.char_id && payload.char_id !== getCharacterId()) return;
+          if (toastReadyRef.current) {
+            void emit('toast:confirm', payload);
+          } else {
+            pendingConfirmRef.current.push(payload);
+            void ensureToastWindow();
+          }
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+      safeUnlisten(unlistenDone);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ensureToastWindow]);
+
+  // Recover confirmations lost while the toast window is closing or its listeners reload.
+  // The backend registry, rather than successful event emission, owns pending requests.
+  useEffect(() => {
+    let cancelled = false;
+    let busy = false;
+    const recover = async () => {
+      if (busy || cancelled) return;
+      busy = true;
+      try {
+        const requests = await invoke<ToolConfirmPayload[]>('get_pending_tool_confirmations');
+        if (cancelled) return;
+        const mine = requests.filter(p => (!p.char_id || p.char_id === getCharacterId())
+          && !completedConfirmRef.current.has(p.request_id));
+        pendingConfirmRef.current = mine;
+        if (mine.length === 0) return;
+        await ensureToastWindow();
+        if (cancelled || !toastReadyRef.current) return;
+        // Once delivered, these must not be replayed by a later toast:ready event.
+        pendingConfirmRef.current = [];
+        for (const request of mine) {
+          if (!completedConfirmRef.current.has(request.request_id)) await emit('toast:confirm', request);
+        }
+      } catch (error) {
+        console.warn('[ToolConfirm] pending request recovery failed:', error);
+      } finally {
+        busy = false;
+      }
+    };
+    void recover();
+    const timer = window.setInterval(() => { void recover(); }, 2000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [ensureToastWindow]);
+
+  // 主动对话流式 chunk 监听：后端生成期间推送 proactive:chunk 事件
+  // 流式期间只缓存文本，不喂 TTS 也不显示气泡——等 proactive_tick 返回后
+  // 根据 delivery_channel 分发：bubble 渠道喂 TTS + showBubble，chat_window 渠道跳过 TTS
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ text: string; character_id?: string }>('proactive:chunk', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          proactiveStreamTextRef.current += event.payload.text;
+        });
+        if (!unlisten) return;
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      safeUnlisten(unlisten);
+    };
+  }, []);
+
+  // 主动旁观插话监听：用户与角色 A 对话时，旁观者 B 经 LLM 判断后主动插话
+  // 后端 emit proactive:bubble 事件，前端负责 showBubble + TTS + 写入 chat:assistant_message
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{
+          character_id: string;
+          content: string;
+          expression?: string;
+          motion?: string;
+          sticker?: import('./types').StickerRef;
+        }>('proactive:bubble', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          const rawText = event.payload?.content ?? '';
+          if (!rawText) return;
+          const text = stripActions(rawText);
+          if (!text) return;
+          void (async () => {
+            let shown = false;
+            let release: (() => void) | undefined;
+            const show = () => {
+              if (shown) return;
+              shown = true;
+              if (!TtsStreamQueue.isEnabled()) {
+                if (event.payload.expression) petRef.current?.setExpression(event.payload.expression, 3000);
+                if (event.payload.motion) petRef.current?.playMotion(event.payload.motion);
+              }
+              BubbleController.showBubble(text, undefined, { sticker: event.payload.sticker });
+              if (TtsStreamQueue.isEnabled()) release = BubbleController.holdForSpeech();
+            };
+            if (TtsStreamQueue.isEnabled()) {
+              TtsStreamQueue.beginStream(`interjection-${Date.now()}`, event.payload.character_id);
+              TtsStreamQueue.setPresentation({ expression: event.payload.expression ?? '', motion: event.payload.motion ?? '' });
+              TtsStreamQueue.feedSync(text, { onFirstAudioStart: show });
+              await TtsStreamQueue.flushSync();
+            }
+            show();
+            release?.();
+            void emit('chat:assistant_message', {
+              content: text,
+              sticker: event.payload.sticker,
+              timestamp: new Date().toISOString(),
+              character_id: getCharacterId() ?? undefined,
+              channel: 'proactive',
+            });
+          })();
+        });
+        if (!unlisten) return;
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      safeUnlisten(unlisten);
+    };
+  }, []);
+
+  // 跨角色对话流式监听（同步模式：语音开始时才显示文字气泡，音画同步）
+  useEffect(() => {
+    let cancelled = false;
+    const unlisteners: (() => void)[] = [];
+    const crossStreamTextRef = { current: '' };
+    const crossStreamIdRef = { current: '' };
+    const crossStreamRoleRef = { current: '' as 'source' | 'target' | '' };
+    const crossListenerNameRef = { current: '' };
+    const finishPeerSpeech = ({ stream_id, speaker_id }: { stream_id: string; speaker_id: string }) => {
+      void emit('cross:speech-finished', { stream_id, character_id: speaker_id }).catch(() => {});
+    };
+    void (async () => {
+      try {
+        // cross:start：源角色发起说话（speaker_id=源角色）
+        const unStart = await listen<{
+          stream_id: string; speaker_id: string; listener_id: string;
+          speaker_name: string; listener_name: string; message: string;
+        }>('cross:start', (event) => {
+          if (event.payload.speaker_id !== getCharacterId()) return;
+          crossStreamIdRef.current = event.payload.stream_id;
+          crossStreamRoleRef.current = 'source';
+          crossStreamTextRef.current = '';
+          crossListenerNameRef.current = event.payload.listener_name;
+          TtsStreamQueue.resetBuffer();
+          // listener_name为User时，这是对用户说话，不应标记为跨角色
+          const isCrossChar = event.payload.listener_name !== 'User' && event.payload.listener_name !== 'user';
+          const crossOpts = { crossCharacter: isCrossChar, listenerName: event.payload.listener_name };
+          const rawMsg = event.payload.message;
+          const msg = rawMsg ? stripActions(rawMsg) : '';
+          if (msg && ttsConfigRef.current?.enabled) {
+            void (async () => {
+              await TtsStreamQueue.speakSync(msg);
+              if (cancelled) return;
+              BubbleController.showBubble(msg, undefined, crossOpts);
+              void emit('chat:assistant_message', {
+                content: msg,
+                timestamp: new Date().toISOString(),
+                character_id: getCharacterId() ?? undefined,
+                channel: isCrossChar ? 'cross_character' : 'proactive',
+              });
+              await TtsStreamQueue.waitForDrain();
+            })().finally(() => finishPeerSpeech(event.payload));
+          } else {
+            if (msg) BubbleController.showBubble(msg, undefined, crossOpts);
+            finishPeerSpeech(event.payload);
+          }
+        });
+        unlisteners.push(unStart);
+
+        // cross:chunk：目标角色回复流式文本（speaker_id=目标角色=正在回复的角色）
+        const unChunk = await listen<{
+          text: string; stream_id: string; speaker_id: string; listener_id: string; listener_name?: string;
+        }>('cross:chunk', (event) => {
+          if (event.payload.speaker_id !== getCharacterId()) return;
+          if (crossStreamRoleRef.current === 'target'
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (crossStreamRoleRef.current !== 'target') {
+            crossStreamTextRef.current = '';
+            crossListenerNameRef.current = '';
+            TtsStreamQueue.resetBuffer();
+          }
+          crossStreamIdRef.current = event.payload.stream_id;
+          crossStreamRoleRef.current = 'target';
+          crossStreamTextRef.current += event.payload.text;
+          if (!crossListenerNameRef.current) {
+            crossListenerNameRef.current = event.payload.listener_name || event.payload.listener_id;
+          }
+          const listenerName = crossListenerNameRef.current;
+          const isCrossChar = listenerName !== 'User' && listenerName !== 'user';
+          const crossOpts = { crossCharacter: isCrossChar, listenerName };
+          if (ttsConfigRef.current?.enabled) {
+            TtsStreamQueue.feedSync(event.payload.text, {
+              onFirstAudioStart: () => {
+                if (cancelled) return;
+                const cleanText = stripActions(crossStreamTextRef.current);
+                BubbleController.showStreamingBubble(cleanText, crossOpts);
+              },
+            });
+          } else {
+            const cleanText = stripActions(crossStreamTextRef.current);
+            BubbleController.showStreamingBubble(cleanText, crossOpts);
+            TtsStreamQueue.feed(event.payload.text);
+          }
+        });
+        unlisteners.push(unChunk);
+
+        // cross:done：目标角色回复完成
+        const unDone = await listen<{
+          text: string; stream_id: string; speaker_id: string; listener_id: string; listener_name?: string;
+          expression: string; motion: string; response_mode: string;
+        }>('cross:done', (event) => {
+          if (event.payload.speaker_id !== getCharacterId()) return;
+          if (crossStreamRoleRef.current === 'target'
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) {
+            finishPeerSpeech(event.payload);
+            return;
+          }
+          crossStreamRoleRef.current = 'target';
+          crossStreamIdRef.current = event.payload.stream_id;
+          const rawText = event.payload.text || crossStreamTextRef.current;
+          const finalText = stripActions(rawText);
+          const listenerName = crossListenerNameRef.current || event.payload.listener_name || event.payload.listener_id;
+          const isCrossChar = listenerName !== 'User' && listenerName !== 'user';
+          const crossOpts = { crossCharacter: isCrossChar, listenerName };
+          void (async () => {
+            if (ttsConfigRef.current?.enabled) {
+              await TtsStreamQueue.flushSync();
+            } else {
+              TtsStreamQueue.flush();
+            }
+            if (cancelled) return;
+            if (finalText) {
+              BubbleController.finishStreaming(finalText, crossOpts);
+              void emit('chat:assistant_message', {
+                content: finalText,
+                timestamp: new Date().toISOString(),
+                character_id: getCharacterId() ?? undefined,
+                channel: isCrossChar ? 'cross_character' : 'proactive',
+              });
+            }
+            crossStreamTextRef.current = '';
+            crossStreamIdRef.current = '';
+            crossStreamRoleRef.current = '';
+            crossListenerNameRef.current = '';
+          })().finally(() => finishPeerSpeech(event.payload));
+        });
+        unlisteners.push(unDone);
+
+        // 连接失败时清掉可能停住的半截流式气泡，并只在发起方显示简短状态提示。
+        const unError = await listen<{
+          source_id: string; target_id: string; stream_id: string;
+        }>('cross:error', (event) => {
+          const characterId = getCharacterId();
+          if (!characterId || (characterId !== event.payload.source_id && characterId !== event.payload.target_id)) return;
+          if (crossStreamRoleRef.current === 'target'
+            && characterId === event.payload.target_id
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (crossStreamRoleRef.current === 'source'
+            && characterId === event.payload.source_id
+            && crossStreamIdRef.current
+            && crossStreamIdRef.current !== event.payload.stream_id) return;
+          if (characterId === event.payload.target_id) {
+            TtsStreamQueue.resetBuffer();
+            BubbleController.closeAll();
+            crossStreamTextRef.current = '';
+            crossStreamIdRef.current = '';
+            crossStreamRoleRef.current = '';
+            crossListenerNameRef.current = '';
+            return;
+          }
+          const targetName = characterName(event.payload.target_id);
+          TtsStreamQueue.resetBuffer();
+          BubbleController.closeAll();
+          crossStreamTextRef.current = '';
+          crossStreamIdRef.current = '';
+          crossStreamRoleRef.current = '';
+          crossListenerNameRef.current = '';
+          showToast(t('chat.cross_character_unavailable', { name: targetName }), 'error', 3800);
+        });
+        unlisteners.push(unError);
+
+        if (cancelled) {
+          unlisteners.forEach(u => u());
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisteners.forEach(u => { try { u(); } catch { /* ignore */ } });
+    };
+  }, [t, showToast]);
+
+  // 跨角色发言通知监听：其他角色发言后广播 proactive:spoken 事件，
+  // 本角色记录时间戳，在下次 tick 时延迟执行，避免同时或连续发言
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ character_id: string; timestamp: number }>('proactive:spoken', (event) => {
+          if (event.payload?.character_id === getCharacterId()) return;
+          otherSpokenAtRef.current = Date.now();
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+  }, []);
+
+  // Liveness continues while a proactive generation is awaiting its model.
+  useEffect(() => {
+    if (!proactiveStarted) return;
+    const heartbeat = () => void invoke('proactive_heartbeat', {
+      characterId: getCharacterId() ?? undefined,
+    }).catch(error => console.debug('[Proactive] heartbeat failed:', error));
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 10000);
+    return () => window.clearInterval(timer);
+  }, [proactiveStarted]);
+
+  // 主动发言呈现轮询；各角色的内部认知由 Rust 常驻任务驱动。间隔由 proactive.tick_interval 配置。
+  useEffect(() => {
+    if (!proactiveStarted) return;
+    let cancelled = false;
+    let timerId: number | null = null;
+    const scheduleNext = (delayMs: number) => {
+      timerId = window.setTimeout(runTick, delayMs);
+    };
+    const runTick = async () => {
+      if (cancelled) return;
+      // 用户对话进行中时跳过主动 tick，避免主动消息与对话 TTS/气泡竞争
+      if (ChatController.isStreaming) {
+        scheduleNext(proactiveTickIntervalRef.current);
+        return;
+      }
+      // 其他角色最近发言后延迟本角色 tick，避免同时或连续发言
+      if (otherSpokenAtRef.current > 0) {
+        const sinceOther = Date.now() - otherSpokenAtRef.current;
+        const cooldownMs = crossCooldownMsRef.current;
+        if (sinceOther < cooldownMs) {
+          scheduleNext(cooldownMs - sinceOther);
+          return;
+        }
+      }
+      // 视频动画演出自动触发（后端按 配置开关 + 冷却 + 活动匹配 决定；缺素材时优雅跳过）
+      try {
+        await invoke('video_animation_auto_tick', {
+          characterId: getCharacterId() ?? undefined,
+        });
+      } catch {
+        /* 后端未就绪忽略 */
+      }
+      const now = Date.now();
+      const idleSeconds = (now - lastActivityRef.current) / 1000;
+      const awaySeconds = (now - lastUserMessageRef.current) / 1000;
+      const userPresent = idleSeconds < IDLE_AWAY_THRESHOLD_SECONDS;
+      const windowChanged =
+        activeWindowRef.current !== lastActiveWindowRef.current;
+      const ctx: ProactiveTickContext = {
+        idle_seconds: idleSeconds,
+        away_seconds: awaySeconds,
+        user_present: userPresent,
+        interaction_count_today: 0,
+        active_window: activeWindowRef.current,
+        window_changed: windowChanged,
+        last_topic_relevant: false,
+        has_relevant_memory: false,
+        drag_distance: dragDistanceRef.current,
+        // 注意：这里必须用 LLM 在 chat:done 中判定的真实用户情绪，
+        // 不能用 store.currentMood.primary_emotion——那是 Vivian 自身的 mood，
+        // 会把 Vivian 的内部情绪误传为用户情绪（曾导致 proactive LLM 凭空"觉得用户难过"）。
+        user_emotion: useAppStore.getState().lastUserEmotion ?? '',
+      };
+      try {
+        proactiveStreamTextRef.current = '';
+        // A window change is an observed event, not an acknowledgement of speech.
+        // Consume this snapshot even when the model stays silent or delivery fails.
+        lastActiveWindowRef.current = ctx.active_window;
+        const resp = await proactiveApi.tick(ctx);
+        if (resp.messages && resp.messages.length > 0) {
+          for (const msg of resp.messages as ProactiveMessage[]) {
+            // 按 delivery_channel 分流：
+            // - chat_window（微信渠道）：后端已写入 dialogue(channel=wechat) + emit chat:assistant_message
+            //   + 在 chat 窗口不可见时 emit wechat:message_banner。微信消息不需要 TTS，
+            //   不 showBubble（不弹桌宠气泡）也不重复 emit chat:assistant_message。
+            // - bubble（桌宠气泡）：前端负责 TTS + showBubble + emit chat:assistant_message(channel=proactive)，
+            //   后端不发任何事件。
+            if (msg.delivery_channel === 'chat_window') {
+              // 微信渠道：跳过 TTS，关闭流式期间可能残留的桌宠气泡
+              BubbleController.closeAll();
+              continue;
+            }
+            // bubble 渠道：首段语音开始时逐字显示，播放结束后解除气泡保留。
+            let shown = false;
+            let release: (() => void) | undefined;
+            const show = () => {
+              if (shown || cancelled) return;
+              shown = true;
+              BubbleController.showBubble(msg.content);
+              if (TtsStreamQueue.isEnabled()) release = BubbleController.holdForSpeech();
+              void emit('chat:assistant_message', {
+                content: msg.content,
+                timestamp: new Date(msg.timestamp * 1000 || Date.now()).toISOString(),
+                character_id: getCharacterId() ?? undefined,
+                channel: 'proactive',
+              });
+            };
+            try {
+              if (TtsStreamQueue.isEnabled()) {
+                TtsStreamQueue.feedSync(msg.content, { onFirstAudioStart: show });
+                await TtsStreamQueue.flushSync();
+              }
+            } finally {
+              // 未启用语音或播放失败时仍显示文字；回调已显示时不会重复。
+              show();
+              release?.();
+            }
+          }
+          lastBubbleFromProactiveRef.current = now;
+        } else if (proactiveStreamTextRef.current) {
+          BubbleController.closeAll();
+        }
+        // 自适应 tick 间隔：后端根据用户空闲时间推荐下次 tick 延迟
+        if (typeof resp.recommended_next_interval_ms === 'number' && resp.recommended_next_interval_ms > 0) {
+          proactiveTickIntervalRef.current = resp.recommended_next_interval_ms;
+        }
+        // 跨角色冷却时长：后端按角色 reluctance 差异化下发
+        if (typeof resp.effective_cross_cooldown_ms === 'number' && resp.effective_cross_cooldown_ms > 0) {
+          crossCooldownMsRef.current = resp.effective_cross_cooldown_ms;
+        }
+      } catch {
+        /* ignore */
+      }
+      if (!cancelled) {
+        scheduleNext(proactiveTickIntervalRef.current);
+      }
+    };
+    // 首次 tick 错峰：根据 character_id 添加偏移，避免两个角色窗口同时触发 tick。
+    // vivian 延迟 0ms，nana 延迟半个周期，使两者 tick 永远错开。
+    const initialDelay = (() => {
+      const cid = getCharacterId();
+      const phase = Math.max(0, CHARACTER_IDS.indexOf(cid ?? 'vivian'));
+      if (phase > 0) return Math.floor(proactiveTickIntervalRef.current * phase / 4);
+      return proactiveTickIntervalRef.current;
+    })();
+    scheduleNext(initialDelay);
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proactiveStarted]);
+
+  // 心理微调 tick：让情绪持续波动（Homeostasis + 微噪声），并刷新 mood 到全局 store
+  // 刷新 store.currentMood 后，微表情 / 呼吸频率 / 自主行为等订阅 mood 的逻辑才能随真实注意力动态切换
+  // 休息时降频：正常 3s，休息/离线时 30s，避免空闲时高频写盘/IPC
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | null = null;
+    const NORMAL_INTERVAL = 3000;
+    const REST_INTERVAL = 30000;
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const ps = presenceStateRef.current;
+      const isResting = ps === 'rest' || ps === 'offline';
+      const interval = isResting ? REST_INTERVAL : NORMAL_INTERVAL;
+      timerId = window.setTimeout(runTick, interval);
+    };
+    const runTick = async () => {
+      await invoke('psychology_micro_tick', { characterId: getCharacterId() ?? undefined }).catch(() => {
+        /* 后端未就绪忽略 */
+      });
+      const m = await moodApi.getCurrent().catch(() => null);
+      if (m) useAppStore.getState().setMood(m);
+      scheduleNext();
+    };
+    scheduleNext();
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 心情表情触发 tick：空闲时根据当前心情随机触发表情，让桌宠更生动
+  // 随机 25-35s 间隔（避免机械感）；休息/对话流式/页面隐藏时跳过
+  // 后端负责概率门控 + 20s 冷却 + push_action，前端只需周期调用
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | null = null;
+    const scheduleNext = () => {
+      if (cancelled) return;
+      const interval = 25000 + Math.random() * 10000;
+      timerId = window.setTimeout(runTick, interval);
+    };
+    const runTick = async () => {
+      if (cancelled) return;
+      const ps = presenceStateRef.current;
+      const isResting = ps === 'rest' || ps === 'offline';
+      if (!isResting && !ChatController.isStreaming && !document.hidden) {
+        await invoke('mood_expression_tick', { characterId: getCharacterId() ?? undefined }).catch(() => {
+          /* 后端未就绪忽略 */
+        });
+      }
+      scheduleNext();
+    };
+    // 首次延迟 15s 启动（等待心理状态稳定）
+    timerId = window.setTimeout(runTick, 15000);
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 自动表情触发 tick（每4秒）：检查空闲状态、心情持续表情、程序事件等
+  // 无需LLM参与，纯规则驱动，让桌宠在用户不交互时也能有丰富表情
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | null = null;
+    const AUTO_TICK_INTERVAL = 4000;
+    let lastTimeOfDay = '';
+
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const ps = presenceStateRef.current;
+        const isResting = ps === 'rest' || ps === 'offline';
+        if (!isResting && !ChatController.isStreaming && !document.hidden) {
+          await invoke('auto_expression_tick', { characterId: getCharacterId() ?? undefined });
+        }
+
+        // 时间段变化检测（早/中/晚/夜）
+        const hour = new Date().getHours();
+        let timeOfDay = '';
+        if (hour >= 6 && hour < 12) timeOfDay = 'morning';
+        else if (hour >= 12 && hour < 18) timeOfDay = 'afternoon';
+        else if (hour >= 18 && hour < 23) timeOfDay = 'evening';
+        else timeOfDay = 'night';
+        if (timeOfDay !== lastTimeOfDay && lastTimeOfDay !== '') {
+          await invoke('trigger_system_event', { event: timeOfDay, characterId: getCharacterId() ?? undefined });
+        }
+        lastTimeOfDay = timeOfDay;
+      } catch {
+        /* ignore */
+      }
+      if (!cancelled) {
+        timerId = window.setTimeout(tick, AUTO_TICK_INTERVAL);
+      }
+    };
+
+    timerId = window.setTimeout(tick, 8000); // 延迟8秒启动，等其他系统就绪
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 窗口聚焦/失焦事件触发
+  useEffect(() => {
+    const handleFocus = () => {
+      void invoke('trigger_system_event', { event: 'window_focus', characterId: getCharacterId() ?? undefined }).catch(() => {});
+    };
+    const handleBlur = () => {
+      void invoke('trigger_system_event', { event: 'window_blur', characterId: getCharacterId() ?? undefined }).catch(() => {});
+    };
+    window.addEventListener('focus', handleFocus);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, []);
+
+  // 桌宠动作队列消费：工具层通过 push_action 投递的动作请求在此取出并驱动 桌宠
+  // 事件驱动：后端 push_action 时 emit `pet:action_pending`，前端 listen 触发一次性 drain
+  // 兜底轮询：保留 PET_ACTION_DRAIN_INTERVAL_MS 间隔防止事件丢失
+  useEffect(() => {
+    type PendingAction = {
+      kind: string;
+      target: string;
+      params: Record<string, unknown>;
+      timestamp: number;
+    };
+
+    const drainAndApply = async () => {
+      let actions: PendingAction[] = [];
+      try {
+        const resp = await invoke<{ actions: PendingAction[] }>('drain_pet_actions', { characterId: getCharacterId() ?? undefined });
+        actions = resp.actions ?? [];
+      } catch {
+        /* 后端未就绪忽略 */
+      }
+      if (actions.length === 0) return;
+
+      const handle = petRef.current;
+      for (const act of actions) {
+        const { kind, target, params } = act;
+        switch (kind) {
+          case 'expression':
+            // 后端规则表驱动的限时表情。图集格位（如 dizzy）靠这个 duration_ms 限时，
+            // 到点由画布自己回落到 idle——没有它那张脸会一直挂着。
+            handle?.setExpression(target, (params.duration_ms as number) || 0);
+            break;
+          case 'motion':
+          case 'animation':
+            handle?.playMotion(target);
+            break;
+          case 'idle':
+            // 触发引擎随机待机动作（与 commands::engine::trigger_idle_action 同源）
+            void invoke('trigger_idle_action', { characterId: getCharacterId() ?? undefined }).catch(() => {});
+            break;
+          case 'bubble': {
+            const text = (params.text as string) || '';
+            if (text) {
+              BubbleController.showBubble(text);
+            }
+            break;
+          }
+          case 'mood': {
+            // mood 联动表情（pet_behavior_tools 中已计算 expression 字段）
+            const expression = (params.expression as string) || '';
+            if (expression) {
+              handle?.setExpression(expression, 3000);
+            }
+            break;
+          }
+          case 'state':
+            // 状态切换由 Presence 系统统一管理（rest/offline），此处无 桌宠对应
+            break;
+          case 'window': {
+            // 窗口位置/尺寸由 Tauri window API 直接设置
+            try {
+              const win = getCurrentWindow();
+              if (target === 'position') {
+                const x = (params.x as number) ?? 0;
+                const y = (params.y as number) ?? 0;
+                await win.setPosition(new LogicalPosition(x, y));
+              } else if (target === 'size') {
+                const w = (params.width as number) ?? 400;
+                const h = (params.height as number) ?? 500;
+                await win.setSize(new LogicalSize(w, h));
+              }
+            } catch {
+              /* ignore */
+            }
+            break;
+          }
+          case 'query':
+          case 'watch_mode':
+          case 'behavior_mode':
+          case 'follow_cursor':
+            // 这些是引擎状态/查询类，无直接 桌宠副作用，暂不处理
+            break;
+          default:
+            break;
+        }
+      }
+    };
+
+    // 兜底轮询（防事件丢失）
+    const id = window.setInterval(drainAndApply, PET_ACTION_DRAIN_INTERVAL_MS);
+
+    // 事件驱动：收到后端 emit 后立即 drain 一次
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{ character_id?: string }>('pet:action_pending', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          void drainAndApply();
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 环境信息更新：每 30 秒同步一次鼠标位置和活动窗口
+  useEffect(() => {
+    const id = window.setInterval(async () => {
+      try {
+        // 通过后端获取当前活动窗口信息
+        const info = await environmentApi.getInfo();
+        if (info.active_window) {
+          activeWindowRef.current = info.active_window;
+        }
+      } catch {
+        /* ignore */
+      }
+    }, ENVIRONMENT_UPDATE_INTERVAL_MS);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 主动消息"被冷落"检测已迁移到后端（proactive.tick 内的权威判定，见 proactive/mod.rs）：
+  // 主动消息投递后若用户在场且超过 IGNORE_TIMEOUT_SECS 仍未回应，则 on_ignored 一次。
+  // 前端不再用 ref 驱动的定时器判定（ref 变化不触发重渲染，原实现不可靠且 ignored_count 恒为 0）。
+
+  // requestRestore / hideForSleep / restoreFromSleep / hideForOffline / restoreFromOffline 引用 ——
+  // 让快捷键回调和事件监听器能调用最新的闭包，无需重新注册
+  const requestRestoreRef = useRef<() => void>(() => {});
+  const hideForSleepRef = useRef<() => void>(() => {});
+  const restoreFromSleepRef = useRef<() => void>(() => {});
+  const hideForOfflineRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const restoreFromOfflineRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  useEffect(() => {
+    requestRestoreRef.current = requestRestore;
+  }, [requestRestore]);
+  useEffect(() => {
+    hideForSleepRef.current = hideForSleep;
+  }, [hideForSleep]);
+  useEffect(() => {
+    restoreFromSleepRef.current = restoreFromSleep;
+  }, [restoreFromSleep]);
+  useEffect(() => {
+    hideForOfflineRef.current = hideForOffline;
+  }, [hideForOffline]);
+  useEffect(() => {
+    restoreFromOfflineRef.current = restoreFromOffline;
+  }, [restoreFromOffline]);
+
+  // hideReason 引用 —— 快捷键回调需要读取最新的隐藏原因以判断是否从睡眠唤醒
+  const hideReasonRef = useRef<HideReason | null>(null);
+  useEffect(() => {
+    hideReasonRef.current = hideReason;
+  }, [hideReason]);
+
+  /** 触发睡眠唤醒问候：调用后端 try_wake_greeting 命令，
+   *  概率命中时 LLM 生成问候语，展示气泡 + TTS 朗读 */
+  const triggerWakeGreeting = useCallback(async () => {
+    try {
+      const result = await invoke<{
+        greeting: string | null;
+        probability: number;
+        triggered: boolean;
+      }>('try_wake_greeting', { characterId: getCharacterId() ?? undefined });
+      if (result.triggered && result.greeting) {
+        lastBubbleFromProactiveRef.current = Date.now();
+        if (ttsConfigRef.current?.enabled) {
+          await TtsStreamQueue.speakSync(result.greeting);
+        }
+        BubbleController.showBubble(result.greeting);
+      }
+    } catch {
+      /* 后端未就绪忽略 */
+    }
+    // 函数体内未使用 store/ttsApi，原先的依赖是误写——会导致每次 re-render 引用变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const triggerWakeGreetingRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    triggerWakeGreetingRef.current = triggerWakeGreeting;
+  }, [triggerWakeGreeting]);
+
+  // Only the independent lightweight menu is resident. Chat loads on demand.
+  useEffect(() => {
+    void invoke('start_edge_menu_watcher').catch(() => {});
+    void invoke('start_chat_outside_click_hook').catch(() => {});
+    // 预创建微信消息横幅窗口（常驻隐藏，由后端事件触发显示）
+    void ensureMessageBannerWindow();
+  }, [ensureMessageBannerWindow]);
+
+  // 在场状态监听：驱动 桌宠行为（表情/闭眼/鼠标跟随/隐藏）
+  // Rest 状态 = 休息：回落到 idle + 闭眼 + 隐藏到角落（露出 48px）
+  // Busy 在场状态序列化为 edge，角色仍能听见发言。
+  // Offline 状态 = 离线：真正 hide_window，只能通过托盘/快捷键唤回
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    let presenceRevision = 0;
+    void (async () => {
+      // Subscribe before reading: default windows mount before their Brain exists.
+      try {
+        unlisten = await listen<{ character_id: string; from: string; to: string; farewell_text?: string | null }>('presence:changed', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          presenceRevision += 1;
+          const from = event.payload?.from ?? '';
+          const to = event.payload?.to ?? null;
+          const farewell = event.payload?.farewell_text ?? null;
+          setPresenceState(to);
+          useAppStore.getState().setPresenceState(to);
+
+          const applyPresenceChange = () => {
+            // Visible sleep/edge sequences are handled by the canvas.
+            if (to === 'offline') {
+              void hideForOfflineRef.current?.();
+            } else if (from === 'rest') {
+              restoreFromSleepRef.current?.();
+            } else if (from === 'offline') {
+              void restoreFromOfflineRef.current?.();
+            }
+          };
+
+          // 有告别语时：先显示气泡 + TTS，延迟隐藏让用户看到告别语
+          if (farewell && (to === 'rest' || to === 'offline')) {
+            BubbleController.showBubble(farewell);
+            if (ttsConfigRef.current?.enabled) {
+              TtsStreamQueue.feed(farewell);
+            }
+            void emit('chat:assistant_message', {
+              content: farewell,
+              timestamp: new Date().toISOString(),
+              character_id: getCharacterId() ?? undefined,
+              channel: 'proactive',
+            });
+            const delay = Math.max(3000, farewell.length * 150);
+            window.setTimeout(() => applyPresenceChange(), delay);
+          } else {
+            applyPresenceChange();
+          }
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+      await syncPresenceSnapshot({
+        ready: waitForAppReady,
+        read: () => invoke<{ state: string }>('get_presence_state', { characterId: getCharacterId() }),
+        apply: info => {
+          setPresenceState(info.state);
+          useAppStore.getState().setPresenceState(info.state);
+          if (info.state === 'offline') void hideForOfflineRef.current?.();
+        },
+        cancelled: () => cancelled,
+        revision: () => presenceRevision,
+        wait: () => new Promise(resolve => window.setTimeout(resolve, 1000)),
+      });
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persistent sleep/edge sequences are owned by ChibiPetCanvas.
+  // 监听 direct 渠道被拦截：后端 emit chat:presence_blocked → toast 提示用户改用微信
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{
+          stream_id: string;
+          character_id: string;
+          presence: string;
+          hint?: string;
+        }>('chat:presence_blocked', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          const hint = event.payload.hint || t('chat.presence_blocked_default');
+          // 同 presence:wake_deferred：原样转发归属，空归属交由主角色窗口收敛
+          void emit('toast:show', { message: hint, type: 'warning', duration: 5000, key: `presence_blocked_${Date.now()}`, character_id: event.payload?.character_id || undefined });
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 监听唤醒被延迟：用户尝试唤醒但任务进行中（Busy 知识采集 / Rest 记忆沉淀）
+  // 后端 emit presence:wake_deferred → toast 提示「等我做完」
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await listen<{
+          character_id: string;
+          from_state: string;
+          task: string;
+          hint?: string;
+        }>('presence:wake_deferred', (event) => {
+          if (event.payload?.character_id && event.payload.character_id !== getCharacterId()) return;
+          const hint = event.payload.hint || t('toast.wake_deferred_default');
+          // 原样转发 payload 的归属，而不是改写成本窗口角色：本监听是宽松守卫
+          // （空归属时所有角色窗口都会通过），若各自标成自身角色，就会各弹一条。
+          // 空归属保持为空 → 接收侧按「无归属只弹主角色窗口」收敛。
+          void emit('toast:show', {
+            message: hint,
+            type: 'info',
+            duration: 4000,
+            key: `wake_deferred_${Date.now()}`,
+            character_id: event.payload?.character_id || undefined,
+          });
+        });
+        if (cancelled) { safeUnlisten(unlisten); return; }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      safeUnlisten(unlisten);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 文件拖放：通过 Tauri 原生 onDragDropEvent 获取文件路径 ──
+  const extractFileText = useExtractFileText();
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Drop 逻辑用 ref 保存最新闭包，避免 onDragDropEvent 监听器持有过时状态
+  const handleFileDropRef = useRef<(paths: string[]) => void>(() => {});
+  handleFileDropRef.current = (paths: string[]) => {
+    const charId = getCharacterId() ?? undefined;
+    if (!charId || paths.length === 0) return;
+
+    void (async () => {
+      for (const filePath of paths) {
+        try {
+          const result: FileTextResult = await extractFileText(filePath);
+
+          if (result.file_type === 'image') {
+            const reply = await invoke<string>('send_image_message', {
+              sourcePath: filePath,
+              characterId: charId,
+              channel: 'direct',
+            });
+            if (reply?.trim()) BubbleController.showBubble(reply);
+            showToast(
+              t('toast.image_dropped', {
+                filename: result.filename,
+                defaultValue: '已发送图片：{{filename}}',
+              }),
+              'success',
+              3000,
+            );
+          } else if (result.file_type === 'unsupported') {
+            showToast(
+              t('toast.file_unsupported', {
+                filename: result.filename,
+                defaultValue: '不支持的文件类型：{{filename}}',
+              }),
+              'warning',
+              4000,
+            );
+          } else {
+            const truncatedHint = result.truncated
+              ? t('toast.file_truncated', {
+                  count: result.original_char_count,
+                  defaultValue: `（文件过长，已截断，原始 ${result.original_char_count} 字符）`,
+                })
+              : '';
+            const message = `[文件：${result.filename}]\n${result.text}${truncatedHint}`;
+            const fileMetadata = {
+              kind: 'file',
+              file_name: result.filename,
+              file_type: result.file_type,
+              truncated: result.truncated,
+              original_char_count: result.original_char_count,
+            };
+            await ChatController.sendMessage(message, charId, 'direct', undefined, fileMetadata);
+          }
+        } catch (err) {
+          showToast(
+            t('toast.file_extract_failed', {
+              error: String(err),
+              defaultValue: '文件处理失败：{{error}}',
+            }),
+            'error',
+            5000,
+          );
+        }
+      }
+    })();
+  };
+
+  // 注册原生拖放事件监听（仅一次）
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void (async () => {
+      unlisten = await getCurrentWindow().onDragDropEvent((event) => {
+        if (disposed) return;
+        const payload = event.payload;
+        if (payload.type === 'enter') {
+          setIsDragOver(true);
+        } else if (payload.type === 'leave') {
+          setIsDragOver(false);
+        } else if (payload.type === 'drop') {
+          setIsDragOver(false);
+          handleFileDropRef.current(payload.paths);
+        }
+      });
+      if (disposed) unlisten();
+    })().catch((err) => console.warn('[App] File drop listener:', err));
+    return () => { disposed = true; unlisten?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── 长按桌宠打开心智观察器 ──
+  // 左键按住（不拖动）满 HOLD_OPEN_TOTAL_MS（1s）后打开心智观察器；
+  // 超过 HOLD_RING_DELAY_MS（0.2s）后在按住位置显示顺时针填充的环形进度槽，
+  // 同时起播施法逐帧动画。
+  /**
+   * 放行一次已经成立的长按：让（预热好的）心智观察器显形。
+   *
+   *  预热把「建窗口」提前到了长按成立之前，但「建好」不等于「子窗口接得住显形事件」
+   *  ——两者之间隔着一整个页面冷启。所以这里分三种情况：
+   *  - 没有预热会话（长按快得没跑到 0.1s；或预热链自己放弃了）：直接走常规打开；
+   *  - 子窗口已回执就绪：立刻放行，这一下就是「松手即见」；
+   *  - 还没回执：挂起等回执（见 pet:prewarm_ready 监听），另配超时兜底——回执只是
+   *    一条事件，丢了不该让长按毫无反应。
+   *
+   *  这里**不**提前腾会话位：挂起期间回执还要靠它认领这次长按。
+   */
+  const releasePrewarm = useCallback(() => {
+    const session = prewarmRef.current;
+    if (!session) {
+      holdActionRef.current();
+      return;
+    }
+    session.committed = true;
+    void (async () => {
+      // 等预热链落地：窗口得先真的建出来，常规打开路径的复用判定才认得它
+      await session.chain;
+      if (prewarmRef.current !== session) return;
+      if (session.childReady) {
+        finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+        return;
+      }
+      session.readyTimer = window.setTimeout(() => {
+        session.readyTimer = null;
+        finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+      }, PREWARM_READY_WAIT_MS);
+    })();
+  }, []);
+
+  const cancelHold = useCallback(() => {
+    if (!holdActiveRef.current) return;
+    holdActiveRef.current = false;
+    if (holdTimerRef.current !== undefined) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = undefined;
+    }
+    if (prewarmTimerRef.current !== undefined) {
+      window.clearTimeout(prewarmTimerRef.current);
+      prewarmTimerRef.current = undefined;
+    }
+    // 中止预热：这次长按没成立，提前建出来的窗口不该留下（详见 abortPrewarmSession）。
+    // 加载没跑完的也在这一下被打断——窗口正在建的话由预热链自己收尾销毁。
+    const session = prewarmRef.current;
+    if (session) {
+      prewarmRef.current = null;
+      abortPrewarmSession(session);
+    }
+    setHoldRingPos(null);
+    // 施法动画从当前帧倒放回初始帧（进度环未出现/已播完时无会话，no-op）
+    petRef.current?.cancelCast();
+  }, []);
+
+  const completeHold = useCallback(() => {
+    if (!holdActiveRef.current) return;
+    holdActiveRef.current = false;
+    holdCompletedAtRef.current = Date.now();
+    setHoldRingPos(null);
+    // 观察器可能接到这次 mouseup，长按成立时立即结束桌宠的按压会话。
+    dragPressAliveRef.current = false;
+    dragSessionRef.current = false;
+    positioningCoordinator.dragInFlight = false;
+    void invoke('stop_window_drag', { cancel: true }).catch(() => {});
+    // 施法动画与进度环同步播放，此时应已自然播完；兜底立即归位（不倒放）
+    petRef.current?.stopCast();
+    // 预热会话若已就绪，这一下就让它显形；还没就绪则挂起，等子窗口回执或超时
+    // （详见 releasePrewarm）。没有预热会话（没跑到 0.1s / 预热链放弃了）时，
+    // releasePrewarm 会直接走常规打开路径。
+    releasePrewarm();
+    // 长按本身也是一次用户动作：记进事件账本，并让桌宠随口反应一句
+    requestPetReaction('long_press', undefined, { pressDurationMs: Date.now() - holdStartedAtRef.current });
+  }, [requestPetReaction, releasePrewarm]);
+
+  const startHold = useCallback((clientX: number, clientY: number) => {
+    // 新长按会话：上一段施法（含取消倒放）直接归位，避免与本次叠加
+    petRef.current?.stopCast();
+    cancelHold();
+    holdActiveRef.current = true;
+    holdCompletedAtRef.current = 0;
+    holdStartedAtRef.current = Date.now();
+    // 提前加载：0.1s 就开始建心智观察器窗口（预热期间一律不上屏）。
+    // 比进度环（0.2s）更早，把「窗口加载」这段最慢的活儿挪到长按判定期间干。
+    prewarmTimerRef.current = window.setTimeout(() => {
+      prewarmTimerRef.current = undefined;
+      if (!holdActiveRef.current) return;
+      prewarmActionRef.current();
+    }, HOLD_PREWARM_DELAY_MS);
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = undefined;
+      if (!holdActiveRef.current) return;
+      setHoldRingPos({ x: clientX, y: clientY });
+      // 保留已贴边的画面；普通站立姿态下让施法动画和进度环一起播放。
+      if (useAppStore.getState().dockState === 'Off') {
+        petRef.current?.startCast(HOLD_OPEN_TOTAL_MS - HOLD_RING_DELAY_MS);
+      }
+    }, HOLD_RING_DELAY_MS);
+  }, [cancelHold]);
+
+  // 真正开始拖拽、松开左键，或 watchdog 检测到松手时取消长按。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    const onMouseUp = (event: MouseEvent) => { if (event.button === 0) cancelHold(); };
+    window.addEventListener('mouseup', onMouseUp);
+    let disposed = false;
+    const unlisteners: UnlistenFn[] = [];
+    for (const event of ['drag:started', 'drag:cancelled']) {
+      void win.listen(event, cancelHold).then(unlisten => {
+        if (disposed) safeUnlisten(unlisten);
+        else unlisteners.push(unlisten);
+      }).catch(() => {});
+    }
+    return () => {
+      disposed = true;
+      window.removeEventListener('mouseup', onMouseUp);
+      unlisteners.forEach(safeUnlisten);
+      cancelHold();
+      // 卸载时预热会话也一并作废：窗口不该留在这个已经没人管的界面上
+      const session = prewarmRef.current;
+      if (session) {
+        prewarmRef.current = null;
+        abortPrewarmSession(session);
+      }
+    };
+  }, [cancelHold]);
+
+  // 预热就绪回执：子窗口挂好 `pet:reveal` 监听后广播一次。
+  //
+  // 这是「提前加载」这条链的最后一环。预热把建窗口提前了，但建好 ≠ 加载完，
+  // 两者之间隔着一整个页面冷启；长按成立时若子窗口还没接住监听，显形事件就丢了，
+  // 窗口只能靠兜底定时器迟到显形——那正好抵消掉预热的意义。
+  //
+  // 两种到达时机都要处理：
+  // - 长按还没成立：只记下「就绪」，等长按成立时立刻放行；
+  // - 长按已经成立（放行时在等它）：当场放行，这就是「松手即见」那一刻。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        unlisten = await listen<PetPrewarmReady>(PET_PREWARM_READY_EVENT, (e) => {
+          const session = prewarmRef.current;
+          // 不是本会话的回执（多角色桌宠各有一场预热）→ 丢弃
+          if (!session || e.payload?.session !== session.session) return;
+          session.childReady = true;
+          if (session.committed) {
+            finishPrewarm(prewarmRef, session, () => holdActionRef.current());
+          }
+        });
+        if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+      } catch {
+        /* listen 不可用：放行时的超时兜底会接管，长按照常打开 */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * 开始自定义窗口拖动。
+   *
+   * 绕过 Windows 工作区限制（`startDragging` 会把超出屏幕顶部的窗口弹回）：取光标的
+   * 屏幕坐标交给后端，cursor tracking 线程随后用 `SetWindowPos` 追着光标移动窗口。
+   *
+   * 后端记下的是**调用那一刻**的光标相对窗口左上角的偏移，之后每 60ms 用它钉一次窗口
+   * ——所以「什么时候调用」很关键：窗口被别的东西挪走之后再调用，这个偏移就是陈的，
+   * 追踪线程会把窗口一路拽回调用时的位置（见 handleBackgroundMouseDown 里的逃离分支）。
+   */
+  const beginWindowDrag = useCallback(async () => {
+    // 窗口归用户了：逃离（若正在跑）据此让位，别和人抢窗口
+    positioningCoordinator.dragInFlight = true;
+    const pressedAt = holdStartedAtRef.current;
+    const pressIsCurrent = () => dragPressAliveRef.current && holdStartedAtRef.current === pressedAt;
+    try {
+      const cursor = await invoke<{ x: number; y: number }>('get_cursor_position');
+      if (!pressIsCurrent()) return;
+      await invoke('start_window_drag', { cursorX: cursor.x, cursorY: cursor.y });
+    } catch {
+      // 后端命令失败时回退到原生 startDragging
+      if (!pressIsCurrent()) return;
+      cancelHold();
+      void getCurrentWindow().startDragging();
+    }
+  }, [cancelHold]);
+
+  // 背景层窗口拖拽
+  const handleBackgroundMouseDown = useCallback(async (e: React.MouseEvent) => {
+    console.log(`[DIAG] mousedown (drag), char=${getCharacterId()}, button=${e.button}, x=${e.clientX}, y=${e.clientY}`);
+    if (e.button !== 0) return;
+    if (e.ctrlKey && (e.target as HTMLElement).closest('.chibi-pet-sprite')) return;
+    // 左键按住期间启动长按检测：不松手、不拖动满 1s 打开心智观察器
+    startHold(e.clientX, e.clientY);
+    dragPressAliveRef.current = true;
+
+    // 逃离途中先压住拖动，等按住够久（人真的想抓住它）再补上这一拖。
+    //
+    // 不能一按下就开拖：拖动是「窗口跟着光标走」，而追踪线程的偏移是**按下那一刻**采的
+    // ——那时位移还没开始，于是每按一下窗口就被钉回按下时的位置，刚滑出去的距离整段作废。
+    // 连点的时候每一按都拽一次，位移看起来就是「原地不动」。按下时长是这里唯一的判据：
+    // 点一下是逗它，按住才是抓它（与画布那边 `isHoldingPet` 共用同一个阈值）。
+    if (positioningCoordinator.fleeInFlight) {
+      if (dragDeferTimerRef.current !== null) window.clearTimeout(dragDeferTimerRef.current);
+      dragDeferTimerRef.current = window.setTimeout(() => {
+        dragDeferTimerRef.current = null;
+        // 到点时人已经松手 → 这一按就是个普通点击，不该在松手后凭空开一次拖动
+        if (!dragPressAliveRef.current) return;
+        dragSessionRef.current = true;
+        void beginWindowDrag();
+      }, FLEE_TAKEOVER_HOLD_MS);
+      return;
+    }
+
+    // 标记进入用户拖拽会话：后续 onMoved 事件将触发收伞表情
+    dragSessionRef.current = true;
+    void beginWindowDrag();
+  }, [beginWindowDrag, startHold]);
+
+  // 拖拽表情联动：窗口实际移动时切到 drag 格位（被拎起），松手时重置。
+  // 另外接管后端 `drag:dizzy` 事件——甩飞高速撞到顶部边界时，
+  // 按后端给出的时长临时切到 dizzy 格位（晕乎乎），到点再回落。
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlistenMoved: (() => void) | undefined;
+
+    const applyDragExpression = () => {
+      if (dragExpressionAppliedRef.current) return;
+      dragExpressionAppliedRef.current = true;
+      petRef.current?.setExpression('drag');
+    };
+
+    /** 临时晕乎乎：按住时长播放 dizzy，到点后仍在拖拽就回到「被拎起」。 */
+    const applyDizzy = (durationMs: number) => {
+      const hold = durationMs > 0 ? durationMs : DIZZY_FALLBACK_MS;
+      petRef.current?.setExpression('dizzy', hold);
+      if (dizzyTimerRef.current !== null) window.clearTimeout(dizzyTimerRef.current);
+      dizzyTimerRef.current = window.setTimeout(() => {
+        dizzyTimerRef.current = null;
+        // 晕眩结束时人还拎着它（本次会话确实拖动过）→ 回到「被拎起」；
+        // 否则交给画布自行回落 idle，不要硬切姿态。
+        if (dragSessionRef.current && dragExpressionAppliedRef.current) {
+          petRef.current?.setExpression('drag');
+        }
+      }, hold);
+    };
+
+    const resetDragExpression = () => {
+      // 松手了：延后开拖的那一按作废（否则松手后还会凭空补一次拖动）
+      dragPressAliveRef.current = false;
+      positioningCoordinator.dragInFlight = false;
+      if (dragDeferTimerRef.current !== null) {
+        window.clearTimeout(dragDeferTimerRef.current);
+        dragDeferTimerRef.current = null;
+      }
+      if (dizzyTimerRef.current !== null) {
+        window.clearTimeout(dizzyTimerRef.current);
+        dizzyTimerRef.current = null;
+      }
+      if (dragExpressionAppliedRef.current) {
+        dragExpressionAppliedRef.current = false;
+        petRef.current?.resetExpression();
+      }
+      dragSessionRef.current = false;
+      // 停止自定义拖动：清除后端 DRAG_OFFSET 状态，恢复点击穿透逻辑
+      void invoke('stop_window_drag').catch(() => {});
+    };
+
+    void (async () => {
+      try {
+        unlistenMoved = await win.onMoved(() => {
+          // 仅在用户拖拽会话期间响应，过滤 useSmartPositioning 等程序性移动
+          if (!dragSessionRef.current) return;
+          applyDragExpression();
+        });
+      } catch {
+        /* onMoved 不可用时跳过 */
+      }
+    })();
+
+    // 后端拖动 watchdog 兜底：松手时 mouseup 因窗口追逐延迟到不了 WebView，
+    // 后端轮询到左键已抬起后发此事件，前端据此重置拖动会话状态
+    let unlistenDragCancelled: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenDragCancelled = await win.listen('drag:cancelled', () => {
+          resetDragExpression();
+        });
+      } catch {
+        /* listen 不可用时跳过 */
+      }
+    })();
+
+    // 晕乎乎触发：拖动过快（拖动中）或甩飞撞到屏幕边缘（松手后）
+    let unlistenDragInteraction: (() => void) | undefined;
+    let dragInteractionDisposed = false;
+    void win.listen<{ duration_ms: number; distance_px: number; speed_px_per_ms: number; session_id?: string; flung?: boolean }>(
+      'drag:interaction', event => {
+        requestPetReaction('drag', undefined, {
+          pressDurationMs: event.payload.duration_ms,
+          dragSpeedPxPerMs: event.payload.speed_px_per_ms,
+          dragDistancePx: event.payload.distance_px,
+          dragSessionId: event.payload.session_id,
+          flung: event.payload.flung,
+        });
+      },
+    ).then(unlisten => {
+      if (dragInteractionDisposed) unlisten();
+      else unlistenDragInteraction = unlisten;
+    }).catch(() => {});
+    let unlistenDizzy: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlistenDizzy = await win.listen<{
+          duration_ms?: number;
+          reason?: string;
+          impact?: number;
+          speed_px_per_ms?: number;
+          session_id?: string;
+        }>('drag:dizzy', (event) => {
+          applyDizzy(event.payload?.duration_ms ?? 0);
+          // 「被甩懵了」是一次实打实的用户动作：除了切表情，也让桌宠反应一句
+          // （后端据此记进统一事件账本，并带节流合并连续撞击）
+          const reason = event.payload?.reason;
+          if (reason === 'fast_drag') {
+            requestPetReaction('fast_drag', undefined, { dragSpeedPxPerMs: event.payload?.speed_px_per_ms });
+          } else if (reason === 'edge_bounce') {
+            requestPetReaction('edge_bounce', event.payload?.impact, { dragSessionId: event.payload?.session_id });
+          }
+        });
+      } catch {
+        /* listen 不可用时跳过 */
+      }
+    })();
+
+    const onMouseUp = (event: MouseEvent) => { if (event.button === 0) resetDragExpression(); };
+    window.addEventListener('mouseup', onMouseUp);
+
+    return () => {
+      safeUnlisten(unlistenMoved);
+      safeUnlisten(unlistenDragCancelled);
+      dragInteractionDisposed = true;
+      safeUnlisten(unlistenDragInteraction);
+      safeUnlisten(unlistenDizzy);
+      window.removeEventListener('mouseup', onMouseUp);
+      if (dragDeferTimerRef.current !== null) {
+        window.clearTimeout(dragDeferTimerRef.current);
+        dragDeferTimerRef.current = null;
+      }
+      if (dizzyTimerRef.current !== null) {
+        window.clearTimeout(dizzyTimerRef.current);
+        dizzyTimerRef.current = null;
+      }
+    };
+  }, [requestPetReaction]);
+
+  // 右键单击桌宠，在鼠标附近打开该角色输入框。
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    lastActivityRef.current = Date.now();
+    void openQuickInput().catch(console.warn);
+  }, [openQuickInput]);
+
+  // 初始化 ChatController + 设置 onMeta 回调（在 text 流式之前提前播放 桌宠动画）
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await ChatController.init();
+        if (cancelled) ChatController.cleanup();
+      } catch (err) {
+        console.warn('[ChatController] 初始化失败:', err);
+      }
+    })();
+    // 设置 onMeta 回调：chat:meta 事件在 chat:chunk 之前到达
+    ChatController.setHandlers({
+      onMeta: (meta) => {
+        // 表情持续时间：优先用 LLM 在 ExpressionMotionRunnable 中决定的 expression_duration_ms；
+        // 缺省/0 时回退到 3000ms（保持原有兜底行为，避免表情卡死）
+        const expressionDuration = meta.expressionDurationMs && meta.expressionDurationMs > 0
+          ? meta.expressionDurationMs
+          : 3000;
+        if (meta.expression) petRef.current?.setExpression(meta.expression, expressionDuration);
+        if (meta.motion) petRef.current?.playMotion(meta.motion);
+      },
+    });
+    return () => {
+      cancelled = true;
+      ChatController.cleanup();
+    };
+  }, []);
+
+  // 补充回复监听：首条回复发出后，后端用 LLM 规划关键词并行检索遗漏记忆，
+  // 若确有需要补充的信息，再 emit chat:augment_reply 让桌宠继续说完。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        unlisten = await listen<{ content: string; character_id?: string }>('chat:augment_reply', (event) => {
+          const payload = event.payload;
+          const text = payload?.content?.trim();
+          if (!text) return;
+          if (payload.character_id && payload.character_id !== getCharacterId()) return;
+          // 用户已经开了新一轮：别让迟到的补充句盖掉正在生成的新回复。
+          if (ChatController.isStreaming) return;
+          ChatController.handleAugmentReply(text);
+        });
+        // 迟到 resolve 兜底：cleanup 先于监听器注册完成时，当场解绑防泄漏
+        if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+      } catch {
+        /* listen 不可用时忽略 */
+      }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 快捷输入 窗口发送消息：QuickInputWindow 是独立 WebviewWindow，持有自己的
+  // ChatController 单例（未 init），无法直接处理流式回复。改为 emit 事件，
+  // 由主窗口统一调用 ChatController.sendMessage，走 direct 渠道。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      unlisten = await listen<{ text: string; character_id?: string; whisper?: boolean }>(
+        'quick_input:send_message',
+        (e) => {
+          if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+          const text = e.payload?.text;
+          if (!text) return;
+          void ChatController.sendMessage(
+            text,
+            e.payload?.character_id ?? getCharacterId() ?? undefined,
+            'direct',
+            e.payload?.whisper,
+          );
+        },
+      );
+      // 迟到 resolve 兜底：cleanup 先于监听器注册完成时，当场解绑防泄漏
+      if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 用户从 快捷输入 窗口发送消息时同步活跃时间戳，保持 idle/away 检测准确
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      unlisten = await listen<{ content: string; character_id?: string }>('chat:user_message', (e) => {
+        if (e.payload?.character_id && e.payload.character_id !== getCharacterId()) return;
+        lastUserMessageRef.current = Date.now();
+        lastActivityRef.current = Date.now();
+        lastBubbleFromProactiveRef.current = 0;
+      });
+      if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleQuit = useCallback(async () => {
+    // 退出整个应用：先注销托盘，再调用 exit_app 让 Rust 端 app.exit(0) 关闭所有窗口并结束进程
+    await invoke('destroy_tray').catch((err) => {
+      console.warn('[handleQuit] 注销托盘失败:', err);
+    });
+    CHILD_WINDOWS.clear();
+    await invoke('exit_app').catch((err) => {
+      console.warn('[handleQuit] exit_app 失败:', err);
+    });
+  }, []);
+
+  // 鼠标跟随模式：
+  // - 'always'（实时看鼠标）：总开关开启 + 心情激活（精力充沛且专注）时
+  //   ——持续注视全局光标，由桌宠心情动态进入/退出
+  // - 'window'（随机张望 + 交互短跟随）：心情未激活或总开关关闭时的默认态
+  // - 'off'：busy/rest/offline 时不跟随
+  const presenceBlockFollow = dockState !== 'Off' || presenceState === 'busy' || presenceState === 'rest' || presenceState === 'offline';
+  const mouseFollowMode: 'always' | 'window' | 'off' = presenceBlockFollow
+    ? 'off'
+    : alwaysFollowMouse && moodFollowActive
+      ? 'always'
+      : 'window';
+
+  const openChat = useCallback(() => {
+    void ensureWechatWindow({ show: true });
+  }, [ensureWechatWindow]);
+
+  const openConfig = useCallback((showGuide = false) => {
+    void openWindow('config', 'config', t('config.title'), 1120, 760, {
+      decorations: false,
+      transparent: true,
+      shadow: false,
+      minWidth: 880,
+      minHeight: 600,
+        extraQuery: showGuide ? 'guide=1' : undefined,
+    });
+  }, [t]);
+
+  /**
+   * 打开（或预热）心智观察器窗口——常规打开与长按预热共用同一条入口。
+   *
+   *  入场动画：窗口从桌宠当前矩形「长」到全屏。两条路径共用同一个矩形：
+   *  - 新建：把桌宠的物理矩形随 URL 带过去，由子窗口自己折算成 CSS px 并播放；
+   *  - 已存在：不能再 navigate（会整页 reload），改由事件通知子窗口自己再播一遍。
+   *  取不到位置就退化为普通显示（没有动画），不阻塞打开。
+   *
+   *  两条路径的「显形」都由子窗口负责（`selfReveal`）：它得先把首帧摆成桌宠大小
+   *  再让窗口出现。尤其是被最小化的时候——若这里先把窗口还原出来，用户会先看到
+   *  整屏复位一次、再看到它缩回桌宠长出来，等于呼出了两回。
+   *
+   *  `prewarmSession` 有值即预热：窗口建出来加载，但不上屏、也不挂兜底显形
+   *  （见 `openWindow` 的 `prewarm`），显形等长按成立后由 `pet:reveal` 驱动。
+   *  返回窗口句柄，预热会话作废时要靠它把自己建的那个销毁掉。
+   */
+  const openMemoryWindow = useCallback(
+    (prewarmSession?: number, nav?: string): Promise<WebviewWindow | null> => {
+      // 心智观察器默认全屏大小（CSS 逻辑像素，Tauri 窗口尺寸同单位）
+      const fullW = window.screen.width;
+      const fullH = window.screen.height;
+      return (async () => {
+        const rect = await readPetRect();
+        return openWindow('memory', 'memory', t('memory.title'), fullW, fullH, {
+          decorations: false,
+          resizable: false,
+          // 入场动画缩放期间，卡片之外必须透出桌面，故用透明窗口 + 去阴影；
+          // 静止态由 .codex-theme 的纸面背景铺满整窗，与不透明窗口视觉一致。
+          transparent: true,
+          shadow: false,
+          selfReveal: true,
+          minWidth: 1260,
+          minHeight: 896,
+          prewarm: prewarmSession !== undefined,
+          extraQuery: nav ? `nav=${encodeURIComponent(nav)}` :
+            prewarmSession !== undefined
+              ? buildPrewarmQuery(rect, prewarmSession)
+              : rect
+                ? buildPetRectQuery(rect)
+                : undefined,
+          // 已打开时：提到前台后再从桌宠位置重播一次入场，观感与首开一致。
+          // 预热不传：此刻显形与否还没定，通知子窗口播入场等于让它上屏。
+          onExisting:
+            prewarmSession === undefined && rect
+              ? () => { void emitPetReveal('memory', rect); }
+              : undefined,
+        });
+      })();
+    },
+    [t],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    let cleanup: (() => void) | undefined;
+    void listen('companion:open-scheduler', () => {
+      void openMemoryWindow(undefined, 'scheduler').then(win => win?.emit('memory:navigate', { page: 'scheduler' }));
+    }).then(unlisten => { if (cancelled) unlisten(); else cleanup = unlisten; });
+    return () => { cancelled = true; cleanup?.(); };
+  }, [openMemoryWindow]);
+
+  const openMemory = useCallback(() => {
+    void openMemoryWindow();
+  }, [openMemoryWindow]);
+
+  /** 长按桌宠触发的动作：心智观察器的**开关**。
+   *
+   *  它此刻已经开在屏幕上（可见且未最小化）→ 长按是「收起来」，直接最小化；
+   *  其余情况（没开过 / 已被最小化 / 被 hide）都走 `openMemory`：打开、提到前台、播入场动画。
+   *
+   *  判据为什么是「在不在屏上」而不是窗口焦点：按下桌宠那一刻焦点就被桌宠窗口抢走了，
+   *  子窗口的失焦回调还会顺手把它降回非置顶；等 1 秒长按成立时它早已不是前台窗口，
+   *  按焦点判断这个动作根本触发不了。
+   *
+   *  托盘菜单与全局快捷键不走这里——它们要的是明确的「打开」，不该变成开关。 */
+  const toggleMemory = useCallback(() => {
+    void (async () => {
+      let win: WebviewWindow | null = null;
+      try {
+        win = await WebviewWindow.getByLabel(charScopedLabel('memory'));
+      } catch {
+        win = null;
+      }
+      if (win && (await isWindowOnScreen(win))) {
+        await win.minimize().catch(() => {});
+        return;
+      }
+      openMemory();
+    })();
+  }, [openMemory]);
+
+  // 长按桌宠触发的动作：开关心智观察器（与托盘菜单、快捷键共用 openMemory）
+  holdActionRef.current = toggleMemory;
+
+  /**
+   * 长按预热：长按 0.1s 时开一场会话，把心智观察器窗口提前建出来加载。
+   *
+   *  窗口加载（WebView 冷启 + React 挂载 + 首屏数据）是这条链上最慢的一环，而长按
+   *  判定要整整 1s。提前起步，绝大多数情况下窗口在长按成立时已经就绪，松手即见。
+   *
+   *  三条铁律，缺一都会让「预热」变成「误开」：
+   *  1. 预热期间窗口一律不上屏：URL 带 `hidden=1` 关掉 main.tsx 的兜底 show，
+   *     子窗口收到预热参数后也只藏不播，兜底显形更是不挂（见 openWindow 的 prewarm）。
+   *  2. 长按成立才放行：显形由 `pet:reveal` 驱动，且要等子窗口回执就绪再发
+   *     （见 releasePrewarm），否则事件打在空处、窗口迟到。
+   *  3. 长按中止就销毁：见 cancelHold → abortPrewarmSession。加载没跑完的也一并打断。
+   *
+   *  两种情况不预热：窗口已经开在屏上（长按是「收起」，没有加载可提前）、
+   *  窗口已存在但被最小化/hide（内容早就加载完了，预热无事可做）。
+   */
+  const prewarmMemory = useCallback(() => {
+    // 会话号加随机基数：memory 是共享窗口，两个角色桌宠各有一场预热时，
+    // 纯自增会让两边的首个会话号撞车，回执就分不清是谁的。
+    if (prewarmSeqRef.current === 0) prewarmSeqRef.current = Math.floor(Math.random() * 1e6);
+    const session: MemoryPrewarmSession = {
+      session: ++prewarmSeqRef.current,
+      chain: Promise.resolve(),
+      win: null,
+      childReady: false,
+      committed: false,
+      aborted: false,
+      readyTimer: null,
+    };
+    prewarmRef.current = session;
+
+    session.chain = (async () => {
+      // 已有实例？在屏上 → 长按是「收起」；不在屏上 → 内容早已加载完。
+      // 两种都没有「加载」可提前，但后者要记下就绪，好让放行时的显形事件必被接住。
+      let existing: WebviewWindow | null = null;
+      try {
+        existing = await WebviewWindow.getByLabel(charScopedLabel('memory'));
+      } catch {
+        existing = null;
+      }
+      if (session.aborted) return;
+      if (existing) {
+        if (await isWindowOnScreen(existing)) {
+          // 长按会把它收起来，没有可预热的东西 → 撤掉会话，让放行走常规开关路径
+          if (prewarmRef.current === session) prewarmRef.current = null;
+          return;
+        }
+        session.childReady = true;
+        return;
+      }
+      // 还没有这个窗口 → 建一个隐藏的。句柄回填到会话上，作废时要靠它销毁。
+      const win = await openMemoryWindow(session.session);
+      if (session.aborted) {
+        // 长按在创建期间就中止了：这一下不销毁的话，窗口会永远留在后台
+        if (win) await destroyPrewarmedWindow(win);
+        return;
+      }
+      session.win = win;
+    })();
+  }, [openMemoryWindow]);
+
+  // 长按 0.1s 触发的动作：提前加载心智观察器（见 startHold 的预热定时器）
+  prewarmActionRef.current = prewarmMemory;
+
+  // 3D 公寓窗口：固定屏幕尺寸 + 无边框 + 透明背景。
+  // 与心智观察器共用 utils/roomWindow 的入口，保证两处打开的是同一个实例。
+  // 触发来源：Rust 侧全局快捷键（base.shortcut_room，默认 Ctrl+Shift+R）emit
+  // "window:shortcut" 的 room 分支，以及心智观察器的「进入公寓」按钮。
+  const openRoom = useCallback(() => {
+    void openRoomWindow(t('room.title', { defaultValue: '公寓' }));
+  }, [t]);
+
+  // 窗口快捷键：后端 emit "window:shortcut" 事件，前端根据 action 打开对应窗口
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      unlisten = await listen<{ action: string }>('window:shortcut', (e) => {
+        switch (e.payload.action) {
+          case 'chat':
+            openChat();
+            break;
+          case 'settings':
+            openConfig();
+            break;
+          case 'memory':
+            openMemory();
+            break;
+          case 'room':
+            openRoom();
+            break;
+        }
+      });
+      // 迟到 resolve 兜底：cleanup 先于监听器注册完成时，当场解绑防泄漏
+      if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+  }, [openChat, openConfig, openMemory, openRoom]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ character_id: string; result?: { saved_path?: string; handled?: boolean }; error?: string }>('screen:analysis', (event) => {
+      if (event.payload.character_id !== getCharacterId()) return;
+      const { result, error } = event.payload;
+      if (result?.handled) {
+        if (result.saved_path) showToast(t('toast.screenshot_saved'), 'success', 2500);
+        return;
+      }
+      if (result?.saved_path) {
+        showToast(t('toast.screenshot_saved'), 'success', 2500);
+      } else if (error) {
+        showToast(error, 'error', 4000);
+      }
+    }).then(fn => { if (cancelled) safeUnlisten(fn); else unlisten = fn; });
+    return () => { cancelled = true; safeUnlisten(unlisten); };
+  }, [t, showToast]);
+
+  // 后端启动预检未通过时，打开设置窗口并展示配置说明
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      unlisten = await listen('setup-guide:show', () => {
+        openConfig(true);
+      });
+      if (cancelled) { safeUnlisten(unlisten); unlisten = undefined; }
+    })();
+    return () => { cancelled = true; safeUnlisten(unlisten); unlisten = undefined; };
+  }, [openConfig]);
+
+  // Ctrl+滚轮缩放：100ms debounce + rAF 帧同步
+  //
+  // 闪烁根因：SetWindowPos 触发 DWM 立即更新窗口几何，但 WebView2 内部
+  // canvas 纹理还是旧尺寸，透明背景下表现为短暂闪烁。连续滚动时每一帧都
+  // 暴露中间态，累积成明显闪烁。
+  //
+  // 解决方案：
+  // 1. 100ms debounce 累积滚动事件，仅在滚动停止后执行一次 resize，
+  //    避免连续滚动期间每帧都产生中间态
+  // 2. 后端 set_window_rect 用 SWP_NOREDRAW 延迟重绘，resize 完成后
+  //    立即 RedrawWindow 强制同步重绘，让几何更新与纹理更新落在同一帧
+  // 3. resize 完成后前端同步触发 app.renderer.resize + fitModel，
+  //    不等待 Tauri 的 resize 事件（避免跨帧延迟）
+  const scaleAnimationTokenRef = useRef(0);
+  useEffect(() => () => { scaleAnimationTokenRef.current += 1; }, []);
+  const handleResetScale = useCallback(async () => {
+    const token = ++scaleAnimationTokenRef.current;
+    if (scaleDebounceRef.current) clearTimeout(scaleDebounceRef.current);
+    scaleDebounceRef.current = null;
+    if (scaleIdleTimerRef.current) clearTimeout(scaleIdleTimerRef.current);
+    scaleIdleTimerRef.current = null;
+    scaleCenterRef.current = null;
+    targetScaleRef.current = 1;
+    windowScaleRef.current = 1;
+    try {
+      const win = getCurrentWindow();
+      const [pos, size, factor] = await Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()]);
+      if (token !== scaleAnimationTokenRef.current) return;
+      const base = baseWindowSizeRef.current;
+      if (base.w <= 0 || base.h <= 0) return;
+      const width = Math.max(150, Math.round(base.w * factor));
+      const height = Math.max(150, Math.round(base.h * factor));
+      const cx = pos.x + size.width / 2;
+      const cy = pos.y + size.height / 2;
+      const start = performance.now();
+      while (token === scaleAnimationTokenRef.current) {
+        const progress = Math.min(1, (performance.now() - start) / 350);
+        const eased = progress * progress * (3 - 2 * progress);
+        const w = Math.round(size.width + (width - size.width) * eased);
+        const h = Math.round(size.height + (height - size.height) * eased);
+        await invoke('set_window_rect', { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), width: w, height: h });
+        if (progress === 1) break;
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      }
+    } catch { /* 窗口已销毁或尺寸更新失败 */ }
+  }, []);
+  const handleScaleChange = useCallback((scale: number) => {
+    const token = ++scaleAnimationTokenRef.current;
+    const base = baseWindowSizeRef.current;
+    if (base.w <= 0 || base.h <= 0) return;
+    // 同步更新目标值
+    targetScaleRef.current = scale;
+    windowScaleRef.current = scale;
+
+    // 滚动停止 150ms 后清除中心缓存，下次滚动重新读取
+    if (scaleIdleTimerRef.current) clearTimeout(scaleIdleTimerRef.current);
+    scaleIdleTimerRef.current = setTimeout(() => {
+      scaleCenterRef.current = null;
+      scaleIdleTimerRef.current = null;
+    }, 150);
+
+    // debounce：100ms 内有新滚动事件则重置计时器，仅最后一次滚动后执行 resize
+    if (scaleDebounceRef.current) clearTimeout(scaleDebounceRef.current);
+    scaleDebounceRef.current = setTimeout(() => {
+      scaleDebounceRef.current = null;
+
+      const b = baseWindowSizeRef.current;
+      if (b.w <= 0 || b.h <= 0) return;
+      const s = targetScaleRef.current;
+
+      const applyResize = () => {
+        if (token !== scaleAnimationTokenRef.current) return;
+        const cur = scaleCenterRef.current;
+        if (!cur) return;
+        const { cx, cy, factor } = cur;
+        const newW = Math.max(150, Math.round(b.w * s * factor));
+        const newH = Math.max(150, Math.round(b.h * s * factor));
+        void invoke('set_window_rect', {
+          x: Math.round(cx - newW / 2),
+          y: Math.round(cy - newH / 2),
+          width: newW,
+          height: newH,
+        }).catch(() => { /* IPC 失败时静默 */ });
+      };
+
+      // 首次迭代缓存窗口中心，后续复用避免位置漂移
+      if (!scaleCenterRef.current) {
+        const win = getCurrentWindow();
+        void Promise.all([
+          win.outerPosition(),
+          win.outerSize(),
+          win.scaleFactor(),
+        ]).then(([pos, size, factor]) => {
+          if (token !== scaleAnimationTokenRef.current) return;
+          scaleCenterRef.current = {
+            cx: pos.x + size.width / 2,
+            cy: pos.y + size.height / 2,
+            factor,
+          };
+          applyResize();
+        }).catch(() => { /* 窗口已销毁 */ });
+      } else {
+        applyResize();
+      }
+    }, 100);
+  }, []);
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        overflow: 'hidden',
+        background: 'transparent',
+      }}
+      // 拖拽必须在捕获阶段开始：对话期间画布会切换动作层，个别动作格/覆盖层会
+      // 消费冒泡阶段的鼠标事件。若仍只在 onMouseDown（冒泡）绑定，桌宠说过话后就会
+      // 偶发无法再拖动。捕获阶段保证窗口拖拽不依赖子组件是否 stopPropagation。
+      onMouseDownCapture={handleBackgroundMouseDown}
+      onContextMenu={handleContextMenu}
+    >
+      {/* 文件拖放文字提示（简化：仅文字，无蓝色遮罩） */}
+      {isDragOver && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            color: 'rgba(255, 255, 255, 0.9)',
+            fontSize: '14px',
+            textShadow: '0 1px 4px rgba(0,0,0,0.6)',
+            fontWeight: 600,
+          }}
+        >
+          {t('ui.drop_file_hint', { defaultValue: '松开以发送文件' })}
+        </div>
+      )}
+      {/* 长按桌宠的环形进度槽：按住超 0.2s 后显示，顺时针填满（0.8s）即打开心智观察器 */}
+      {holdRingPos && (
+        <HoldProgressRing
+          x={holdRingPos.x}
+          y={holdRingPos.y}
+          durationMs={HOLD_OPEN_TOTAL_MS - HOLD_RING_DELAY_MS}
+          onComplete={completeHold}
+        />
+      )}
+
+      {/* 系统托盘右键菜单事件路由（不渲染 UI，监听 tray:menu_action 事件）
+          即使两个角色都 Offline、桌宠窗口被 hide_window 隐藏，
+          托盘菜单仍可访问所有子窗口入口（记忆/设置/微信），
+          也可通过「微信」入口发消息唤醒离线智能体。
+          与系统托盘菜单共用同一组 openXxx / toggleXxx 回调。
+          注：语音开关由后端直接处理（托盘不依赖窗口在线），不经过本组件。 */}
+      <SystemTray
+        onOpenMemory={openMemory}
+        onOpenSettings={openConfig}
+        onOpenChat={openChat}
+        onQuit={() => void handleQuit()}
+      />
+
+      {/* Q 版桌宠主内容（透明窗口；智能避让与窗口定位仍沿用原后端） */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          // 视频动画演出层播放期间隐藏 Q 版本体，避免两个角色同时出现
+          opacity: videoActive ? 0 : game.active ? 0.72 : 1,
+          transition: 'opacity .25s ease',
+        }}
+      >
+        <ModelCanvas
+          ref={petRef}
+          mouseFollowMode={game.active ? 'off' : mouseFollowMode}
+          onScaleChange={handleScaleChange}
+          onResetScale={() => { void handleResetScale(); }}
+          ambientMotionEnabled={presenceState === 'online' && dockState === 'Off' && !game.active}
+          // 重力只由配置开关决定，不能绑死在 'online' 上：presence 查询是异步的
+          // （首帧是 null），后台任务/用户离开还会切到 rest/busy，这些状态下桌宠
+          // 依然站在桌面上，物理必须继续跑，否则重力会静默失效。
+          // 只有真正贴边停靠（窗口被裁剪到屏幕外）和离线隐藏时才暂停物理。
+          desktopPhysicsEnabled={desktopPhysicsEnabled && dockState === 'Off' && presenceState !== 'offline' && !game.active}
+          gameMode={game.active}
+          onInteraction={handleChibiInteraction}
+          onReady={() => {
+            setModelReady(true);
+            const showMainWindow = () => { if (!quietModeRef.current) void getCurrentWindow().show().catch(() => {}); };
+            baseWindowSizeRef.current = CHARACTER_WINDOW_SIZE;
+            windowScaleRef.current = 1.0;
+            void getCurrentWindow()
+              .setSize(new LogicalSize(CHARACTER_WINDOW_SIZE.w, CHARACTER_WINDOW_SIZE.h))
+              .then(() => {
+                petRef.current?.refitModel();
+                showMainWindow();
+              })
+              .catch(() => { showMainWindow(); });
+          }}
+          onModelClick={() => {
+            lastActivityRef.current = Date.now();
+            lastBubbleFromProactiveRef.current = 0;
+
+            // 从休息/忙碌状态唤醒：rest 需 3 次连续点击，busy 1 次即唤醒
+            const presence = presenceState;
+            if (presence === 'rest' || presence === 'edge' || presence === 'busy') {
+              const now = Date.now();
+              const tracker = wakeClickRef.current;
+              // 800ms 时间窗口内累加，否则重置
+              if (now - tracker.lastTime > 800) {
+                tracker.count = 0;
+              }
+              tracker.count += 1;
+              tracker.lastTime = now;
+
+              const threshold = presence === 'rest' ? 3 : 1;
+              if (tracker.count >= threshold) {
+                tracker.count = 0;
+                tracker.lastTime = 0;
+                void ChatController.triggerWakeInteraction(getCharacterId() ?? undefined);
+              }
+            }
+          }}
+        />
+      </div>
+
+      <ClipboardHint onSend={async message => { await ChatController.sendMessage(message, getCharacterId() ?? undefined, 'direct'); }} />
+      {/* 视频动画演出层：监听 video:animation 事件播放透明动画素材（缺素材优雅跳过） */}
+      {!game.active && <VideoAnimationLayer
+        characterId={getCharacterId() ?? undefined}
+        onActiveChange={setVideoActive}
+      />}
+
+      {/* 角落感知按钮 —— 隐藏到角落时显示，悬停可见，点击召回桌宠 + 唤醒睡眠 */}
+      {hiddenCorner && (
+        <PeekButton
+          corner={hiddenCorner}
+          onClick={() => {
+            // 退出睡眠隐藏。
+            // 捕获唤醒前的隐藏原因，requestRestore 会清空 hideReason
+            const wasSleep = hideReason === 'sleep';
+            requestRestore();
+            // 若因休息隐藏，切换 Presence 回 Online + 尝试生成唤醒问候
+            if (wasSleep) {
+              void invoke('set_presence_state', { target: 'online', characterId: getCharacterId() ?? undefined }).catch(() => {
+                /* 后端未就绪忽略 */
+              });
+              void triggerWakeGreeting();
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 屏幕角落 → 按钮在窗口内的定位。
+ *
+ * 桌宠隐藏到屏幕角落时，窗口只有对角的 48×48 区域可见：
+ * - 屏幕右下角 → 窗口左上角可见
+ * - 屏幕左下角 → 窗口右上角可见
+ * - 屏幕右上角 → 窗口左下角可见
+ * - 屏幕左上角 → 窗口右下角可见
+ */
+const PEEK_BUTTON_POSITION: Record<Corner, React.CSSProperties> = {
+  br: { top: 0, left: 0 },
+  bl: { top: 0, right: 0 },
+  tr: { bottom: 0, left: 0 },
+  tl: { bottom: 0, right: 0 },
+};
+
+/**
+ * 屏幕角落 → 箭头旋转角度（基础箭头指向上方 ↑）。
+ * 箭头指向屏幕中心，提示用户"点击此处可将桌宠召回"。
+ */
+const PEEK_ARROW_ROTATION: Record<Corner, number> = {
+  br: 315, // ↖ 屏幕右下角 → 指向左上
+  bl: 45,  // ↗ 屏幕左下角 → 指向右上
+  tr: 225, // ↙ 屏幕右上角 → 指向左下
+  tl: 135, // ↘ 屏幕左上角 → 指向右下
+};
+
+const PeekButton: React.FC<{ corner: Corner; onClick: () => void }> = ({ corner, onClick }) => {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label="召回桌宠"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      // 阻止 mousedown 冒泡到背景层，避免触发 startDragging 拖拽窗口
+      onMouseDown={(e) => e.stopPropagation()}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        position: 'absolute',
+        width: 48,
+        height: 48,
+        padding: 0,
+        border: 'none',
+        background: 'transparent',
+        cursor: 'pointer',
+        zIndex: 1000,
+        opacity: hovered ? 1 : 0,
+        transition: 'opacity 0.18s ease',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        ...PEEK_BUTTON_POSITION[corner],
+      }}
+    >
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 10,
+          background: 'rgba(40, 40, 50, 0.78)',
+          border: '1px solid rgba(255, 255, 255, 0.14)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: 'rgba(255, 255, 255, 0.92)',
+          boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+        }}
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          style={{
+            transform: `rotate(${PEEK_ARROW_ROTATION[corner]}deg)`,
+            transition: 'transform 0.2s ease',
+          }}
+        >
+          {/* 基础箭头指向上方，通过 rotate 旋转到对应方向 */}
+          <path
+            d="M12 5L12 19M12 5L6 11M12 5L18 11"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </div>
+    </button>
+  );
+};

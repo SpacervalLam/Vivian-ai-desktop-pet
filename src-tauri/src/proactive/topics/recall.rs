@@ -1,0 +1,143 @@
+//! 回忆式提问
+//!
+//! 从对话历史 / 最近记忆文本提取可自然提及的旧话题，生成"记得吗？"类问题。
+//! 仅使用 LLM 生成，LLM 失败则不交互。
+
+use crate::providers::base::LLMRequest;
+use crate::providers::ModelRouter;
+use crate::types::response::ChatMessage;
+
+/// 回忆式提问生成器
+pub struct MemoryRecall;
+
+impl MemoryRecall {
+    // ============ LLM 路径 ============
+
+    /// 调用 LLM 生成自然回忆提问
+    ///
+    /// `recent_memory`：缓存的最近对话/记忆文本，作为"最近对话"与话题来源。
+    /// `system_prompt`：来自 PersonaEngine 的人设风格约束，为空时使用兜底。
+    /// `idle_seconds`：距上次对话的秒数，让 LLM 感知回忆的"远度"。
+    /// LLM 失败则返回 None（不交互）。
+    pub async fn generate_llm(
+        router: &ModelRouter,
+        recent_memory: &str,
+        system_prompt: &str,
+        lang: &str,
+        char_id: &str,
+        idle_seconds: f64,
+    ) -> Option<String> {
+        let messages =
+            Self::build_messages(recent_memory, system_prompt, lang, char_id, idle_seconds)?;
+        let raw = match router.generate(LLMRequest::new(crate::providers::base::TASK_COMPANION, messages)
+            .with_character_id(char_id.to_string())).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!("[RecallTopic] proactive LLM 查询失败，跳过本次回忆提问: {}", e);
+                return None;
+            }
+        };
+        Self::parse_response(&raw)
+    }
+
+    /// 构造 LLM 请求消息（供流式路径复用）
+    pub fn build_messages(
+        recent_memory: &str,
+        system_prompt: &str,
+        lang: &str,
+        char_id: &str,
+        idle_seconds: f64,
+    ) -> Option<Vec<ChatMessage>> {
+        let memory = recent_memory.trim();
+        if memory.len() < 5 {
+            return None;
+        }
+        // 按行切分取末 6 行作为对话上下文
+        let lines: Vec<String> = memory
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let lines_str = lines.join("\n");
+        // 只从真实用户发言取话题；助手的回复与生成的 hook 不代表用户近况。
+        let topic: String = memory.lines().rev()
+            .find_map(|line| line.trim().strip_prefix("user:"))
+            .map(|line| line.trim().chars().take(40).collect())
+            .unwrap_or_default();
+        if topic.is_empty() {
+            return None;
+        }
+
+        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let elapsed_str = crate::proactive::format_elapsed_lang(idle_seconds, lang_norm);
+        let sys = crate::proactive::behavior::speaking_voice(system_prompt, lang, char_id)?;
+
+        let prompt = match lang_norm {
+            "en" => format!(
+                "Time since last talk: {elapsed_str}. This is real — calibrate the recall accordingly (a 5-minute gap means 'just now', a 2-hour gap means it's fine to bring up something from earlier).\n\
+                 Only if the user's own words contain an unfinished matter worth following up, write one low-pressure line. A comment is fine; do not force a question. With no real opening, return an empty text.\n\
+                 Requirements: short (<30 chars), specific, no invented outcome or promise, no repeated greeting.\n\n\
+                 Recent conversation:\n{lines_str}\n\n\
+                 Mentionable topic: {topic}\n\
+                 JSON output: {{\"text\": \"line or empty string\"}}"
+            ),
+            "ja" => format!(
+                "最後の会話から: {elapsed_str}。この経過時間は事実——回想の重みをそれに合わせて（5分なら「さっき」、2時間なら以前のことを持ち出しても自然）。\n\
+                 ユーザー自身の発言に未完了の話題がある場合だけ、負担にならない短い一言を作って。質問を強制しない。自然なきっかけがなければ text を空にする。\n\
+                 要件: 30字以内、結果や約束を創作しない、挨拶を繰り返さない。\n\n\
+                 最近の会話:\n{lines_str}\n\n\
+                 触れられる話題: {topic}\n\
+                 JSON出力: {{\"text\": \"一言または空文字\"}}"
+            ),
+            _ => format!(
+                "距上次对话已过: {elapsed_str}。这个时长是真实的——请据此校准回忆的语气（5分钟是「刚才」的事，2小时就可以自然提起之前聊过的内容）。\n\
+                 只有用户自己提过尚未结束、值得关心的事情时，才写一句轻松的接话。可以是陈述，不必强行提问；没有自然切口就让 text 为空。\n\
+                 要求：简短（<30字）、具体、不脑补结果或承诺、不重复问候。\n\n\
+                 最近对话:\n{lines_str}\n\n\
+                 可提及的话题: {topic}\n\
+                 JSON输出: {{\"text\": \"接话或空字符串\"}}"
+            ),
+        };
+        Some(vec![
+            ChatMessage::system(format!("{sys}\n{}", crate::pipeline::prompt_modules::proactive_companionship_rules(lang_norm))),
+            ChatMessage::internal_prompt(prompt),
+        ])
+    }
+
+    /// 从 LLM 响应解析 text
+    fn parse_response(raw: &str) -> Option<String> {
+        let text = raw.trim();
+        let start = text.find('{')?;
+        let end = text.rfind('}')?;
+        if end < start {
+            return None;
+        }
+        let data: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+        let t = data.get("text")?.as_str()?;
+        let text_owned: String = t.chars().take(60).collect();
+        if text_owned.is_empty() {
+            None
+        } else {
+            Some(text_owned)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryRecall;
+
+    #[test]
+    fn recall_requires_a_real_user_anchor() {
+        assert!(MemoryRecall::build_messages("assistant: 晚安", "", "zh", "vivian", 300.0).is_none());
+        assert!(MemoryRecall::build_messages("user: 明天要面试\nassistant: 祝你顺利", "", "zh", "vivian", 300.0).is_some());
+    }
+}

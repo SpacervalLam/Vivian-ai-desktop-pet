@@ -1,0 +1,67 @@
+name: CI
+on:
+  push:
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  frontend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:frontend
+      - run: npm run build
+  rust:
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 1
+      VIVIAN_TEST_OFFLINE: '0'
+      # Unit tests do not ship the locally generated encrypted resource bundle.
+      TAURI_CONFIG: '{"bundle":{"resources":[]}}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Fetch pinned sqlite-vec extension
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'sqlite-vec-0.1.9.tar.gz'
+          Invoke-WebRequest -Uri 'https://github.com/asg017/sqlite-vec/releases/download/v0.1.9/sqlite-vec-0.1.9-loadable-windows-x86_64.tar.gz' -OutFile $archive
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne '51581189D52066B4DFC6631F6D7A3EAB7DEDC2260656AB09CA97AB3FB8165983') { throw 'sqlite-vec archive checksum mismatch' }
+          New-Item -ItemType Directory -Force -Path src-tauri/vendor/sqlite-vec | Out-Null
+          tar -xzf $archive -C src-tauri/vendor/sqlite-vec
+          if ($LASTEXITCODE -ne 0) { throw 'sqlite-vec extraction failed' }
+          if ((Get-FileHash -LiteralPath src-tauri/vendor/sqlite-vec/vec0.dll -Algorithm SHA256).Hash -ne 'FCF98662A7AD9DCE394B96A88F91032047823831B951C76636787C312A6476E6') { throw 'sqlite-vec DLL checksum mismatch' }
+      - run: npm ci
+      - run: npm run test:rust
+      - run: npm test
+      - run: npm run eval:companion
+  contracts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path src-tauri/runtime-contracts/Cargo.toml -j 1

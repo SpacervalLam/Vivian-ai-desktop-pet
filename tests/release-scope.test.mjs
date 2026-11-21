@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+const read=name=>readFile(name,'utf8');
+const installer=await read('src-tauri/windows/apartment-installer.nsh');
+assert.doesNotMatch(installer,/APARTMENT|3D 公寓|install-apartment|ApartmentPlugin/);
+for(const component of ['FontsChoice','StickersChoice'])assert.ok(installer.includes(component));
+const apartment=await read('src-tauri/src/commands/apartment.rs');
+assert.match(apartment,/if !cfg!\(debug_assertions\)\s*\{\s*return None;/);
+const plugins=await read('src-tauri/src/plugins.rs');
+assert.match(plugins,/key == "3d-apartment" && !cfg!\(debug_assertions\)\s*\{\s*return false;/);
+assert.match(plugins,/key == "3d-apartment" && !cfg!\(debug_assertions\)\s*\{\s*return Err/);
+const app=JSON.parse(await read('package.json'));
+assert.equal(JSON.parse(await read('src-tauri/tauri.conf.json')).version,app.version);
+assert.match(await read('src-tauri/Cargo.toml'),new RegExp(`version = "${app.version.replaceAll('.','\\.')}"`));
+assert.equal(JSON.parse(await read('package-lock.json')).version,app.version);
+assert.ok(!Object.keys(JSON.parse(await read('src-tauri/tauri.conf.json')).bundle.resources).some(s=>/3d-apartment|room\//.test(s)));
+console.log('Release scope: consistent versions, apartment disabled in distributed builds, no apartment installer option or bundled resources.');

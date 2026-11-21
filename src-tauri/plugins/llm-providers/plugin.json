@@ -1,0 +1,10 @@
+{
+  "name": "llm-providers",
+  "version": "1.5.1",
+  "description": "供应商配置数据包：模型、端点和请求参数适配描述；附带的核对技能仅提供操作指导，实际联网和数据更新使用独立注册的工具。",
+  "skills": [
+    "skills/*.md"
+  ],
+  "providers": "providers.json",
+  "embeddings": "embedding-providers.json"
+}

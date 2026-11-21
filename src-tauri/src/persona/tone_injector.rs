@@ -1,0 +1,378 @@
+//! 场景语气注入器（Tone Injector）
+//!
+//! 基于 embedding + 关键词匹配用户输入的场景，命中后给出对应场景的语气方向。
+//! 不依赖 LLM 主动调用。
+//!
+//! ## 在主对话链路里的真实地位（2026-10-24 勘误）
+//!
+//! ** CompanionPrompt 按设计不消费场景语气注入**：脚本化的台词/语气参考会让角色
+//! 表演预设反应，压过当下这句原话（见 `companion_prompt.rs` 的
+//! `automated_response_scripts_do_not_overrule_current_dialogue` 测试与
+//! "Real state wins" 注释）。主链路因此不再计算它——2026-10-24 删掉了
+//! PromptBuildingStep 里「算了但被 CompanionPrompt 丢弃」的整段废功
+//! （场景台词 + 情绪浮点向量 + 心情读数 + 热梗回响都只喂那个被丢弃的字段）。
+//!
+//! 本类型在主链路的现存职责只有一个：**承载 ExampleRetriever**（few-shot 检索），
+//! `PromptBuildingStep::tone_injector` 就是为拿 `injector.examples` 而存在的。
+//! 场景匹配 API 保留给设置页预览与后续实验，`pub` 但不被生产调用。
+//!
+//! ## 匹配策略
+//!
+//! 1. **关键词匹配**（primary）：场景样本作为关键词集合，检查用户输入是否包含任何关键词
+//!    - 快速、确定性、不依赖 embedding 服务质量
+//!    - 适用于默认哈希嵌入场景
+//! 2. **embedding 匹配**（secondary）：仅当配置了远程 embedding 服务时启用
+//!    - 语义相似度匹配，能识别关键词未覆盖的同义表达
+//!    - 命中阈值 0.72
+
+use std::sync::Arc;
+
+use super::embedding_snapshot::EmbeddingSnapshot;
+
+use crate::memory::embedding::{default_embedding, MemoryEmbeddingProvider};
+use crate::memory::vector_search::cosine_similarity;
+
+/// 场景命中阈值：cosine similarity >= 此值才触发 embedding 匹配注入
+const SCENE_MATCH_THRESHOLD: f64 = 0.72;
+
+/// 场景条目
+#[derive(Debug, Clone)]
+struct SceneEntry {
+    /// 场景标识（如 "greeting" / "comfort"）
+    id: String,
+    /// 匹配样本（用于关键词匹配和 embedding 匹配的典型用户输入）
+    samples: Vec<String>,
+    /// 参考台词（命中后注入 prompt）
+    quotes: Vec<String>,
+
+}
+
+/// 场景语气注入器
+///
+/// 每个角色一个实例，惰性初始化 embedding 缓存。
+pub struct ToneInjector {
+    pub(crate) examples: super::example_retriever::ExampleRetriever,
+    /// 角色 ID
+    char_id: String,
+    /// 场景列表（按 scenes.md 顺序）
+    scenes: Vec<SceneEntry>,
+    /// embedding 服务
+    embedding: Arc<dyn MemoryEmbeddingProvider>,
+    /// 是否已初始化 embedding
+    vectors: EmbeddingSnapshot,
+}
+
+impl ToneInjector {
+    /// 创建 ToneInjector（使用默认哈希嵌入）
+    pub fn new(char_id: &str) -> Self {
+        Self::with_embedding(char_id, default_embedding())
+    }
+
+    /// 创建 ToneInjector（指定 embedding 服务）
+    pub fn with_embedding(char_id: &str, embedding: Arc<dyn MemoryEmbeddingProvider>) -> Self {
+        let scenes_md = load_scenes_md(char_id);
+        let scenes = parse_scenes_md(scenes_md);
+
+        tracing::info!(
+            "[ToneInjector] 已加载角色 {} 的场景库：{} 个场景",
+            char_id,
+            scenes.len()
+        );
+
+        let texts = scenes.iter().flat_map(|scene| scene.samples.iter().cloned()).collect();
+        let vectors = EmbeddingSnapshot::new(embedding.clone(), format!("tone_{char_id}"), texts);
+        Self {
+            examples: super::example_retriever::ExampleRetriever::new(char_id, Arc::clone(&embedding)),
+            char_id: char_id.to_string(),
+            scenes,
+            embedding,
+            vectors,
+        }
+    }
+
+    /// 匹配场景并构建注入文本
+    ///
+    /// - `user_input`：当前用户输入
+    /// - `recent_messages`：最近几轮对话消息（user + assistant），用于上下文感知
+    /// - `lang`：界面语言（zh/en/ja），用于三语化标题
+    ///
+    /// 返回注入文本（None 表示无命中）
+    pub fn build_tone_injection(
+        &self,
+        user_input: &str,
+        lang: &str,
+    ) -> Option<String> {
+        self.build_tone_injection_growing(user_input, lang, &[])
+    }
+
+    /// A learned scene already has an experience-backed response tendency.
+    /// Do not reintroduce its old factory lines at the end of the prompt.
+    pub fn build_tone_injection_growing(&self, user_input: &str, lang: &str, learned: &[&str]) -> Option<String> {
+        self.build_tone_injection_with_embedding(user_input, lang, learned, None)
+    }
+
+    pub(crate) fn preload(&self) { self.vectors.request(); self.examples.request_preload(); }
+
+    #[cfg(test)]
+    pub(crate) fn preload_scene_vectors_for_test(&self) {
+        self.vectors.preload();
+        self.examples.preload();
+    }
+
+    /// 主对话链路不调用本方法（见模块文档）：保留给预览与实验，故为 `pub`。
+    pub fn build_tone_injection_with_embedding(&self, user_input: &str, lang: &str, learned: &[&str], query_embedding: Option<&[f32]>) -> Option<String> {
+        if user_input.trim().is_empty() {
+            return None;
+        }
+
+        self.preload();
+
+        // 两种匹配都只看当前发言。历史场景不能在换话题后继续施加语气。
+        let scenes = &self.scenes;
+
+        // 1. 关键词匹配（primary）只看当前用户输入。旧实现把最近三轮也用于硬匹配，
+        // 一个场景会在用户换话题后继续注入，模型因而反复表演同一种语气。
+        for scene in scenes.iter() {
+            for sample in &scene.samples {
+                if sample.is_empty() {
+                    continue;
+                }
+                if user_input.contains(sample.as_str()) {
+                    return (!scene_is_learned(&scene.id, learned)).then(|| format_injection(scene, 1.0, "keyword", lang));
+                }
+            }
+        }
+
+        // 2. embedding 匹配（secondary，仅远程 embedding 时启用）
+        if let Some(vectors) = self.vectors.get().filter(|v| !v.is_empty()) {
+            let query_emb = query_embedding
+                .filter(|embedding| embedding.len() == self.embedding.dimension() && embedding.iter().all(|value| value.is_finite()))
+                .map(std::borrow::Cow::Borrowed)
+                .or_else(|| self.embedding.embed(user_input.trim()).ok().map(std::borrow::Cow::Owned));
+            if let Some(query_emb) = query_emb {
+                let mut best: Option<(&SceneEntry, f64)> = None;
+                let mut index = 0;
+                for scene in scenes.iter() {
+                    for _ in &scene.samples {
+                        let sample_emb = &vectors[index];
+                        index += 1;
+                        let sim = cosine_similarity(&query_emb, sample_emb);
+                        if best.is_none() || sim > best.unwrap().1 {
+                            best = Some((scene, sim));
+                        }
+                    }
+                }
+                if let Some((scene, score)) = best {
+                    if score >= SCENE_MATCH_THRESHOLD {
+                        return (!scene_is_learned(&scene.id, learned)).then(|| format_injection(scene, score, "embedding", lang));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 获取当前角色 ID
+    pub fn char_id(&self) -> &str {
+        &self.char_id
+    }
+}
+
+fn scene_is_learned(scene: &str, learned: &[&str]) -> bool {
+    let scope = match scene {
+        "praised" => "praise", "playful" => "humor", "concern" => "care",
+        "annoyed" => "disagreement", "tired" => "comfort", other => other,
+    };
+    learned.contains(&scope)
+}
+
+/// 格式化注入文本
+fn format_injection(scene: &SceneEntry, score: f64, match_type: &str, lang: &str) -> String {
+    let quotes_text = scene
+        .quotes
+        .iter()
+        .take(2)
+        .map(|q| format!("- {}", q))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+    let header = crate::pipeline::prompt_modules::section_heading("scene_tone", lang);
+    let (match_label, sim_label, intro) = match lang_norm {
+        "en" => ("match", "similarity",
+            "At most two optional scene reminders follow. Infer the actual situation from the conversation first; ignore reminders that do not fit. They are not dialogue to repeat:"),
+        "ja" => ("マッチ", "類似度",
+            "最大二つの任意の場面メモ。まず会話から状況を読み取り、合わないものは無視する。繰り返す台詞ではない："),
+        _ => ("命中", "相似度",
+            "以下最多两条是可选的场景提醒。先从对话判断实际情境，不吻合就忽略；它们不是需要复述的台词："),
+    };
+
+    format!(
+        "{}（{}: {} | {} | {}: {:.2}）\n{}\n{}",
+        header, match_label, scene.id, match_type, sim_label, score, intro, quotes_text
+    )
+}
+
+/// 加载角色的 scenes.md
+fn load_scenes_md(char_id: &str) -> &'static str {
+    match char_id {
+        "nana" => include_str!("../../prompts/characters/nana/scenes.md"),
+        "vivian" => include_str!("../../prompts/characters/vivian/scenes.md"),
+        _ => crate::character_packages::text(char_id, "scenes.md"),
+    }
+}
+
+/// 解析 scenes.md 为场景列表
+///
+/// 格式：
+/// ```text
+/// ## [scene_id]
+/// ### 匹配样本
+/// 样本1 样本2 样本3 ...
+/// ### 参考台词
+/// - 台词1
+/// - 台词2
+/// ```
+fn parse_scenes_md(md: &str) -> Vec<SceneEntry> {
+    let mut scenes: Vec<SceneEntry> = Vec::new();
+    let mut current_scene: Option<SceneEntry> = None;
+    let mut current_section = "";
+
+    for line in md.lines() {
+        let line = line.trim();
+
+        // 场景头：## [scene_id]
+        if line.starts_with("## [") && line.ends_with(']') {
+            if let Some(scene) = current_scene.take() {
+                scenes.push(scene);
+            }
+            let id = line
+                .trim_start_matches("## [")
+                .trim_end_matches(']')
+                .to_string();
+            current_scene = Some(SceneEntry {
+                id,
+                samples: Vec::new(),
+                quotes: Vec::new(),
+            });
+            current_section = "";
+        } else if line.starts_with("### 匹配样本") {
+            current_section = "samples";
+        } else if line.starts_with("### 参考台词") {
+            current_section = "quotes";
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if let Some(scene) = current_scene.as_mut() {
+                match current_section {
+                    "samples" => {
+                        // 样本按空格分词（每个词都是独立的匹配关键词）
+                        for word in line.split_whitespace() {
+                            if !word.is_empty() {
+                                scene.samples.push(word.to_string());
+                            }
+                        }
+                    }
+                    "quotes" => {
+                        // 台词以 "- " 开头
+                        if let Some(quote) = line.strip_prefix("- ") {
+                            scene.quotes.push(quote.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if let Some(scene) = current_scene {
+        scenes.push(scene);
+    }
+
+    scenes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn learned_scene_stops_factory_quote_reinjection() {
+        let injector = ToneInjector::new("vivian");
+        let input = "今天好累啊";
+        assert!(injector.build_tone_injection(input, "zh").is_some());
+        assert!(injector.build_tone_injection_growing(input, "zh", &["comfort"]).is_none());
+        assert!(injector.build_tone_injection_growing(input, "zh", &["praise"]).is_some());
+    }
+
+    #[test]
+    fn parse_vivian_scenes() {
+        let md = load_scenes_md("vivian");
+        let scenes = parse_scenes_md(md);
+        assert!(scenes.len() >= 9, "应至少解析出 9 个场景，实际: {}", scenes.len());
+        assert!(scenes.iter().any(|s| s.id == "greeting"));
+        assert!(scenes.iter().any(|s| s.id == "comfort"));
+        assert!(scenes.iter().any(|s| s.id == "daily"));
+    }
+
+    #[test]
+    fn parse_nana_scenes() {
+        let md = load_scenes_md("nana");
+        let scenes = parse_scenes_md(md);
+        assert!(scenes.len() >= 9, "应至少解析出 9 个场景，实际: {}", scenes.len());
+    }
+
+    #[test]
+    fn vivian_scenes_have_quotes() {
+        let md = load_scenes_md("vivian");
+        let scenes = parse_scenes_md(md);
+        for scene in &scenes {
+            assert!(
+                !scene.quotes.is_empty(),
+                "场景 {} 的参考台词为空",
+                scene.id
+            );
+            assert!(
+                !scene.samples.is_empty(),
+                "场景 {} 的匹配样本为空",
+                scene.id
+            );
+        }
+    }
+
+    #[test]
+    fn keyword_match_greeting() {
+        let injector = ToneInjector::new("vivian");
+        let result = injector.build_tone_injection("早安", "zh");
+        assert!(result.is_some(), "早安应通过关键词命中 greeting 场景");
+        let text = result.unwrap();
+        assert!(text.contains("greeting"));
+        assert!(text.contains("keyword"));
+    }
+
+    #[test]
+    fn keyword_match_comfort() {
+        let injector = ToneInjector::new("vivian");
+        let result = injector.build_tone_injection("今天好累啊", "zh");
+        assert!(result.is_some(), "好累应通过关键词命中 comfort 或 tired 场景");
+    }
+
+    #[test]
+    fn no_match_for_empty_input() {
+        let injector = ToneInjector::new("vivian");
+        let result = injector.build_tone_injection("", "zh");
+        assert!(result.is_none(), "空输入不应命中任何场景");
+    }
+
+    #[test]
+    fn unrelated_current_turn_has_no_scene() {
+        let injector = ToneInjector::new("vivian");
+        let result = injector.build_tone_injection("quartz_fennec_917", "zh");
+        assert!(result.is_none(), "无关的当前发言不应命中场景语气");
+    }
+    #[test]
+    fn nana_tone_injector_works() {
+        let injector = ToneInjector::new("nana");
+        let result = injector.build_tone_injection("晚安", "zh");
+        assert!(result.is_some(), "晚安应命中 farewell 场景");
+    }
+}

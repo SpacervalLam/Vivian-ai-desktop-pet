@@ -1,0 +1,102 @@
+[
+  {
+    "id": "deepseek_happy_01",
+    "character_id": "deepseek",
+    "label": "开心",
+    "meaning": "开心，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_happy_01-v2.webp",
+    "category": "happy"
+  },
+  {
+    "id": "deepseek_curious_01",
+    "character_id": "deepseek",
+    "label": "好奇",
+    "meaning": "好奇，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_curious_01-v2.webp",
+    "category": "curious"
+  },
+  {
+    "id": "deepseek_sleepy_01",
+    "character_id": "deepseek",
+    "label": "困倦",
+    "meaning": "困倦，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_sleepy_01-v2.webp",
+    "category": "sleepy"
+  },
+  {
+    "id": "deepseek_okay_01",
+    "character_id": "deepseek",
+    "label": "好的",
+    "meaning": "好的，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_okay_01-v2.webp",
+    "category": "okay"
+  },
+  {
+    "id": "deepseek_thanks_01",
+    "character_id": "deepseek",
+    "label": "感谢",
+    "meaning": "感谢，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_thanks_01-v2.webp",
+    "category": "thanks"
+  },
+  {
+    "id": "deepseek_wave_01",
+    "character_id": "deepseek",
+    "label": "招手",
+    "meaning": "招手，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_wave_01-v2.webp",
+    "category": "wave"
+  },
+  {
+    "id": "deepseek_peek_01",
+    "character_id": "deepseek",
+    "label": "探头",
+    "meaning": "探头，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_peek_01-v2.webp",
+    "category": "peek"
+  },
+  {
+    "id": "deepseek_question_01",
+    "character_id": "deepseek",
+    "label": "疑问",
+    "meaning": "疑问，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_question_01-v2.webp",
+    "category": "question"
+  },
+  {
+    "id": "deepseek_think_01",
+    "character_id": "deepseek",
+    "label": "思考",
+    "meaning": "思考，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_think_01-v2.webp",
+    "category": "think"
+  },
+  {
+    "id": "deepseek_content_01",
+    "character_id": "deepseek",
+    "label": "满足",
+    "meaning": "满足，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "deepseek_content_01-v2.webp",
+    "category": "content"
+  }
+]

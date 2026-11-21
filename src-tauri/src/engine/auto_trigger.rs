@@ -1,0 +1,519 @@
+//! 自动表情/动作触发引擎
+//!
+//! 提供非LLM触发路径：
+//! - 空闲检测：用户长时间不交互时，逐步触发无聊/打哈欠/困倦/睡眠表情
+//! - 用户回来：用户从长时空闲回来时，触发惊喜/挥手
+//! - 心情持续：当前主导情绪持续一段时间后，触发心情对应表情
+//! - 程序事件：时间（早/午/晚/夜）、窗口聚焦/失焦、对话开始/结束、音乐播放等
+//!
+//! 设计原则：
+//! 1. 纯规则驱动，不调用LLM，响应即时
+//! 2. 概率触发 + 冷却时间，避免机械重复
+//! 3. 尊重 ResourceManifest 映射，不同角色可自定义
+//! 4. 通过 PetActionRequest 队列与前端通信，统一动作投递
+
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+use parking_lot::RwLock;
+use tracing::debug;
+
+use crate::engine::manifest::ResourceManifest;
+use crate::psychology::mood::MoodSnapshot;
+use crate::psychology::mood_cue::mood_to_cue_for;
+
+/// 触发器结果：(expression, motion, duration_ms)
+type TriggerResult = (String, String, Option<u64>);
+
+/// 同一心情下两次点缀动画的最小间隔：心情没变时别反复闪同一个表情
+const ACCENT_COOLDOWN: Duration = Duration::from_secs(8);
+/// 点缀与上一次相同、又过了冷却时，以该概率再放一次（点缀换了则必定放）
+const ACCENT_IDLE_PROBABILITY: f64 = 0.3;
+/// 启动宽限期：进程刚起的一小段时间内不投任何心情点缀
+///
+/// 存在的理由不是审美，是**启动那一刻的情绪还不可信**：`psychology.json` 里的
+/// emotion 是上次退出时的快照，进程起来后边要跑首个稳态结算（按离线时长回归）、
+/// 边要等开场流水线把心理状态写完。这段时间里 `mood_to_cue` 读到的可能是一个
+/// 正在跳变的中间值——拿它去点一张脸，用户看到的就是"一启动就莫名其妙闪几下
+/// 晕/生气/低落"。
+///
+/// 宽限期只压点缀，不碰空闲阶段触发与程序事件（时刻问候、窗口聚焦这些照常）。
+const MOOD_ACCENT_STARTUP_GRACE: Duration = Duration::from_secs(20);
+/// 心情点缀的展示时长（ms）
+///
+/// 对图集格位（`dizzy`）是**必需**的：格位自己不会计时，没有时长就一直挂着。
+/// 对帧序列类点缀无影响（它们按自己的节奏播完即落）。
+const MOOD_ACCENT_DURATION_MS: u32 = 3000;
+
+/// 空闲阶段定义
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IdleStage {
+    /// 活跃（刚刚交互过）
+    Active = 0,
+    /// 短时空闲（30秒-2分钟）
+    Short = 1,
+    /// 中等空闲（2-5分钟）
+    Medium = 2,
+    /// 长时空闲（5-12分钟）
+    Long = 3,
+    /// 睡眠状态（12分钟以上）
+    Asleep = 4,
+}
+
+impl IdleStage {
+    fn from_seconds(secs: u64) -> Self {
+        match secs {
+            0..=30 => IdleStage::Active,
+            31..=120 => IdleStage::Short,
+            121..=300 => IdleStage::Medium,
+            301..=719 => IdleStage::Long,
+            _ => IdleStage::Asleep,
+        }
+    }
+}
+
+impl Default for IdleStage {
+    fn default() -> Self {
+        IdleStage::Active
+    }
+}
+
+/// 单个角色的自动触发状态
+#[derive(Debug)]
+struct TriggerState {
+    /// 上次用户交互时间
+    last_interaction: Instant,
+    /// 当前空闲阶段
+    last_idle_stage: IdleStage,
+    /// 已触发过的空闲阶段（避免同一阶段重复触发）
+    triggered_idle_stages: HashSet<IdleStage>,
+    /// 当前主导情绪标签
+    current_mood_label: String,
+    /// 上次心情表情触发时间
+    last_mood_idle_time: Instant,
+    /// 上次心情点缀用的动作名（空表示还没下发过）
+    ///
+    /// 用来判「心情状态是不是换了」：换了就立刻给一次反应，没换只按冷却+概率补。
+    /// 以前这里存的是"当前基调格位"，随持续基调一起撤掉了。
+    last_accent: String,
+    /// 上次点缀动画播放时间（用于 ACCENT_COOLDOWN）
+    last_accent_time: Instant,
+    /// 本状态创建时刻（≈ 该角色本进程第一次 auto tick），用于启动宽限
+    created_at: Instant,
+    /// 事件触发冷却表
+    event_cooldowns: HashMap<String, Instant>,
+}
+
+impl Default for TriggerState {
+    fn default() -> Self {
+        Self {
+            last_interaction: Instant::now(),
+            last_idle_stage: IdleStage::Active,
+            triggered_idle_stages: HashSet::new(),
+            current_mood_label: "neutral".to_string(),
+            last_mood_idle_time: Instant::now(),
+            last_accent: String::new(),
+            last_accent_time: Instant::now(),
+            created_at: Instant::now(),
+            event_cooldowns: HashMap::new(),
+        }
+    }
+}
+
+/// 全局自动表情触发引擎
+pub struct AutoExpressionTrigger {
+    states: RwLock<HashMap<String, TriggerState>>,
+}
+
+impl AutoExpressionTrigger {
+    pub fn new() -> Self {
+        Self {
+            states: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// 获取或初始化角色状态并执行闭包
+    fn with_state<F, R>(&self, char_id: &str, f: F) -> R
+    where
+        F: FnOnce(&mut TriggerState) -> R,
+    {
+        let mut states = self.states.write();
+        if !states.contains_key(char_id) {
+            states.insert(char_id.to_string(), TriggerState::default());
+        }
+        let state = states.get_mut(char_id).unwrap();
+        f(state)
+    }
+
+    /// 记录用户交互（重置空闲计时），返回之前是否处于长时空闲
+    pub fn record_interaction(&self, char_id: &str) -> bool {
+        self.with_state(char_id, |state| {
+            let was_long_idle = state.last_idle_stage >= IdleStage::Long;
+            state.last_interaction = Instant::now();
+            state.triggered_idle_stages.clear();
+            state.last_mood_idle_time = Instant::now();
+            state.last_idle_stage = IdleStage::Active;
+            was_long_idle
+        })
+    }
+
+    /// 更新当前心情状态，产出一个**限时**点缀（没有就是 `None`）
+    ///
+    /// 心情→表现的判定交给 [`mood_to_cue`]：它比"按情绪标签查表"多了
+    /// valence / arousal / fatigue / stress 四个维度，能区分"累但开心"和"单纯累"。
+    ///
+    /// 心情**不再产出持续基调**。以前这里还会顺带返回一个可持续的图集格位（`dizzy`），
+    /// 让疲惫/低落长期挂着一张脸，撤掉的原因有二：底色只在规则切换时才重发，角色会
+    /// 几十分钟钉在同一张脸上；而基调一旦不是 `idle`，自主漫步的启用门槛（要求姿态是
+    /// `idle`）会把它一起冻住，那个冻结跟情绪没有半点关系。
+    ///
+    /// 触发条件：命中的点缀与上一次不同（状态换了，立刻给反应），或冷却已过再按概率补
+    /// 一次（状态没变，时不时动一下）。
+    pub fn update_mood(&self, char_id: &str, mood: &MoodSnapshot) -> Option<String> {
+        let cue = mood_to_cue_for(char_id, mood);
+        if cue.accent.is_empty() {
+            return None;
+        }
+
+        self.with_state(char_id, |state| {
+            state.current_mood_label = mood.primary_emotion.as_str().to_string();
+            // 启动宽限：此时心情还在做首次稳态结算，读到的可能是跳变中间值
+            // （见 MOOD_ACCENT_STARTUP_GRACE 的说明）。此处直接不出表情。
+            if Instant::now().saturating_duration_since(state.created_at) < MOOD_ACCENT_STARTUP_GRACE {
+                return None;
+            }
+            if cue.accent == "dizzy"
+                && Instant::now().saturating_duration_since(state.last_interaction).as_secs() >= 301
+            {
+                return None;
+            }
+
+            let changed = cue.accent != state.last_accent;
+            let cooled_down = Instant::now().saturating_duration_since(state.last_accent_time)
+                > ACCENT_COOLDOWN;
+            if changed || (cooled_down && rand::random::<f64>() < ACCENT_IDLE_PROBABILITY) {
+                state.last_accent = cue.accent.clone();
+                state.last_accent_time = Instant::now();
+                Some(cue.accent.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// 检查事件冷却，返回是否可以触发
+    fn check_event_cooldown(&self, char_id: &str, event_key: &str, cooldown: Duration) -> bool {
+        self.with_state(char_id, |state| {
+            let now = Instant::now();
+            if let Some(next_time) = state.event_cooldowns.get(event_key) {
+                if now < *next_time {
+                    return false;
+                }
+            }
+            state.event_cooldowns.insert(event_key.to_string(), now + cooldown);
+            true
+        })
+    }
+
+    /// tick 检查：空闲检测 + 心情持续表情
+    pub fn tick(&self, char_id: &str, manifest: &ResourceManifest) -> Vec<TriggerResult> {
+        let mut results = Vec::new();
+        let now = Instant::now();
+
+        self.with_state(char_id, |state| {
+            let idle_secs = now.saturating_duration_since(state.last_interaction).as_secs();
+            let current_stage = IdleStage::from_seconds(idle_secs);
+
+            // 阶段变化检测
+            if current_stage != state.last_idle_stage {
+                let old_stage = state.last_idle_stage;
+                state.last_idle_stage = current_stage;
+
+                // 前进到新阶段（只在阶段升级时触发）
+                if current_stage > old_stage {
+                    let trigger_key = match current_stage {
+                        IdleStage::Short => "idle_short",
+                        IdleStage::Medium => "idle_medium",
+                        IdleStage::Long => "idle_long",
+                        IdleStage::Asleep => "idle_asleep",
+                        _ => "",
+                    };
+
+                    if !trigger_key.is_empty() && !state.triggered_idle_stages.contains(&current_stage) {
+                        let base_prob = match current_stage {
+                            IdleStage::Short => 0.4,
+                            IdleStage::Medium => 0.6,
+                            IdleStage::Long => 0.8,
+                            IdleStage::Asleep => 0.95,
+                            _ => 0.0,
+                        };
+
+                        let should_trigger = rand::random::<f64>() < base_prob;
+                        if should_trigger {
+                            if let Some(mut trigger) = manifest.get_idle_trigger(trigger_key) {
+                                if current_stage == IdleStage::Asleep && char_id.eq_ignore_ascii_case("nana") {
+                                    trigger.1 = "tend".to_string();
+                                }
+                                results.push(trigger);
+                                state.triggered_idle_stages.insert(current_stage);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 心情持续表情：主导情绪持续超过45秒后，随机触发心情表情（有冷却）
+            let mood_cooldown = Duration::from_secs(45);
+            if now.saturating_duration_since(state.last_mood_idle_time) > mood_cooldown {
+                if current_stage >= IdleStage::Short && current_stage < IdleStage::Asleep {
+                    let mood_label = &state.current_mood_label;
+                    // get_mood_idle_expression返回(expr, priority)，包装成TriggerResult
+                    if let Some((expr_name, _priority)) = manifest.get_mood_idle_expression(mood_label) {
+                        if expr_name != "dizzy" && rand::random::<f64>() < 0.25 {
+                            results.push((expr_name, String::new(), Some(3000)));
+                            state.last_mood_idle_time = now;
+                        }
+                    }
+                }
+            }
+        });
+
+        results
+    }
+
+    /// 触发程序事件
+    pub fn trigger_event_with_manifest(&self, char_id: &str, event_key: &str, manifest: &ResourceManifest) -> Option<TriggerResult> {
+        let cooldown = match event_key {
+            "morning" | "afternoon" | "evening" | "night" => Duration::from_secs(3600),
+            "window_focus" | "window_blur" => Duration::from_secs(10),
+            "chat_start" | "chat_end" => Duration::from_secs(5),
+            "music_start" | "music_stop" => Duration::from_secs(30),
+            "battery_low" => Duration::from_secs(300),
+            "user_return" => Duration::from_secs(10),
+            _ => Duration::from_secs(30),
+        };
+
+        if !self.check_event_cooldown(char_id, event_key, cooldown) {
+            return None;
+        }
+
+        debug!("[AutoTrigger] 触发事件: char={}, event={}", char_id, event_key);
+        manifest.get_event_trigger(event_key)
+    }
+
+    /// 获取当前空闲时间（秒）
+    pub fn idle_seconds(&self, char_id: &str) -> u64 {
+        self.with_state(char_id, |state| {
+            Instant::now().saturating_duration_since(state.last_interaction).as_secs()
+        })
+    }
+
+    /// 获取当前空闲阶段
+    pub fn idle_stage(&self, char_id: &str) -> IdleStage {
+        self.with_state(char_id, |state| state.last_idle_stage)
+    }
+}
+
+/// 全局单例
+pub static AUTO_TRIGGER: std::sync::LazyLock<AutoExpressionTrigger> =
+    std::sync::LazyLock::new(|| AutoExpressionTrigger::new());
+
+/// 向 PetActionRequest 队列投递动作
+fn push_action(char_id: &str, kind: &str, target: &str, params: serde_json::Value) {
+    use crate::tools::builtin::pet_tools::{push_action as push_pet_action, PetActionRequest};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    push_pet_action(PetActionRequest {
+        kind: kind.to_string(),
+        target: target.to_string(),
+        params,
+        timestamp: now,
+        character_id: char_id.to_string(),
+    });
+}
+
+/// 应用触发器结果到动作队列
+fn apply_trigger_result(char_id: &str, result: &TriggerResult) {
+    let (expr, motion, duration_opt) = result;
+    let duration = duration_opt.unwrap_or(3000) as u32;
+
+    // 触发表情
+    if !expr.is_empty() && expr != "none" {
+        push_action(
+            char_id,
+            "expression",
+            expr,
+            serde_json::json!({ "duration_ms": duration }),
+        );
+    }
+
+    // 触发motion文件
+    if !motion.is_empty() && motion != "none" {
+        push_action(char_id, "motion", motion, serde_json::json!({}));
+    }
+}
+
+/// 便捷函数：记录用户交互，返回是否处于长时空闲（调用方需用manifest触发user_return）
+pub fn record_user_interaction(char_id: &str) -> bool {
+    AUTO_TRIGGER.record_interaction(char_id)
+}
+
+/// 便捷函数：更新心情状态，并把点缀投递给前端
+///
+/// 通过 `expression` 传递 `duration_ms`，让图集格位点缀（如 `dizzy`）到期后回落 idle。
+/// 帧序列点缀（如 `happy`）按素材时长播放，前端会忽略该参数。
+pub fn update_mood_state(char_id: &str, mood: &MoodSnapshot) {
+    if let Some(accent) = AUTO_TRIGGER.update_mood(char_id, mood) {
+        push_action(
+            char_id,
+            "expression",
+            &accent,
+            serde_json::json!({ "duration_ms": MOOD_ACCENT_DURATION_MS }),
+        );
+    }
+}
+
+/// 便捷函数：触发事件
+pub fn trigger_event(char_id: &str, event_key: &str, manifest: &ResourceManifest) {
+    if let Some(result) = AUTO_TRIGGER.trigger_event_with_manifest(char_id, event_key, manifest) {
+        apply_trigger_result(char_id, &result);
+    }
+}
+
+/// 便捷函数：执行tick，自动应用触发结果
+pub fn auto_trigger_tick(char_id: &str, manifest: &ResourceManifest) {
+    let triggers = AUTO_TRIGGER.tick(char_id, manifest);
+    for result in &triggers {
+        apply_trigger_result(char_id, result);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::psychology::emotion::EmotionLabel;
+    use crate::tools::builtin::pet_tools::drain_pending_actions;
+
+    #[test]
+    fn sleep_starts_at_twelve_minutes() {
+        assert_eq!(IdleStage::from_seconds(719), IdleStage::Long);
+        assert_eq!(IdleStage::from_seconds(720), IdleStage::Asleep);
+    }
+
+    #[test]
+    fn sleep_idle_trigger_keeps_state_animation_name() {
+        let mf = crate::engine::manifest::ModelManifest::load_from_dir(std::path::Path::new("Vivian"))
+            .expect("Vivian motion vocabulary");
+        let manifest = ResourceManifest::from_manifest(mf);
+        let trigger = manifest.get_idle_trigger("idle_asleep").expect("sleep idle trigger");
+        assert_eq!(trigger.0, "");
+        assert_eq!(trigger.1, "sleep");
+    }
+
+    #[test]
+    fn long_idle_does_not_emit_dizzy_accent() {
+        let trigger = AutoExpressionTrigger::new();
+        trigger.with_state("vivian", |state| {
+            state.last_interaction = Instant::now() - Duration::from_secs(360);
+            // 越过启动宽限，否则这条用例会被宽限而不是被空闲判定挡住
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
+        });
+        assert!(trigger.update_mood("vivian", &grieving_mood()).is_none());
+    }
+
+    /// 启动宽限期：情绪还在首次结算时不投点缀；过了宽限该恢复。
+    ///
+    /// 这条守的是「一启动就闪几下坏表情」这个现象：`psychology.json` 里存的是上次
+    /// 退出时的情绪，进程起来那一刻它正在被稳态结算改写，此时表情判断读到的可能是
+    /// 中间值。宽限期把这个窗口盖住。
+    #[test]
+    fn startup_grace_suppresses_mood_accent() {
+        let char_id = "test_startup_grace_suppresses_mood_accent";
+        let trigger = AutoExpressionTrigger::new();
+
+        assert!(
+            trigger.update_mood(char_id, &grieving_mood()).is_none(),
+            "启动宽限期内不该投心情点缀"
+        );
+
+        trigger.with_state(char_id, |state| {
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
+        });
+        assert_eq!(
+            trigger.update_mood(char_id, &grieving_mood()).as_deref(),
+            Some("dizzy"),
+            "宽限期过后心情点缀应恢复"
+        );
+    }
+
+    /// 严重悲伤 → `sadness_grieving` → 点缀 `dizzy`（图集格位，不是帧序列）。
+    fn grieving_mood() -> MoodSnapshot {
+        MoodSnapshot {
+            valence: -0.6,
+            arousal: 0.3,
+            primary_emotion: EmotionLabel::Sadness,
+            secondary_emotion: EmotionLabel::Curiosity,
+            primary_intensity: 0.8,
+            fatigue: 20.0,
+            stress: 10.0,
+            relationship_score: 50.0,
+            ..MoodSnapshot::default()
+        }
+    }
+
+    /// 把该角色的启动宽限推过去。
+    ///
+    /// 下面两条用例关心的是点缀本身的语义（限时、不重复复燃），不是宽限；
+    /// 不推过去它们会被宽限挡在门外，变成"因为没投递所以断言成立"的空用例。
+    fn expire_startup_grace(char_id: &str) {
+        AUTO_TRIGGER.with_state(char_id, |state| {
+            state.created_at = Instant::now() - MOOD_ACCENT_STARTUP_GRACE - Duration::from_secs(1);
+        });
+    }
+
+    /// 心情点缀必须是**限时**的。
+    ///
+    /// `dizzy` 是图集格位，自己不会计时：动作里少了 `duration_ms`，前端就会把那张脸
+    /// 一直挂着——正是这一版要消灭的"持续状态"。这条用例守两件事：点缀必须走
+    /// `expression` 通道（`motion` 通道落到 `playMotion`，对格位用固定 900ms 且不收时长），
+    /// 以及时长参数不能丢。
+    #[test]
+    fn mood_accent_is_always_timed() {
+        let char_id = "test_mood_accent_is_always_timed";
+        expire_startup_grace(char_id);
+        update_mood_state(char_id, &grieving_mood());
+
+        let actions = drain_pending_actions(Some(char_id));
+        let action = actions.last().expect("心情点缀一个动作都没投递");
+        assert_eq!(action.kind, "expression", "点缀走错了通道：{:?}", action.kind);
+        assert_eq!(action.target, "dizzy");
+        let duration = action
+            .params
+            .get("duration_ms")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            duration > 0,
+            "dizzy 点缀没带时长，前端会一直挂着这张脸"
+        );
+    }
+
+    /// 同一状态连续重算不该每次都闪：第二次只剩冷却+概率，实测大概率不投递。
+    #[test]
+    fn mood_accent_does_not_refire_same_state() {
+        let char_id = "test_mood_accent_does_not_refire_same_state";
+        let mood = grieving_mood();
+        expire_startup_grace(char_id);
+        update_mood_state(char_id, &mood);
+        drain_pending_actions(Some(char_id));
+
+        // 冷却 8s 内重复调用，点缀没变 ⇒ 不应再投递
+        let mut refired = 0;
+        for _ in 0..20 {
+            update_mood_state(char_id, &mood);
+            refired += drain_pending_actions(Some(char_id)).len();
+        }
+        assert_eq!(refired, 0, "同一状态在冷却期内重复触发了 {refired} 次");
+    }
+}

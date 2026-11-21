@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import { buildSync } from 'esbuild';
+const { outputFiles } = buildSync({ entryPoints: ['src/components/mind-inspector/pages/browserOverlayFrame.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
+const { intersectBrowserRect, browserViewportClip } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
+const viewport = { x: 54, y: 100, width: 1000, height: 600 };
+assert.deepEqual(intersectBrowserRect(viewport, viewport), viewport);
+assert.deepEqual(intersectBrowserRect({ x: -8, y: 70, width: 900, height: 650 }, { x: 54, y: 0, width: 800, height: 600 }), { x: 54, y: 70, width: 800, height: 530 });
+assert.equal(intersectBrowserRect(viewport, { x: 2000, y: 0, width: 10, height: 10 }).width, 0);
+const copy = { ...viewport };
+intersectBrowserRect(viewport, { x: 300, y: 0, width: 600, height: 700 });
+assert.deepEqual(viewport, copy, 'visual clipping must not resize the document viewport');
+console.log('Browser viewport clipping: container intersections, negative coordinates, disjoint areas and immutable document bounds passed.');
+
+globalThis.innerWidth = 1000; globalThis.innerHeight = 700;
+globalThis.getComputedStyle = element => element.style;
+const outer = { parentElement: null, style: { overflowX: 'hidden', overflowY: 'hidden' }, getBoundingClientRect: () => ({ x: 88, y: 40, width: 800, height: 620 }) };
+const element = { parentElement: outer, getBoundingClientRect: () => ({ x: 83, y: 110, width: 900, height: 650 }) };
+assert.deepEqual(browserViewportClip(element), { x: 88, y: 110, width: 800, height: 550 });
+outer.style.overflowX = 'visible';
+assert.equal(browserViewportClip(element).x, 83, 'only clipping ancestors constrain the corresponding axis');
+console.log('Browser clipping honors ancestor overflow and viewport bounds.');

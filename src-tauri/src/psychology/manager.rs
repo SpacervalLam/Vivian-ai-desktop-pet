@@ -1,0 +1,1447 @@
+//! PsychologyManager — 心理系统中枢。
+//!
+//! 职责：
+//! 1. 持久化 PsychologySnapshot（psychology.json）
+//! 2. 执行 Homeostasis tick（稳态调节）
+//! 3. 应用 LLM 产出（appraisal + emotion_update + behavior_drive）
+//! 4. 应用关系更新
+//! 5. 构建心理学 prompt 上下文
+//! 6. 计算统一 Mood（UI 与回复表达共用）
+//! 7. 提供规则驱动的 Behavior Drive
+
+use std::sync::Arc;
+
+use chrono::Timelike;
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+
+use super::appraisal::Appraisal;
+use super::behavior_drive::{BehaviorDrive, RuleBasedDriveResolver};
+use super::emotion::{EmotionDeltas, EmotionState};
+use super::homeostasis::{CircadianFactors, HomeostasisEngine};
+use super::mood::{compute_mood, MoodSnapshot};
+use super::needs::{NeedDeltas, NeedsState};
+use super::relationship::{
+    MilestoneEntry, RelationshipEvent, RelationshipStage, RelationshipState, StageStrategy,
+    EVENT_INTERACTION, EVENT_LONG_ABSENCE, EVENT_TIME_PASSAGE, EVENT_USER_RETURNED, EVENT_USER_SAD,
+};
+use super::snapshot::{PsychologySnapshot};
+
+/// LLM 返回的心理状态产出（从 JSON 解析）
+///
+/// 这些字段都是 Option，因为 LLM 可能不返回（兼容性）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PsychologyOutput {
+    pub appraisal: Option<Appraisal>,
+    /// Net emotional change for the interaction, including its appraisal.
+    /// Some(all-zero) explicitly keeps emotion unchanged; None uses appraisal fallback.
+    pub emotion_update: Option<EmotionDeltas>,
+    pub behavior_drive: Option<BehaviorDrive>,
+    /// 需求增量（可选，LLM 也可产出）
+    pub need_update: Option<NeedDeltas>,
+}
+
+impl PsychologyOutput {
+    /// A direct update describes the final net change; appraisal is only the fallback.
+    fn resolved_emotion_delta(&self, sensitivity: f64, trust: f64) -> Option<EmotionDeltas> {
+        self.emotion_update.as_ref().map(|delta| delta.bounded(sensitivity, 0.12, 0.24))
+            .or_else(|| self.appraisal.as_ref()
+                .map(|appraisal| appraisal.to_emotion_deltas(sensitivity, trust)))
+    }
+}
+
+/// 用户交互的反馈 — 前端直接播放的 桌宠 表情/动作
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InteractionFeedback {
+    /// 建议的表情（如 "happy"、"angry"、"dizzy"、"think"、"smug"）
+    pub expression: String,
+    /// 建议的动作（如 "idle"）
+    pub motion: String,
+    /// 前端动作（如 "wave_hand"/"blush"/"surprised" 等11个前端动作库动作）
+    #[serde(default)]
+    pub action: String,
+    /// 表情持续时间（毫秒），0或None表示使用表情默认时长
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// 是否触发避让鼠标（连续点击时基于心理参数概率触发）
+    #[serde(default)]
+    pub avoid_mouse: bool,
+    /// 避让概率（0.0-1.0，仅用于调试/日志，avoid_mouse=true 时有意义）
+    #[serde(default)]
+    pub avoid_probability: f64,
+}
+
+/// 心理系统管理器
+pub struct PsychologyManager {
+    state: Arc<RwLock<PsychologySnapshot>>,
+    persistence_path: std::path::PathBuf,
+    /// 持久化锁，防止并发写
+    persist_lock: Arc<parking_lot::Mutex<()>>,
+    /// micro_tick 累计计数（达到阈值后持久化一次）
+    micro_tick_count: parking_lot::Mutex<u32>,
+    /// 当前角色的 ResourceManifest（用于交互反馈表情映射）
+    manifest: Option<Arc<crate::engine::manifest::ResourceManifest>>,
+    /// Per-character interaction evidence; reset with the character, never an identity profile.
+    pet_interactions: parking_lot::Mutex<super::interaction::InteractionTracker>,
+}
+
+/// micro_tick 每累积 N 次才持久化一次（默认 1 分钟：3s × 20）
+const MICRO_TICK_PERSIST_INTERVAL: u32 = 20;
+
+impl PsychologyManager {
+    /// 从持久化文件加载，若不存在则用默认值初始化
+    pub fn load_or_init(persistence_path: std::path::PathBuf) -> Self {
+        let mut snapshot = if persistence_path.exists() {
+            match std::fs::read_to_string(&persistence_path) {
+                Ok(content) => serde_json::from_str::<PsychologySnapshot>(&content)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "psychology.json 解析失败，使用默认值: {}",
+                            e
+                        );
+                        PsychologySnapshot::default()
+                    }),
+                Err(e) => {
+                    tracing::warn!("读取 psychology.json 失败: {}", e);
+                    PsychologySnapshot::default()
+                }
+            }
+        } else {
+            tracing::info!("psychology.json 不存在，使用默认值初始化");
+            PsychologySnapshot::default()
+        };
+
+        // 启动时重置 last_interaction_time 为当前时间：
+        // 持久化的值是上次运行时用户最后一次交互的时间戳，若距上次运行已超过阈值，
+        // 启动后 secs_since_last_interaction() 会立即返回很大的值，
+        // 进入疲劳公式后导致疲劳度过高，5 分钟状态保护期一过就触发 Online→Rest。
+        // 重置后交互空闲计时从启动时刻重新开始，避免启动即 Rest。
+        let now_ts = chrono::Utc::now().timestamp() as f64;
+        snapshot.last_interaction_time = now_ts;
+
+        Self {
+            state: Arc::new(RwLock::new(snapshot)),
+            persistence_path,
+            persist_lock: Arc::new(parking_lot::Mutex::new(())),
+            micro_tick_count: parking_lot::Mutex::new(0),
+            manifest: None,
+            pet_interactions: parking_lot::Mutex::new(Default::default()),
+        }
+    }
+
+    /// 用指定 Persona 初始化（首次创建时）
+    pub fn with_persona(self, persona: super::persona::PersonaProfile) -> Self {
+        {
+            let mut state = self.state.write();
+            state.persona = persona;
+            // 重新调制 set_points
+            state.persona.apply_trait_modulation();
+        }
+        let _ = self.persist();
+        self
+    }
+
+    /// 注入当前角色的 ResourceManifest（用于交互反馈表情映射）
+    pub fn with_manifest(mut self, manifest: Arc<crate::engine::manifest::ResourceManifest>) -> Self {
+        self.manifest = Some(manifest);
+        self
+    }
+
+    /// 执行一次 Homeostasis tick
+    ///
+    /// 计算距上次 tick 的时间，执行稳态调节。应在后台定时调用（如每 60s）。
+    pub fn homeostasis_tick(&self) {
+        let now = chrono::Utc::now().timestamp() as f64;
+        let dt_raw = {
+            let state = self.state.read();
+            (now - state.last_tick_time).max(0.0)
+        };
+
+        if dt_raw < 1.0 {
+            return;
+        }
+
+        self.run_homeostasis_with_offline(dt_raw, now);
+        let _ = self.persist();
+    }
+
+    /// 微调 tick — 高频调用（每 3-5 秒），让情绪持续波动
+    ///
+    /// 与 `homeostasis_tick` 不同：不跳过短 dt，允许小步长波动。
+    /// 噪声在 `fluctuate` 中随 √dt 缩放，保证时间不变性。
+    ///
+    /// 持久化策略：累积 `MICRO_TICK_PERSIST_INTERVAL` 次才写盘一次（约 1 分钟），
+    /// 避免每 3 秒同步写盘造成 I/O 压力与 SSD 损耗。
+    pub fn micro_tick(&self) {
+        let now = chrono::Utc::now().timestamp() as f64;
+        let dt = {
+            let state = self.state.read();
+            (now - state.last_tick_time).max(0.0).min(60.0) // 最多 60s
+        };
+
+        if dt < 0.5 {
+            return; // 至少 0.5s 间隔
+        }
+
+        self.run_homeostasis(dt, now);
+
+        // 累积计数，达到阈值才持久化
+        let should_persist = {
+            let mut count = self.micro_tick_count.lock();
+            *count = (*count + 1) % MICRO_TICK_PERSIST_INTERVAL;
+            *count == 0
+        };
+        if should_persist {
+            let _ = self.persist();
+        }
+    }
+
+    /// 内部：执行 Homeostasis（不再自动持久化，由调用方决定）
+    fn run_homeostasis(&self, dt: f64, now: f64) {
+        let mut state = self.state.write();
+        let snapshot: &mut PsychologySnapshot = &mut *state;
+        let emotion_set_points = snapshot.persona.emotion_set_points.clone();
+        let recovery_rates = snapshot.persona.recovery_rates.clone();
+        let local = chrono::Local::now();
+        let hour = local.hour() as f64 + local.minute() as f64 / 60.0;
+        let circadian = CircadianFactors::at_hour(hour);
+        HomeostasisEngine::tick(
+            &mut snapshot.needs,
+            &mut snapshot.emotion,
+            &mut snapshot.persona.need_set_points,
+            &emotion_set_points,
+            &recovery_rates,
+            dt,
+            circadian,
+        );
+        snapshot.last_tick_time = now;
+    }
+
+    /// 内部：带离线压缩的 Homeostasis
+    ///
+    /// dt > 3600s 时，Needs 用封顶 1 小时稳态，Emotion 按各通道独立压缩系数结算。
+    fn run_homeostasis_with_offline(&self, dt_raw: f64, now: f64) {
+        let mut state = self.state.write();
+        let snapshot: &mut PsychologySnapshot = &mut *state;
+        let emotion_set_points = snapshot.persona.emotion_set_points.clone();
+        let recovery_rates = snapshot.persona.recovery_rates.clone();
+        let local = chrono::Local::now();
+        let hour = local.hour() as f64 + local.minute() as f64 / 60.0;
+        let circadian = CircadianFactors::at_hour(hour);
+
+        if dt_raw > 3600.0 {
+            // 离线结算：用 1 小时封顶做一次**确定性**回归，再按各通道压缩系数结算。
+            // 这里刻意不用 `tick`：它会给情绪注入随机噪声，而"离线了多久"不该被
+            // 翻译成"情绪被随机大跳一次"——那正是启动即闪坏表情的来源之一。
+            HomeostasisEngine::tick_offline(
+                &mut snapshot.needs,
+                &mut snapshot.emotion,
+                &mut snapshot.persona.need_set_points,
+                &emotion_set_points,
+                &recovery_rates,
+                3600.0,
+                circadian,
+            );
+            HomeostasisEngine::apply_offline_compression(
+                &mut snapshot.emotion,
+                &emotion_set_points,
+                &recovery_rates,
+                dt_raw / 60.0,
+                circadian,
+            );
+        } else {
+            HomeostasisEngine::tick(
+                &mut snapshot.needs,
+                &mut snapshot.emotion,
+                &mut snapshot.persona.need_set_points,
+                &emotion_set_points,
+                &recovery_rates,
+                dt_raw,
+                circadian,
+            );
+        }
+        snapshot.last_tick_time = now;
+    }
+
+    /// 应用 LLM 产出（在 ResponseParsing 之后调用）
+    ///
+    /// 这是「事件 → Appraisal → Emotion → Behavior Drive」因果链的落地。
+    /// LLM 在一次调用中产出 appraisal + emotion_update + behavior_drive，
+    /// 这里将它们应用到内部状态，并记录情绪采样（供情绪弧线叙事）。
+    pub fn apply_llm_output(&self, output: &PsychologyOutput) {
+        let now = chrono::Utc::now().timestamp() as f64;
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+
+        let _ = now; // 时间戳由 add_event 内部生成
+
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+
+            let dt_raw = (now - snapshot.last_tick_time).max(0.0);
+            if dt_raw >= 1.0 {
+                let emotion_set_points = snapshot.persona.emotion_set_points.clone();
+                let recovery_rates = snapshot.persona.recovery_rates.clone();
+                let local = chrono::Local::now();
+                let hour = local.hour() as f64 + local.minute() as f64 / 60.0;
+                let circadian = CircadianFactors::at_hour(hour);
+
+                if dt_raw > 3600.0 {
+                    // 同上：长离线走确定性结算，不让随机噪声替"离线多久"发言
+                    HomeostasisEngine::tick_offline(
+                        &mut snapshot.needs,
+                        &mut snapshot.emotion,
+                        &mut snapshot.persona.need_set_points,
+                        &emotion_set_points,
+                        &recovery_rates,
+                        3600.0,
+                        circadian,
+                    );
+                    HomeostasisEngine::apply_offline_compression(
+                        &mut snapshot.emotion,
+                        &emotion_set_points,
+                        &recovery_rates,
+                        dt_raw / 60.0,
+                        circadian,
+                    );
+                } else {
+                    HomeostasisEngine::tick(
+                        &mut snapshot.needs,
+                        &mut snapshot.emotion,
+                        &mut snapshot.persona.need_set_points,
+                        &emotion_set_points,
+                        &recovery_rates,
+                        dt_raw,
+                        circadian,
+                    );
+                }
+                snapshot.last_tick_time = now;
+            }
+
+            let trust = snapshot.relationship.trust;
+
+            if let Some(appraisal) = &output.appraisal {
+                snapshot.last_appraisal = Some(appraisal.clone());
+
+                let need_deltas_from_appraisal = appraisal.to_need_deltas();
+                snapshot.needs.apply_delta(&need_deltas_from_appraisal);
+            }
+
+            // Explicit feedback is the whole turn's net change, not an additional
+            // copy of the appraisal response. Appraisal remains a fallback.
+            if let Some(delta) = output.resolved_emotion_delta(sensitivity_mult, trust) {
+                if output.emotion_update.is_some() {
+                    // Already a net change: do not let channel interactions
+                    // reverse explicit relief or count the same reaction again.
+                    snapshot.emotion.apply_delta(&delta, 1.0);
+                } else {
+                    snapshot.emotion.apply_feedback_delta(&delta, 1.0);
+                }
+            }
+
+            // 应用 LLM 直接产出的 need_update
+            if let Some(need_update) = &output.need_update {
+                snapshot.needs.apply_delta(need_update);
+            }
+
+            // 应用 Behavior Drive（LLM 产出）
+            if let Some(drive) = &output.behavior_drive {
+                snapshot.last_drive = Some(drive.clone());
+            }
+
+            // 更新互动时间
+            snapshot.last_interaction_time = now;
+
+            // 记录情绪采样（供情绪弧线叙事）
+            let emotion_after = snapshot.emotion.clone();
+            snapshot.add_event(emotion_after);
+        }
+
+        let _ = self.persist();
+    }
+
+    /// 应用外部世界事件 —— 不经过 LLM，由事件类型映射到 Appraisal 模板
+    ///
+    /// 与 `apply_llm_output` 的区别：仅应用 appraisal（无 emotion_update/behavior_drive），
+    /// 用于世界事件（天气变化/节日到来/日出日落等）对心理状态的隐式影响。
+    /// 复用 apply_llm_output 的全部逻辑（Homeostasis 补偿 + 情绪采样 + persist）。
+    pub fn apply_external_event(&self, event: &crate::world::WorldEvent) {
+        let appraisal = event.to_appraisal();
+        let output = PsychologyOutput {
+            appraisal: Some(appraisal),
+            emotion_update: None,
+            behavior_drive: None,
+            need_update: None,
+        };
+        tracing::debug!(
+            "应用世界事件: {} ({}) -> appraisal sig={:.2}",
+            event.kind.as_str(),
+            event.description,
+            event.significance
+        );
+        self.apply_llm_output(&output);
+    }
+
+    /// A peer's tone can nudge the listener's mood, scaled by the listener's persona.
+    pub(crate) fn observe_peer_message(&self, text: &str) {
+        let sentiment = super::social_state::sentiment_from_signal_text(text);
+        if sentiment == 0.0 {
+            return;
+        }
+
+        let positive = sentiment.max(0.0);
+        let negative = (-sentiment).max(0.0);
+        let delta = EmotionDeltas {
+            joy: positive * 0.05,
+            closeness: positive * 0.04 - negative * 0.03,
+            sadness: negative * 0.03,
+            anger: negative * 0.04,
+            ..Default::default()
+        };
+        {
+            let mut state = self.state.write();
+            let sensitivity = state.persona.traits.sensitivity_multiplier();
+            state.emotion.apply_delta(&delta.bounded(sensitivity, 0.05, 0.09), 1.0);
+            let emotion = state.emotion.clone();
+            state.add_event(emotion);
+        }
+        let _ = self.persist();
+    }
+
+    /// 应用关系更新（兼容旧 record_interaction 接口）
+    ///
+    /// 在 MoodStep 之后调用，基于 user_emotion 的 sentiment。
+    pub fn apply_relationship_update(&self, sentiment: f64, intensity: f64) {
+        let now = chrono::Utc::now().timestamp() as f64;
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            let appraisal = snapshot.last_appraisal.clone().unwrap_or_default();
+            let emotion = snapshot.emotion.clone();
+            let rel_deltas = RelationshipState::deltas_from_interaction(
+                &appraisal,
+                &emotion,
+                sentiment * intensity,
+            );
+            snapshot.relationship.apply_delta(&rel_deltas);
+            snapshot.last_interaction_time = now;
+        }
+        let _ = self.persist();
+    }
+
+    /// 统一 turn boundary：一次性完成单轮对话的所有心理学写路径。
+    ///
+    /// 把原来散落在 chat_chain.rs 三处的调用合并为原子操作：
+    /// 1. `apply_llm_output`：应用 LLM 产出的 appraisal/emotion/drive/need
+    /// 2. `apply_relationship_update`：基于 sentiment×intensity 更新 5 维关系
+    /// 3. `record_interaction`：更新交互计数、亲密度阶段升级、临时态检测
+    ///
+    /// 保证三者执行顺序一致，避免中间插入其他写操作导致状态不一致。
+    /// 其他调用方（consciousness_update_async、emotion/bridge、proactive）
+    /// 仍可直接调用 `apply_llm_output` 做独立心理状态更新。
+    pub fn apply_turn_boundary(
+        &self,
+        psy_output: &PsychologyOutput,
+        sentiment: &str,
+        intensity: f64,
+    ) {
+        // Step 1: LLM 产出的心理状态（appraisal + emotion + drive + need）
+        self.apply_llm_output(psy_output);
+
+        // Step 2: 5 维关系数值更新
+        let sentiment_val = match sentiment {
+            "happy" => 0.8 * intensity,
+            "sad" => -0.5 * intensity,
+            "angry" => -0.7 * intensity,
+            "anxious" => -0.4 * intensity,
+            "frustrated" => -0.6 * intensity,
+            _ => 0.0,
+        };
+        self.apply_relationship_update(sentiment_val, intensity);
+
+        // Step 3: 交互统计 + 阶段升级 + 临时态
+        if let Err(e) = self.record_interaction(sentiment, intensity) {
+            tracing::warn!("[PsychologyManager] turn boundary 交互统计更新失败: {}", e);
+        }
+
+        // Step 4: 轮次级情绪回落 —— 与高频 micro_tick 的物理时间衰减互补，
+        // 让仍高于稳态的负面情绪（anger/sadness/fear）在数轮对话内平滑平复，
+        // 修复"情绪一轮就消失"的断裂感。仅作用于 companion 对话轮；
+        // work agent 不接入 PsychologyManager 情绪子系统，不受影响。
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            HomeostasisEngine::apply_turn_boundary_decay(
+                &mut snapshot.emotion,
+                &snapshot.persona.emotion_set_points,
+            );
+        }
+        let _ = self.persist();
+    }
+
+    /// 计算规则驱动的 Behavior Drive（主动行为 tick 用）
+    ///
+    /// 不调用 LLM，由当前 Needs/Emotion/Persona 推导。
+    pub fn compute_rule_drive(&self) -> BehaviorDrive {
+        let state = self.state.read();
+        RuleBasedDriveResolver::resolve(&state.needs, &state.emotion, &state.persona)
+    }
+
+    /// 获取当前主导 Behavior Drive
+    pub fn current_drive(&self) -> Option<BehaviorDrive> {
+        let state = self.state.read();
+        state.last_drive.clone()
+    }
+
+    /// 应用用户交互事件 — 由前端交互检测触发
+    ///
+    /// 不同的交互类型产生不同的情绪/需求增量，让桌宠对用户操作有"反应"：
+    /// - `single_click`：单次点击 → 开心+关注
+    /// - `double_click`：双击 → 惊喜+好奇
+    /// - `fast_click`：快速连续点击 → 害羞 + 小幅快乐（被关注但有点不好意思）
+    /// - `fast_drag`：快速拖动 → 小不满 + 嘟嘴（被打扰）
+    /// - `drag_start`：开始拖动 → 疑惑
+    /// - `drag_end`：结束拖动 → 放松
+    /// - `pet`：缓慢抚摸 → 亲近 + 信任 + 归属满足（被关爱）
+    /// - `long_press`：长按 → 好奇（主人在干嘛？）
+    /// - `mouse_enter`：鼠标进入窗口 → 注意到用户
+    /// - `mouse_leave`：鼠标离开窗口 → 略感失落
+    ///
+    /// 返回值：建议的 桌宠 表情/动作（前端直接播放，无需等 LLM）
+    pub fn apply_user_interaction(&self, interaction: &str) -> InteractionFeedback {
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+
+        // fast_click 避让概率预计算：基于当前心理状态决定是否躲闪用户鼠标
+        let (avoid_mouse, avoid_probability) = if interaction == "fast_click" {
+            let state = self.state.read();
+            let p = Self::compute_avoid_probability(&state);
+            let triggered = rand::random::<f64>() < p;
+            (triggered, p)
+        } else {
+            (false, 0.0)
+        };
+
+        let (emotion_delta, need_delta) = match interaction {
+            "single_click" => (
+                EmotionDeltas {
+                    joy: 0.03,
+                    closeness: 0.01,
+                    curiosity: 0.02,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    expression: -0.02,
+                    novelty: -0.01,
+                    ..Default::default()
+                },
+            ),
+            "double_click" => (
+                EmotionDeltas {
+                    joy: 0.06,
+                    curiosity: 0.05,
+                    closeness: 0.03,
+                    fear: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    expression: -0.03,
+                    novelty: -0.03,
+                    ..Default::default()
+                },
+            ),
+            "fast_click" => (
+                EmotionDeltas {
+                    joy: 0.04,
+                    closeness: 0.02,
+                    curiosity: 0.02,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    expression: -0.03,
+                    belonging: -0.02,
+                    ..Default::default()
+                },
+            ),
+            "fast_drag" => (
+                EmotionDeltas {
+                    joy: 0.03,
+                    anger: 0.01,
+                    curiosity: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    novelty: -0.02,
+                    autonomy: 0.03,
+                    ..Default::default()
+                },
+            ),
+            "drag_start" => (
+                EmotionDeltas {
+                    curiosity: 0.03,
+                    fear: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    autonomy: 0.02,
+                    ..Default::default()
+                },
+            ),
+            "drag_end" => (
+                EmotionDeltas {
+                    joy: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    autonomy: -0.01,
+                    ..Default::default()
+                },
+            ),
+            "pet" => (
+                EmotionDeltas {
+                    joy: 0.06,
+                    closeness: 0.08,
+                    loneliness: -0.05,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    belonging: -0.05,
+                    security: -0.03,
+                    expression: -0.02,
+                    ..Default::default()
+                },
+            ),
+            "long_press" => (
+                EmotionDeltas {
+                    curiosity: 0.04,
+                    closeness: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    novelty: -0.01,
+                    ..Default::default()
+                },
+            ),
+            "mouse_enter" => (
+                EmotionDeltas {
+                    curiosity: 0.02,
+                    joy: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    novelty: -0.01,
+                    ..Default::default()
+                },
+            ),
+            "mouse_leave" => (
+                EmotionDeltas {
+                    loneliness: 0.01,
+                    ..Default::default()
+                },
+                super::needs::NeedDeltas {
+                    belonging: 0.01,
+                    ..Default::default()
+                },
+            ),
+            _ => return InteractionFeedback::default(),
+        };
+
+        // 从当前角色的 manifest 查询完整交互反馈（expression + motion + action + duration）
+        let (expression, motion, action, duration_ms) = self
+            .manifest
+            .as_ref()
+            .map(|m| m.interaction_feedback_full(interaction))
+            .unwrap_or_else(|| (String::new(), crate::engine::manifest::DEFAULT_MOTION.to_string(), String::new(), None));
+
+        let mut feedback = InteractionFeedback {
+            expression,
+            motion,
+            action,
+            duration_ms,
+            avoid_mouse,
+            avoid_probability,
+        };
+
+        // 避让触发时覆盖表情：从 manifest 查询 avoid_mouse 映射
+        if avoid_mouse {
+            if let Some(ref m) = self.manifest {
+                let (avoid_expr, _, avoid_action, avoid_dur) = m.interaction_feedback_full("avoid_mouse");
+                if !avoid_expr.is_empty() {
+                    feedback.expression = avoid_expr;
+                }
+                if !avoid_action.is_empty() {
+                    feedback.action = avoid_action;
+                }
+                if avoid_dur.is_some() {
+                    feedback.duration_ms = avoid_dur;
+                }
+            }
+        } else {
+            // 交互表情多样化：约 35% 概率从当前主导情绪的表情池随机选一个，
+            // 让同样的点击/抚摸在不同心情下产生不同表情，避免每次都一样
+            if rand::random::<f64>() < 0.35 {
+                let mood_label = {
+                    let state = self.state.read();
+                    let (label, _) = state.emotion.dominant();
+                    label.as_str().to_string()
+                };
+                if let Some(ref m) = self.manifest {
+                    if let Some(expr) = m.random_mood_expression(&mood_label) {
+                        if !expr.is_empty() {
+                            feedback.expression = expr;
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            snapshot.emotion.apply_delta(&emotion_delta, sensitivity_mult);
+            snapshot.needs.apply_delta(&need_delta);
+            snapshot.last_interaction_time = chrono::Utc::now().timestamp() as f64;
+        }
+        let _ = self.persist();
+        feedback
+    }
+
+    /// Local rhythm changes only short-lived emotion. No needs, appraisal or relationship update.
+    pub fn observe_pet_interaction(&self, action: &str, metrics: Option<&super::interaction::PetInteractionMetrics>, impact: Option<f64>, now: f64) -> super::interaction::InteractionContext {
+        let context = self.pet_interactions.lock().observe(action, metrics, impact, now);
+        if let Some(delta) = &context.mood_delta {
+            let mut state = self.state.write();
+            let sensitivity = state.persona.traits.sensitivity_multiplier();
+            // At most three updates/minute; each update's total absolute change <= 0.02.
+            state.emotion.apply_delta(&delta.bounded(sensitivity, 0.012, 0.02), 1.0);
+            state.last_interaction_time = now;
+            let emotion = state.emotion.clone();
+            state.add_event(emotion);
+            // Normal micro_tick persists these small changes and restores homeostasis.
+        }
+        context
+    }
+
+    pub fn record_pet_reaction(&self, episode_id: &str, reply: &str) {
+        self.pet_interactions.lock().record_reply(episode_id, reply);
+    }
+
+    pub fn take_pet_interaction_episodes(&self, now: f64) -> Vec<super::interaction::InteractionEpisode> {
+        self.pet_interactions.lock().take_completed(now)
+    }
+
+    pub fn pet_action_capsule(&self, now: f64) -> Option<String> {
+        self.pet_interactions.lock().capsule(now)
+    }
+
+    pub fn query_pet_interactions(&self, now: f64, lookback_seconds: u64, limit: usize) -> serde_json::Value {
+        self.pet_interactions.lock().query(now, lookback_seconds, limit)
+    }
+
+    /// 规则层"被冷落→情绪映射"：连续主动搭话未获回应时累积负面情绪。
+    ///
+    /// `severity` ∈[0,1]，反映冷落程度（例如由连续 ignored_count 归一化）。
+    /// 推高 loneliness / sadness / belonging（归属饥饿），压低 joy / closeness。
+    /// 不依赖 LLM——即使 LLM 未产出情绪增量，被冷落也会真实改变心情。
+    pub fn apply_cold_shoulder(&self, severity: f64) {
+        let severity = severity.clamp(0.0, 1.0);
+        if severity <= 0.0 {
+            return;
+        }
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+        let emotion_delta = EmotionDeltas {
+            loneliness: 0.14 * severity,
+            sadness: 0.06 * severity,
+            joy: -0.08 * severity,
+            closeness: -0.06 * severity,
+            ..Default::default()
+        };
+        let need_delta = NeedDeltas {
+            belonging: 0.08 * severity,
+            expression: 0.05 * severity,
+            ..Default::default()
+        };
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            snapshot.emotion.apply_delta(&emotion_delta, sensitivity_mult);
+            snapshot.needs.apply_delta(&need_delta);
+            let _ = snapshot.emotion.apply_interactions();
+        }
+        let _ = self.persist();
+    }
+
+    /// 用户终于回应时的缓解：降低被冷落的负面情绪，恢复正常状态。
+    ///
+    /// 在用户真实交互且此前曾处于"被冷落"状态时调用，让桌宠语气回暖。
+    pub fn apply_user_answered_relief(&self) {
+        let sensitivity_mult = {
+            let state = self.state.read();
+            state.persona.traits.sensitivity_multiplier()
+        };
+        let emotion_delta = EmotionDeltas {
+            loneliness: -0.20,
+            sadness: -0.12,
+            anger: -0.05,
+            joy: 0.10,
+            closeness: 0.10,
+            curiosity: 0.05,
+            ..Default::default()
+        };
+        let need_delta = NeedDeltas {
+            belonging: -0.10,
+            expression: -0.05,
+            ..Default::default()
+        };
+        {
+            let mut state = self.state.write();
+            let snapshot: &mut PsychologySnapshot = &mut *state;
+            snapshot.emotion.apply_delta(&emotion_delta, sensitivity_mult);
+            snapshot.needs.apply_delta(&need_delta);
+            let _ = snapshot.emotion.apply_interactions();
+        }
+        let _ = self.persist();
+    }
+
+    /// 计算连续点击时的避让鼠标概率（基于当前心理状态）
+    ///
+    /// 返回 0.0-1.0 的概率值。公式设计见 apply_user_interaction 注释。
+    fn compute_avoid_probability(state: &PsychologySnapshot) -> f64 {
+        let e = &state.emotion;
+        let n = &state.needs;
+        let r = &state.relationship;
+        let t = &state.persona.traits;
+
+        // 基础回避驱动：愤怒 + 恐惧 + 自主需求未满足
+        let base = e.anger * 0.35 + e.fear * 0.25 + (n.autonomy - 0.5).max(0.0) * 0.15;
+
+        // 关系调节：亲密/信任/关系稳固 → 容忍度提高
+        let modulator = (1.0 - e.closeness * 0.3)
+            * (1.0 - r.trust * 0.2)
+            * (1.0 - r.intimacy * 0.2);
+
+        // 人设调节：敏感型更易触发，韧性高更稳
+        let sensitivity_factor = 0.7 + t.sensitivity * 0.6;
+        let resilience_factor = 1.0 - t.resilience * 0.4;
+
+        // 累积负面交互增益
+        let neg_boost = 1.0 + (r.consecutive_negative as f64 * 0.1).min(0.5);
+
+        let probability = base * modulator * sensitivity_factor * resilience_factor * neg_boost;
+        probability.clamp(0.0, 0.95)
+    }
+
+    /// 计算从睡眠中唤醒时生成问候语的概率（基于当前心理状态）
+    ///
+    /// 心理学公式：
+    ///   approach = joy * 0.20 + closeness * 0.15 + intimacy * 0.10
+    ///              + curiosity * 0.08 + loneliness * 0.15
+    ///   avoidance = anger * 0.25 + fear * 0.15
+    ///   fatigue_factor = 1.0 - (fatigue / 100) * 0.5      // 疲劳 0-100，最多 50% 抑制
+    ///   neg_factor = 1.0 - min(consecutive_negative * 0.1, 0.5)
+    ///   trust_factor = 0.75 + trust * 0.25                 // 信任调节 0.75-1.0
+    ///   base = 0.25                                        // 基础概率 25%
+    ///   probability = (base + approach * 0.7) * fatigue_factor * neg_factor * trust_factor - avoidance
+    ///
+    /// 含义：积极情绪 + 关系亲近 + 孤单感 → 想找用户说话；
+    ///       疲劳（刚醒还困）→ 抑制；连续负面交互 → 抑制；
+    ///       信任 → 提高表达意愿；愤怒/恐惧 → 直接抑制。
+    pub fn compute_wake_greeting_probability(&self) -> f64 {
+        let state = self.state.read();
+        let e = &state.emotion;
+        let r = &state.relationship;
+
+        // 从 Mood 推导疲劳度（0-100）
+        let mood = compute_mood(
+            &state.emotion,
+            &state.needs,
+            &state.relationship,
+            state.secs_since_last_interaction(),
+        );
+        let fatigue = mood.fatigue;
+
+        let approach = e.joy * 0.20
+            + e.closeness * 0.15
+            + r.intimacy * 0.10
+            + e.curiosity * 0.08
+            + e.loneliness * 0.15;
+        let avoidance = e.anger * 0.25 + e.fear * 0.15;
+        let fatigue_factor = 1.0 - (fatigue / 100.0).clamp(0.0, 1.0) * 0.5;
+        let neg_factor = 1.0 - (r.consecutive_negative as f64 * 0.1).min(0.5);
+        let trust_factor = 0.75 + r.trust * 0.25;
+
+        let base = 0.25;
+        let probability =
+            (base + approach * 0.7) * fatigue_factor * neg_factor * trust_factor - avoidance;
+        probability.clamp(0.0, 0.95)
+    }
+
+    /// 计算 Mood 快照（UI 与回复表达共用，不改变能力或事实判断）
+    pub fn compute_mood(&self) -> MoodSnapshot {
+        let state = self.state.read();
+        compute_mood(
+            &state.emotion,
+            &state.needs,
+            &state.relationship,
+            state.secs_since_last_interaction(),
+        )
+    }
+
+    /// 计算 PetState（仅 UI 展示，18 种衍生状态）
+    ///
+    /// PetState 不参与决策，由 EmotionState + Needs + Relationship 投影推导。
+    pub fn compute_pet_state(&self) -> super::pet_state::PetState {
+        let state = self.state.read();
+        super::pet_state::compute_pet_state(
+            &state.emotion,
+            &state.needs,
+            &state.relationship,
+            state.secs_since_last_interaction(),
+        )
+    }
+
+    /// 构建心理学 prompt 上下文（注入 LLM）
+    ///
+    /// 构造供模型内部使用的连续心理状态快照。
+    ///
+    /// 状态只轻微影响措辞和节奏，不要求模型解释或表演情绪；近期事件也只保留
+    /// 一个相关时可用的背景钩子，避免把普通聊天写成心理报告。
+    pub fn build_psychology_prompt(&self, recent_events_desc: &str, lang: &str) -> String {
+        let state = self.state.read();
+        let (dominant, intensity) = state.emotion.dominant();
+        let lang = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let header = crate::pipeline::prompt_modules::section_heading("emotion_state", lang);
+
+        let mut lines = vec![header.to_string()];
+        // 心境用自然语言描述，不再吐 valence/activation 浮点和英文枚举名——
+        // 那些是存储层量纲，写进来既诱导模型复述机器读数，又把上下文语域带成报告体。
+        let (label, degree) = match lang {
+            "zh" => (
+                dominant.display_zh(),
+                match intensity {
+                    x if x >= 0.66 => "，挺明显的",
+                    x if x >= 0.33 => "，有一点",
+                    _ => "，淡淡的",
+                },
+            ),
+            "ja" => (
+                dominant.display_ja(),
+                match intensity {
+                    x if x >= 0.66 => "、はっきりと",
+                    x if x >= 0.33 => "、少し",
+                    _ => "、ほんのりと",
+                },
+            ),
+            _ => (
+                dominant.display_en(),
+                match intensity {
+                    x if x >= 0.66 => ", noticeably",
+                    x if x >= 0.33 => ", a little",
+                    _ => ", faintly",
+                },
+            ),
+        };
+        lines.push(match lang {
+            "zh" => format!("[内部状态，不要复述] 这会儿心境偏向{label}{degree}。它只提供轻微的语气惯性，不是一段要演出来的剧情。"),
+            "ja" => format!("[内部状態・復唱禁止] 今の気分は{label}{degree}寄り。これはわずかな口調の慣性であり、演じる場面ではない。"),
+            _ => format!("[Internal state; never repeat] Right now the mood leans {label}{degree}. This is a faint delivery bias, not a scene to perform."),
+        });
+        lines.push(
+            match lang {
+                "zh" => "不要解释自己的情绪、心理需求或关系状态；不要为了体现状态而增加台词。当前用户意图始终优先。",
+                "ja" => "感情、心理的欲求、関係状態を説明しない。状態を見せるための台詞を足さず、現在のユーザー意図を常に優先する。",
+                _ => "Do not explain your emotion, psychological needs, or relationship state. Never add a line just to display mood; the user's current intent always comes first.",
+            }
+            .to_string(),
+        );
+
+        // 近期事件只保留一个背景钩子，防止模型把心理快照写成回顾报告。
+        if let Some(event) = recent_events_desc
+            .lines()
+            .map(|line| line.trim_start_matches("- ").trim())
+            .find(|line| !line.is_empty() && *line != "无")
+        {
+            let brief: String = event.chars().take(180).collect();
+            lines.push(match lang {
+                "zh" => format!("可选背景钩子（相关时才用，不主动复述）：{brief}"),
+                "ja" => format!("任意の背景フック（関連する時だけ使い、自分から復唱しない）：{brief}"),
+                _ => format!("Optional background hook (use only if relevant; never recap it): {brief}"),
+            });
+        }
+
+        lines.join("\n")
+    }
+
+    /// 获取只读快照（用于序列化或调试）。
+    ///
+    /// 返回 PsychologySnapshot 的深拷贝。调用方（emotion bridge、proactive、diary 等）
+    /// 需要独立副本来释放锁后继续访问字段（如 events 列表），因此 clone 是必要的。
+    /// 该方法不在每条消息的热路径上（多为命令或周期性任务调用），开销可接受。
+    /// 若未来出现高频热路径调用，可考虑新增按字段访问的方法（如 `events_snapshot()`）
+    /// 避免克隆整个快照。
+    pub fn snapshot(&self) -> PsychologySnapshot {
+        self.state.read().clone()
+    }
+
+    /// 等待在途写入后，同步提交当前状态；失败传播给备份调用方。
+    pub(crate) fn flush_for_backup(&self) -> Result<(), String> {
+        let _guard = self.persist_lock.lock();
+        let json = serde_json::to_string(&*self.state.read()).map_err(|e| e.to_string())?;
+        crate::utils::fs::write_atomic(&self.persistence_path, &json).map_err(|e| e.to_string())
+    }
+
+    /// 后台原子写入；同一管理器串行保存，失败记日志。
+    fn persist(&self) -> Result<(), String> {
+        let state = self.state.clone();
+        let path = self.persistence_path.clone();
+        let lock = self.persist_lock.clone();
+        // Serialize only after acquiring the I/O lock. A delayed worker must
+        // never overwrite a newer flush with an old pre-collected snapshot.
+        std::thread::Builder::new().name("psychology-persist".into()).spawn(move || {
+            let _guard = lock.lock();
+            let result = serde_json::to_string(&*state.read()).map_err(|e| e.to_string())
+                .and_then(|json| crate::utils::fs::write_atomic(&path, &json).map_err(|e| e.to_string()));
+            if let Err(error) = result {
+                tracing::warn!("psychology.json 写入失败: {error}");
+            }
+        }).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// 获取 Persona 引用（用于初始化或其他模块读取）
+    pub fn persona(&self) -> super::persona::PersonaProfile {
+        self.state.read().persona.clone()
+    }
+
+    /// 获取 Emotion 引用
+    pub fn emotion(&self) -> EmotionState {
+        self.state.read().emotion.clone()
+    }
+
+    /// 获取 Needs 引用
+    pub fn needs(&self) -> NeedsState {
+        self.state.read().needs.clone()
+    }
+
+    /// 获取 Relationship 引用
+    pub fn relationship(&self) -> RelationshipState {
+        self.state.read().relationship.clone()
+    }
+
+    // ====================================================================
+    // 关系系统方法（整合自原 RelationshipManager）
+    // ====================================================================
+
+    /// 记录一次用户交互，更新交互统计 + 阶段升级 + 临时态
+    ///
+    /// 注意：5 维关系数值（trust/intimacy/respect/dependency/familiarity）的更新
+    /// 由 `apply_relationship_update` 基于 Appraisal+Emotion 心理学驱动，本方法不更新 5 维。
+    /// 本方法只负责：交互计数、连续正/负向统计、阶段升级检查、临时态进入/退出。
+    pub fn record_interaction(&self, sentiment: &str, intensity: f64) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp() as f64;
+        {
+            let mut state = self.state.write();
+
+            // 交互统计
+            state.relationship.interaction_count += 1;
+            state.relationship.last_interaction_time = now;
+
+            // 连续正/负向统计
+            if sentiment == "happy" || sentiment == "positive" {
+                state.relationship.consecutive_positive += 1;
+                state.relationship.consecutive_negative = 0;
+            } else if sentiment == "sad" || sentiment == "anxious" || sentiment == "angry" {
+                state.relationship.consecutive_negative += 1;
+                state.relationship.consecutive_positive = 0;
+            } else {
+                state.relationship.consecutive_positive += 1;
+                state.relationship.consecutive_negative = 0;
+            }
+
+            // 检查阶段升级（基于 intimacy + interaction_count）
+            state.relationship.check_stage_upgrade();
+
+            // 检查临时态
+            let event = RelationshipEvent::new(EVENT_INTERACTION)
+                .with_intensity(intensity)
+                .with_sentiment(sentiment);
+            state.relationship.check_temporary_stage(&event);
+
+            // 同步快照的 last_interaction_time
+            state.last_interaction_time = now;
+        }
+        self.persist()
+    }
+
+    /// 记录用户负面反馈
+    pub fn record_negative_feedback(&self, intensity: f64) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp() as f64;
+        {
+            let mut state = self.state.write();
+            state.relationship.interaction_count += 1;
+            state.relationship.last_interaction_time = now;
+            state.relationship.consecutive_negative += 1;
+            state.relationship.consecutive_positive = 0;
+            let delta = (3.0 * intensity).floor() / 100.0;
+            state.relationship.intimacy = (state.relationship.intimacy - delta).max(0.0);
+
+            // 负面交互不直接触发临时态（避免与 Soothing 冲突）
+            state.last_interaction_time = now;
+        }
+        self.persist()
+    }
+
+    /// 主动发话反馈闭环：用户回应 → intimacy 微升；冷落 → intimacy 微降
+    ///
+    /// 幅度刻意比 record_negative_feedback 小一个量级——
+    /// 这不是"负面事件"，只是"她主动搭话被忽略/被回应"的日常微调，
+    /// 让她真的会"记住你对她怎么样"。
+    pub fn apply_proactive_feedback(&self, positive: bool, char_id: &str) -> Result<(), String> {
+        let behavior = crate::character_behavior::get_behavior(char_id);
+        {
+            let mut state = self.state.write();
+            let now = chrono::Utc::now().timestamp() as f64;
+            state.relationship.last_interaction_time = now;
+            // 情绪敏感度（与 apply_user_interaction / apply_llm_output 一致）
+            let sensitivity_mult = state.persona.traits.sensitivity_multiplier();
+            if positive {
+                state.relationship.intimacy =
+                    (state.relationship.intimacy + behavior.proactive_feedback_positive).min(1.0);
+                state.relationship.consecutive_positive += 1;
+                state.relationship.consecutive_negative = 0;
+                // 被回应 → 孤独感下降、亲近感上升
+                let delta = super::emotion::EmotionDeltas {
+                    loneliness: -0.04,
+                    closeness: 0.03,
+                    joy: 0.02,
+                    ..Default::default()
+                };
+                state.emotion.apply_delta(&delta, sensitivity_mult);
+            } else {
+                state.relationship.intimacy =
+                    (state.relationship.intimacy - behavior.proactive_feedback_negative).max(0.0);
+                state.relationship.consecutive_negative += 1;
+                state.relationship.consecutive_positive = 0;
+                // 被冷落 → 孤独感上升、小幅度悲伤
+                // 幅度刻意较小（单次冷落不会剧变），但累积多次会让 loneliness 真正上升，
+                // 从而触发 MoodDriven 主动发话和 behavior_drive 的 approach 行为。
+                let delta = super::emotion::EmotionDeltas {
+                    loneliness: 0.05,
+                    sadness: 0.015,
+                    closeness: -0.02,
+                    ..Default::default()
+                };
+                state.emotion.apply_delta(&delta, sensitivity_mult);
+            }
+            state.last_interaction_time = now;
+        }
+        self.persist()
+    }
+
+    /// 记录用户情绪低落（触发 Soothing 临时态）
+    pub fn record_user_sad(&self, intensity: f64) -> Result<(), String> {
+        {
+            let mut state = self.state.write();
+            let event = RelationshipEvent::new(EVENT_USER_SAD).with_intensity(intensity);
+            state.relationship.check_temporary_stage(&event);
+        }
+        self.persist()
+    }
+
+    /// 记录长时间未交互（触发 LowActivity 临时态 + 亲密度衰减）
+    ///
+    /// 缺席 <4h 不处理；衰减 = min(int(hours/24)*2, 15)（×100 后）
+    pub fn record_long_absence(&self) -> Result<(), String> {
+        let hours = {
+            let state = self.state.read();
+            let h = state.relationship.absent_hours();
+            if h < 4.0 { return Ok(()); } else { h }
+        };
+
+        {
+            let mut state = self.state.write();
+            let decay = ((hours / 24.0).floor() * 2.0).min(15.0) / 100.0;
+            state.relationship.intimacy = (state.relationship.intimacy - decay).max(0.0);
+
+            let event = RelationshipEvent::new(EVENT_LONG_ABSENCE).with_duration(hours);
+            state.relationship.check_temporary_stage(&event);
+        }
+        self.persist()
+    }
+
+    /// 记录用户归来（触发 Reconnecting 临时态）
+    ///
+    /// 缺席 <4h 不处理。
+    pub fn record_user_returned(&self) -> Result<(), String> {
+        let hours = {
+            let state = self.state.read();
+            let h = state.relationship.absent_hours();
+            if h < 4.0 { return Ok(()); } else { h }
+        };
+
+        {
+            let mut state = self.state.write();
+            let event = RelationshipEvent::new(EVENT_USER_RETURNED).with_duration(hours);
+            state.relationship.check_temporary_stage(&event);
+        }
+        self.persist()
+    }
+
+    /// 周期性衰减检查（发送 0.5h 时间流逝事件，触发 Soothing 等退出）
+    pub fn tick_decay(&self) -> Result<(), String> {
+        {
+            let mut state = self.state.write();
+            let event = RelationshipEvent::new(EVENT_TIME_PASSAGE).with_duration(0.5);
+            state.relationship.check_temporary_stage(&event);
+        }
+        self.persist()
+    }
+
+    /// 获取里程碑列表
+    pub fn get_milestones(&self) -> Vec<MilestoneEntry> {
+        self.state.read().relationship.milestones.clone()
+    }
+
+    /// 记录自定义里程碑
+    pub fn record_milestone(&self, description: &str) -> Result<(), String> {
+        {
+            let mut state = self.state.write();
+            state.relationship.record_custom_milestone(description);
+        }
+        self.persist()
+    }
+
+    /// 重置关系（回到陌生人）
+    pub fn reset_relationship(&self) -> Result<(), String> {
+        {
+            let mut state = self.state.write();
+            state.relationship.reset();
+        }
+        self.persist()
+    }
+
+    /// 恢复出厂设置：将整个心理快照重置为初始默认值
+    ///
+    /// 与 `reset_relationship` 仅重置关系字段不同，此方法会清空：
+    /// - emotion（情绪状态）
+    /// - needs（心理需求）
+    /// - relationship（关系数值与交互统计）
+    /// - last_appraisal / last_drive（上次交互缓存）
+    /// - last_interaction_time / last_tick_time（重置为当前时间，避免衰减计算异常）
+    /// - events（情绪采样历史）
+    ///
+    /// 注意：persona 会被重置为 default，但下次启动时 `with_persona` 会从
+    /// PersonaEngine 重新推导角色特定的 persona，所以安全。
+    /// 运行时的 manifest（表情映射）不持久化，保留不影响。
+    pub fn reset_to_initial(&self) -> Result<(), String> {
+        *self.pet_interactions.lock() = Default::default();
+        {
+            let mut state = self.state.write();
+            *state = PsychologySnapshot::default();
+        }
+        self.persist()
+    }
+
+    /// 永久阶段
+    pub fn get_stage(&self) -> RelationshipStage {
+        self.state.read().relationship.permanent_stage
+    }
+
+    /// 生效阶段标签（临时态覆盖永久态的中文标签）
+    pub fn get_effective_stage_label(&self) -> String {
+        self.state.read().relationship.get_effective_stage_label()
+    }
+
+    /// 当前生效的策略
+    pub fn get_strategy(&self) -> StageStrategy {
+        self.state.read().relationship.get_strategy()
+    }
+
+    /// 主动级别（0-4）
+    pub fn get_proactivity_level(&self) -> u32 {
+        self.get_strategy().proactivity_level
+    }
+
+    /// 每日最大主动次数
+    pub fn get_max_daily_proactive(&self) -> u32 {
+        self.get_strategy().max_daily_proactive
+    }
+
+    /// 语气风格
+    pub fn get_tone(&self) -> String {
+        self.get_strategy().tone
+    }
+
+    /// 生成关系上下文 prompt 段（注入 system prompt）
+    pub fn relationship_section(&self, lang: &str) -> String {
+        self.state.read().relationship.to_prompt_section(lang)
+    }
+}
+
+// parking_lot::RwLock 的 read()/write() 返回的 guard 自动释放，无需额外处理。
+
+/// 持久化到文件的路径辅助
+pub fn default_psychology_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("companion-v2").join("psychology.json")
+}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+
+    #[test]
+    fn interaction_changes_only_bounded_short_term_emotion_and_reset_clears_evidence() {
+        use super::super::interaction::PetInteractionMetrics;
+        let path = std::env::temp_dir().join(format!("pet-interaction-{}.json", uuid::Uuid::new_v4()));
+        let manager = PsychologyManager::load_or_init(path.clone());
+        let before = manager.snapshot();
+        for index in 0..500 {
+            manager.observe_pet_interaction("drag", Some(&PetInteractionMetrics {
+                drag_session_id: Some(index.to_string()), drag_speed_px_per_ms: Some(3.0),
+                drag_distance_px: Some(600.0), press_duration_ms: Some(500.0), ..Default::default()
+            }), None, 100.0 + index as f64 / 10.0);
+        }
+        let after = manager.snapshot();
+        assert!(after.emotion.curiosity > before.emotion.curiosity);
+        let net: f64 = serde_json::to_value(&after.emotion).unwrap().as_object().unwrap().iter()
+            .map(|(key, value)| (value.as_f64().unwrap() - serde_json::to_value(&before.emotion).unwrap()[key].as_f64().unwrap()).abs()).sum();
+        assert!(net <= 0.06 + 1e-9);
+        assert_eq!(serde_json::to_value(after.relationship).unwrap(), serde_json::to_value(before.relationship).unwrap());
+        assert_eq!(serde_json::to_value(after.needs).unwrap(), serde_json::to_value(before.needs).unwrap());
+        manager.reset_to_initial().unwrap();
+        assert!(manager.take_pet_interaction_episodes(500.0).is_empty());
+        assert!(manager.pet_action_capsule(151.0).is_none());
+        assert!(manager.query_pet_interactions(151.0, 120, 3)["episodes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn direct_feedback_replaces_appraisal_emotion_mapping_even_when_zero() {
+        let output = PsychologyOutput {
+            appraisal: Some(Appraisal { threat: 1.0, rejection: 1.0, ..Default::default() }),
+            emotion_update: Some(EmotionDeltas::default()), ..Default::default()
+        };
+        assert_eq!(output.resolved_emotion_delta(2.0, 0.2).unwrap().magnitude(), 0.0);
+        let fallback = PsychologyOutput { emotion_update: None, ..output };
+        assert!(fallback.resolved_emotion_delta(2.0, 0.2).unwrap().fear > 0.0);
+    }
+
+    #[test]
+    fn peer_tone_changes_only_the_listeners_emotion() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = PsychologyManager::load_or_init(dir.path().join("host.json"));
+        let guest = PsychologyManager::load_or_init(dir.path().join("guest.json"));
+        let before = guest.snapshot();
+
+        guest.observe_peer_message("谢谢你，我很开心。");
+        let grateful = guest.snapshot();
+        assert!(grateful.emotion.joy > before.emotion.joy);
+        assert!(grateful.emotion.closeness > before.emotion.closeness);
+        assert_eq!(host.emotion().joy, before.emotion.joy);
+        assert_eq!(serde_json::to_value(grateful.relationship).unwrap(), serde_json::to_value(before.relationship).unwrap());
+        assert_eq!(grateful.last_interaction_time, before.last_interaction_time);
+
+        host.observe_peer_message("Shut up.");
+        assert!(host.emotion().anger > before.emotion.anger);
+        assert_eq!(guest.emotion().anger, grateful.emotion.anger);
+        guest.observe_peer_message("桌上有两本书。");
+        assert_eq!(guest.emotion().joy, grateful.emotion.joy);
+    }
+
+    #[test]
+    fn reply_feedback_updates_persisted_state_and_derived_mood() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("psychology.json");
+        let manager = PsychologyManager::load_or_init(path.clone());
+        {
+            let mut state = manager.state.write();
+            state.emotion.anger = 0.6;
+            state.emotion.fear = 0.5;
+            state.emotion.curiosity = 0.3;
+        }
+        let before = manager.compute_mood();
+        manager.apply_llm_output(&PsychologyOutput {
+            emotion_update: Some(EmotionDeltas { anger: -0.08, fear: -0.08, curiosity: 0.08, ..Default::default() }),
+            ..Default::default()
+        });
+        let after = manager.compute_mood();
+        assert!(after.stress < before.stress);
+        assert!(after.focus > before.focus);
+        // Existing persistence runs on a background thread. Wait for the actual
+        // snapshot, rather than treating scheduling the write as completing it.
+        let expected = serde_json::to_value(manager.emotion()).unwrap();
+        let matches_saved = |emotion: EmotionState| {
+            let actual = serde_json::to_value(emotion).unwrap();
+            expected.as_object().unwrap().iter().all(|(key, value)| {
+                (value.as_f64().unwrap() - actual[key].as_f64().unwrap()).abs() < 1e-9
+            })
+        };
+        let mut saved = false;
+        for _ in 0..200 {
+            let snapshot = std::fs::read_to_string(&path).ok()
+                .and_then(|text| serde_json::from_str::<PsychologySnapshot>(&text).ok());
+            if snapshot.map(|s| matches_saved(s.emotion)).unwrap_or(false) {
+                saved = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(saved, "feedback snapshot was not persisted: {:?}", std::fs::read_to_string(&path));
+        let reloaded = PsychologyManager::load_or_init(path);
+        assert!(matches_saved(reloaded.emotion()));
+    }
+}
+
+#[cfg(test)]
+mod cold_shoulder_tests {
+    use super::*;
+
+    fn manager(name: &str) -> PsychologyManager {
+        let path = std::env::temp_dir().join(format!("psych_cold_shoulder_{}_{}.json", name, uuid::Uuid::new_v4()));
+        PsychologyManager::load_or_init(path)
+    }
+
+    #[test]
+    fn test_cold_shoulder_raises_loneliness() {
+        let m = manager("lonely");
+        let before = m.emotion().loneliness;
+        m.apply_cold_shoulder(1.0);
+        assert!(m.emotion().loneliness > before);
+    }
+
+    #[test]
+    fn test_cold_shoulder_lowers_joy_closeness() {
+        let m = manager("down");
+        let before = m.emotion();
+        m.apply_cold_shoulder(1.0);
+        let after = m.emotion();
+        assert!(after.joy < before.joy);
+        assert!(after.closeness < before.closeness);
+    }
+
+    #[test]
+    fn test_cold_shoulder_zero_noop() {
+        let m = manager("noop");
+        let before = m.emotion().loneliness;
+        m.apply_cold_shoulder(0.0);
+        assert!((m.emotion().loneliness - before).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_user_answered_relief_cures_cold_shoulder() {
+        let m = manager("relief");
+        m.apply_cold_shoulder(1.0);
+        let cold = m.emotion();
+        assert!(cold.loneliness > cold.closeness);
+        m.apply_user_answered_relief();
+        let relieved = m.emotion();
+        assert!(relieved.loneliness < cold.loneliness);
+        assert!(relieved.closeness > cold.closeness);
+    }
+}

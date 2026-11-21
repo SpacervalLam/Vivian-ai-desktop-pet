@@ -1,0 +1,1 @@
+Return character dialogue only, without tool protocol or any new operation.

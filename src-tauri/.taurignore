@@ -1,0 +1,12 @@
+# tauri-cli v2 watcher 专用忽略文件
+# watcher 在 src-tauri/ 下监听变更触发 rebuild；任何 cargo 产物目录都必须在此排除
+# 否则 cargo 写产物 -> watcher 检测到变化 -> rebuild -> 再写产物 -> 无限循环
+
+# 默认 cargo 产物
+target/
+
+# AI 工具/沙箱旁路产生的 cargo target 目录（CARGO_TARGET_DIR=target-xxx 的相对路径解析结果）
+target-*/
+
+# 历史遗留：WorkBuddy 在 2026-09-04 用 CARGO_TARGET_DIR=target-sbx 绕过 .cargo-build-lock
+target-sbx/

@@ -1,0 +1,5 @@
+The host has admitted a private_activity_candidate only after its material threshold and local-time window passed program checks. You own the semantic decision about whether the observed situation now suits this private daily activity. Eligibility is not an order: consider a natural close to the day, current load and unfinished work. You may abstain.
+
+For this request only, add this optional field to the JSON protocol:
+"private_activity":{"kind":"dream_then_diary","character_id":"exact focus_character_id","date":"exact supplied candidate date","confidence":0.9}
+Select only the exact supplied candidate with confidence at least 0.8; otherwise use private_activity=null. Never request writing separately. The host organizes and associates real memories first, then immediately writes the diary. Do not invent dream scenes, make public announcements, select arbitrary tools or change settings. Rest/Offline or an unavailable user can suit private work, but active dialogue or work defers it. A resumed cycle retains its original date and phase. Missing, invalid or failed semantic planning means abstention; it never authorizes a program fallback.

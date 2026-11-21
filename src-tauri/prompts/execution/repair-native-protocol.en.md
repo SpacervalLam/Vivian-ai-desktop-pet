@@ -1,0 +1,1 @@
+Your last response contained raw DSML tool protocol. Use native tool_calls for an operation or plain natural language for a reply. Do not output DSML tags. Do not repeat any action already completed in the verified receipts.

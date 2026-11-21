@@ -1,0 +1,1 @@
+No further calls is not task completion. If the full request is satisfied, call finish_companion_task alone with evidence IDs. Otherwise continue within the remaining budget, or return partial/blocked with remaining_work. Do not repeat successful operations.

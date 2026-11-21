@@ -1,0 +1,1 @@
+import fs from 'node:fs';const p='plugins/3d-apartment/src/anime/exterior.ts';let s=fs.readFileSync(p,'utf8');s=s.replace('便利店湿地反射使用独立低分辨率限频通道','便利店湿地反射使用独立低分辨率逐帧通道');s=s.replace('// x∈[-1.0, 1.0]（门扇 1.8m 宽、门框立柱在 ±0.95）处留洞，否则进不了楼。','// 新首层中央 x∈[-1.2, 1.2] 留出 2.4m 入口，门扇停放在两侧。');fs.writeFileSync(p,s);

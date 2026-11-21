@@ -1,0 +1,2473 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{VivianError, VivianResult};
+use crate::providers::reasoning::ReasoningPreference;
+use crate::utils::path;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub companion: crate::companion_policy::CompanionConfig,
+    pub base: BaseConfig,
+    pub window: WindowConfig,
+    /// 桌宠渲染表现配置。
+    pub pet_render: PetRenderConfig,
+    pub ai: AiConfig,
+    pub network: NetworkConfig,
+    pub routing_matrix: HashMap<String, TaskRouteConfig>,
+    /// 模型档位配置：用户实际选择的粒度（对话 / 视觉 / 执行 / 工作 / 记忆 / 认知 / 判断 / 文本）。
+    ///
+    /// 解析顺序为「任务自己的 `routing_matrix` 条目 → 同档更通用的任务（`fallback` 链）
+    /// → 该任务所属档位 → 主 LLM API」。`routing_matrix` 因此退化为按任务覆盖，
+    /// 只有用户显式配了模型才会命中。
+    #[serde(default)]
+    pub routing_tiers: HashMap<String, TaskRouteConfig>,
+    pub memory: MemoryConfig,
+    pub speech_recognition: SpeechRecognitionConfig,
+    #[serde(default)]
+    pub proactive: ProactiveConfig,
+    #[serde(default)]
+    pub enable_routing_matrix: bool,
+    /// 工具系统配置（工具页签）
+    #[serde(default)]
+    pub tools: ToolConfig,
+    /// 真实世界感知配置（让 Vivian 在真实世界中"活着"）
+    #[serde(default)]
+    pub world: WorldConfig,
+    /// 服务商切换缓存：按 preset id 索引各家配置快照，切换预设时自动恢复
+    #[serde(default)]
+    pub provider_cache: HashMap<String, CachedProviderProfile>,
+    /// 豆包端到端实时语音通话配置（SC2.0）
+    #[serde(default)]
+    pub realtime_voice: RealtimeVoiceConfig,
+    /// 多角色配置
+    #[serde(default)]
+    pub characters: CharactersConfig,
+    /// 网络搜索后端配置（provider 切换 + 各家 API Key）
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+    /// 内联表情/动作标签配置
+    #[serde(default)]
+    pub inline_expression: InlineExpressionConfig,
+    /// 音乐驱动动画配置（WASAPI 系统音频回环）
+    #[serde(default)]
+    pub music_reactive: MusicReactiveConfig,
+    /// 视频动画演出层配置
+    #[serde(default)]
+    pub video_animations: VideoAnimationsConfig,
+    /// 工作智能体模型预置列表（设置窗口 LLM 页签维护，编程页列表切换）
+    #[serde(default)]
+    pub work_models: Vec<WorkModelProfile>,
+    /// 当前选中的工作智能体模型 id（None 表示未切换，走默认路由）
+    #[serde(default)]
+    pub active_work_model: Option<String>,
+    /// 工作页「新建任务」的默认工作区目录（None/空串使用系统文档目录下的 Vivian 文件夹）。
+    #[serde(default)]
+    pub default_workspace: Option<String>,
+    /// 工具沙箱配置（命令执行隔离层：受限令牌作用域、网络出口、工作区写授权）
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+/// 音乐驱动动画配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MusicReactiveConfig {
+    /// 是否启用系统音频回环驱动 桌宠 随音乐律动
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+}
+
+impl Default for MusicReactiveConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+/// 视频动画演出层配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoAnimationsConfig {
+    /// 是否启用行为自动触发视频动画
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// 两次自动触发的最小间隔（秒）
+    #[serde(default = "default_video_animations_cooldown")]
+    pub cooldown_secs: u64,
+}
+
+impl Default for VideoAnimationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cooldown_secs: 300,
+        }
+    }
+}
+
+fn default_false() -> bool {
+    false
+}
+
+fn default_video_animations_cooldown() -> u64 {
+    300
+}
+
+/// 多角色配置
+///
+/// 定义应用支持的所有桌面宠物角色。每个角色有独立的人格、记忆、心理状态、对话历史和用户事实画像，
+/// 共享 LLM 配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharactersConfig {
+    #[serde(default)]
+    pub legacy_models_migrated: bool,
+    /// 所有角色列表
+    #[serde(default = "default_characters")]
+    pub list: Vec<CharacterEntry>,
+    /// 当前活跃角色 ID（点击选中的对话目标）
+    #[serde(default = "default_active_character")]
+    pub active_id: String,
+}
+
+impl Default for CharactersConfig {
+    fn default() -> Self {
+        default_characters_config()
+    }
+}
+
+/// 单个角色配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CharacterEntry {
+    pub id: String,
+    pub name: String,
+    /// 角色美术资源目录名（如 "Nana" / "Vivian"）。
+    #[serde(default = "default_character_model_dir")]
+    pub model_dir: String,
+    #[serde(default = "default_model_kind")]
+    pub model_kind: String,
+    #[serde(default = "default_true")]
+    pub default_online: bool,
+}
+
+fn default_model_kind() -> String {
+    "sprite".to_string()
+}
+
+fn default_characters_config() -> CharactersConfig {
+    CharactersConfig {
+        list: default_characters(),
+        active_id: default_active_character(),
+        legacy_models_migrated: false,
+    }
+}
+
+fn default_characters() -> Vec<CharacterEntry> {
+    vec![
+        CharacterEntry {
+            id: "nana".to_string(),
+            name: "Nana".to_string(),
+            model_dir: "Nana".to_string(),
+            model_kind: "sprite".to_string(),
+            default_online: true,
+        },
+        CharacterEntry {
+            id: "vivian".to_string(),
+            name: "Vivian".to_string(),
+            model_dir: "Vivian".to_string(),
+            model_kind: "sprite".to_string(),
+            default_online: true,
+        },
+    ]
+}
+
+fn default_active_character() -> String {
+    "nana".to_string()
+}
+
+// ============================================================================
+// WebSearchConfig — 网络搜索后端配置
+// ============================================================================
+
+/// 网络搜索后端配置
+///
+/// 支持多引擎**混用**：用户可同时启用 duckduckgo / searxng / tavily，
+/// 搜索工具会并发调用所有已配置的引擎，合并去重后返回。
+///
+/// - `providers`：启用的引擎列表（至少包含一个；DuckDuckGo 零配置始终可用）
+/// - 未配置必要参数的引擎（如 SearXNG 未填 base_url）会被跳过并记录日志
+/// - 若所有引擎都不可用，最终回退到 DuckDuckGo 兜底
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchConfig {
+    /// 已弃用：旧版单一引擎选择。加载时由 `migrate_web_search_providers` 迁进
+    /// `providers` 并清空；新代码不应读取本字段。
+    #[serde(default)]
+    pub provider: String,
+    /// 启用的搜索引擎列表（混用模式）
+    /// 候选值：duckduckgo / searxng / tavily / deepseek
+    /// research 模式下并发调用并合并去重结果；单引擎失败时按本列表顺序降级
+    #[serde(default = "default_web_search_providers")]
+    pub providers: Vec<String>,
+    /// 每次搜索返回结果数：0 = 自动（按调用方智能体取差异化默认：陪伴 5 / 工作 10），
+    /// 1-20 = 固定覆盖（仅当模型未显式传参时生效）
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: u32,
+    /// 一次性迁移标记：旧默认值 5 → 0（自动）的迁移是否已执行。
+    /// 旧版默认 5 且配置全量落盘，老配置文件普遍持久化了 5；加载时将其归零走
+    /// 差异化默认。标记随配置持久化，避免把用户后来显式设置的 5 再抹掉。
+    #[serde(default)]
+    pub max_results_default_migrated: bool,
+    /// 搜索请求超时（秒）
+    #[serde(default = "default_web_search_timeout_secs")]
+    pub timeout_secs: u64,
+    /// 是否在 Busy 状态下主动检索知识
+    #[serde(default = "default_true")]
+    pub enable_background_knowledge_fetch: bool,
+    /// 语言偏好（如 "zh-CN" / "en" / "ja"），空表示不限定
+    #[serde(default)]
+    pub language: Option<String>,
+
+    /// SearXNG 配置（自部署元搜索引擎，聚合多源结果）
+    #[serde(default)]
+    pub searxng: SearXngConfig,
+    /// Tavily 配置（专为 LLM Agent 设计的搜索 API）
+    #[serde(default)]
+    pub tavily: TavilyConfig,
+    /// DeepSeek 官方原生搜索配置（Anthropic 兼容 Messages API + web_search server tool）
+    ///
+    /// 一次搜索 = 一次 DeepSeek 模型调用（返回结构化 web_search_tool_result 块），
+    /// 返回引用摘录。api_key 为空时自动复用主对话 ai 配置的 DeepSeek key。
+    #[serde(default)]
+    pub deepseek: WebSearchDeepSeekConfig,
+    /// Optional external search backends. Empty keys/models never trigger paid calls.
+    #[serde(default)]
+    pub exa: SearchApiConfig,
+    #[serde(default)]
+    pub perplexity: SearchApiConfig,
+    #[serde(default)]
+    pub openai: SearchApiConfig,
+    #[serde(default)]
+    pub xai: SearchApiConfig,
+    #[serde(default)]
+    pub anthropic: SearchApiConfig,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            providers: default_web_search_providers(),
+            max_results: default_web_search_max_results(),
+            max_results_default_migrated: false,
+            timeout_secs: default_web_search_timeout_secs(),
+            enable_background_knowledge_fetch: true,
+            language: None,
+            searxng: SearXngConfig::default(),
+            tavily: TavilyConfig::default(),
+            deepseek: WebSearchDeepSeekConfig::default(),
+            exa: SearchApiConfig::default(),
+            perplexity: SearchApiConfig::default(),
+            openai: SearchApiConfig::default(),
+            xai: SearchApiConfig::default(),
+            anthropic: SearchApiConfig::default(),
+        }
+    }
+}
+
+/// Provider-owned endpoints; models are explicit for model-backed search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SearchApiConfig {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+fn default_web_search_providers() -> Vec<String> {
+    vec!["duckduckgo".to_string()]
+}
+
+/// 0 = 自动：按调用方智能体取差异化默认（陪伴 5 / 工作 10）
+fn default_web_search_max_results() -> u32 {
+    0
+}
+
+fn default_web_search_timeout_secs() -> u64 {
+    15
+}
+
+/// SearXNG 配置（自部署元搜索引擎）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearXngConfig {
+    /// SearXNG 实例 base URL（如 `http://localhost:8080` 或公共实例 `https://searx.example.com`）
+    /// 末尾不要带 `/`。本地 Docker 部署默认端口 8080。
+    #[serde(default)]
+    pub base_url: String,
+    /// 用于访问受保护实例的 token（若实例配置了 `search.formats` 限制）
+    #[serde(default)]
+    pub auth_token: String,
+}
+
+impl Default for SearXngConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            auth_token: String::new(),
+        }
+    }
+}
+
+/// Tavily API 配置（专为 LLM Agent 设计）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TavilyConfig {
+    /// Tavily API Key（https://tavily.com 注册获取，免费 1000 次/月）
+    #[serde(default)]
+    pub api_key: String,
+    /// 是否返回原文摘录（true）还是仅摘要（false）
+    #[serde(default = "default_true")]
+    pub include_raw_content: bool,
+    /// 搜索深度：basic（默认）/ advanced（更全面但更慢，多消耗 1 credit）
+    #[serde(default = "default_tavily_search_depth")]
+    pub search_depth: String,
+}
+
+impl Default for TavilyConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            include_raw_content: true,
+            search_depth: default_tavily_search_depth(),
+        }
+    }
+}
+
+fn default_tavily_search_depth() -> String {
+    "basic".to_string()
+}
+
+/// DeepSeek 官方原生搜索配置（Anthropic 兼容 Messages API + `web_search_20250305` server tool）
+///
+/// 设计要点：
+/// - 一次搜索 = 一次 DeepSeek 模型调用：向 Anthropic 兼容 Messages API 发送
+///   带原生 web_search server tool 的请求，返回结构化 `web_search_tool_result` 块
+/// - 复用主对话 DeepSeek key，但**不复用**其 base_url（搜索走 Anthropic 兼容
+///   端点，主对话走 chat-completions 端点，两者协议不同）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchDeepSeekConfig {
+    /// DeepSeek API Key；为空时自动复用主对话 `ai` 配置的 key（provider 为 deepseek 时）
+    #[serde(default)]
+    pub api_key: String,
+    /// Anthropic 兼容端点 base（`/messages` 会自动拼接）
+    ///
+    /// 默认 `https://api.deepseek.com/anthropic/v1`。注意这与主对话的
+    /// chat-completions 端点（`https://api.deepseek.com`）不同。
+    #[serde(default = "default_deepseek_search_base_url")]
+    pub base_url: String,
+    /// Anthropic 格式的模型名；为空时复用主对话模型，仍为空则默认 `deepseek-chat`
+    #[serde(default)]
+    pub model: String,
+    /// 每次请求 web_search server tool 的最大使用次数（默认 5）
+    #[serde(default = "default_deepseek_max_uses")]
+    pub max_uses: u32,
+    /// Messages 请求的生成 token 上限（默认 4096）
+    #[serde(default = "default_deepseek_max_tokens")]
+    pub max_tokens: u32,
+    /// 搜索请求超时（秒，默认 60 —— 一次模型调用 + 服务端搜索比普通引擎慢）
+    #[serde(default = "default_deepseek_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+impl Default for WebSearchDeepSeekConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            base_url: default_deepseek_search_base_url(),
+            model: String::new(),
+            max_uses: default_deepseek_max_uses(),
+            max_tokens: default_deepseek_max_tokens(),
+            timeout_secs: default_deepseek_timeout_secs(),
+        }
+    }
+}
+
+fn default_deepseek_search_base_url() -> String {
+    "https://api.deepseek.com/anthropic/v1".to_string()
+}
+
+fn default_deepseek_max_uses() -> u32 {
+    5
+}
+
+fn default_deepseek_max_tokens() -> u32 {
+    4096
+}
+
+fn default_deepseek_timeout_secs() -> u64 {
+    60
+}
+
+/// 真实世界感知配置
+///
+/// 控制让 Vivian 感知真实世界（时间/节气/节日/日出日落/天气），
+/// 以及离线时的内心活动（内心独白、作息、记忆巩固）。
+/// 这些功能会加大 token 消耗，可由 `enable` 总开关统一关闭。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldConfig {
+    #[serde(default)]
+    pub perception: crate::world::perception::PerceptionConfig,
+    /// 总开关：关闭后所有"活着"功能停止（不感知世界、不内心独白、不记忆巩固）
+    #[serde(default = "default_true")]
+    pub enable: bool,
+    /// 是否注入世界快照到 prompt（让 Vivian 知道外面在下雨/今天是中秋）
+    #[serde(default = "default_true")]
+    pub inject_into_prompt: bool,
+    // ── 天气 ──
+    /// 是否启用天气感知
+    #[serde(default = "default_true")]
+    pub enable_weather: bool,
+    /// 天气缓存 TTL（秒），默认 3600（1 小时）
+    #[serde(default = "default_weather_cache_ttl")]
+    pub weather_cache_ttl_secs: u64,
+    #[serde(default)]
+    pub apple_weather: AppleWeatherConfig,
+    /// 纬度（度，北正南负）—— 用于天气获取与日出日落计算
+    #[serde(default)]
+    pub latitude: Option<f64>,
+    /// 经度（度，东正西负）
+    #[serde(default)]
+    pub longitude: Option<f64>,
+    /// 城市名称
+    #[serde(default)]
+    pub city: Option<String>,
+    /// 地区/省份名称
+    #[serde(default)]
+    pub region: Option<String>,
+    /// 国家名称
+    #[serde(default)]
+    pub country: Option<String>,
+    // ── 内心独白 ──
+    /// 是否启用内心独白（离线时 LLM 自主思考，写入记忆，不打扰用户）
+    #[serde(default = "default_true")]
+    pub enable_inner_monologue: bool,
+    // ── 记忆巩固 ──
+    /// 是否启用夜间记忆巩固（睡眠时整理记忆）
+    #[serde(default = "default_true")]
+    pub enable_memory_consolidation: bool,
+    // ── 作息（让桌宠的睡眠时间可配置，而非写死） ──
+    /// 入睡小时（0-23），默认 1（凌晨 1 点开始真正入睡）
+    #[serde(default = "default_sleep_start_hour")]
+    pub sleep_start_hour: u32,
+    /// 醒来小时（0-23），默认 6（凌晨 6 点醒来）
+    #[serde(default = "default_sleep_end_hour")]
+    pub sleep_end_hour: u32,
+}
+
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self {
+            perception: crate::world::perception::PerceptionConfig::default(),
+            enable: true,
+            inject_into_prompt: true,
+            enable_weather: true,
+            weather_cache_ttl_secs: default_weather_cache_ttl(),
+            apple_weather: AppleWeatherConfig::default(),
+            latitude: None,
+            longitude: None,
+            city: None,
+            region: None,
+            country: None,
+            enable_inner_monologue: true,
+            enable_memory_consolidation: true,
+            sleep_start_hour: default_sleep_start_hour(),
+            sleep_end_hour: default_sleep_end_hour(),
+        }
+    }
+}
+
+/// User-owned WeatherKit credentials; never include the private key in diagnostics.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppleWeatherConfig {
+    pub enabled: bool,
+    pub team_id: String,
+    pub service_id: String,
+    pub key_id: String,
+    /// Optional IANA timezone override; otherwise use Open-Meteo's coordinate timezone.
+    pub timezone: String,
+    /// PKCS#8 PEM (.p8), protected by the configuration secret store.
+    pub api_secret: String,
+}
+
+impl std::fmt::Debug for AppleWeatherConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleWeatherConfig")
+            .field("enabled", &self.enabled)
+            .field("team_id", &self.team_id)
+            .field("service_id", &self.service_id)
+            .field("key_id", &self.key_id)
+            .field("api_secret", &"[redacted]")
+            .finish()
+    }
+}
+
+fn default_weather_cache_ttl() -> u64 {
+    3600
+}
+
+fn default_sleep_start_hour() -> u32 {
+    1
+}
+
+fn default_sleep_end_hour() -> u32 {
+    6
+}
+
+/// 检测系统语言并映射为应用支持的界面语言代码
+///
+/// 仅在首次创建 config.yaml 时调用，作为默认界面语言。
+/// 映射规则：zh* → zh-CN，ja* → ja，其余 → en（与前端 i18n 支持的三种语言对齐）。
+/// 检测失败时回退到 zh-CN。
+fn detect_default_language() -> String {
+    let locale = sys_locale::get_locale().unwrap_or_default();
+    if locale.is_empty() {
+        return "zh-CN".to_string();
+    }
+    let lower = locale.to_lowercase();
+    if lower.starts_with("zh") {
+        "zh-CN".to_string()
+    } else if lower.starts_with("ja") {
+        "ja".to_string()
+    } else if lower.starts_with("en") {
+        "en".to_string()
+    } else {
+        "zh-CN".to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaseConfig {
+    pub language: String,
+    /// 界面主题：system（跟随系统）/ light（浅色）/ dark（深色）
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default)]
+    pub theme_auto_solar: bool,
+    #[serde(default = "default_shortcut")]
+    pub shortcut: String,
+    /// Nana 私聊输入框快捷键
+    #[serde(default = "default_shortcut_nana")]
+    pub shortcut_nana: String,
+    #[serde(default = "default_shortcut_deepseek")]
+    pub shortcut_deepseek: String,
+    #[serde(default = "default_shortcut_claude")]
+    pub shortcut_claude: String,
+    /// 总框快捷键（同时向两个角色发言），弹窗居中显示
+    #[serde(default = "default_shortcut_broadcast")]
+    pub shortcut_broadcast: String,
+    /// 打开微信主页面快捷键
+    #[serde(default = "default_shortcut_chat")]
+    pub shortcut_chat: String,
+    /// 打开设置快捷键
+    #[serde(default = "default_shortcut_settings")]
+    pub shortcut_settings: String,
+    /// 打开笔记本快捷键
+    #[serde(default = "default_shortcut_memory")]
+    pub shortcut_memory: String,
+    /// 打开 3D 公寓窗口快捷键
+    #[serde(default = "default_shortcut_room")]
+    pub shortcut_room: String,
+    #[serde(default = "default_shortcut_screen_analyze")]
+    pub shortcut_screen_analyze: String,
+    /// 已安装 3D 公寓插件的运行时开关。
+    #[serde(default = "default_true")]
+    pub apartment_enabled: bool,
+    /// 开机自动启动（写入当前用户 Windows 启动项）
+    #[serde(default = "default_false")]
+    pub auto_start: bool,
+    /// 用户自定义头像在本机用户数据目录下的相对路径（如 "avatar.png"）。
+    /// 为 None 时不使用自定义头像，前端回退到默认蓝色"我"字图标。
+    #[serde(default)]
+    pub user_avatar_path: Option<String>,
+}
+
+fn default_shortcut() -> String {
+    "Control+LeftAlt+Z".to_string()
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_shortcut_nana() -> String {
+    "CommandOrControl+Shift+N".to_string()
+}
+
+fn default_shortcut_deepseek() -> String { "CommandOrControl+Shift+D".into() }
+fn default_shortcut_claude() -> String { "CommandOrControl+Shift+C".into() }
+
+fn default_shortcut_broadcast() -> String {
+    "CommandOrControl+Shift+B".to_string()
+}
+
+fn default_shortcut_chat() -> String {
+    "Control+LeftAlt+C".to_string()
+}
+
+fn default_shortcut_settings() -> String {
+    "CommandOrControl+Shift+S".to_string()
+}
+
+fn default_shortcut_memory() -> String {
+    "CommandOrControl+Shift+M".to_string()
+}
+
+fn default_shortcut_screen_analyze() -> String { "Control+LeftAlt+A".into() }
+
+fn default_shortcut_room() -> String {
+    "CommandOrControl+Shift+R".to_string()
+}
+
+fn default_character_model_dir() -> String {
+    "Vivian".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowConfig {
+    /// Optional terrain/gravity mode; otherwise retain free desktop placement.
+    #[serde(default)]
+    pub desktop_physics_enabled: bool,
+    /// 智能避让：实时检测屏幕纯色区域，将桌宠移动到不遮挡内容的位置。
+    /// 默认启用；用户可在设置面板的通用页签关闭。
+    #[serde(default = "default_true")]
+    pub smart_positioning_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PetRenderConfig {
+    pub blink_interval: u64,
+    /// 心情注意力联动（默认开启）：桌宠依据自身心情动态调节注视行为——
+    /// 精力充沛且专注（energy/focus 高于阈值）时实时注视全局光标；
+    /// 疲惫或走神时回归随机张望（仅交互短暂跟随）。关闭后固定为随机张望模式。
+    #[serde(default = "default_true")]
+    pub always_follow_mouse: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    pub provider: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub endpoint: Option<String>,
+    pub temperature: f64,
+    pub max_tokens: u32,
+    #[serde(default = "default_true")]
+    pub send_temperature: bool,
+    #[serde(default = "default_true")]
+    pub send_max_tokens: bool,
+    #[serde(default)]
+    pub reasoning_overrides: Option<serde_json::Value>,
+    /// API Secret（仅文心 / 讯飞等需要 OAuth/HMAC 签名的服务商使用）
+    #[serde(default)]
+    pub api_secret: Option<String>,
+    /// 应用 ID（仅讯飞星火等需要 app_id 的服务商使用）
+    #[serde(default)]
+    pub app_id: Option<String>,
+    /// 是否启用原生 function calling（结构化 tools 字段路径）
+    ///
+    /// - true：当 provider 支持时走 `bind_tools` + `invoke` 结构化路径
+    ///   （schema 走 API 专用通道，不占 prompt token，调用准确率更高）
+    /// - false：始终走文本路径（在 system prompt 注入工具列表 + JSON 输出协议）
+    ///
+    /// 默认 true。不支持原生 fc 的 provider 会自动回退到文本路径。
+    /// 旧配置存于 `ai.enable_native_function_calling`；新配置存于 `tools.enable_native_function_calling`，
+    /// 加载时若新字段缺失则从旧字段继承。
+    #[serde(default = "default_true")]
+    pub enable_native_function_calling: bool,
+    /// 是否启用图片输入（多模态）
+    ///
+    /// 开启后 user 消息可携带图片，provider 层按各家协议翻译为
+    /// `image_url`（OpenAI 兼容）或 `image` block（Anthropic）。
+    /// 不支持视觉的模型会忽略图片或报错，由用户自行确认模型能力。
+    #[serde(default)]
+    pub enable_vision: bool,
+    /// 图片采样精度（OpenAI vision 协议的 `detail` 字段）
+    ///
+    /// - `auto`：由模型按分辨率自行决定（默认）
+    /// - `low`：固定低分辨率（512×512），token 消耗低
+    /// - `high`：高分辨率切片，细节更好但 token 消耗高
+    #[serde(default = "default_image_detail")]
+    pub image_detail: String,
+    /// 存在惩罚（presence penalty）：对本轮已出现过的 token 施加固定惩罚，
+    /// 抑制"一句话里同一个词/同一个句式反复出现"这类复读。
+    ///
+    /// **只对支持该参数的协议生效**：Chat Completions（`/chat/completions`）与
+    /// Gemini `generationConfig`；Responses API（`/responses`）对未知参数会直接 400、
+    /// Anthropic Messages 协议没有该字段，这两条路径会静默忽略
+    /// （判据见 `providers::base::ProviderCallOptions::presence_penalty`）。
+    ///
+    /// 取值区间 [-2.0, 2.0]，0 表示关闭。
+    #[serde(default = "default_presence_penalty")]
+    pub presence_penalty: f64,
+    /// 频率惩罚（frequency penalty）：按 token 出现次数成比例惩罚，比存在惩罚更激进。
+    /// 取值区间与生效范围同 `presence_penalty`。
+    #[serde(default = "default_frequency_penalty")]
+    pub frequency_penalty: f64,
+    /// 上下文窗口大小（tokens）
+    ///
+    /// 用于编程智能体自动压缩的阈值判定（达到窗口 75% 时归档早期历史）。
+    /// None 时按厂商预设兜底。
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// 推理偏好（思考模式 + 档位）
+    ///
+    /// None 表示不干预（交由服务端默认；思考爆炸防护模型映射安全档位）。
+    #[serde(default)]
+    pub reasoning: Option<ReasoningPreference>,
+}
+
+/// 分侧禁用的工具名（陪伴侧 / 工作侧各自独立）。
+///
+/// 陪伴侧与工作侧是两条独立产品线，同一工具（如 web_search）在一侧禁用
+/// 不应影响另一侧，因此禁用状态按侧别隔离存储。
+///
+/// **兼容旧格式**：早期为扁平 `Vec<String>`（全局禁用）。自定义反序列化会把
+/// 旧列表同时写入两侧（`companion` 与 `work`），保持升级前的行为
+/// ——旧配置里的"全局禁用"等价于"两侧都禁用"。
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct DisabledTools {
+    /// 陪伴侧禁用的工具名
+    pub companion: Vec<String>,
+    /// 工作侧禁用的工具名
+    pub work: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for DisabledTools {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// 反序列化中间态：兼容旧的扁平列表与新分侧结构
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            /// 旧格式：全局禁用列表
+            Legacy(Vec<String>),
+            /// 新格式：分侧
+            Split {
+                #[serde(default)]
+                companion: Vec<String>,
+                #[serde(default)]
+                work: Vec<String>,
+            },
+        }
+
+        // `Option` 包一层：`disabled_tools:`（空值 / null）不报错，退化为无禁用
+        Ok(match Option::<Raw>::deserialize(deserializer)? {
+            None => DisabledTools::default(),
+            // 旧全局禁用 → 两侧都禁用，行为等价于升级前
+            Some(Raw::Legacy(names)) => DisabledTools {
+                companion: names.clone(),
+                work: names,
+            },
+            Some(Raw::Split { companion, work }) => DisabledTools { companion, work },
+        })
+    }
+}
+
+/// 工具系统配置（设置窗口「工具」页签）
+///
+/// 集中管理工具执行/缓存/超时/原生 fc 等运行时参数，
+/// 替代分散在 `executor.rs` / `registry.rs` / `tool_call_manager.rs` / `generation.rs` 的硬编码常量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    #[serde(default)]
+    pub desktop: crate::desktop_contract::DesktopConfig,
+    // ── 原生 function calling ──
+    /// 是否启用原生 function calling（结构化 tools 字段路径）
+    ///
+    /// 与 `ai.enable_native_function_calling` 含义相同，本字段为新增的主存储位置。
+    /// 旧配置中的 `ai.enable_native_function_calling` 在加载时作为 fallback。
+    #[serde(default = "default_true")]
+    pub enable_native_function_calling: bool,
+
+    // ── 执行轮次 ──
+    /// 文本路径工具调用循环最大迭代数（`ToolCallManager::max_iterations`）
+    #[serde(default = "default_tool_max_iterations")]
+    pub max_iterations: u32,
+    /// 原生 function calling 路径单次对话最大 LLM↔工具 往返轮次
+    /// （`generation.rs` `call_llm_native_fc(_stream)` 的 `max_rounds`；0 = 无限，
+    /// 由 LLM 停止调用 / goal_completed / 死循环检测自然终止）
+    #[serde(default = "default_tool_max_rounds")]
+    pub max_rounds: u32,
+    /// 编程智能体（coding agent）单轮最大 LLM↔工具 往返轮次
+    /// （`coding_agent.rs` agent loop 上限；默认 48，可在设置-工具中调整，
+    /// 到达上限自动停止，可发送新消息继续）
+    #[serde(default = "default_tool_max_coding_rounds")]
+    pub max_coding_rounds: u32,
+    /// Shared deadline per work-model step, including retries and fallback.
+    #[serde(default = "default_work_request_timeout_secs")]
+    pub work_request_timeout_secs: u64,
+    #[serde(default = "default_work_request_max_attempts")]
+    pub work_request_max_attempts: usize,
+
+    // ── 结果大小预算 ──
+    /// 单工具结果字符预算，超出则截断为预览版（`executor.rs` 的 `MAX_RESULT_CHARS`）
+    #[serde(default = "default_tool_max_result_chars")]
+    pub max_result_chars: u32,
+    /// 反馈提示词中工具结果 JSON 的截断长度（`tool_call_manager.rs` 的 `take(2000)`）
+    #[serde(default = "default_tool_feedback_history_chars")]
+    pub feedback_history_chars: u32,
+
+    // ── 超时 ──
+    /// 未登记工具的默认超时（秒）（`executor.rs` 的 `DEFAULT_TOOL_TIMEOUT_SECS`）
+    #[serde(default = "default_tool_default_timeout_secs")]
+    pub default_tool_timeout_secs: u64,
+    /// 用户授权确认弹窗的最长等待时间（秒）（`registry.rs` 的 `Duration::from_secs(600)`）
+    #[serde(default = "default_tool_confirmation_timeout_secs")]
+    pub confirmation_timeout_secs: u64,
+
+    // ── 缓存 ──
+    /// 是否启用工具结果缓存
+    #[serde(default = "default_true")]
+    pub enable_cache: bool,
+    /// 工具结果缓存 TTL（秒）（`registry.rs` 的 `ToolCache::new(300, ...)` 第一参数）
+    #[serde(default = "default_tool_cache_ttl_secs")]
+    pub cache_ttl_secs: u64,
+    /// 工具结果缓存最大条目数（`registry.rs` 的 `ToolCache::new(..., 1000)` 第二参数）
+    #[serde(default = "default_tool_cache_max_size")]
+    pub cache_max_size: u32,
+
+    // ── 提示缓存策略 ──
+    /// LLM 提示缓存策略：`auto` / `prompt_cache_key` / `cache_control` / `none`
+    ///
+    /// - `auto`：由 provider 按模型启发式选择（默认）
+    /// - `prompt_cache_key`：注入顶层字段（Kimi / Moonshot）
+    /// - `cache_control`：Anthropic system 块打 ephemeral 标记
+    /// - `none`：显式关闭
+    #[serde(default = "default_cache_strategy")]
+    pub cache_strategy: String,
+
+    // ── 工具权限网关 ──
+    /// Agent 文件访问级别：`read-only` / `fs-read` / `fs-write` / `shell` / `full-control`
+    ///
+    /// 与每个工具的 `risk()` 共同决定 `allow` / `ask` / `deny`：
+    /// - 高风险工具在低权限级别下需要用户确认或被拒绝
+    /// - `read-only` 仅允许安全工具（无副作用查询）
+    /// - `full-control` 允许包括 shell / input-control 在内的全部工具
+    #[serde(default = "default_access_level")]
+    pub access_level: String,
+
+    // ── 上下文窗口压缩 ──
+    /// FC 循环中对话消息总 token 估算值超过此阈值时触发窗口级压缩（默认 20000）
+    #[serde(default = "default_compress_threshold_tokens")]
+    pub compress_threshold_tokens: usize,
+    /// 压缩时保留的最近消息轮数（不会被截断）
+    #[serde(default = "default_compress_keep_recent")]
+    pub compress_keep_recent: usize,
+
+    // ── 工具级开关 ──
+    /// 用户在设置-工具中禁用的工具名（按**陪伴侧 / 工作侧**分别记录）
+    ///
+    /// 禁用的工具：不注入**该侧**的 LLM 工具列表（prompt 文本与 FC tools 字段）、
+    /// 不进入该侧 schema，且执行入口按 `agent_kind` 对应的侧别直接拒绝
+    /// （防 LLM 幻觉调用）。`list_tools` 命令仍返回全部工具（供设置界面重新启用）。
+    #[serde(default)]
+    pub disabled_tools: DisabledTools,
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            desktop: crate::desktop_contract::DesktopConfig::default(),
+            enable_native_function_calling: true,
+            max_iterations: default_tool_max_iterations(),
+            max_rounds: default_tool_max_rounds(),
+            max_coding_rounds: default_tool_max_coding_rounds(),
+            work_request_timeout_secs: default_work_request_timeout_secs(),
+            work_request_max_attempts: default_work_request_max_attempts(),
+            max_result_chars: default_tool_max_result_chars(),
+            feedback_history_chars: default_tool_feedback_history_chars(),
+            default_tool_timeout_secs: default_tool_default_timeout_secs(),
+            confirmation_timeout_secs: default_tool_confirmation_timeout_secs(),
+            enable_cache: true,
+            cache_ttl_secs: default_tool_cache_ttl_secs(),
+            cache_max_size: default_tool_cache_max_size(),
+            cache_strategy: default_cache_strategy(),
+            access_level: default_access_level(),
+            compress_threshold_tokens: default_compress_threshold_tokens(),
+            compress_keep_recent: default_compress_keep_recent(),
+            disabled_tools: DisabledTools::default(),
+        }
+    }
+}
+
+// ============================================================================
+// 工具沙箱（命令执行隔离层）
+// ============================================================================
+
+/// 沙箱网络出口模式（定义在零依赖的 `utils::sandbox_policy`，此处转出供配置层使用）
+pub use crate::utils::sandbox_policy::SandboxNetworkMode;
+
+/// 工具沙箱配置（命令执行隔离层）
+///
+/// 覆盖 one-shot 命令（`run_command` / 编程智能体命令 / 插件脚本）与持久终端
+/// 会话。网络三项只在 `network_mode` 为 `proxy` 时生效——默认 `allow` 保持
+/// 与隔离层接入前一致的行为，需要收紧时再逐条打开。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// 是否启用 OS 级隔离（Windows 受限令牌 + 低完整性级别）。
+    ///
+    /// 关闭后所有命令执行退回普通子进程——只用于排查沙箱本身的问题，正常
+    /// 使用不应关闭。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// 网络出口模式：`allow` / `proxy` / `blocked`
+    #[serde(default)]
+    pub network_mode: SandboxNetworkMode,
+
+    /// 沙箱代理监听端口（`network_mode = proxy` 时生效）。
+    ///
+    /// **0 = 启动时自动挑一个空闲端口**。端口不写成固定值：本机可能已经跑着
+    /// 别的服务，硬编码端口会在启动时撞车，且撞车后无从恢复。
+    #[serde(default)]
+    pub proxy_port: u16,
+
+    /// 沙箱代理监听地址。默认只绑回环——代理面向的是本机的沙箱子进程，
+    /// 绑 0.0.0.0 等于把内网出口一并开放出去。
+    #[serde(default = "default_sandbox_proxy_host")]
+    pub proxy_host: String,
+
+    /// 代理域名白名单（`network_mode = proxy` 时生效），逗号分隔。
+    ///
+    /// 匹配：精确相等；以 `.` 开头表示后缀匹配（`.example.com` 命中
+    /// `a.example.com`）。**留空 = 拒绝全部出口**，需要联网时逐条显式放行。
+    ///
+    /// 用逗号分隔的单个字符串而不是 `Vec<String>`：设置界面是自由输入而不是
+    /// 预设选项列表，两个字段表达同一件事迟早会漂移。
+    #[serde(default)]
+    pub proxy_allow_domains: String,
+
+    /// 是否给会话工作区授予沙箱写权限。
+    ///
+    /// 开启后对主工作区与附加工作区打低完整性标签并授予写 ACL，沙箱进程在
+    /// 工作区内可读可写，工作区之外仍然只写 scratch。关闭则工作区只读。
+    #[serde(default = "default_true")]
+    pub grant_workspace_write: bool,
+
+    /// scratch 目录按会话隔离，避免不同会话的脚本与临时文件互相可见
+    #[serde(default = "default_true")]
+    pub per_session_scratch: bool,
+
+    /// 持久终端（`terminal_open`）是否也放进沙箱。
+    ///
+    /// 依赖 `grant_workspace_write`：工作区不授权时，终端 cd 过去只能读。
+    #[serde(default = "default_true")]
+    pub sandbox_terminal: bool,
+
+    /// 是否要求必须有 OS 级隔离。
+    ///
+    /// 开启后，平台没有可用沙箱（或沙箱被关闭）时**直接拒绝执行命令**，而不是
+    /// 退回全权限子进程。默认关闭 = 降级执行——桌宠在非 Windows 上还跑不起来，
+    /// 一刀切拒绝会让整个工具链不可用。要的是"宁可不跑也不裸跑"时打开它。
+    #[serde(default)]
+    pub require_isolation: bool,
+
+    /// one-shot 沙箱命令默认超时（秒）
+    #[serde(default = "default_sandbox_command_timeout_secs")]
+    pub command_timeout_secs: u64,
+
+    /// 沙箱命令单路输出上限（字节）
+    #[serde(default = "default_sandbox_output_cap_bytes")]
+    pub output_cap_bytes: usize,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            network_mode: SandboxNetworkMode::Allow,
+            proxy_port: 0,
+            proxy_host: default_sandbox_proxy_host(),
+            proxy_allow_domains: String::new(),
+            grant_workspace_write: true,
+            per_session_scratch: true,
+            sandbox_terminal: true,
+            require_isolation: false,
+            command_timeout_secs: default_sandbox_command_timeout_secs(),
+            output_cap_bytes: default_sandbox_output_cap_bytes(),
+        }
+    }
+}
+
+fn default_sandbox_proxy_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_sandbox_command_timeout_secs() -> u64 {
+    120
+}
+
+fn default_sandbox_output_cap_bytes() -> usize {
+    4 * 1024 * 1024
+}
+
+fn default_tool_max_iterations() -> u32 {
+    10
+}
+pub(crate) fn default_tool_max_rounds() -> u32 {
+    20
+}
+fn default_tool_max_coding_rounds() -> u32 {
+    48
+}
+fn default_work_request_timeout_secs() -> u64 { 300 }
+fn default_work_request_max_attempts() -> usize { 6 }
+fn default_tool_max_result_chars() -> u32 {
+    4000
+}
+fn default_tool_feedback_history_chars() -> u32 {
+    2000
+}
+fn default_tool_default_timeout_secs() -> u64 {
+    120
+}
+fn default_tool_confirmation_timeout_secs() -> u64 {
+    600
+}
+fn default_tool_cache_ttl_secs() -> u64 {
+    300
+}
+fn default_tool_cache_max_size() -> u32 {
+    1000
+}
+fn default_cache_strategy() -> String {
+    "auto".to_string()
+}
+fn default_access_level() -> String {
+    // 安全默认：工作区读写与联网可用；shell 和输入控制需用户显式授权。
+    // 已有用户的持久化配置不受影响。
+    "fs-write".to_string()
+}
+fn default_compress_threshold_tokens() -> usize {
+    20000
+}
+fn default_compress_keep_recent() -> usize {
+    6
+}
+fn default_image_detail() -> String {
+    "auto".to_string()
+}
+
+/// 陪伴对话默认存在惩罚。0.3 是"能压住复读、又不会让句子散架"的经验值。
+fn default_presence_penalty() -> f64 {
+    0.3
+}
+
+/// 陪伴对话默认频率惩罚。比存在惩罚略低：陪伴回复偏短，
+/// 短文本上频率惩罚过强会让措辞明显变生硬。
+fn default_frequency_penalty() -> f64 {
+    0.2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkConfig {
+    pub proxy_mode: String,
+    pub proxy_url: String,
+    pub timeout: f64,
+    /// 远程访问（Tailscale 场景）配置
+    #[serde(default)]
+    pub remote_access: RemoteAccessConfig,
+}
+
+/// 远程访问配置（Tailscale / 内网穿透场景）
+///
+/// 开启后，应用在后台启动一个轻量 HTTP 服务端，暴露聊天接口。
+/// 配合 Tailscale 等组网工具，手机可通过 Tailscale IP 直接访问电脑上的智能体。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteAccessConfig {
+    /// 是否启用远程访问
+    #[serde(default)]
+    pub enabled: bool,
+    /// 监听端口（默认 8080）
+    #[serde(default = "default_remote_port")]
+    pub port: u16,
+}
+
+fn default_remote_port() -> u16 {
+    8080
+}
+
+impl Default for RemoteAccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_remote_port(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+/// 服务商切换缓存：按 preset id 索引的 provider 配置快照
+///
+/// 用户在设置窗口切换服务商预设时，把当前槽位的 provider_type/endpoint/model/api_key/
+/// api_secret/app_id 快照存入 `AppConfig.provider_cache`，切回该预设时自动恢复，
+/// 避免反复填写。主配置与路由矩阵共享同一份缓存（同一家厂商的凭据应一致）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CachedProviderProfile {
+    pub provider_type: String,
+    pub endpoint: String,
+    pub model: String,
+    pub api_key: String,
+    #[serde(default)]
+    pub api_secret: String,
+    #[serde(default)]
+    pub app_id: String,
+}
+
+/// 单个任务的完整路由配置 —— 字段与 LLM 主配置一致
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskRouteConfig {
+    /// 服务商类型：openai / gemini / anthropic / wenxin / spark / custom
+    pub provider_type: String,
+    /// 模型名称
+    pub model: String,
+    /// API Key
+    pub api_key: String,
+    /// 接口端点
+    pub endpoint: String,
+    /// API Secret（仅文心 / 讯飞等需要 OAuth/HMAC 签名的服务商使用）
+    #[serde(default)]
+    pub api_secret: String,
+    /// 应用 ID（仅讯飞星火等需要 app_id 的服务商使用）
+    #[serde(default)]
+    pub app_id: String,
+    /// 生成温度（None 时回退到主 LLM 配置）
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// None inherits the main configuration; false omits the wire parameter.
+    #[serde(default)]
+    pub send_temperature: Option<bool>,
+    #[serde(default)]
+    pub send_max_tokens: Option<bool>,
+    #[serde(default)]
+    pub reasoning_overrides: Option<serde_json::Value>,
+    /// 最大 token 数（None 时回退到主 LLM 配置）
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// 上下文窗口大小（tokens，用于自动压缩阈值判定；None 时按厂商预设兜底）
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// 推理偏好（None 表示不干预，交由服务端默认）
+    #[serde(default)]
+    pub reasoning: Option<ReasoningPreference>,
+}
+
+impl TaskRouteConfig {
+    /// 空白路由条目：没有任何模型信息，运行时视为"未配置"。
+    pub fn empty() -> Self {
+        Self::default()
+    }
+}
+
+/// 工作智能体模型预置项（编程页可切换的模型配置）
+///
+/// `id` 用于前端定位与持久化当前选中项；`route` 复用路由矩阵的完整模型配置
+/// （provider_type / model / api_key / endpoint 等），由 `set_work_model_override`
+/// 构建 provider 实现运行时热切换。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkModelProfile {
+    pub id: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub route: TaskRouteConfig,
+}
+
+/// 工作智能体模型列表快照（命令层返回给前端列表切换）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkModelsInfo {
+    pub models: Vec<WorkModelProfile>,
+    pub active_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// 用户在设置中明确保存的办公侧智能体偏好，不用于陪伴聊天。
+    #[serde(default)]
+    pub custom_instructions: String,
+    pub max_short_term_memory: usize,
+    pub retrieval_strategy: String,
+    pub enable_expiration: bool,
+    /// 嵌入服务配置（独立于 routing_matrix.memory）
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
+    /// 巩固流水线配置（ShortTerm→MidTerm→LongTerm 三阶段）
+    #[serde(default)]
+    pub consolidation: ConsolidationConfig,
+    /// 检索五因子加权配置（recency + relevance + importance + hook_boost + need_sim）
+    #[serde(default)]
+    pub retrieval_weights: RetrievalWeightsConfig,
+    /// 独立精排（cross-encoder reranker）配置
+    #[serde(default)]
+    pub rerank: RerankConfig,
+    /// 向量索引后端配置（local=内置 sqlite-vec / external=外部向量库如 Qdrant）
+    #[serde(default)]
+    pub vector_store: VectorStoreConfig,
+}
+
+/// 向量索引后端配置。
+///
+/// - `local`：内置 sqlite-vec（默认，零依赖、单机）
+/// - `external`：接入外部向量数据库（如 Qdrant），提供 HNSW 索引、元数据过滤、
+///   持久化快照与备份。需用户自行部署并在设置表单配置连接参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorStoreConfig {
+    /// 后端来源: "local"（sqlite-vec）| "external"（Qdrant）
+    #[serde(default = "default_vector_store_source")]
+    pub source: String,
+    /// 外部向量库地址（如 `http://localhost:6333`，Qdrant REST）
+    #[serde(default)]
+    pub external_url: String,
+    /// 外部向量库 API Key（Qdrant 启用认证时必填）
+    #[serde(default)]
+    pub api_key: String,
+    /// 外部集合名（每个角色可独立集合，避免多租户隔离冲突）
+    #[serde(default = "default_vector_collection")]
+    pub collection: String,
+    /// HNSW 图 M（向量连接数，越大召回越高、内存占用越大）
+    #[serde(default = "default_hnsw_m")]
+    pub hnsw_m: usize,
+    /// HNSW 建图 ef（越大索引质量越高、建图越慢）
+    #[serde(default = "default_hnsw_ef_construction")]
+    pub ef_construction: usize,
+}
+
+impl Default for VectorStoreConfig {
+    fn default() -> Self {
+        Self {
+            source: default_vector_store_source(),
+            external_url: String::new(),
+            api_key: String::new(),
+            collection: default_vector_collection(),
+            hnsw_m: default_hnsw_m(),
+            ef_construction: default_hnsw_ef_construction(),
+        }
+    }
+}
+
+fn default_vector_store_source() -> String {
+    "local".to_string()
+}
+fn default_vector_collection() -> String {
+    "vivian_memories".to_string()
+}
+fn default_hnsw_m() -> usize {
+    16
+}
+fn default_hnsw_ef_construction() -> usize {
+    200
+}
+
+/// 巩固流水线配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidationConfig {
+    /// Stage 1 触发阈值：ShortTerm 条数 ≥ 此值时触发摘要
+    #[serde(default = "default_stage1_threshold")]
+    pub stage1_short_term_threshold: usize,
+    /// Stage 1 触发空闲超时（秒）：会话空闲超过此值时触发摘要
+    #[serde(default = "default_stage1_idle_sec")]
+    pub stage1_idle_timeout_sec: f64,
+}
+
+impl Default for ConsolidationConfig {
+    fn default() -> Self {
+        Self {
+            stage1_short_term_threshold: default_stage1_threshold(),
+            stage1_idle_timeout_sec: default_stage1_idle_sec(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_stage1_threshold() -> usize {
+    20
+}
+fn default_stage1_idle_sec() -> f64 {
+    1800.0
+}
+
+/// 检索五因子加权配置
+///
+/// 综合 score = α·recency + β·relevance + γ·importance + δ·hook_boost + ε·need_sim
+/// - recency = exp(-age_hours / tau)
+/// - relevance = RRF fused_score（含 semantic_boost）
+/// - importance = memory.importance（写入时 LLM 打分 + 命中反馈 delta）
+/// - hook_boost = 含未闭环 open_hooks 的记忆获得加成（承诺/约定/待跟进优先 surfaced）
+/// - need_sim = 当前用户输入与记忆内容的 Jaccard 语义相似度（jieba 分词）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalWeightsConfig {
+    #[serde(default = "default_w_recency")]
+    pub recency: f64,
+    #[serde(default = "default_w_relevance")]
+    pub relevance: f64,
+    #[serde(default = "default_w_importance")]
+    pub importance: f64,
+    #[serde(default = "default_w_hook_boost")]
+    pub hook_boost: f64,
+    #[serde(default = "default_w_need_sim")]
+    pub need_sim: f64,
+    /// recency 衰减时间常数（小时），τ=24 时 24h 后 R≈0.368
+    #[serde(default = "default_w_tau")]
+    pub recency_tau_hours: f64,
+    /// Legacy compatibility field. Recall admission now uses query-local evidence,
+    /// independently of the normalized rank and age of other candidates.
+    #[serde(default = "default_w_min_score")]
+    pub min_score: f64,
+}
+
+impl Default for RetrievalWeightsConfig {
+    fn default() -> Self {
+        Self {
+            recency: default_w_recency(),
+            relevance: default_w_relevance(),
+            importance: default_w_importance(),
+            hook_boost: default_w_hook_boost(),
+            need_sim: default_w_need_sim(),
+            recency_tau_hours: default_w_tau(),
+            min_score: default_w_min_score(),
+        }
+    }
+}
+
+fn default_w_recency() -> f64 {
+    0.25
+}
+fn default_w_relevance() -> f64 {
+    0.40
+}
+fn default_w_importance() -> f64 {
+    0.15
+}
+fn default_w_hook_boost() -> f64 {
+    0.10
+}
+fn default_w_need_sim() -> f64 {
+    0.10
+}
+fn default_w_tau() -> f64 {
+    24.0
+}
+fn default_w_min_score() -> f64 {
+    0.15
+}
+
+/// 独立精排（cross-encoder reranker）配置
+///
+/// 在混合检索召回之后，对 top-k 候选做二次精排，提升 query-doc 细粒度相关度。
+/// 默认调用本地 Ollama 的 `/api/rerank`（bge-reranker 系列）；未启用或调用失败时
+/// 静默回退到召回顺序，不阻塞检索主流程。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RerankConfig {
+    /// 是否启用精排
+    #[serde(default)]
+    pub enabled: bool,
+    /// Ollama 接口端点（不含 `/api/rerank`，默认 `http://localhost:11434`）
+    #[serde(default = "default_rerank_endpoint")]
+    pub endpoint: String,
+    /// rerank 模型名（默认 bge-reranker-v2-m3）
+    #[serde(default = "default_rerank_model")]
+    pub model: String,
+    /// 参与精排的候选数上限（召回后仅对前 N 条精排，兼顾质量与延迟）
+    #[serde(default = "default_rerank_top_k")]
+    pub top_k: usize,
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_rerank_endpoint(),
+            model: default_rerank_model(),
+            top_k: default_rerank_top_k(),
+        }
+    }
+}
+
+fn default_rerank_endpoint() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_rerank_model() -> String {
+    "bge-reranker-v2-m3".to_string()
+}
+fn default_rerank_top_k() -> usize {
+    20
+}
+
+/// 嵌入服务配置
+///
+/// 独立于 `routing_matrix.memory`（后者用于 LLM 任务），专门控制向量检索的嵌入服务。
+/// 启用后，向量索引与查询将使用远程 OpenAI 兼容接口；否则回退到 256 维哈希嵌入。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddingConfig {
+    /// 是否启用远程嵌入服务（false 时使用本地哈希嵌入）
+    #[serde(default)]
+    pub enabled: bool,
+    /// API Key
+    #[serde(default)]
+    pub api_key: String,
+    /// 接口端点（OpenAI Embeddings 兼容）
+    #[serde(default)]
+    pub endpoint: String,
+    /// 模型名称；默认留空，由用户根据服务商选择
+    #[serde(default = "default_embedding_model")]
+    pub model: String,
+    /// 向量维度（须与所选模型一致；用于检测维度变更并清空旧索引）
+    #[serde(default = "default_embedding_dim")]
+    pub dimension: usize,
+    /// 嵌入来源: "cloud"（远程 API）| "local"（本地 Ollama）
+    #[serde(default = "default_embedding_source")]
+    pub source: String,
+    /// 应用启动时自动启动 Ollama（仅 source="local" 时生效）
+    #[serde(default)]
+    pub ollama_auto_start: bool,
+    /// ollama.exe 可执行文件路径
+    #[serde(default = "default_ollama_path")]
+    pub ollama_path: String,
+    /// 本地 Ollama 嵌入模型名（如 bge-m3、nomic-embed-text）
+    #[serde(default = "default_ollama_model")]
+    pub ollama_model: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+            endpoint: String::new(),
+            model: default_embedding_model(),
+            dimension: default_embedding_dim(),
+            source: default_embedding_source(),
+            ollama_auto_start: false,
+            ollama_path: default_ollama_path(),
+            ollama_model: default_ollama_model(),
+        }
+    }
+}
+
+fn default_embedding_model() -> String {
+    String::new()
+}
+
+fn default_embedding_dim() -> usize {
+    1024
+}
+
+fn default_embedding_source() -> String {
+    "cloud".to_string()
+}
+
+fn default_ollama_path() -> String {
+    "G:\\ollama\\ollama.exe".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "bge-m3".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechRecognitionConfig {
+    pub engine: String,
+    pub language: String,
+    pub silence_timeout_ms: u64,
+    /// Whisper 后端专属配置（engine=whisper 时使用）
+    #[serde(default)]
+    pub whisper: crate::speech::WhisperConfig,
+    /// Azure Speech 后端专属配置（engine=azure 时使用）
+    #[serde(default)]
+    pub azure: crate::speech::AzureSpeechConfig,
+    /// 阿里云 NLS 后端专属配置（engine=aliyun 时使用）
+    #[serde(default)]
+    pub aliyun: crate::speech::AliyunAsrConfig,
+    /// OpenAI Whisper API 后端专属配置（engine=openai_whisper 时使用）
+    #[serde(default)]
+    pub openai_whisper: crate::speech::OpenaiWhisperConfig,
+}
+
+/// 豆包端到端实时语音大模型配置（SC2.0）
+///
+/// 独立通话模式，绕过 ASR/LLM/TTS 三层 pipeline，走全双工 WebSocket。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeVoiceConfig {
+    /// 是否启用实时语音通话功能
+    #[serde(default)]
+    pub enabled: bool,
+    /// 实时语音通话供应商：doubao / gpt_live
+    #[serde(default = "default_realtime_provider")]
+    pub provider: String,
+    /// 火山引擎控制台 App ID
+    #[serde(default)]
+    pub app_id: String,
+    /// 火山引擎控制台 Access Key
+    #[serde(default)]
+    pub access_key: String,
+    /// 模型版本：O 或 SC（默认 SC）
+    #[serde(default = "default_realtime_model")]
+    pub model: String,
+    /// SC 版本角色描述（character_manifest），用于塑造 AI 人设
+    #[serde(default = "default_character_manifest")]
+    pub character_manifest: String,
+    /// O 版本人设字段
+    #[serde(default)]
+    pub bot_name: String,
+    #[serde(default)]
+    pub system_role: String,
+    #[serde(default)]
+    pub speaking_style: String,
+    /// 发音人音色 ID（SC 版本用 ICL_ 开头克隆音色，O 版本用精品音色）
+    #[serde(default = "default_realtime_speaker")]
+    pub speaker: String,
+    /// 判断用户停止说话的时间（毫秒），默认 1500，范围 [500, 50000]
+    #[serde(default = "default_end_smooth_window_ms")]
+    pub end_smooth_window_ms: u64,
+    /// 是否开启自定义 VAD
+    #[serde(default)]
+    pub enable_custom_vad: bool,
+    /// 是否开启非流式模型识别能力
+    #[serde(default)]
+    pub enable_asr_twopass: bool,
+    /// 输入模式：audio（麦克风）/ text（纯文本）/ audio_file（录音文件）
+    #[serde(default = "default_realtime_input_mod")]
+    pub input_mod: String,
+    /// 是否严格审核
+    #[serde(default = "default_true")]
+    pub strict_audit: bool,
+    /// 命中审核后的自定义回复话术
+    #[serde(default)]
+    pub audit_response: String,
+    /// 用户位置信息（可选，提升联网搜索精度）
+    #[serde(default)]
+    pub location: Option<RealtimeLocation>,
+    /// 上次通话的 dialog_id（用于恢复最近20轮对话上下文）
+    #[serde(default)]
+    pub dialog_id: String,
+    /// 是否启用声学回声消除（使用扬声器播放参考，保留用户插话）
+    #[serde(default = "default_true")]
+    pub echo_suppression: bool,
+    /// 声学回声消除滤波尾长（毫秒），兼容原 echo_release_ms 配置
+    #[serde(default = "default_echo_release_ms")]
+    pub echo_release_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealtimeLocation {
+    pub longitude: f64,
+    pub latitude: f64,
+    #[serde(default)]
+    pub city: String,
+    #[serde(default)]
+    pub country: String,
+    #[serde(default)]
+    pub province: String,
+    #[serde(default)]
+    pub district: String,
+    #[serde(default)]
+    pub country_code: String,
+}
+
+fn default_realtime_model() -> String {
+    "SC".to_string()
+}
+
+fn default_realtime_provider() -> String {
+    "doubao".to_string()
+}
+
+fn default_character_manifest() -> String {
+    "你是Vivian，一个温柔体贴的 AI 伙伴。".to_string()
+}
+
+fn default_realtime_speaker() -> String {
+    "ICL_zh_female_wenrouwenya_tob".to_string()
+}
+
+fn default_end_smooth_window_ms() -> u64 {
+    1500
+}
+
+fn default_echo_release_ms() -> u64 {
+    500
+}
+
+fn default_realtime_input_mod() -> String {
+    "audio".to_string()
+}
+
+impl Default for RealtimeVoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_realtime_provider(),
+            app_id: String::new(),
+            access_key: String::new(),
+            model: default_realtime_model(),
+            character_manifest: default_character_manifest(),
+            bot_name: String::new(),
+            system_role: String::new(),
+            speaking_style: String::new(),
+            speaker: default_realtime_speaker(),
+            end_smooth_window_ms: default_end_smooth_window_ms(),
+            enable_custom_vad: false,
+            enable_asr_twopass: false,
+            input_mod: default_realtime_input_mod(),
+            strict_audit: true,
+            audit_response: String::new(),
+            location: None,
+            dialog_id: String::new(),
+            echo_suppression: true,
+            echo_release_ms: default_echo_release_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProactiveConfig {
+    pub enabled: bool,
+    pub tick_interval: u64,
+    pub idle_threshold: u64,
+    pub min_trigger_interval: u64,
+    pub proactivity: f64,
+    pub enable_idle_trigger: bool,
+    pub enable_window_change_trigger: bool,
+    pub enable_away_reminder: bool,
+    /// 用户离开设备的空闲阈值（秒）。超过该值视为用户不在设备前，
+    /// 主动对话暂停触发，等待用户回归后由 WelcomeBack 接续。
+    #[serde(default = "default_away_threshold_seconds")]
+    pub away_threshold_seconds: u64,
+    /// 自适应 tick 间隔：根据用户空闲时间动态调整 tick 频率
+    /// （空闲越久 tick 越慢，减少空转 IPC），用户交互立即重置到活跃档。
+    #[serde(default = "default_true")]
+    pub adaptive_tick_enabled: bool,
+    /// 在 current_thought 请求中同时决定沉默/问候/续聊/分享。
+    /// 启用后日常搭话只消费新鲜的明确意图，不回退到整点或空闲规则。
+    /// 需要同时开启主动对话（enabled）和内心独白（world.enable_inner_monologue）才生效。
+    #[serde(default = "default_true")]
+    pub enable_social_urge_gating: bool,
+    /// 连续主动打扰退避倍数：每次产出主动消息后，下次冷却按
+    /// `base_cooldown × backoff_multiplier^min(consecutive, max_level)` 拉长，
+    /// 用户交互或长时间无打扰后自然归零，实现"打扰越多间隔越长"的渐进收敛。
+    /// 被忽略时（ignored_count 上升）热度提升但频率收敛，避免反复尝试打扰。
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+    /// 退避指数上限：连续打扰计数超过该值后不再继续翻倍（平滑封顶）
+    #[serde(default = "default_backoff_max_level")]
+    pub backoff_max_level: u32,
+    /// 退避自然衰减窗口（秒）：距上次主动打扰超过该时长后退避计数减半回落
+    #[serde(default = "default_backoff_grace_secs")]
+    pub backoff_grace_secs: u64,
+    /// Report sustained resource transitions to the environment agent; never a direct reminder.
+    #[serde(default = "default_true")]
+    pub enable_system_pressure_trigger: bool,
+    /// 是否启用主动截屏观察触发器（窗口切换引发好奇，经用户同意后截屏理解并搭话）
+    #[serde(default = "default_true")]
+    pub enable_screen_peek_trigger: bool,
+    /// 是否启用应用持续使用超时触发器（同一类应用长时间使用时按语义关心/调侃）
+    #[serde(default = "default_true")]
+    pub enable_app_duration_trigger: bool,
+    /// 是否启用深夜未眠触发器（凌晨时段用户仍活跃时关心睡眠）
+    #[serde(default = "default_true")]
+    pub enable_late_night_trigger: bool,
+    /// 是否启用音乐切换触发器（用户开始播放/切换曲目时基于 SMTC 信息自然搭话）
+    #[serde(default = "default_true")]
+    pub enable_music_trigger: bool,
+    /// 内心独白（内心OS）最小间隔（秒）：同一角色两次内心OS之间的全局下限。
+    /// 内心OS 不打扰用户，但过于频繁会显得"话痨"，故设较长下限（25 分钟）。
+    #[serde(default = "default_inner_monologue_min_interval_secs")]
+    pub inner_monologue_min_interval_secs: u64,
+    /// 内心独白每日上限：单角色每天最多产出多少条内心OS。
+    #[serde(default = "default_inner_monologue_daily_max")]
+    pub inner_monologue_daily_max: u32,
+}
+
+fn default_inner_monologue_min_interval_secs() -> u64 {
+    1500
+}
+
+fn default_inner_monologue_daily_max() -> u32 {
+    12
+}
+
+fn default_backoff_multiplier() -> f64 {
+    1.8
+}
+
+fn default_backoff_max_level() -> u32 {
+    4
+}
+
+fn default_backoff_grace_secs() -> u64 {
+    1800
+}
+
+fn default_away_threshold_seconds() -> u64 {
+    600
+}
+
+impl Default for ProactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_interval: 10,
+            idle_threshold: 300,
+            min_trigger_interval: 180,
+            proactivity: 0.5,
+            enable_idle_trigger: true,
+            enable_window_change_trigger: false,
+            enable_away_reminder: true,
+            away_threshold_seconds: default_away_threshold_seconds(),
+            adaptive_tick_enabled: true,
+            enable_social_urge_gating: true,
+            backoff_multiplier: default_backoff_multiplier(),
+            backoff_max_level: default_backoff_max_level(),
+            backoff_grace_secs: default_backoff_grace_secs(),
+            enable_system_pressure_trigger: true,
+            enable_screen_peek_trigger: true,
+            enable_app_duration_trigger: true,
+            enable_late_night_trigger: true,
+            enable_music_trigger: true,
+            inner_monologue_min_interval_secs: default_inner_monologue_min_interval_secs(),
+            inner_monologue_daily_max: default_inner_monologue_daily_max(),
+        }
+    }
+}
+
+/// 内联表情/动作标签配置。
+///
+/// 注意：默认关闭。内联模式会在主 prompt 中注入标签格式说明 + 表情/动作列表，
+/// 稀释主 LLM 注意力，影响对话沉浸感。默认使用独立后处理 LLM（ExpressionMotionRunnable）
+/// 在文本生成完成后选择表情/动作，主 prompt 保持干净。
+///
+/// 启用后，LLM 在流式输出文本中直接嵌入 `<e name="happy"/>` `<m name="wave"/>` 等标签，
+/// 流式扫描器实时剥离并 emit `chat:inline_meta` 事件，
+/// 消除 ExpressionMotionRunnable 的第二次 LLM 调用延迟（500ms-2s）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InlineExpressionConfig {
+    /// 是否启用内联标签模式（true = 内联模式，false = 独立后处理 LLM 模式）
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for InlineExpressionConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            companion: Default::default(),
+            base: BaseConfig {
+                language: "zh-CN".to_string(),
+                theme: default_theme(),
+                theme_auto_solar: false,
+                shortcut: default_shortcut(),
+                shortcut_nana: default_shortcut_nana(),
+                shortcut_deepseek: default_shortcut_deepseek(),
+                shortcut_claude: default_shortcut_claude(),
+                shortcut_broadcast: default_shortcut_broadcast(),
+                shortcut_chat: default_shortcut_chat(),
+                shortcut_settings: default_shortcut_settings(),
+                shortcut_memory: default_shortcut_memory(),
+                shortcut_room: default_shortcut_room(),
+                shortcut_screen_analyze: default_shortcut_screen_analyze(),
+                apartment_enabled: true,
+                auto_start: false,
+                user_avatar_path: None,
+            },
+            window: WindowConfig {
+                desktop_physics_enabled: false,
+                smart_positioning_enabled: true,
+            },
+            pet_render: PetRenderConfig {
+                blink_interval: 4000,
+                always_follow_mouse: true,
+            },
+            ai: AiConfig {
+                provider: "openai".to_string(),
+                model: "deepseek-ai/DeepSeek-V3.1".to_string(),
+                api_key: None,
+                endpoint: Some("https://api.siliconflow.cn/v1".to_string()),
+                send_temperature: true,
+                send_max_tokens: true,
+                reasoning_overrides: None,
+                temperature: 0.70,
+                max_tokens: 2048,
+                api_secret: None,
+                app_id: None,
+                enable_native_function_calling: true,
+                enable_vision: false,
+                image_detail: default_image_detail(),
+                presence_penalty: default_presence_penalty(),
+                frequency_penalty: default_frequency_penalty(),
+                context_window: None,
+                reasoning: None,
+            },
+            network: NetworkConfig {
+                proxy_mode: "direct".to_string(),
+                proxy_url: String::new(),
+                timeout: 30.0,
+                remote_access: RemoteAccessConfig::default(),
+            },
+            routing_matrix: {
+                let mut m = HashMap::new();
+                // 路由矩阵任务键预注册（配置留空，由用户填写）
+                // 空配置的任务在 ModelRouter 中跳过构建 provider，运行时按档位回退
+                for spec in crate::providers::task_catalog::tasks().iter() {
+                    m.insert(spec.id.clone(), TaskRouteConfig::empty());
+                }
+                m
+            },
+            routing_tiers: {
+                let mut m = HashMap::new();
+                // 档位键预注册，同样留空；用户填了模型才会接管该档任务。
+                for spec in crate::providers::task_catalog::tiers().iter() {
+                    m.insert(spec.id.clone(), TaskRouteConfig::empty());
+                }
+                m
+            },
+            memory: MemoryConfig {
+                custom_instructions: String::new(),
+                max_short_term_memory: 20,
+                retrieval_strategy: "auto".to_string(),
+                enable_expiration: true,
+                embedding: EmbeddingConfig::default(),
+                consolidation: ConsolidationConfig::default(),
+                retrieval_weights: RetrievalWeightsConfig::default(),
+                rerank: RerankConfig::default(),
+                vector_store: VectorStoreConfig::default(),
+            },
+            speech_recognition: SpeechRecognitionConfig {
+                engine: "winrt".to_string(),
+                language: "zh-CN".to_string(),
+                silence_timeout_ms: 1500,
+                whisper: crate::speech::WhisperConfig::default(),
+                azure: crate::speech::AzureSpeechConfig::default(),
+                aliyun: crate::speech::AliyunAsrConfig::default(),
+                openai_whisper: crate::speech::OpenaiWhisperConfig::default(),
+            },
+            proactive: ProactiveConfig::default(),
+            enable_routing_matrix: true,
+            tools: ToolConfig::default(),
+            world: WorldConfig::default(),
+            provider_cache: HashMap::new(),
+            realtime_voice: RealtimeVoiceConfig::default(),
+            characters: CharactersConfig::default(),
+            web_search: WebSearchConfig::default(),
+            inline_expression: InlineExpressionConfig::default(),
+            music_reactive: MusicReactiveConfig::default(),
+            video_animations: VideoAnimationsConfig::default(),
+            work_models: Vec::new(),
+            active_work_model: None,
+            default_workspace: None,
+            sandbox: SandboxConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ConfigManager {
+    config: Arc<RwLock<AppConfig>>,
+    config_file: PathBuf,
+    /// 设置修订号：每次成功写入自增，供 compare-and-swap 围栏校验并发写冲突。
+    revision: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// 把任务目录里新增的任务与档位补进已保存的配置。
+///
+/// 配置文件里没有新键；不补的话，读取方（如生图路由）会拿到 None，
+/// 表现成"功能存在但永远不可用"，而用户在界面上改了又因为对不上键而无效。
+/// 只补缺失项，绝不覆盖用户已填的值；目录里已经不存在的键一并清掉，避免
+/// 已删除任务残留在用量报告与连通性测试里。
+fn ensure_task_routes(cfg: &mut AppConfig) {
+    let packages = crate::character_packages::active();
+    cfg.characters.list.retain(|c| matches!(c.id.as_str(), "vivian" | "nana") || packages.iter().any(|p| p.id == c.id));
+    for package in packages {
+        if let Some(entry)=cfg.characters.list.iter_mut().find(|c|c.id==package.id) {
+            entry.model_dir=package.id; entry.model_kind="sprite".into();
+        } else {
+            cfg.characters.list.push(CharacterEntry { id: package.id.clone(), name: package.name, model_dir: package.id, model_kind: "sprite".into(), default_online: true });
+        }
+    }
+
+    if cfg.characters.list.is_empty() { cfg.characters.list=default_characters(); }
+    if !cfg.characters.list.iter().any(|c|c.id==cfg.characters.active_id) { cfg.characters.active_id=cfg.characters.list.first().map(|c|c.id.clone()).unwrap_or_else(||"vivian".into()); }
+    // Migrate the retired shared reply slot without overwriting either pet.
+    if let Some(old)=cfg.routing_matrix.get("companion").filter(|route|!route.model.trim().is_empty()).cloned(){
+        for key in ["companion_vivian","companion_nana"] {
+            if cfg.routing_matrix.get(key).is_none_or(|route|route.model.trim().is_empty()) {cfg.routing_matrix.insert(key.into(),old.clone());}
+        }
+    }
+    cfg.routing_matrix.insert("companion".into(),TaskRouteConfig::empty());
+    let tasks = crate::providers::task_catalog::tasks();
+    cfg.routing_matrix.retain(|key, _| key.starts_with("companion_") || tasks.iter().any(|spec| &spec.id == key));
+    for spec in tasks.iter() {
+        cfg.routing_matrix.entry(spec.id.clone()).or_insert_with(TaskRouteConfig::empty);
+    }
+    let tiers = crate::providers::task_catalog::tiers();
+    cfg.routing_tiers.retain(|key, _| tiers.iter().any(|spec| &spec.id == key));
+    for spec in tiers.iter() {
+        cfg.routing_tiers.entry(spec.id.clone()).or_insert_with(TaskRouteConfig::empty);
+    }
+}
+
+#[cfg(test)]
+mod character_reply_route_tests {
+    use super::*;
+    #[test]
+    fn migrates_legacy_reply_model_without_overwriting_explicit_character_models() {
+        let mut cfg=AppConfig::default();
+        cfg.routing_matrix.get_mut("companion").unwrap().model="legacy".into();
+        cfg.routing_matrix.get_mut("companion_vivian").unwrap().model="vivian-own".into();
+        ensure_task_routes(&mut cfg);
+        assert_eq!(cfg.routing_matrix["companion_vivian"].model,"vivian-own");
+        assert_eq!(cfg.routing_matrix["companion_nana"].model,"legacy");
+        assert!(cfg.routing_matrix["companion"].model.is_empty());
+        cfg.routing_matrix.get_mut("companion_nana").unwrap().model.clear();
+        ensure_task_routes(&mut cfg);
+        assert!(cfg.routing_matrix["companion_nana"].model.is_empty());
+    }
+    #[test]
+    fn fresh_config_has_only_empty_character_reply_models_and_no_shared_model() {
+        let mut cfg=AppConfig::default();ensure_task_routes(&mut cfg);
+        for key in ["companion","companion_vivian","companion_nana"] {assert!(cfg.routing_matrix[key].model.is_empty());}
+    }
+}
+
+fn import_legacy_contact_model(config: &mut AppConfig, id: &str, profile: Option<crate::sns_store::Contact>) -> Result<(), String> {
+    let legacy = profile.and_then(|p|p.model).or_else(|| (id == "deepseek").then(||config.routing_matrix.get("chat_partner").cloned()).flatten().and_then(|r|serde_json::to_value(r).ok()));
+    let key = format!("companion_{id}");
+    if config.routing_matrix.get(&key).is_some_and(|r|!r.model.trim().is_empty()) { return Ok(()); }
+    if let Some(mut value) = legacy {
+        if value.get("provider_type").is_none() { value["provider_type"] = serde_json::json!("openai"); }
+        if value.get("api_key").is_none() { value["api_key"] = serde_json::json!(""); }
+        let route = serde_json::from_value::<TaskRouteConfig>(value).map_err(|e|e.to_string())?;
+        if !route.model.trim().is_empty() { config.routing_matrix.insert(key, route); }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod legacy_companion_route_tests {
+    use super::*;
+    #[test]
+    fn archived_model_is_restored_without_overwriting_new_configuration() {
+        let dir=tempfile::tempdir().unwrap();
+        let store=crate::sns_store::SnsStore::new(dir.path().join("sns.sqlite3"));
+        let old=crate::sns_store::Contact {id:"deepseek".into(),name:"Legacy".into(),persona:"legacy".into(),avatar:String::new(),model:Some(serde_json::json!({"provider_type":"openai","model":"legacy-model","endpoint":"https://example.invalid/v1","api_key":"test-key"}))};
+        store.seed(&old).unwrap();store.retire_builtin_contacts().unwrap();
+        let mut config=AppConfig::default();ensure_task_routes(&mut config);
+        import_legacy_contact_model(&mut config,"deepseek",store.legacy_builtin_contact("deepseek").unwrap()).unwrap();
+        assert_eq!(config.routing_matrix["companion_deepseek"].model,"legacy-model");
+        assert_eq!(config.routing_matrix["companion_deepseek"].api_key,"test-key");
+        config.routing_matrix.get_mut("companion_deepseek").unwrap().model="explicit-new".into();
+        import_legacy_contact_model(&mut config,"deepseek",store.legacy_builtin_contact("deepseek").unwrap()).unwrap();
+        assert_eq!(config.routing_matrix["companion_deepseek"].model,"explicit-new");
+        assert!(store.contact("deepseek").is_err());
+    }
+}
+
+impl ConfigManager {
+    pub fn new() -> Self {
+        let app_dir = path::get_user_data_dir();
+        let config_file = app_dir.join("config.yaml");
+
+        let mut config = if config_file.exists() {
+            let mut loaded = Self::load_from_file(&config_file).unwrap_or_else(|e| {
+                tracing::warn!("加载配置失败: {}, 使用默认配置", e);
+                AppConfig::default()
+            });
+            ensure_task_routes(&mut loaded);
+            loaded
+        } else {
+            // 首次启动：根据系统语言设置默认界面语言，避免用户来不及改设置就触发英文问候
+            let mut default = AppConfig::default();
+            default.base.language = detect_default_language();
+            tracing::info!("首次启动，检测到系统语言并设置为默认界面语言: {}", default.base.language);
+            let _ = Self::save_to_file(&config_file, &default);
+            default
+        };
+
+        ensure_task_routes(&mut config);
+        if !config.characters.legacy_models_migrated {
+            let store = crate::sns_runtime::store();
+            let mut valid = true;
+            for id in ["deepseek", "claude"] {
+                match store.legacy_builtin_contact(id) {
+                    Ok(profile) => {
+                        if let Err(e) = import_legacy_contact_model(&mut config, id, profile) {
+                            valid = false; tracing::warn!("Legacy model migration failed for {id}: {e}");
+                        }
+                    },
+                    Err(e) => { valid = false; tracing::warn!("Legacy contact migration failed: {e}"); }
+                }
+            }
+            if valid {
+                config.characters.legacy_models_migrated = true;
+                if let Err(e) = Self::save_to_file(&config_file, &config) {
+                    config.characters.legacy_models_migrated = false;
+                    tracing::warn!("Could not persist legacy model migration: {e}");
+                }
+            }
+        }
+        Self {
+            config: Arc::new(RwLock::new(config)),
+            config_file,
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Value {
+        let config = self.config.read();
+        let value = serde_json::to_value(&*config).unwrap_or(Value::Null);
+        Self::get_nested(&value, key)
+    }
+
+    pub fn get_typed<T: serde::de::DeserializeOwned>(&self, key: &str, default: T) -> T {
+        let value = self.get(key);
+        serde_json::from_value(value).unwrap_or(default)
+    }
+
+    pub fn set(&self, key: &str, value: Value) -> VivianResult<()> {
+        self.set_no_save(key, value)?;
+        self.save()
+    }
+
+    /// 当前设置修订号（发起 CAS 写入前读取快照）。
+    pub fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 带修订号围栏的写入：`expected_revision` 与当前不一致则拒绝（返回 Err），
+    /// 避免两个写入方基于旧快照互相覆盖。
+    pub fn set_cas(&self, key: &str, value: Value, expected_revision: u64) -> VivianResult<()> {
+        use std::sync::atomic::Ordering;
+        // 先 CAS 递增：失败说明有并发写
+        self.revision
+            .compare_exchange(
+                expected_revision,
+                expected_revision + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .map_err(|_| VivianError::Config("设置修订号冲突（其他人已修改，请重读后重试）".into()))?;
+        self.set_no_save(key, value)?;
+        self.save()
+    }
+
+    /// Read just the user preferences without serializing unrelated settings.
+    pub fn custom_instructions(&self) -> String {
+        self.config.read().memory.custom_instructions.clone()
+    }
+
+    /// 修改内存中的配置但不写入磁盘 —— 用于批量修改后统一保存
+    pub fn set_no_save(&self, key: &str, value: Value) -> VivianResult<()> {
+        let mut config = self.config.write();
+        let mut config_value = serde_json::to_value(&*config)
+            .map_err(|e| VivianError::Serialization(e.to_string()))?;
+        Self::set_nested(&mut config_value, key, value)?;
+        let mut next: AppConfig = serde_json::from_value(config_value)
+            .map_err(|e| VivianError::Serialization(e.to_string()))?;
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut next.window.smart_positioning_enabled, &mut next.window.desktop_physics_enabled, key);
+        *config = next;
+        Ok(())
+    }
+
+    /// 获取完整配置的深拷贝。
+    ///
+    /// 调用方较多（23+ 处），多数为命令处理或后台任务的一次性读取，不在每条消息的热路径上，
+    /// 因此保留整份 clone 可接受。若未来出现高频热路径调用，应改为按字段访问的方法
+    /// （如 `get_field<T>(&self, key: &str) -> T`），避免整份 AppConfig 克隆。
+    pub fn get_all(&self) -> AppConfig {
+        self.config.read().clone()
+    }
+
+    /// The one-second game observer needs only these preferences, not model keys/history caches.
+    pub fn game_preferences(&self) -> (crate::companion_policy::CompanionConfig, bool, bool) {
+        let config = self.config.read();
+        (config.companion.clone(), config.ai.enable_vision, config.proactive.enabled)
+    }
+
+    /// Merge discoveries under the same lock as settings edits; never replace a stale table.
+    pub fn remember_game_process(&self, process: &str) -> VivianResult<()> {
+        let mut config = self.config.write();
+        if !config.companion.remember_game(process) { return Ok(()); }
+        if let Err(error) = Self::save_to_file(&self.config_file, &config) {
+            config.companion.game_processes.pop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub fn save(&self) -> VivianResult<()> {
+        Self::save_to_file(&self.config_file, &*self.config.read())
+    }
+
+    /// Publish a validated complete settings import; failed persistence leaves memory intact.
+    pub fn replace_all(&self, mut next: AppConfig) -> VivianResult<()> {
+        ensure_task_routes(&mut next);
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut next.window.smart_positioning_enabled,
+            &mut next.window.desktop_physics_enabled, "window");
+        let mut config = self.config.write();
+        // The observer may discover another game while the import is being validated.
+        next.companion.game_processes = config.companion.game_processes.clone();
+        Self::save_to_file(&self.config_file, &next)?;
+        *config = next;
+        self.revision.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn reload(&self) -> VivianResult<()> {
+        let config = Self::load_from_file(&self.config_file)?;
+        *self.config.write() = config;
+        Ok(())
+    }
+
+    fn load_from_file(path: &Path) -> VivianResult<AppConfig> {
+        let content = fs::read_to_string(path)?;
+        let content = Self::replace_env_vars(&content);
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|e| VivianError::Config(format!("YAML 解析失败: {}", e)))?;
+        super::secret_store::unprotect_yaml(&mut value)
+            .map_err(|e| VivianError::Config(format!("配置密钥解密失败: {}", e)))?;
+        let mut config: AppConfig = serde_yaml::from_value(value)
+            .map_err(|e| VivianError::Config(format!("YAML 结构无效: {}", e)))?;
+
+        // Upgrade the previous input defaults; retain other custom bindings.
+        for (shortcut, previous, next) in [
+            (&mut config.base.shortcut_nana, "Q", "N"),
+            (&mut config.base.shortcut_broadcast, "Z", "B"),
+            (&mut config.base.shortcut_memory, "N", "M"),
+        ] {
+            if ["CommandOrControl", "Control", "Ctrl"].iter().any(|modifier| shortcut == &format!("{modifier}+Shift+{previous}")) {
+                *shortcut = format!("CommandOrControl+Shift+{next}");
+            }
+        }
+
+        // Legacy configurations could enable both; preserve the previously effective gravity mode.
+        crate::desktop_menu_policy::enforce_movement_exclusion(
+            &mut config.window.smart_positioning_enabled, &mut config.window.desktop_physics_enabled, "window");
+
+        // ── 配置迁移：ai.enable_native_function_calling → tools.enable_native_function_calling ──
+        // 旧版本中开关存于 ai 下；新版本统一到 tools 下。
+        // 若用户旧配置 ai.enable_native_function_calling=false 且 tools 用了默认值 true，
+        // 则继承旧值 false，避免升级后行为变化。
+        if !config.ai.enable_native_function_calling
+            && config.tools.enable_native_function_calling
+        {
+            config.tools.enable_native_function_calling = false;
+        }
+
+        // ── 配置迁移：web_search 引擎选择 → web_search.providers (Vec<String>) ──
+        Self::migrate_web_search_providers(&mut config);
+
+
+        // ── 配置迁移：web_search.max_results 旧默认 5 → 0（自动）──
+        // 旧版本默认 5 且配置全量落盘，老配置文件普遍持久化了 5；
+        // 一次性将其归零（运行时按调用方智能体取陪伴 5 / 工作 10）。
+        // 标记随配置持久化，用户后来显式设置的任何值（含 5）不再被迁移。
+        if !config.web_search.max_results_default_migrated {
+            if config.web_search.max_results == 5 {
+                config.web_search.max_results = 0;
+            }
+            config.web_search.max_results_default_migrated = true;
+        }
+
+        // ── 配置迁移：浏览器桥工具名 → MCP 命名空间 ──
+        // 桥工具已收进 MCP 命名空间（`browser_click` → `mcp__browser__click`），
+        // 用户此前禁用的旧名若不迁移，会因匹配不上而被静默重新启用。
+        // 映射是幂等的（新名不再以 `browser_` 开头），无需迁移标记。
+        for list in [
+            &mut config.tools.disabled_tools.companion,
+            &mut config.tools.disabled_tools.work,
+        ] {
+            for name in list.iter_mut() {
+                if let Some(new_name) = crate::browser_bridge::tools::to_mcp_name(name) {
+                    *name = new_name;
+                }
+            }
+            // 保序去重：旧名与新名可能同时存在（如 `browser_click` 与
+            // `mcp__browser__click`），`Vec::dedup` 只去相邻重复项，不够用
+            let mut seen = std::collections::HashSet::new();
+            list.retain(|name| seen.insert(name.clone()));
+        }
+
+        Ok(config)
+    }
+
+    /// 搜索引擎选择迁移：单引擎 `provider` → 多引擎 `providers`。
+    ///
+    /// 旧版本只支持单一引擎；新版本允许多引擎混用。保留用户原选择（去重插入到
+    /// 列表首位）。
+    ///
+    /// 迁移完成后 `provider` 归零，避免二次迁移。`providers` 兜底为默认值，
+    /// 避免旧配置把启用列表清空导致搜索静默失效。
+    fn migrate_web_search_providers(config: &mut AppConfig) {
+        // Azure Bing Search v7 已于 2025-08-11 退役，provider 与配置结构都已删除。
+        // 用户磁盘上的旧配置可能仍写着它 —— 在这里静默剔除，否则它会作为一个
+        // 未注册的引擎 id 留在启用列表里，让用户以为搜索仍走 Bing。
+        const RETIRED_ENGINES: &[&str] = &["bing"];
+
+        let old_provider = config.web_search.provider.clone();
+        if !old_provider.is_empty() {
+            if !RETIRED_ENGINES.contains(&old_provider.as_str()) {
+                let providers = &mut config.web_search.providers;
+                if !providers.iter().any(|p| p == &old_provider) {
+                    providers.insert(0, old_provider);
+                }
+            }
+            config.web_search.provider.clear();
+        }
+        config
+            .web_search
+            .providers
+            .retain(|p| !RETIRED_ENGINES.contains(&p.as_str()));
+        if config.web_search.providers.is_empty() {
+            config.web_search.providers = default_web_search_providers();
+        }
+    }
+
+    fn save_to_file(path: &Path, config: &AppConfig) -> VivianResult<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                VivianError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("创建配置目录失败 [{}]: {}", parent.display(), e),
+                ))
+            })?;
+        }
+        let mut value = serde_yaml::to_value(config)
+            .map_err(|e| VivianError::Serialization(e.to_string()))?;
+        super::secret_store::protect_yaml(&mut value)
+            .map_err(|e| VivianError::Config(format!("配置密钥加密失败: {}", e)))?;
+        let yaml = serde_yaml::to_string(&value)
+            .map_err(|e| VivianError::Serialization(e.to_string()))?;
+        crate::utils::fs::write_atomic(path, &yaml).map_err(|e| {
+            // 权限类失败最常见的原因是宿主被降成了低完整性级别（或目录被安全软件
+            // 独占）：此时读取一切正常、只有写入被拒，光看 "os error 5" 无从下手。
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "（用户数据目录不可写：可能以低权限/沙箱方式启动，或目录被安全软件占用）"
+            } else {
+                ""
+            };
+            VivianError::Io(std::io::Error::new(
+                e.kind(),
+                format!("写入配置文件失败 [{}]: {}{}", path.display(), e, hint),
+            ))
+        })?;
+        // 配置文件含 API key 等敏感信息，Unix 下收紧权限为 0o600（仅属主可读写）
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    fn replace_env_vars(content: &str) -> String {
+        regex::Regex::new(r"\$\{([^}]+)\}")
+            .map(|re| {
+                re.replace_all(content, |caps: &regex::Captures| {
+                    std::env::var(&caps[1]).unwrap_or_else(|_| caps[0].to_string())
+                })
+                .to_string()
+            })
+            .unwrap_or_else(|_| content.to_string())
+    }
+
+    fn get_nested(value: &Value, key: &str) -> Value {
+        let mut current = value.clone();
+        for part in key.split('.') {
+            current = current.get(part).cloned().unwrap_or(Value::Null);
+        }
+        current
+    }
+
+    fn set_nested(value: &mut Value, key: &str, new_value: Value) -> VivianResult<()> {
+        let parts: Vec<&str> = key.split('.').collect();
+        let mut current = value;
+        for part in &parts[..parts.len() - 1] {
+            if !current.is_object() {
+                *current = Value::Object(serde_json::Map::new());
+            }
+            current = current
+                .as_object_mut()
+                .unwrap()
+                .entry(part.to_string())
+                .or_insert(Value::Object(serde_json::Map::new()));
+        }
+        if let Some(obj) = current.as_object_mut() {
+            obj.insert(parts.last().unwrap().to_string(), new_value);
+        }
+        Ok(())
+    }
+}
+
+impl Default for ConfigManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod web_search_migration_tests {
+    use super::*;
+
+    fn cfg_with(provider: &str, providers: &[&str]) -> AppConfig {
+        let mut c = AppConfig::default();
+        c.web_search.provider = provider.into();
+        c.web_search.providers = providers.iter().map(|s| (*s).to_string()).collect();
+        c
+    }
+
+    #[test]
+    fn legacy_single_provider_is_preserved() {
+        let mut c = cfg_with("tavily", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["tavily", "duckduckgo"]);
+        assert!(c.web_search.provider.is_empty(), "旧字段迁移后应清空，避免二次迁移");
+    }
+
+    #[test]
+    fn bing_is_dropped_from_both_fields() {
+        // Bing v7 已退役：旧单引擎字段与新列表都要剔除
+        let mut c = cfg_with("bing", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["duckduckgo"]);
+        assert!(c.web_search.provider.is_empty());
+
+        let mut c2 = cfg_with("", &["tavily", "bing"]);
+        ConfigManager::migrate_web_search_providers(&mut c2);
+        assert_eq!(c2.web_search.providers, vec!["tavily"]);
+    }
+
+    #[test]
+    fn empty_providers_fall_back_to_default() {
+        let mut c = cfg_with("bing", &[]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, default_web_search_providers());
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let mut c = cfg_with("tavily", &["duckduckgo"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        let once = c.web_search.providers.clone();
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, once, "重复迁移不应改变结果");
+    }
+
+    #[test]
+    fn duplicate_legacy_choice_is_not_inserted_twice() {
+        let mut c = cfg_with("tavily", &["tavily", "deepseek"]);
+        ConfigManager::migrate_web_search_providers(&mut c);
+        assert_eq!(c.web_search.providers, vec!["tavily", "deepseek"]);
+    }
+
+    /// 用户磁盘上的旧配置可能仍带 `bing:` 整块。结构已删除，反序列化必须忽略它
+    /// 而不是报错，否则升级直接失败打不开设置。
+    #[test]
+    fn legacy_yaml_with_bing_block_still_loads() {
+        // 以默认配置为底，注入退役引擎的痕迹，模拟一份升级前的用户配置
+        let mut value = serde_yaml::to_value(AppConfig::default()).expect("默认配置可序列化");
+        {
+            let ws = value
+                .get_mut("web_search")
+                .and_then(|v| v.as_mapping_mut())
+                .expect("默认配置含 web_search");
+            ws.insert(
+                serde_yaml::Value::String("provider".into()),
+                serde_yaml::Value::String("bing".into()),
+            );
+            ws.insert(
+                serde_yaml::Value::String("bing".into()),
+                serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            );
+        }
+
+        let mut config: AppConfig = serde_yaml::from_value(value)
+            .expect("含已删除 bing 块的旧配置应能反序列化");
+        ConfigManager::migrate_web_search_providers(&mut config);
+        assert_eq!(config.web_search.providers, default_web_search_providers());
+        assert!(config.web_search.provider.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod custom_instruction_tests {
+    use super::*;
+
+    #[test]
+    fn old_configs_default_to_empty_custom_instructions() {
+        let mut value = serde_json::to_value(AppConfig::default()).unwrap();
+        value["memory"].as_object_mut().unwrap().remove("custom_instructions");
+        let loaded: AppConfig = serde_json::from_value(value).unwrap();
+        assert!(loaded.memory.custom_instructions.is_empty());
+    }
+
+    #[test]
+    fn saved_instructions_round_trip_and_shared_readers_observe_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = ConfigManager {
+            config: Arc::new(RwLock::new(AppConfig::default())),
+            config_file: dir.path().join("config.yaml"),
+            revision: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        };
+        let reader = manager.clone();
+        let text = "回答用中文\nCode comments in English.";
+        manager.set_no_save("memory.custom_instructions", serde_json::json!(text)).unwrap();
+        manager.save().unwrap();
+        assert_eq!(reader.custom_instructions(), text);
+        assert_eq!(ConfigManager::load_from_file(&manager.config_file).unwrap().memory.custom_instructions, text);
+        manager.set_no_save("memory.custom_instructions", serde_json::json!("")).unwrap();
+        assert!(reader.custom_instructions().is_empty());
+        manager.reload().unwrap();
+        assert_eq!(reader.custom_instructions(), text);
+    }
+}
+
+#[cfg(test)]
+mod builtin_companion_migration_tests {
+    use super::*;
+    #[test]
+    fn adds_new_companions_once_without_replacing_existing_config() {
+        let mut cfg = AppConfig::default();
+        cfg.characters.list.retain(|c| matches!(c.id.as_str(), "vivian" | "nana"));
+        cfg.characters.list[0].default_online = false;
+        let active = cfg.characters.active_id.clone();
+        ensure_task_routes(&mut cfg);
+        ensure_task_routes(&mut cfg);
+        assert_eq!(cfg.characters.list.len(), 4);
+        assert!(!cfg.characters.list[0].default_online);
+        assert_eq!(cfg.characters.active_id, active);
+        for id in ["deepseek", "claude"] {
+            assert_eq!(cfg.characters.list.iter().filter(|c| c.id == id).count(), 1);
+            assert!(cfg.routing_matrix.contains_key(&format!("companion_{id}")));
+        }
+    }
+}

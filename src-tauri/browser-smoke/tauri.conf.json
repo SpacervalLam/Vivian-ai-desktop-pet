@@ -1,0 +1,19 @@
+{
+  "productName": "Vivian Browser Smoke",
+  "version": "0.1.0",
+  "identifier": "test.vivian.browser-smoke",
+  "app": {
+    "windows": [],
+    "security": {
+      "assetProtocol": {
+        "scope": [],
+        "enable": true
+      }
+    }
+  },
+  "bundle": {
+    "icon": [
+      "../../src-tauri/icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+/* 按钮外观按角色分色；默认值即 Vivian，未知角色也沿用这套兜底。 */
+.pet-clipboard {
+  --clip-bg: rgba(255,249,224,.97);
+  --clip-ink: #806328;
+  --clip-line: rgba(170,140,70,.24);
+  --clip-shadow: #30261920;
+  --clip-shadow-hover: #30261928;
+  position: absolute; right: 16px; top: 28%; z-index: 50; pointer-events: auto; width: max-content; max-width: calc(100% - 32px);
+}
+/* 新增内置角色只需补一组变量，不必再改组件的分支判断。 */
+.pet-clipboard.is-nana { --clip-bg: rgba(246,237,255,.97); --clip-ink: #7955a3; --clip-line: #ad8cc33d; --clip-shadow: #2f234020; --clip-shadow-hover: #2f234028; }
+.pet-clipboard.is-deepseek { --clip-bg: rgba(230,243,252,.97); --clip-ink: #2f6d9c; --clip-line: #428abf3d; --clip-shadow: #18324820; --clip-shadow-hover: #18324828; }
+.pet-clipboard.is-claude { --clip-bg: rgba(250,234,223,.97); --clip-ink: #96552f; --clip-line: #b777503d; --clip-shadow: #40241520; --clip-shadow-hover: #40241528; }
+.pet-clipboard-send { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-radius: 18px; border: 1px solid var(--clip-line); background: var(--clip-bg); color: var(--clip-ink); box-shadow: 0 4px 14px var(--clip-shadow), inset 0 1px 0 #ffffffcc; font: 500 12px/1.2 system-ui,sans-serif; white-space: nowrap; cursor: pointer; transition: transform .16s, box-shadow .16s; }
+.pet-clipboard-send:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 18px var(--clip-shadow-hover); }
+.pet-clipboard-send:active:not(:disabled) { transform: scale(.96); }
+.pet-clipboard-send:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.pet-clipboard-send:disabled { opacity: .7; cursor: wait; }
+.pet-clipboard-error { display: block; margin-top: 6px; padding: 7px 9px; border-radius: 10px; background: #fff9f5; color: #a34936; font: 12px/1.4 system-ui; overflow-wrap: anywhere; }
+.pet-clipboard-spinner { animation: clipboard-spin 1s linear infinite; }
+.pet-clipboard-send { box-sizing: border-box; max-width: 100%; }
+.pet-clipboard-send svg { flex-shrink: 0; }
+.pet-clipboard-send span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+@keyframes clipboard-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pet-clipboard-send { transition: none; } .pet-clipboard-spinner { animation: none; } }

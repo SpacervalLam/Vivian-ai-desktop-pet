@@ -1,0 +1,3269 @@
+{
+  "format": 1,
+  "id": "deepseek",
+  "name": "DeepSeek",
+  "version": "1.0.15",
+  "files": {
+    "assets/chibi/deepseek-atlas.webp": "5029ebbbe66fcc5ca9a86f439e620fb16346a59d36b285417ffcae47953ff10a",
+    "assets/chibi/motion/deepseek/deepseek-angry-sheet.webp": "6a549d2996d7bc065c5fa7f152e4af176309cc5d55e21ab883870522f7c9f833",
+    "assets/chibi/motion/deepseek/deepseek-blink-sheet.webp": "e264b0a89638ac0993393cd4dd18d352061f6349f2433424858d87bc255b1bc5",
+    "assets/chibi/motion/deepseek/deepseek-busy-in-sheet.webp": "c82c954b9e4261cad129ee351e9ab150cc8d747b32f0f7172292adb3205ed5c0",
+    "assets/chibi/motion/deepseek/deepseek-busy-loop-sheet.webp": "25544dce9e29604c9ebef2b64a6594a4bcf858ebee8362516e3e8b70f91e54a0",
+    "assets/chibi/motion/deepseek/deepseek-cast-sheet.webp": "a092d27c717e982964d12e7a9dad3cebf3c758d1a157e2312fe188aecef31a69",
+    "assets/chibi/motion/deepseek/deepseek-clipboard-sheet.webp": "198e70d431fc311cee75747b4b500ca384ef3f57b430e4a233f724e2b37bd8ce",
+    "assets/chibi/motion/deepseek/deepseek-edge-bottom-sheet.webp": "7015a93d303b92c7861827c21e63af247974b542861b8191daabed0c0acdaf09",
+    "assets/chibi/motion/deepseek/deepseek-edge-peek-sheet.webp": "870c93a99485ab3382db905c8cbffbbefc8285b6b2987c0abbfa8d10bb2f2085",
+    "assets/chibi/motion/deepseek/deepseek-float-sheet.webp": "4e813611b4149241eb4c446ea66c8fd30966d99268fc91f6bd477a7bd72a5d16",
+    "assets/chibi/motion/deepseek/deepseek-happy-sheet.webp": "66ffd32f1cfa3ace647cb61f297d66a11db471d221ebf8e5e8a60c55298ac6a6",
+    "assets/chibi/motion/deepseek/deepseek-idle-sheet.webp": "7c90ca0334c8b746870eb7d52bcf0f862ab36eb8929d6a20bbbae872eb8cc25e",
+    "assets/chibi/motion/deepseek/deepseek-look-sheet.webp": "d163f55c525cfdaba17934831e0a74eda2f0d58cf6ab56c6232c99c982f2f2a8",
+    "assets/chibi/motion/deepseek/deepseek-music-sheet.webp": "0266695c09cd65e690e039d12cd80f3891b2fd7d5738d23d4fece36f060cac94",
+    "assets/chibi/motion/deepseek/deepseek-remind-sheet.webp": "4749cb4b609dcc78c5dafae87b2217c84df4ed73c21276f239deea539357abaa",
+    "assets/chibi/motion/deepseek/deepseek-sleep-sheet.webp": "5253e679e4071a4848432fc6dffab7911966ff4f0f709e03aaac0acf2b8dd731",
+    "assets/chibi/motion/deepseek/deepseek-smug-sheet.webp": "13d14da3c3748cb5ef0a94749c30a2b5b377b4a3bf7f950220d0d98b5738ce40",
+    "assets/chibi/motion/deepseek/deepseek-think-sheet.webp": "a9f1ea41a00d56214fa3f6e88a2dbc63d4ac84bae9215f2dd97d94179b40748f",
+    "assets/chibi/motion/deepseek/deepseek-tired-sheet.webp": "5fa0e276882fbcce45dcdf0587170ff82d25f263bb6aceb1617088c9d76324e1",
+    "assets/chibi/motion/deepseek/deepseek-turn-left-sheet.webp": "0c1a7a0e3dc0f8ad3ad8c2d70e57446a43c8d418c24d0b86063a198bca55739c",
+    "assets/chibi/motion/deepseek/deepseek-wake-sheet.webp": "b7aa84a470e0cad298d69743ce9c44fafc919b7daeefbcd1868f48dbe6a92dc8",
+    "assets/chibi/walk/deepseek/deepseek-walk-left-sheet.webp": "8fcb27fb97294374f499ff02aff56a3c4cf38c61a7fb2952c995e665fdd7e70e",
+    "assets/icons/charaters/deepseek.webp": "02aef306b84f09bd1f50bd180ca8a09b0c60a98f49fbea0d527e3bbb30919723",
+    "assets/record-art/deepseek-bed-phone-v1.webp": "75fc457c555a71aaedff0ecc17fa6e7ae9a928479cbd6d3d2c6f8335d0fe9c8c",
+    "assets/stickers/deepseek_content_01-v2.webp": "f9a64191ca0288a5e6ed0c11b99f9571c41f8f1c3b6cff384f723d1849f24574",
+    "assets/stickers/deepseek_curious_01-v2.webp": "eb2e0c352f7f79e0647794f658ff6be2443fe74c8e66cc81cff9e235077b696d",
+    "assets/stickers/deepseek_happy_01-v2.webp": "1ef70b158b70f04500667553eb0dbea5379cf6a5f1bfa36e2d9755ea86700adb",
+    "assets/stickers/deepseek_okay_01-v2.webp": "07e6f9294a1ff167260d4c8531fa7715cd604e269e0058f1adaa95f5def3c286",
+    "assets/stickers/deepseek_peek_01-v2.webp": "bd7052f4ce028bfe5c9f1319a65e4b7691a48d26dbf04b673923e3667a2c9059",
+    "assets/stickers/deepseek_question_01-v2.webp": "c8171e0f691c99a55fdaa0e671eb1e2baa774f007becfc88a816bf90805239b8",
+    "assets/stickers/deepseek_sleepy_01-v2.webp": "ef7774a4ac69d1ee9596a234ef363c6853b0ab8fe49ec013ccabc8ee289fbed0",
+    "assets/stickers/deepseek_thanks_01-v2.webp": "d5e7dc3b8aa524797f4a8c45142f8727806bba39e218ab924d5e201ee9cfc29c",
+    "assets/stickers/deepseek_think_01-v2.webp": "313e3d644d57038297d45ee91790677829b8c66ec25d3012b7b977fbe7245500",
+    "assets/stickers/deepseek_wave_01-v2.webp": "02b19e08c55e0b85315a635fb6d887bcaaf57a6587d2dfb011dff0813c8caf7f",
+    "prompts/appearance.en.md": "ca7ac3d8ea705cdb3ad03e37a88204cd820affe87487c468c8ca9dcb88f3c9f7",
+    "prompts/appearance.ja.md": "35dd4353b3363d2a34c41263078f592ad16e48136c4ceca94ab421a64bba9948",
+    "prompts/appearance.md": "513b6ce23a4138327f67bb9abaa322e01c720845269077ec44744cfb8a5968de",
+    "prompts/augment_voice.md": "2e7a0acf2f3ddd1d171776675a33e59a1eedfde1826a9ffb7a67f246881ec944",
+    "prompts/background.en.md": "5a3aec08cb00dc2c6eb6c9e3b79d6075135a15b859fa664aef7adc60ae9e920e",
+    "prompts/background.ja.md": "e19288a56375c7e3c940210b2aec4ef70a60af30c75c6fd9c9ca4389cf4429f7",
+    "prompts/background.md": "e3424460782c5fef422808437aba64564dd9e7c022a36c65c8382fa8c5933596",
+    "prompts/behavior.json": "bc9f250d4c2e8a4bda755d7901091f9f2b13df8bb1430b30e761e057a9c8b018",
+    "prompts/canon_quotes.en.md": "eb6e3f67f837fdc188eb5ffa5ff2ea7dce511f1c32a34289750b9e10473790a4",
+    "prompts/canon_quotes.ja.md": "1fcd49e61dded659a03806205be69e6dc351c11f8721dce80fe7db73f6f11901",
+    "prompts/canon_quotes.md": "0ab913e1209505e8400573a5dd8727f9ab57c6b0c366993728e89437984aa086",
+    "prompts/coding_voice.md": "484be57f119605f6bcdb8c83b67745f05af6a7e27d97d6e14bafb7b334b6f70f",
+    "prompts/diary_voice.en.md": "0763ab4dce66b0b0a62277762c3827711467a32fc1015f9b75d1b18dd5d70c5a",
+    "prompts/diary_voice.ja.md": "dbabb6b5d53b7e982d6a8ead8ec909d2c26926d306714d657c42a351f5ffc59b",
+    "prompts/diary_voice.zh.md": "39b60f4f8d85227d47df62c63fba4ddb62173071d2e264be1cb65d22fc9ed0db",
+    "prompts/environment_presets.en.md": "9666004cf1d90cd1e0a2e1d005090510e49cae402828e9ba51278786f03c40e1",
+    "prompts/environment_presets.ja.md": "bc2277dd49fd208ee70fc21c3ab6892995f5cf0da0c52e959c319890d8cd8e3d",
+    "prompts/environment_presets.md": "5c87006deb5313a35ee9df29e6e84b2bd2e8c15fe7740ae5496b0905abdfb329",
+    "prompts/examples.en.md": "2c5798a9d23fd9444494a0db74541709aa223edacb41dcbb60e0152e220354e8",
+    "prompts/examples.ja.md": "82c8edddc3f7adb4adcdf29b33bc6aab5cada30de3768f03728544e3cf782d78",
+    "prompts/examples.md": "c81eca3eaf9d2d342cdb6e5d9f715919490f7b6cc02d372256a5858c30d005f0",
+    "prompts/flags.json": "c7f58c5e2650fecda9f906314784124b25ba6dc9b6f429f5d0b2ab60e9f01078",
+    "prompts/identity.en.md": "51d8b7a9fc7b40266e648caa7ec0bf3f7ed4e6807f605848e8ccba3053ee83e7",
+    "prompts/identity.ja.md": "a11de6dd33d616e123f16ab3bf0b1a3f7cc9541e0de0a16bc7711bdd69021fd4",
+    "prompts/identity.md": "57e432dc8b6f1e48a335c73f83b9740e3f946625e4e426bc79eed53e47b31812",
+    "prompts/interests.en.md": "b4e98cb3ecfd158658383e5073dfdbbce94bf6c8e3e6f6c98dedd7e60d44b53b",
+    "prompts/interests.ja.md": "e042d87adbbf8dae29e40a3a0c12bbdc02658c6d6d22825185cd72b7bd60ff63",
+    "prompts/interests.md": "c1e69fad930a2cf76291d31413f78b7aa50e5fdc4c72d89d4cb87e9172ca36aa",
+    "prompts/meme_voice.md": "516cc0e20c4320d61ff32ebc832b2412f65f12e5e9c7eb0ca1030cc044f13337",
+    "prompts/mood.json": "f894a977d4ab752846d22af63190fbbb4e26ba3d715ad6251ee9be4eab45c2c9",
+    "prompts/persona_config.en.md": "2f14af6a49fa3ac37e3468980f7da90c5fb9caf7971b5b678315aa27efdadb5a",
+    "prompts/persona_config.ja.md": "be43d40bdb80818c0ecc876b7c2b7c2ecd0c6d6de50615b344adc7fae45ac6cf",
+    "prompts/persona_config.md": "8f19cf4d997590a96aa82935cbcde5606efe217706fa6a9c0e77b3f6e257c824",
+    "prompts/personality.en.md": "a75db84a5ba87081e79d0598a859181ac391da3099c37f77a894db3c24af5d5b",
+    "prompts/personality.ja.md": "197acb01f0ace631db2655eb2c3a1b103484d1194ddbf753ee1818bcd78ac342",
+    "prompts/personality.md": "6e96d7a29e959b2389e3643c943d6f75f7d4e45e38fa366ba29b04f58e6ff600",
+    "prompts/platforms.json": "c7e8dbcb7d68ccaa24e417ec906afa2eacb1deadc39e0dd44412572058abfc57",
+    "prompts/relation_links.json": "097c41bdc08f648810af9d7592f82e6c914a17d2c32e57a1cb3a99f8afa38518",
+    "prompts/relationships.en.md": "8a0b4f443ebb872407f6dc2a7518ac80b262bd64fee98b1f8dc02aa043fcad4a",
+    "prompts/relationships.ja.md": "c93443ffc52d8eb3a1c2470e013eacfa1c86cfebdf936d6d3980df4e132c5829",
+    "prompts/relationships.md": "d47789b48fd7f2ab9cff1aaf261449b4ca93897123a4118578825969b02c6269",
+    "prompts/scenes.en.md": "1e2411153514a3db6806b3eddd4ad35676111e21ec5666707d93f68f32fcc8f7",
+    "prompts/scenes.ja.md": "8ededfb7b94aec0c4dea91a2337e03ab7a92397221e06fd70ef516cc04ac4848",
+    "prompts/scenes.md": "c2a1d7a4e268d98a86606e30cce20565e403b68db55658bc1b38e048f27165d7",
+    "prompts/seed_group.json": "d7868d7178860d5f62bc53248f2697fa92004e80d71a502e36d905570c68ecf8",
+    "prompts/seed_memories.en.md": "171620225b00c31f6df68f2bd7d9007e8f5c0a4917504ca677a03b09a5963665",
+    "prompts/seed_memories.ja.md": "d839c7cac191c3a58bee265dfe743a7b0fc18cb83e581e64da887d4409334bbd",
+    "prompts/seed_memories.md": "4feb49e1bae5831463f0d554c2125338f7c60068e1648a6a0666d5d3660e2a73",
+    "prompts/speech.en.md": "c5e9e640219f45e33f3160e82dac2ae63f223ae7d0ddc452065636158caee40b",
+    "prompts/speech.ja.md": "cbd40411f6389156d545bdc29235a423e9fa7df81997ab01ab1f2a4e6fe3f42f",
+    "prompts/speech.md": "54f738984ab2694800e590d502210d842887f89e5dbb66324e94df74f899d4f5",
+    "prompts/stickers.json": "ba3ee203ff19deb4c3b0aa0ccaca6f368d94c33a2fb6bd2569c792be220a8a83",
+    "prompts/style.json": "84dc0288f87d44bb0fc04329cbf5ef9b50b44a6041861a1cbf17b5aae46e8fc9",
+    "prompts/traits.json": "d3cb55403cc21c8f980e68196632b80e02dc46ed8e4b24b4a65f94f77e38b1b9",
+    "prompts/voice_fragments.json": "1c79c7d30a2b2602a8977de88fe6e46e95cc2e384d42f958554efba2d8db37d8",
+    "assets/chibi/walk/deepseek/deepseek-walk-right-sheet.webp": "bb6764a06a55813b9f5d41f89ff89ef19cd863f9c4bba32e4044fe1f8cdb2295",
+    "assets/chibi/motion/deepseek/deepseek-turn-right-sheet.webp": "f47c6f79aaea815de0528b8a4e2facea1f88cc15acc4ebb85a04ca2ddece3297"
+  },
+  "anchors": {
+    "/chibi/deepseek-atlas.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-idle-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-float-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/walk/deepseek/deepseek-walk-left-sheet.webp": [
+      [
+        0.137189,
+        -2.0119309
+      ],
+      [
+        0.137189,
+        -2.0119309
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.0119309
+      ],
+      [
+        0.137189,
+        -2.0119309
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.210664
+      ],
+      [
+        0.137189,
+        -2.0119309
+      ],
+      [
+        0.137189,
+        -2.210664
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-turn-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0.137189,
+        -2.0119309
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-blink-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-cast-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-happy-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.0030571
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        0.1873806
+      ],
+      [
+        0,
+        0.1900361
+      ],
+      [
+        0,
+        -0.0030571
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-angry-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-think-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-smug-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-sleep-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-busy-in-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-busy-loop-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-wake-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-remind-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-tired-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-music-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-clipboard-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-look-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-edge-peek-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        -1.953125,
+        0
+      ],
+      [
+        4.296875,
+        0
+      ],
+      [
+        11.914063,
+        0
+      ],
+      [
+        17.96875,
+        0
+      ],
+      [
+        21.484375,
+        0
+      ],
+      [
+        22.265625,
+        0
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-edge-bottom-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/walk/deepseek/deepseek-walk-right-sheet.webp": [
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.863281
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ],
+      [
+        2.910156,
+        -1.863281
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-turn-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        0,
+        0.1953125
+      ],
+      [
+        2.910156,
+        -1.6614573
+      ]
+    ]
+  },
+  "scales": {
+    "/chibi/deepseek-atlas.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-idle-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-float-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/deepseek/deepseek-walk-left-sheet.webp": [
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-turn-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1.017505,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-blink-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-cast-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-happy-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1.00217391,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.00655022,
+        90
+      ],
+      [
+        1.0043573,
+        90
+      ],
+      [
+        1.00217391,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-angry-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-think-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-smug-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-sleep-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-busy-in-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-busy-loop-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-wake-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-remind-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-tired-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-music-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-clipboard-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-look-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-edge-peek-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-edge-bottom-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/deepseek/deepseek-walk-right-sheet.webp": [
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ]
+    ],
+    "/chibi/motion/deepseek/deepseek-turn-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1.033333,
+        90
+      ]
+    ]
+  },
+  "presentation": {
+    "defaultSize": {
+      "scale": 0.95282,
+      "translateY": 2.410097
+    },
+    "bottomDock": {
+      "scale": 0.735,
+      "translateY": -44.397631
+    },
+    "bubbleTheme": {
+      "background": "rgba(255, 255, 255, 0.97)",
+      "textColor": "#1D4ED8",
+      "tailColor": "#FFFFFF",
+      "shadow": "0 6px 20px rgba(77, 107, 254, 0.30), inset 0 0 0 2px #4D6BFE",
+      "crossBorderColor": "rgba(77, 107, 254, 0.7)"
+    },
+    "accent": "#4b9ed3",
+    "notificationNotes": [
+      587,
+      784
+    ],
+    "diaryArt": "deepseek-bed-phone-v1.webp"
+  },
+  "independent_directions": true,
+  "animations": {
+    "float": {
+      "name": "float",
+      "label": "升降悬浮",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-float-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "walk": {
+      "name": "walk",
+      "label": "走动",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/walk/deepseek/deepseek-walk-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 4,
+      "frames": 14,
+      "loop": true,
+      "durations": [
+        90,
+        82,
+        76,
+        72,
+        68,
+        84,
+        78,
+        72,
+        82,
+        82,
+        72,
+        68,
+        88,
+        76
+      ],
+      "mirrorRight": false
+    },
+    "turn": {
+      "name": "turn",
+      "label": "转身",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-turn-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": false,
+      "durations": [
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        27
+      ],
+      "mirrorRight": false
+    },
+    "blink": {
+      "name": "blink",
+      "label": "眨眼",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-blink-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30,
+        30
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "cast": {
+      "name": "cast",
+      "label": "施法",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-cast-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "happy": {
+      "name": "happy",
+      "label": "开心",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-happy-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "angry": {
+      "name": "angry",
+      "label": "生气",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-angry-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "thinking": {
+      "name": "thinking",
+      "label": "思考中",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": true,
+      "durations": [
+        100,
+        100,
+        140,
+        180,
+        260,
+        280,
+        320,
+        280,
+        240,
+        180,
+        140,
+        100
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "think": {
+      "name": "think",
+      "label": "思考",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "smug": {
+      "name": "smug",
+      "label": "得意",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-smug-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "sleep": {
+      "name": "sleep",
+      "label": "入睡",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-sleep-sheet.webp",
+      "cols": 4,
+      "rows": 6,
+      "frames": 24,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        120,
+        120,
+        130,
+        140,
+        150,
+        160,
+        170,
+        170,
+        160,
+        150,
+        150,
+        160,
+        170,
+        180,
+        180,
+        170,
+        160,
+        150,
+        140,
+        130,
+        130,
+        120,
+        120,
+        120
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-in": {
+      "name": "busy-in",
+      "label": "忙碌-掏出手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-busy-in-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        85,
+        90,
+        95,
+        95,
+        90,
+        85,
+        80,
+        80,
+        85,
+        90
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-loop": {
+      "name": "busy-loop",
+      "label": "忙碌-看手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-busy-loop-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        210,
+        210,
+        120,
+        120,
+        100,
+        100,
+        90,
+        90,
+        90,
+        90,
+        100,
+        100,
+        120,
+        120,
+        210,
+        210
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "wake": {
+      "name": "wake",
+      "label": "睡醒起身",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-wake-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "durations": [
+        50,
+        50,
+        60,
+        60,
+        65,
+        65,
+        65,
+        65,
+        60,
+        60,
+        55,
+        55,
+        50,
+        50,
+        45,
+        45
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "remind": {
+      "name": "remind",
+      "label": "温和提醒",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-remind-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        120,
+        130,
+        140,
+        150,
+        160,
+        160,
+        150,
+        140,
+        130,
+        120,
+        110,
+        110
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "tired": {
+      "name": "tired",
+      "label": "吃力擦汗",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-tired-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "music": {
+      "name": "music",
+      "label": "听歌打拍子",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-music-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "clipboard": {
+      "name": "clipboard",
+      "label": "好奇看纸条",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-clipboard-sheet.webp",
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        120
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "look": {
+      "name": "look",
+      "label": "四处张望",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/deepseek/deepseek-look-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        180,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        180
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "edge": {
+      "name": "edge",
+      "label": "贴边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-edge-peek-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        70,
+        70,
+        80,
+        80,
+        90,
+        90,
+        90,
+        90,
+        110,
+        110,
+        120,
+        120,
+        150,
+        150,
+        200,
+        200
+      ],
+      "directions": null,
+      "mirrorRight": true,
+      "mirrorLeft": false
+    },
+    "edge-bottom": {
+      "name": "edge-bottom",
+      "label": "下沿扒边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/deepseek/deepseek-edge-bottom-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        60,
+        280
+      ],
+      "directions": null,
+      "mirrorRight": false
+    }
+  }
+}

@@ -1,0 +1,3289 @@
+{
+  "format": 1,
+  "id": "chatgpt",
+  "name": "ChatGPT",
+  "version": "1.0.10",
+  "files": {
+    "assets/chibi/chatgpt-atlas.webp": "b26708c4db406cfc2d90238cc8573775ecac44d6e7b8dad9520220a34bf62726",
+    "assets/chibi/motion/chatgpt/chatgpt-angry-sheet.webp": "fdae4c468de224bb1456f7b391ba2df140a44d11653a90fe603dce5dd3229ae7",
+    "assets/chibi/motion/chatgpt/chatgpt-blink-sheet.webp": "32484d1636cf5dad1dfdc56a1c3bebb2ca0cf22ab87baa33dcb84c42978d0321",
+    "assets/chibi/motion/chatgpt/chatgpt-busy-in-sheet.webp": "1adf818192520cea144cbcb5e08cea7da6fee2cd9b8555766c173ffd3c1b44a6",
+    "assets/chibi/motion/chatgpt/chatgpt-busy-loop-sheet.webp": "c59a4cb731d2b14a398b28153a6b93b82cb22c1a8def643fc839f581eb3fb39b",
+    "assets/chibi/motion/chatgpt/chatgpt-cast-sheet.webp": "780d1a7f864d46f338db1021f6dd0c2cab895f4e05b096c32343db492a17b4df",
+    "assets/chibi/motion/chatgpt/chatgpt-clipboard-sheet.webp": "b235820a4fabe553775f0f623877764ce8c94fd8fd01d8d05b09f8cc2288704a",
+    "assets/chibi/motion/chatgpt/chatgpt-edge-bottom-sheet.webp": "c02cf2b99cdf62d3ab481d1bd197c4c408f89bcf591f0dd33c6249c8b9489f91",
+    "assets/chibi/motion/chatgpt/chatgpt-edge-peek-sheet.webp": "12a4492a28c1d783f3eea64113d1d4fdc9c0d4003b9499e70c3a85c5a4fa1ef5",
+    "assets/chibi/motion/chatgpt/chatgpt-edge-sheet.webp": "266cb62ec1e1c7a8f5a42814da3db962596297f75164bd5a1d7fbfe4c3c93bc2",
+    "assets/chibi/motion/chatgpt/chatgpt-float-sheet.webp": "15aeb93c4930383565aaf5833d2956eaffdb5d470fb0ec7f489192017f9ef267",
+    "assets/chibi/motion/chatgpt/chatgpt-happy-sheet.webp": "8db61a928ab3f38bad34290ea6b16da745b4382fadc53d4d34de53d8fad7cbb6",
+    "assets/chibi/motion/chatgpt/chatgpt-idle-sheet.webp": "a2a5565a49e4a03f59cbda2f844de032089a4069184843cafa7e9fb330d5ffb1",
+    "assets/chibi/motion/chatgpt/chatgpt-look-sheet.webp": "fb4ef96f20752d6cdd299f04befaa62074e9bc8c062a8b629c2229ef2345d578",
+    "assets/chibi/motion/chatgpt/chatgpt-music-sheet.webp": "e48803d3e22d937074e733e05a54925f0d79ec2ebc021b8e0b7c24e57b8334de",
+    "assets/chibi/motion/chatgpt/chatgpt-remind-sheet.webp": "ae3d35c769aa24deb0cddc9beab122d0d4e2f46e22bd648dd14b93713e578aa1",
+    "assets/chibi/motion/chatgpt/chatgpt-sleep-sheet.webp": "1bc87f018a46f401ffd5abd03810b9b9aa0c8a60630de90332d524b0d646e2d4",
+    "assets/chibi/motion/chatgpt/chatgpt-smug-sheet.webp": "df40509a3bc24e81cf1a3494f5a221bb550b116a42ca6fa014c28d4610905acb",
+    "assets/chibi/motion/chatgpt/chatgpt-think-sheet.webp": "d7d3b2cb68716fe27d264b53364cee939f84c4fece63f326cd4e2c9b8b274749",
+    "assets/chibi/motion/chatgpt/chatgpt-tired-sheet.webp": "66173127b2bb5dfe6061e7447bb63c7bb2a38530793d8e8a3e6f6e3d5e496a2c",
+    "assets/chibi/motion/chatgpt/chatgpt-turn-left-sheet.webp": "d9018be9af713baad1aac8d1fa1d483db14b4ed6cefd126a93ee6bab64356fef",
+    "assets/chibi/motion/chatgpt/chatgpt-umbrella-sheet.webp": "faef98dbced8994bdca0051f36fbbc376ffc918f5bd0f6def69e4319defaa989",
+    "assets/chibi/motion/chatgpt/chatgpt-wake-sheet.webp": "89538beccbcebbdbd219ce8bedaba39f3f59c615132caa40690451d4eabac9e4",
+    "assets/chibi/walk/chatgpt/chatgpt-walk-left-sheet.webp": "c4875e7c30c3b20a8bdade030e4675c5f99566ff00f6062b4a875e8cdd6d7096",
+    "assets/icons/charaters/chatgpt.webp": "180ba5a78a24ce3a11c0f042c999bdff1c127f3c333e3112230938bfe2d4a2d4",
+    "assets/stickers/chatgpt_content_01-v2.webp": "9d3da77fb7a90bea6419ec2672ef5ab5d851e04312dd3fdf64466f6e91ecf1ac",
+    "assets/stickers/chatgpt_curious_01-v2.webp": "b901911d2adddf74037e387ab504db946dea14dd4f4ffd98fbaeefcdb5fdd370",
+    "assets/stickers/chatgpt_happy_01-v2.webp": "21214fc2550a85bb7d2065ec7fda0a1d8a6ff6123b8c6fd7ab39c9476ae1345a",
+    "assets/stickers/chatgpt_okay_01-v2.webp": "467b9d65364634c4b77a1e847e4242fc7eaf6b4f7eaf2cc20db1e43b2127dd37",
+    "assets/stickers/chatgpt_peek_01-v2.webp": "7711f85f39e207b5dd67ad9b91703177fae6b95b9e516f61eb46963224cd4582",
+    "assets/stickers/chatgpt_question_01-v2.webp": "95fc33a7f86f53df6dd08419577657ae09353b8c8ea903601848f11e39bbae06",
+    "assets/stickers/chatgpt_sleepy_01-v2.webp": "9be4c06cf9451cea85a22ad5cb37144290b7f717e2815a92717502c10bf04d83",
+    "assets/stickers/chatgpt_thanks_01-v2.webp": "898034f0488b91c8366f8d422f3d91d428b501d1308d563c3cb8be2798fdebce",
+    "assets/stickers/chatgpt_think_01-v2.webp": "caf271fc41c370e69e4a6e83e6e4b59401ee90ea691c4dae2e7c1a626302f4c2",
+    "assets/stickers/chatgpt_wave_01-v2.webp": "560e68760c3d45528ec2d3fc39497b8e8411eb6ff9f2a64f325401ed9496cc6b",
+    "prompts/appearance.md": "fc9955dcfb2ce154f4eb32a3cff2b6dfe31bc847a189fd8b72489cbe9510f4f8",
+    "prompts/augment_voice.md": "4877d9b0d07c13bffe15d2c8ff31f90c42b6e9bec30112180d94c1fe9042c084",
+    "prompts/background.md": "6702b7511a026c2452b92581015f4631f5ecc33413d7e624be3cf448ed877a60",
+    "prompts/behavior.json": "b7cbe8887d12dda02e65f2844566b856d529351e2989ee4c30a75a9907683cd6",
+    "prompts/canon_quotes.md": "3974622509e8df0c23f47f6f6bac7fbf6ad0f8d58a44a05e2f3521710d9d6b2f",
+    "prompts/coding_voice.md": "da2b0e541f1ec02e16fb93bdc03ab5541bdd4850bc42de2e78bc6057299b23e2",
+    "prompts/diary_voice.en.md": "8462735b89f679344c10d99f74cc3ea474e1c02e04d120b6a961849aad2b95ec",
+    "prompts/diary_voice.ja.md": "caca22554b4f2bacf82434e4f8a2f501c10381442b405c9e80f03a1150e8777c",
+    "prompts/diary_voice.zh.md": "98b814a370c08d002858830c563b545aee49481f4bc79018a676d3f9c0ca6420",
+    "prompts/environment_presets.md": "dd1f74308c382aa34d0aa557084d8dbfb43d5a7e0a5a7b96a7a8a4fd7595b0ce",
+    "prompts/examples.md": "13e1ef4842d67aba5380dff34ba6d6e012e7e27cfb0c9a468bf6832b6f8c2b48",
+    "prompts/flags.json": "e05b1b60b6ba2425e4fa9b7c9239fa4ded841b24770c99a5c5860415f687bd6e",
+    "prompts/identity.md": "cd19d2e170baf86d8a828e27eeaf21af5ea509c016972a1e524a3c14ca76a4d3",
+    "prompts/interests.md": "fcd59aa058d6acf8a32e6b750e88d369783d6ffd163759676499957e4e161638",
+    "prompts/meme_voice.md": "f7a031492fbd37ad5fa6bc07e58defa78751325a6e862836565eaab5b8920091",
+    "prompts/mood.json": "92c3284384f02f42e2f0b09b18cd0cd29472b00314816d88341aa4cb1d93030b",
+    "prompts/persona_config.md": "2f86e7e5ca4d76dc768a51bd939e46e73d25112a9f6cad04206777011422a705",
+    "prompts/personality.md": "4e1d3327061f9613038212b18acf4ef7c96957dd0c17e45ff110aaa3b30e9f09",
+    "prompts/platforms.json": "d5bd563b82a753a34d8e9b785e85c580e804215b61230756687b28db4a6541f7",
+    "prompts/relationships.md": "7744adf6cca11cef77ca5a085d67a6ce0053a57720a417bb556848022a98b1b1",
+    "prompts/scenes.md": "0777043d27efc86f5725599715916437261feb281b44ec6b163a5b0d7cef302b",
+    "prompts/seed_memories.md": "833ed9255cb2bedbb011cb19097a63839e1a12264513dc0f5b79a4d944b3676c",
+    "prompts/speech.md": "45d2f8f2ecdd888343255e7c88a4268e87853a3d8176441b4364fd413a48604c",
+    "prompts/stickers.json": "f11f8407efaba31df10057d88318a9d4ecb245cb1d0c0474bf844530ef7c3870",
+    "prompts/traits.json": "a5c3d509c0b1ee667a480ca4b46724010e053701198db76a52383d6b1ae4d00c",
+    "prompts/voice_fragments.json": "a5338d955b09046ec0b16f3a9625b7955c763aae07dc722e474e6078745f932f",
+    "assets/chibi/walk/chatgpt/chatgpt-walk-right-sheet.webp": "433ba1706e21fc9c2a3649c74c6e430d2703c909b24c61ce31df64ecb35b96f6",
+    "assets/chibi/motion/chatgpt/chatgpt-turn-right-sheet.webp": "665d695f239726a61ad70949b02c46ccc61bd0a5587d0287bfdae0aefc9e68e0"
+  },
+  "anchors": {
+    "/chibi/chatgpt-atlas.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-idle-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-float-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/walk/chatgpt/chatgpt-walk-left-sheet.webp": [
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.390625
+      ],
+      [
+        0.878906,
+        0.195313
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-turn-left-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        -0.558889,
+        0.381158
+      ],
+      [
+        1.520647,
+        0.195313
+      ],
+      [
+        0.571987,
+        0.195313
+      ],
+      [
+        1.08817,
+        0.195313
+      ],
+      [
+        0.139509,
+        0.195313
+      ],
+      [
+        -1.981027,
+        0.195313
+      ],
+      [
+        0.878906,
+        0.390625
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-blink-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-cast-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-happy-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-angry-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-think-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-smug-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-sleep-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-busy-in-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-busy-loop-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-wake-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-remind-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-tired-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-umbrella-sheet.webp": [
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.918122
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.478077
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.478077
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ],
+      [
+        -1.761366,
+        -1.6981
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-music-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-clipboard-sheet.webp": [
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-look-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-peek-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        -0.168139
+      ],
+      [
+        0,
+        -0.226875
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-bottom-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ]
+    ],
+    "/chibi/walk/chatgpt/chatgpt-walk-right-sheet.webp": [
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-turn-right-sheet.webp": [
+      [
+        0,
+        0
+      ],
+      [
+        -3.766741,
+        0.195313
+      ],
+      [
+        -5.970982,
+        0.195313
+      ],
+      [
+        -5.245536,
+        0.195313
+      ],
+      [
+        -4.422433,
+        0.195313
+      ],
+      [
+        -3.696987,
+        0.195313
+      ],
+      [
+        -2.483259,
+        0.195313
+      ],
+      [
+        -1.269531,
+        0.195313
+      ]
+    ]
+  },
+  "scales": {
+    "/chibi/chatgpt-atlas.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-idle-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-float-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/chatgpt/chatgpt-walk-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-turn-left-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1.002183,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-blink-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-cast-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-happy-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-angry-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-think-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-smug-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-sleep-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-busy-in-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-busy-loop-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-wake-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-remind-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-tired-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-umbrella-sheet.webp": [
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ],
+      [
+        1.126516,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-music-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-clipboard-sheet.webp": [
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-look-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-peek-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1.035573,
+        90
+      ],
+      [
+        1.048,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-edge-bottom-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/walk/chatgpt/chatgpt-walk-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ],
+    "/chibi/motion/chatgpt/chatgpt-turn-right-sheet.webp": [
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ],
+      [
+        1,
+        90
+      ]
+    ]
+  },
+  "presentation": {
+    "defaultSize": {
+      "scale": 0.956972,
+      "translateY": -0.773186
+    },
+    "bottomDock": {
+      "scale": 0.854027,
+      "translateY": -41.831686
+    },
+    "accent": "#a192d7",
+    "notificationNotes": [
+      988,
+      1319
+    ],
+    "bubbleTheme": {
+      "background": "rgba(250, 247, 255, 0.97)",
+      "textColor": "#695889",
+      "tailColor": "#FAF7FF",
+      "shadow": "0 6px 20px rgba(161, 146, 215, 0.30), inset 0 0 0 2px #A192D7",
+      "crossBorderColor": "rgba(161, 146, 215, 0.7)"
+    }
+  },
+  "independent_directions": true,
+  "animations": {
+    "float": {
+      "name": "float",
+      "label": "升降悬浮",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-float-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70,
+        70
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "walk": {
+      "name": "walk",
+      "label": "走动",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/walk/chatgpt/chatgpt-walk-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 4,
+      "frames": 14,
+      "loop": true,
+      "durations": [
+        90,
+        82,
+        76,
+        72,
+        68,
+        84,
+        78,
+        72,
+        82,
+        82,
+        72,
+        68,
+        88,
+        76
+      ],
+      "mirrorRight": false
+    },
+    "turn": {
+      "name": "turn",
+      "label": "转身",
+      "category": "action",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-turn-{direction}-sheet.webp",
+      "directions": [
+        "left",
+        "right"
+      ],
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": false,
+      "durations": [
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        31,
+        27
+      ],
+      "mirrorRight": false
+    },
+    "blink": {
+      "name": "blink",
+      "label": "眨眼",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-blink-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": false,
+      "durations": [
+        98,
+        32,
+        28,
+        28,
+        101,
+        36,
+        46,
+        45
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "cast": {
+      "name": "cast",
+      "label": "施法",
+      "category": "action",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-cast-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "happy": {
+      "name": "happy",
+      "label": "开心",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-happy-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "angry": {
+      "name": "angry",
+      "label": "生气",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-angry-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "thinking": {
+      "name": "thinking",
+      "label": "思考中",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": true,
+      "durations": [
+        100,
+        100,
+        140,
+        180,
+        260,
+        280,
+        320,
+        280,
+        240,
+        180,
+        140,
+        100
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "think": {
+      "name": "think",
+      "label": "思考",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-think-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "smug": {
+      "name": "smug",
+      "label": "得意",
+      "category": "emotion",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-smug-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        80,
+        80,
+        85,
+        85,
+        85,
+        85,
+        85,
+        90,
+        90,
+        95
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "sleep": {
+      "name": "sleep",
+      "label": "入睡",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-sleep-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        231,
+        231,
+        254,
+        254,
+        277,
+        277,
+        300,
+        300,
+        323,
+        323,
+        323,
+        457
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-in": {
+      "name": "busy-in",
+      "label": "忙碌-掏出手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-busy-in-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        70,
+        80,
+        85,
+        90,
+        95,
+        95,
+        90,
+        85,
+        80,
+        80,
+        85,
+        90
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "busy-loop": {
+      "name": "busy-loop",
+      "label": "忙碌-看手机",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-busy-loop-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        210,
+        210,
+        120,
+        120,
+        100,
+        100,
+        90,
+        90,
+        90,
+        90,
+        100,
+        100,
+        120,
+        120,
+        210,
+        210
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "wake": {
+      "name": "wake",
+      "label": "睡醒起身",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-wake-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75,
+        75
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "remind": {
+      "name": "remind",
+      "label": "温和提醒",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-remind-sheet.webp",
+      "cols": 4,
+      "rows": 3,
+      "frames": 12,
+      "loop": false,
+      "durations": [
+        120,
+        130,
+        140,
+        150,
+        160,
+        160,
+        150,
+        140,
+        130,
+        120,
+        110,
+        110
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "tired": {
+      "name": "tired",
+      "label": "吃力擦汗",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-tired-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "umbrella": {
+      "name": "umbrella",
+      "label": "撑伞",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-umbrella-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "music": {
+      "name": "music",
+      "label": "听歌打拍子",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-music-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80,
+        80
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "clipboard": {
+      "name": "clipboard",
+      "label": "好奇看纸条",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-clipboard-sheet.webp",
+      "cols": 1,
+      "rows": 1,
+      "frames": 1,
+      "loop": false,
+      "durations": [
+        120
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "look": {
+      "name": "look",
+      "label": "四处张望",
+      "category": "emote",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-look-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": true,
+      "durations": [
+        180,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        150,
+        180
+      ],
+      "directions": null,
+      "mirrorRight": false
+    },
+    "edge": {
+      "name": "edge",
+      "label": "贴边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-edge-peek-sheet.webp",
+      "cols": 4,
+      "rows": 2,
+      "frames": 8,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        95,
+        145,
+        280,
+        125,
+        135,
+        145,
+        170,
+        270
+      ],
+      "directions": null,
+      "mirrorRight": false,
+      "dockedFrame": 3,
+      "wallContact": {
+        "left": [
+          376,
+          234
+        ],
+        "right": [
+          376,
+          234
+        ]
+      }
+    },
+    "lean": {
+      "name": "lean",
+      "label": "倚靠",
+      "category": "state",
+      "promptable": true,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-edge-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 16,
+      "loop": false,
+      "hold": false,
+      "durations": [
+        70,
+        70,
+        80,
+        80,
+        90,
+        90,
+        90,
+        90,
+        110,
+        110,
+        120,
+        120,
+        150,
+        150,
+        200,
+        200
+      ],
+      "directions": null,
+      "mirrorRight": false,
+      "wallContact": {
+        "left": [
+          398,
+          198
+        ],
+        "right": [
+          398,
+          198
+        ]
+      },
+      "wallContactFrames": {
+        "from": 4,
+        "right": [
+          437,
+          437,
+          421,
+          405,
+          403,
+          399,
+          396,
+          394,
+          393,
+          393,
+          396,
+          398
+        ]
+      }
+    },
+    "edge-bottom": {
+      "name": "edge-bottom",
+      "label": "下沿扒边",
+      "category": "state",
+      "promptable": false,
+      "sheet": "/chibi/motion/chatgpt/chatgpt-edge-bottom-sheet.webp",
+      "cols": 4,
+      "rows": 4,
+      "frames": 13,
+      "loop": false,
+      "hold": true,
+      "durations": [
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        71,
+        328
+      ],
+      "directions": null,
+      "mirrorRight": false
+    }
+  }
+}

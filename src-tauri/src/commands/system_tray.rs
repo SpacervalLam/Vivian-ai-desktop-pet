@@ -1,0 +1,417 @@
+//! 系统托盘命令
+//!
+//! 托盘行为：
+//! - **左键单击**：不响应（避免打乱离线状态，参见 useHiding::hideForOffline）
+//! - **右键单击**：弹出原生右键菜单，内容与 桌宠 窗口内 ContextMenu 一致
+//!   - 详情 / 设置 / 聊天 / 分隔 / 语音开关● / 智能避让● / 重力● / 分隔 / 退出
+//!
+//! 多角色架构下，托盘事件 payload 携带活跃角色 character_id，
+//! 由前端 SystemTray 组件按角色过滤后响应（活跃角色在 active_character_id 中维护）。
+//!
+//! **语音和运动开关由后端直接处理**：托盘作为全局入口不依赖窗口在线，
+//! 点击后由 `toggle_voice` 直接改写所有角色的 `TtsConfig.enabled`，
+//! 用户无需再进设置窗口启用/禁用。
+//!
+//! 窗口内右键菜单由前端 `ContextMenu` 组件独立实现，与本组件互不依赖。
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use once_cell::race::OnceBox;
+use parking_lot::Mutex;
+use serde_json::json;
+use tauri::{
+    AppHandle, Emitter, Listener, Manager,
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+
+use crate::state::AppState;
+
+/// 托盘 ID（用于 `app.tray_by_id` 查询）
+pub const TRAY_ID: &str = "vivian-tray";
+
+/// 托盘可见性运行时跟踪（Tauri 2 未提供 TrayIcon::visible() getter）
+static TRAY_VISIBLE: AtomicBool = AtomicBool::new(true);
+
+/// 菜单项 ID（与前端 SystemTray 路由一一对应）
+mod menu_id {
+    pub const MEMORY: &str = "memory";
+    pub const SETTINGS: &str = "settings";
+    pub const CHAT: &str = "chat";
+    pub const VOICE: &str = "voice";
+    pub const SMART_POSITIONING: &str = "smart_positioning";
+    pub const DESKTOP_PHYSICS: &str = "desktop_physics";
+    pub const QUIT: &str = "quit";
+}
+
+/// 缓存 CheckMenuItem 的全局句柄，供 `set_tray_menu_check` 命令更新勾选状态
+///
+/// 用 OnceBox 持有，避免全局 Mutex<Option<>> 的样板。初始化在 `setup_tray` 中完成。
+struct CheckItems {
+    voice: CheckMenuItem<tauri::Wry>,
+    smart_positioning: CheckMenuItem<tauri::Wry>,
+    desktop_physics: CheckMenuItem<tauri::Wry>,
+}
+
+static CHECK_ITEMS: OnceBox<Mutex<CheckItems>> = OnceBox::new();
+
+fn err_str(e: impl std::fmt::Display) -> String {
+    e.to_string()
+}
+
+/// 读取当前活跃角色 ID（无活跃角色时返回空字符串）
+fn active_character_id(app: &AppHandle) -> String {
+    match app.try_state::<std::sync::Arc<AppState>>() {
+        Some(state) => state.active_character_id.read().clone(),
+        None => String::new(),
+    }
+}
+
+/// 在应用启动时创建托盘图标（由 `lib.rs::setup` 调用）
+///
+/// 仅注册右键原生菜单。菜单项点击通过 `tray:menu_action` 事件路由到前端 SystemTray 组件。
+/// 左键单击不再触发任何动作（避免在两个角色都离线时打乱 hide_window 状态）。
+pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or(tauri::Error::AssetNotFound("default window icon".into()))?;
+
+    // 构建菜单项（中文文案与 ContextMenu.tsx 默认语言一致；
+    // 若需切换语言，可通过 update_tray_menu_labels 命令更新，本实现暂未暴露）
+    let memory = MenuItem::with_id(app, menu_id::MEMORY, "详情", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, menu_id::SETTINGS, "设置", true, None::<&str>)?;
+    let chat = MenuItem::with_id(app, menu_id::CHAT, "聊天", true, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let voice = CheckMenuItem::with_id(app, menu_id::VOICE, "语音开关", true, true, None::<&str>)?;
+    let smart_positioning = CheckMenuItem::with_id(
+        app,
+        menu_id::SMART_POSITIONING,
+        "智能避让",
+        true,
+        true,
+        None::<&str>,
+    )?;
+    let desktop_physics = CheckMenuItem::with_id(app, menu_id::DESKTOP_PHYSICS, "重力", true, false, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, menu_id::QUIT, "退出", true, None::<&str>)?;
+
+    // 缓存 CheckMenuItem 句柄供 set_tray_menu_check 命令更新
+    let _ = CHECK_ITEMS.set(Box::new(Mutex::new(CheckItems {
+        voice: voice.clone(),
+        smart_positioning: smart_positioning.clone(),
+        desktop_physics: desktop_physics.clone(),
+    })));
+
+    let menu = Menu::with_items(
+        app,
+        &[
+            &memory,
+            &settings,
+            &chat,
+            &sep1,
+            &voice,
+            &smart_positioning,
+            &desktop_physics,
+            &sep2,
+            &quit,
+        ],
+    )?;
+
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        .tooltip("Vivian")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            handle_menu_event(app, &event);
+        })
+        .on_tray_icon_event(|_tray, event| {
+            // 左键单击/双击不响应，避免打乱离线状态。
+            // 右键菜单由 .menu() 自动弹出，无需在此处理。
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                tracing::debug!("[tray] 左键单击已忽略（避免打乱离线状态）");
+            }
+        })
+        .build(app)?;
+
+    sync_movement_checks(app);
+    let movement_app = app.clone();
+    app.listen("config:saved", move |_| sync_movement_checks(&movement_app));
+    tracing::info!("系统托盘已创建 (id={}, 含右键菜单)", TRAY_ID);
+    Ok(())
+}
+
+/// 处理菜单项点击 → emit `tray:menu_action` 事件给前端 SystemTray 组件
+///
+/// 前端根据 action id 路由到 openStatus / openMemory / openChat 等回调。
+/// 语音和运动 CheckMenuItem 在后端切换并同步，其他入口通过事件路由至前端。
+///
+/// 例外：**voice 和运动开关在后端直接处理**。托盘是全局入口，不应依赖某个角色窗口是否在线；
+/// 且语音朗读的真相源在后端 `TtsConfig.enabled`，走前端会形成第二条状态链。
+fn handle_menu_event(app: &AppHandle, event: &MenuEvent) {
+    let id = event.id().as_ref();
+    let character_id = active_character_id(app);
+
+    // 退出特殊处理：直接走 exit_app，不经过前端
+    if id == menu_id::QUIT {
+        tracing::info!("[tray] 菜单点击：退出");
+        let _ = app.emit(
+            "tray:menu_action",
+            json!({ "action": menu_id::QUIT, "character_id": character_id }),
+        );
+        return;
+    }
+
+    // 语音开关：直接在后端切换所有角色的 TTS enabled，失败时回滚勾选标记
+    if id == menu_id::VOICE {
+        toggle_voice(app);
+        return;
+    }
+
+    if id == menu_id::SMART_POSITIONING || id == menu_id::DESKTOP_PHYSICS {
+        if let Err(error) = toggle_movement(app, id) { tracing::warn!("[tray] 运动模式切换失败: {error}"); }
+        sync_movement_checks(app);
+        return;
+    }
+
+    tracing::debug!(
+        "[tray] 菜单点击：{} (active_character={})",
+        id,
+        character_id
+    );
+
+    let _ = app.emit(
+        "tray:menu_action",
+        json!({ "action": id, "character_id": character_id }),
+    );
+}
+
+fn sync_movement_checks(app: &AppHandle) {
+    let state = app.state::<std::sync::Arc<AppState>>();
+    let window = state.config.read().get_all().window;
+    if let Some(items) = CHECK_ITEMS.get() {
+        let items = items.lock();
+        let _ = items.smart_positioning.set_checked(window.smart_positioning_enabled);
+        let _ = items.desktop_physics.set_checked(window.desktop_physics_enabled);
+    }
+}
+
+/// Shared by the edge menu and tray. Read and toggle under one lock, then notify every window.
+pub(crate) fn toggle_movement(app: &AppHandle, action: &str) -> Result<(), String> {
+    let key = match action {
+        "smart_positioning" => "window.smart_positioning_enabled",
+        "desktop_physics" => "window.desktop_physics_enabled",
+        _ => return Err("未知运动模式".into()),
+    };
+    let state = app.state::<std::sync::Arc<AppState>>();
+    {
+        let config = state.config.write();
+        let old = config.get_all().window;
+        let next = !config.get_typed(key, false);
+        config.set_no_save(key, json!(next)).map_err(err_str)?;
+        if let Err(error) = config.save() {
+            let _ = config.set_no_save("window.smart_positioning_enabled", json!(old.smart_positioning_enabled));
+            let _ = config.set_no_save("window.desktop_physics_enabled", json!(old.desktop_physics_enabled));
+            return Err(err_str(error));
+        }
+    }
+    sync_movement_checks(app);
+    app.emit("config:saved", ()).map_err(err_str)
+}
+
+/// 侧边栏三态按钮：按 `重力 → 避让 → 静止` 循环运动模式。
+///
+/// 与 `toggle_movement` 一样在同一把锁内同时读写两个开关位，
+/// 因此不会出现「重力与避让同时为真」的中间态；失败时整体回滚。
+pub(crate) fn cycle_movement(app: &AppHandle) -> Result<(), String> {
+    use crate::desktop_menu_policy::MovementMode;
+    let state = app.state::<std::sync::Arc<AppState>>();
+    {
+        let config = state.config.write();
+        let old = config.get_all().window;
+        let next = MovementMode::from_flags(old.smart_positioning_enabled, old.desktop_physics_enabled).next();
+        let (smart, gravity) = next.flags();
+        config.set_no_save("window.smart_positioning_enabled", json!(smart)).map_err(err_str)?;
+        config.set_no_save("window.desktop_physics_enabled", json!(gravity)).map_err(err_str)?;
+        if let Err(error) = config.save() {
+            let _ = config.set_no_save("window.smart_positioning_enabled", json!(old.smart_positioning_enabled));
+            let _ = config.set_no_save("window.desktop_physics_enabled", json!(old.desktop_physics_enabled));
+            return Err(err_str(error));
+        }
+    }
+    sync_movement_checks(app);
+    app.emit("config:saved", ()).map_err(err_str)
+}
+
+/// 切换全局语音朗读开关
+///
+/// CheckMenuItem 被点击时自身已翻转勾选态，这里以「翻转后的实际状态」为准写回后端；
+/// 写入失败则把勾选标记回滚，避免菜单显示与后端配置不一致。
+fn toggle_voice(app: &AppHandle) {
+    let Some(items) = CHECK_ITEMS.get() else {
+        tracing::warn!("[tray] 托盘菜单未初始化，忽略语音开关");
+        return;
+    };
+    // 点击后 CheckMenuItem 已自动翻转，读到的即为用户期望的目标状态
+    let target = match items.lock().voice.is_checked() {
+        Ok(checked) => checked,
+        Err(e) => {
+            tracing::warn!("[tray] 读取语音开关状态失败: {e}");
+            return;
+        }
+    };
+    tracing::info!("[tray] 语音开关 -> {}", target);
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<std::sync::Arc<AppState>>();
+        match crate::commands::tts::set_tts_enabled_all(state, app.clone(), target).await {
+            Ok(()) => tracing::info!("[tray] 语音开关已生效: enabled={}", target),
+            Err(e) => {
+                tracing::warn!("[tray] 语音开关生效失败: {e}");
+                // 回滚勾选标记，保持菜单与后端一致
+                if let Some(items) = CHECK_ITEMS.get() {
+                    let _ = items.lock().voice.set_checked(!target);
+                }
+                let _ = app.emit(
+                    "toast:show",
+                    json!({
+                        "type": "error",
+                        "message": format!("语音开关切换失败: {e}"),
+                        "duration": 5000,
+                    }),
+                );
+            }
+        }
+    });
+}
+
+/// 设置托盘 tooltip
+#[tauri::command]
+pub fn set_tray_tooltip(app: AppHandle, tooltip: String) -> Result<(), String> {
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "托盘未初始化".to_string())?;
+    tray.set_tooltip(Some(tooltip.clone()))
+        .map_err(err_str)?;
+    tracing::debug!("托盘 tooltip 已更新: {}", tooltip);
+    Ok(())
+}
+
+/// 更新托盘图标（按路径加载）
+#[tauri::command]
+pub fn update_tray_icon(app: AppHandle, icon_path: String) -> Result<(), String> {
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "托盘未初始化".to_string())?;
+
+    let image = tauri::image::Image::from_path(&icon_path).map_err(err_str)?;
+    tray.set_icon(Some(image)).map_err(err_str)?;
+    tracing::debug!("托盘图标已更新: {}", icon_path);
+    Ok(())
+}
+
+/// 显示托盘通知消息（对应 QSystemTrayIcon.showMessage）
+#[tauri::command]
+pub fn show_tray_message(
+    app: AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), String> {
+    use tauri_plugin_notification::NotificationExt;
+
+    app.notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取托盘当前可见性
+#[tauri::command]
+pub fn is_tray_visible(app: AppHandle) -> Result<bool, String> {
+    let _ = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "托盘未初始化".to_string())?;
+    Ok(TRAY_VISIBLE.load(Ordering::SeqCst))
+}
+
+/// 设置托盘可见性
+#[tauri::command]
+pub fn set_tray_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "托盘未初始化".to_string())?;
+    tray.set_visible(visible).map_err(err_str)?;
+    TRAY_VISIBLE.store(visible, Ordering::SeqCst);
+    Ok(())
+}
+
+/// 更新托盘菜单中 CheckMenuItem 的勾选状态
+///
+/// 由前端在 `smartPositioningEnabled` 变化时调用，让后端原生菜单的勾选标记
+/// 与前端 store 保持一致。
+///
+/// `item_id` 取值：`"smart_positioning"`。
+///
+/// **注意**：`"voice"` 不再走这条路径——语音开关由 `toggle_voice` 在后端直接处理，
+/// 前端不需要（也不应该）回写 voice 的勾选状态。
+#[tauri::command]
+pub fn set_tray_menu_check(item_id: String, checked: bool) -> Result<(), String> {
+    let items = CHECK_ITEMS
+        .get()
+        .ok_or_else(|| "托盘菜单未初始化".to_string())?
+        .lock();
+
+    let target = match item_id.as_str() {
+        menu_id::SMART_POSITIONING => &items.smart_positioning,
+        other => {
+            return Err(format!("未知菜单项 ID: {}", other));
+        }
+    };
+
+    target.set_checked(checked).map_err(err_str)?;
+    tracing::debug!("[tray] 菜单勾选更新: {} = {}", item_id, checked);
+    Ok(())
+}
+
+/// 根据后端实际的 TTS 配置同步托盘「语音开关」勾选态
+///
+/// 在角色初始化完成后调用：`setup_tray` 时角色尚未加载，勾选态只能取默认值，
+/// 真实配置要等 `TtsConfig` 从各角色 config.json 读出后才拿得到。
+/// 多个角色状态不一致时以「任一启用即视为启用」，避免菜单显示关但实际在朗读。
+pub fn sync_voice_check_from_state(state: &std::sync::Arc<AppState>) {
+    let Some(items) = CHECK_ITEMS.get() else {
+        return;
+    };
+    let enabled = {
+        let characters = state.characters.read();
+        characters
+            .values()
+            .any(|c| c.brain.tts.get_config().enabled)
+    };
+    if let Err(e) = items.lock().voice.set_checked(enabled) {
+        tracing::warn!("[tray] 同步语音开关勾选态失败: {e}");
+    } else {
+        tracing::debug!("[tray] 语音开关勾选态已同步: {}", enabled);
+    }
+}
+
+/// 注销系统托盘图标（应用退出前调用，避免进程结束后残留图标）
+#[tauri::command]
+pub fn destroy_tray(app: AppHandle) -> Result<(), String> {
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        tray.set_visible(false).map_err(err_str)?;
+        TRAY_VISIBLE.store(false, Ordering::SeqCst);
+        tracing::info!("系统托盘已隐藏 (id={})", TRAY_ID);
+    }
+    Ok(())
+}

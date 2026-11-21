@@ -1,0 +1,161 @@
+.chibi-pet-canvas {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  --atlas-url: url('/chibi/vivian-atlas.webp');
+}
+
+.chibi-pet-nana {
+  --atlas-url: url('/chibi/nana-atlas.webp');
+}
+
+.chibi-pet-physics-feedback { width: 100%; height: 100%; transform-origin: 50% 92%; transform: rotate(var(--physics-lean, 0deg)); }
+.chibi-physics-error { position: absolute; top: 10%; right: 10%; color: #bd7620; font-size: 18px; }
+
+.chibi-pet-stage {
+  --gaze-x: 0px;
+  --gaze-y: 0px;
+  position: relative;
+  width: min(96vw, 94vh);
+  aspect-ratio: 1;
+  transform: translate(var(--gaze-x), var(--gaze-y));
+  transform-origin: 50% 92%;
+  transition: transform 140ms ease-out, filter 180ms ease;
+  will-change: transform;
+}
+
+.chibi-pet-stage.is-wall-lean { transition: filter 180ms ease; }
+
+.chibi-pet-stage.is-bottom-docked {
+  transform: translateX(var(--gaze-x));
+  transition: filter 180ms ease;
+}
+
+.chibi-pet-shadow {
+  position: absolute;
+  z-index: 0;
+  left: 25%;
+  right: 25%;
+  bottom: 4.2%;
+  height: 7%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgba(53, 39, 67, 0.28), rgba(53, 39, 67, 0));
+  filter: blur(3px);
+  transform-origin: center;
+  animation: chibi-shadow-breathe 4.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.chibi-pet-tap-feedback {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  transform-origin: 50% 90%;
+}
+
+/* 四个角色的默认 idle 素材是在不同镜头尺度下画的（包围盒高 419~468px、脚底
+   480/493 两组）。这一层只负责把「整个人物」统一到同一高度与脚底基线：
+   scale / translate 是 CSS 独立属性，会以 transform-origin 为中心复合到
+   子节点的逐帧校准之上，因此 idle、动作帧、呼吸/点击动画全都会同步缩放。
+   数值由 scripts/calibrate-chibi-default-size.mjs 实测生成，经 defaultSize.ts 注入。 */
+.chibi-pet-default-size {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 90%;
+  transition: translate 220ms ease-out;
+}
+
+.chibi-pet-sprite {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  outline: none;
+  cursor: grab;
+  /* 背景图与格位定位由动作词汇表在行内给出，此处只提供默认图集 */
+  background-image: var(--atlas-url);
+  background-repeat: no-repeat;
+  filter: drop-shadow(0 8px 8px rgba(44, 30, 61, 0.22));
+  transform-origin: 50% 90%;
+  animation: none;
+  transition: filter 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 定格姿态只改变舞台形变，图集格位由词汇表计算 */
+.pose-happy .chibi-pet-sprite { animation: chibi-happy-pop 620ms cubic-bezier(.2,.85,.28,1.18) both; }
+.pose-drag .chibi-pet-sprite { cursor: grabbing; animation: chibi-drag-sway 460ms ease-in-out infinite alternate; }
+.pose-dizzy .chibi-pet-sprite { animation: chibi-dizzy 900ms ease-in-out infinite; }
+.pose-talk .chibi-pet-sprite { animation: chibi-talk 420ms ease-in-out infinite alternate; }
+.pose-listen .chibi-pet-sprite { animation: chibi-listen 1.3s ease-in-out infinite alternate; }
+.pose-walk .chibi-pet-sprite { animation: chibi-walk-step 420ms ease-in-out infinite alternate; }
+
+/* These characters already draw body motion into their frames. Extra CSS pop,
+   breathing and step transforms change size/position when the pose class switches. */
+.chibi-pet-imported .chibi-pet-sprite { animation: none; }
+
+/* Frame sheets already contain body movement. Keep the same resting transform
+   when entering them, rather than restarting CSS breathing/pop/step offsets. */
+.chibi-pet-stage.has-frame-animation .chibi-pet-sprite { animation: none; }
+.chibi-pet-stage.has-frame-animation.is-peer-speaking .chibi-pet-sprite { animation: chibi-talk 420ms ease-in-out infinite alternate; }
+
+.chibi-pet-stage.is-pressed .chibi-pet-sprite {
+  animation: none;
+  transform: translateY(1.2%) scale(.98);
+  filter: drop-shadow(0 5px 6px rgba(44, 30, 61, 0.19));
+}
+
+@keyframes chibi-shadow-breathe {
+  0%, 100% { transform: scaleX(1); opacity: .72; }
+  50% { transform: scaleX(.88); opacity: .52; }
+}
+
+@keyframes chibi-happy-pop {
+  0% { transform: translateY(2%) scale(.95, 1.04); }
+  42% { transform: translateY(-6%) scale(1.05, .96) rotate(1.2deg); }
+  72% { transform: translateY(1%) scale(.98, 1.02) rotate(-.6deg); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+@keyframes chibi-drag-sway {
+  from { transform: translateY(1%) rotate(-3deg) scale(.98, 1.02); }
+  to { transform: translateY(-1%) rotate(3deg) scale(1.02, .98); }
+}
+
+@keyframes chibi-dizzy {
+  0%, 100% { transform: translateX(0) rotate(0); }
+  25% { transform: translateX(-2%) rotate(-2deg); }
+  75% { transform: translateX(2%) rotate(2deg); }
+}
+
+@keyframes chibi-talk {
+  from { transform: translateY(0) scaleY(1); }
+  to { transform: translateY(-1.5%) scaleY(1.015); }
+}
+
+@keyframes chibi-listen {
+  from { transform: translateX(-1%) rotate(-1deg); }
+  to { transform: translateX(1%) rotate(1deg); }
+}
+
+@keyframes chibi-walk-step {
+  from { transform: translateY(0) rotate(-1.2deg); }
+  to { transform: translateY(-2.4%) rotate(1.2deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chibi-pet-sprite,
+  .chibi-pet-shadow {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+
+.chibi-pet-imported { --atlas-url: none; }
+
+.pose-edge .chibi-pet-shadow, .pose-edge-bottom .chibi-pet-shadow { display: none; }

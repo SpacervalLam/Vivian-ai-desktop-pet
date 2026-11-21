@@ -1,0 +1,145 @@
+# 构建与依赖
+node_modules/
+dist/
+dist-ssr/
+target/
+target_check/
+src-tauri/gen/schemas/
+*.tsbuildinfo
+vite.config.ts.timestamp-*.mjs
+*.local
+*.exe
+*.dll
+*.lib
+*.pdb
+
+# 编辑器与系统文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 密钥与运行时数据
+.env
+.env.*
+.webview-data/
+vivian_data/
+.vivian/
+*.log
+logs/
+src-tauri/assets_enc/
+src-tauri/asset_key.bin
+src-tauri/vivian.bundle.enc
+src-tauri/vivian.bundle.index.json
+
+# 临时文件与缓存
+tmp/
+temp/
+.trash/
+/.screenshots/
+/test_social.json
+/test_vectors.json
+.npm-cache/
+.npm-cache-tmp/
+__pycache__/
+*.pyc
+*.tmp
+*.bak
+*.bak_*
+*.bak.*
+*.old
+*.orig
+*.rej
+*.blend1
+*.blend2
+.texture-backup-4096/
+.glb-backup-4096/
+.config-backup-*/
+/tmp-*
+/tmp_*
+/temp-*
+/temp_*
+
+# 本地脚本与预览；保留构建和打包入口
+/scripts/*
+!/scripts/preview-four-pets.mjs
+!/scripts/check-apartment-plugin.mjs
+!/scripts/compress-chibi.mjs
+!/scripts/package-resources.mjs
+!/scripts/package-browser-runtime.mjs
+/src-tauri/browser-runtime/
+!/scripts/audit-rust-size.mjs
+!/scripts/audit-chibi-palette.mjs
+!/scripts/package-small.mjs
+!/scripts/package-apartment.mjs
+!/scripts/run-tests.mjs
+!/scripts/run-rust-tests.mjs
+!/scripts/provider-core-tests.rs
+!/scripts/provider-core-modules.rs
+!/scripts/test-provider-core.ps1
+!/scripts/evaluate-companion.mjs
+!/scripts/evaluate-prompts.mjs
+!/scripts/prompt-reply-evaluation.mjs
+!/scripts/prompt-eval-support.mjs
+!/scripts/production-prompt-requests.mjs
+!/scripts/audit-companion-dialogue.mjs
+!/scripts/*.test.mjs
+!/scripts/*.test.ts
+# 桌宠尺寸校准与验收（package.json 里的 npm script 指向它们）
+!/scripts/calibrate-chibi-scales.mjs
+!/scripts/check-chibi-scale.mjs
+!/scripts/calibrate-chibi-default-size.mjs
+*-preview.html
+src/*Preview.tsx
+
+# AI 工作记录与开发文档
+/*.md
+!/README.md
+!/CODE_WIKI.md
+/*.txt
+/*.pdf
+/*.docx
+/docs/
+.workbuddy/
+.workbuddy-ai/
+.codex/
+.claude/
+/.trae/
+/COMPANION_MEMORY.md
+/MEMORY_OPTIMIZATION.md
+/src-tauri/prompts/PROMPT_EVALUATION.md
+
+# 美术工程与发布产物
+/assets/
+# 仓库根目录的本地动画装配脚本与中间帧，不属于运行资源。
+# 按 `_` 前缀统一忽略：此前逐扩展名列举漏掉了 .jpg 与 _t1/_t2_* 目录，
+# 每次新增一种产物格式都要补一行，改为前缀规则后不再需要。
+/_*
+/output/
+# Keep the runtime asset audit alongside packaging scripts.
+!/scripts/audit-mind-comic-assets.mjs
+/blender/
+/plugins/3d-apartment/art/
+/release/
+/src-tauri/windows/apartment-package.nsh
+/src-tauri/windows/resource-packages.nsh
+
+# 本地调试输出
+src-tauri/*.txt
+src-tauri/test_vectors.json
+src-tauri/test_social.json
+src-tauri/test_sqlite.rs
+
+# Character package build and verification tools
+!/scripts/package-characters.py
+!/scripts/finalize-character-sheets.mjs
+!/scripts/prepare-character-release.mjs
+!/scripts/assemble-walk-stickers.mjs
+!/scripts/preview-walk-stickers.mjs
+
+# Tracked sprite authoring tools; source artwork stays local in /assets/.
+!/scripts/chibi/
+!/scripts/chibi/**

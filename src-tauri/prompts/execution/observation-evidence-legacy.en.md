@@ -1,0 +1,1 @@
+Return JSON with text and tool_calls (each call has tool and arguments). Available schemas: {}

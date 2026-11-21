@@ -1,0 +1,50 @@
+/* 记录四页（对话 / 日记 / 笔记 / 计划）的独立页版式。
+   与办公页同级后，视觉语言统一向办公页靠拢：
+   · 纸面 + 1px 细线 + 柔和圆角 + 轻阴影，不使用漫画页的粗墨框、倾斜与错位；
+   · 控件刻度沿用 RecordTheme.css（字号、间距、圆角），这里只补页根与页头。
+   各页形状（日记索引 + 阅读面 / 笔记索引 + 工作面 / 计划列表）仍由各自的
+   RecordTheme.css 与页面组件定义，不在本文件里重复。 */
+
+.record-page {
+  --rec-line: 1px solid var(--claude-line);
+  --rec-line-strong: 1px solid var(--claude-line-strong);
+  --rec-line-soft: 1px solid color-mix(in srgb, var(--claude-line) 55%, transparent);
+  color: var(--claude-ink);
+  background: transparent;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: clamp(16px, 1.8vw, 24px) clamp(20px, 2.4vw, 32px) 28px;
+  font-family: var(--claude-sans);
+}
+.mind-page-content:has(.record-page) { padding: 0; }
+.record-scope:has(.record-page) { padding: 0; background: var(--claude-bg); }
+.record-page *,
+.record-page *::before,
+.record-page *::after { box-sizing: border-box; }
+
+/* 页面顶部只保留操作控件（搜索 / 分段 / 刷新），不再渲染大标题与标语。 */
+.record-planner .record-planner-modes { align-self: flex-start; flex-shrink: 0; margin-bottom: 14px; }
+.record-memory .memory-page-actions { justify-content: flex-end; margin-bottom: 14px; }
+.record-page :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--claude-clay);
+  outline-offset: 2px;
+}
+
+/* 笔记页：索引 + 工作面，两栏各自撑满剩余高度。 */
+.record-notebook-art { display: flex; flex-direction: column; flex: 1; }
+.record-notebook-art .record-note { gap: 20px; }
+
+/* 计划页：页内 tab 在上，任务列表铺满剩余高度。 */
+.record-planner { display: flex; flex-direction: column; flex: 1; }
+.record-layout-spread {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.record-layout-content { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+/* 漫画页的插图位已移除：首条记忆改为通栏卡片，日记的要事清单直接铺满阅读区。 */
+.record-page .memory-entry.memory-opening-panel { column-span: all; }
+.record-diary-art-montage { display: block; }

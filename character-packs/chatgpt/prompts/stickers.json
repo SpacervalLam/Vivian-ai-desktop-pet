@@ -1,0 +1,102 @@
+[
+  {
+    "id": "chatgpt_happy_01",
+    "character_id": "chatgpt",
+    "label": "开心",
+    "meaning": "开心，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_happy_01-v2.webp",
+    "category": "happy"
+  },
+  {
+    "id": "chatgpt_curious_01",
+    "character_id": "chatgpt",
+    "label": "好奇",
+    "meaning": "好奇，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_curious_01-v2.webp",
+    "category": "curious"
+  },
+  {
+    "id": "chatgpt_sleepy_01",
+    "character_id": "chatgpt",
+    "label": "困倦",
+    "meaning": "困倦，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_sleepy_01-v2.webp",
+    "category": "sleepy"
+  },
+  {
+    "id": "chatgpt_okay_01",
+    "character_id": "chatgpt",
+    "label": "好的",
+    "meaning": "好的，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_okay_01-v2.webp",
+    "category": "okay"
+  },
+  {
+    "id": "chatgpt_thanks_01",
+    "character_id": "chatgpt",
+    "label": "感谢",
+    "meaning": "感谢，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_thanks_01-v2.webp",
+    "category": "thanks"
+  },
+  {
+    "id": "chatgpt_wave_01",
+    "character_id": "chatgpt",
+    "label": "招手",
+    "meaning": "招手，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_wave_01-v2.webp",
+    "category": "wave"
+  },
+  {
+    "id": "chatgpt_peek_01",
+    "character_id": "chatgpt",
+    "label": "探头",
+    "meaning": "探头，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_peek_01-v2.webp",
+    "category": "peek"
+  },
+  {
+    "id": "chatgpt_question_01",
+    "character_id": "chatgpt",
+    "label": "疑问",
+    "meaning": "疑问，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_question_01-v2.webp",
+    "category": "question"
+  },
+  {
+    "id": "chatgpt_think_01",
+    "character_id": "chatgpt",
+    "label": "思考",
+    "meaning": "思考，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_think_01-v2.webp",
+    "category": "think"
+  },
+  {
+    "id": "chatgpt_content_01",
+    "character_id": "chatgpt",
+    "label": "满足",
+    "meaning": "满足，适合自然回应当前话题",
+    "version": "2",
+    "builtin": true,
+    "filename": "chatgpt_content_01-v2.webp",
+    "category": "content"
+  }
+]

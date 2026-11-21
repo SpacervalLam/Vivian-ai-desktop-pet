@@ -1,0 +1,236 @@
+//! 工具命令 - 工具列表、执行与历史
+
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+use tauri::State;
+
+use crate::state::AppState;
+use crate::tools::registry::{is_tool_locked, tool_scope, AgentSide};
+
+/// List all registered tools
+///
+/// `description` 字段按当前界面语言返回（调用 `Tool::description_in`），
+/// 与 ToolSemanticFilter 语义匹配使用的描述保持一致。
+///
+/// 返回全部注册工具（**不做**禁用过滤），供设置页展示与重新启用；同时给出
+/// 每个工具的归属侧别与分侧开关状态，让设置页能如实分区渲染：
+/// - `scope`：`companion` / `work` / `both`，由 [`tool_scope`] 单一真相源推导
+/// - `companion_enabled` / `work_enabled`：该侧是否启用（未被禁用）
+/// - `companion_locked` / `work_locked`：该侧是否锁定（锁定 = 不可禁用）
+#[tauri::command]
+pub fn list_tools(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let tool_system = &state.tool_system;
+    let lang = state.config.read().get_all().base.language;
+    let normalized = crate::pipeline::prompt_modules::normalize_lang(&lang);
+    let tools = tool_system.list_tools();
+    let tool_defs: Vec<Value> = tools
+        .iter()
+        .map(|t| {
+            let name = t.name();
+            json!({
+                "name": name,
+                "description": t.description_in(normalized),
+                "input_schema": t.parameters_schema_in(normalized),
+                "is_read_only": t.is_read_only(),
+                "is_cacheable": t.is_cacheable(),
+                "risk": t.risk().as_str(),
+                "category": t.category(),
+                "is_custom": t.is_custom(),
+                "scope": tool_scope(name).as_str(),
+                "companion_enabled": !tool_system.is_tool_disabled(name, AgentSide::Companion),
+                "work_enabled": !tool_system.is_tool_disabled(name, AgentSide::Work),
+                "companion_locked": is_tool_locked(name, AgentSide::Companion),
+                "work_locked": is_tool_locked(name, AgentSide::Work),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "tools": tool_defs,
+        "total": tool_defs.len(),
+    }))
+}
+
+/// Get tool call history and observability summary
+#[tauri::command]
+pub fn get_tool_history(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    let tool_system = &state.tool_system;
+    let summary = tool_system.get_observability_summary();
+    let cache_stats = tool_system.get_cache_stats();
+    Ok(json!({
+        "observability": summary,
+        "cache": cache_stats,
+        "tool_count": tool_system.list_tool_names().len(),
+    }))
+}
+
+/// Pending confirmations are authoritative; UI events may be lost during window recreation.
+#[tauri::command]
+pub fn get_pending_tool_confirmations(
+    state: State<'_, Arc<AppState>>,
+) -> Vec<crate::tools::confirmation::ConfirmationRequest> {
+    state.tool_system.confirmation.list_pending()
+}
+
+/// After user confirms tool execution request on frontend, return result via this command
+///
+/// When tool requires user confirmation (e.g. file operations, screenshots, launching apps),
+/// backend emits `tool:confirmation_request` event, frontend shows a confirmation toast,
+/// user selects then calls this command to return result.
+///
+/// - `request_id`: from ConfirmationRequest
+/// - `action`: "deny" / "allow_once" / "allow_always"
+#[tauri::command]
+pub fn confirm_tool_execution(
+    state: State<'_, Arc<AppState>>,
+    request_id: u64,
+    action: String,
+) -> Result<bool, String> {
+    use crate::tools::confirmation::ConfirmationResponse;
+
+    let response = match action.as_str() {
+        "deny" => ConfirmationResponse::Deny,
+        "allow_once" => ConfirmationResponse::AllowOnce,
+        "allow_always" => ConfirmationResponse::AllowAlways,
+        other => return Err(format!("无效的确认动作: {}", other)),
+    };
+
+    let tool_system = &*state.tool_system;
+    let resolved = tool_system
+        .confirmation
+        .resolve_request(request_id, response);
+    if resolved {
+        tracing::info!(
+            "[Command] 工具确认 {} 已解决: action={}",
+            request_id,
+            action
+        );
+    } else {
+        tracing::warn!(
+            "[Command] 工具确认 {} 未找到（可能已超时或重复解决）",
+            request_id
+        );
+    }
+    Ok(resolved)
+}
+
+/// 回传用户对 `ask_user` 提问的回答，唤醒正在等待的工具。
+///
+/// 后端 emit `chat:question` 事件后，前端弹输入框；用户提交回答后调用本命令，
+/// 携带 question_id 与回答文本，注册表据此把答案交回工具执行流。
+#[tauri::command]
+pub fn respond_question(question_id: u64, answer: String) -> Result<bool, String> {
+    use crate::tools::question::global_question_registry;
+    let registry = global_question_registry();
+    let resolved = registry.respond(question_id, answer);
+    if !resolved {
+        tracing::warn!(
+            "[Command] 提问 {} 未找到（可能已超时或重复回答）",
+            question_id
+        );
+    }
+    Ok(resolved)
+}
+
+/// 用户对 `plan_task` 计划的批准/否决决定。
+///
+/// 后端 emit `plan:created` 事件后，前端弹确认框；用户选择后调用本命令，
+/// 携带 plan_id 与 decision（approve / reject），计划状态据此迁移。
+#[tauri::command]
+pub fn plan_decision(plan_id: String, decision: String) -> Result<bool, String> {
+    use crate::brain::plan_mode::PlanService;
+    use once_cell::sync::Lazy;
+    static SVC: Lazy<PlanService> = Lazy::new(|| (*PlanService::new()).clone());
+    let ok = match decision.as_str() {
+        "approve" => SVC.approve(&plan_id),
+        "reject" => SVC.reject(&plan_id),
+        other => return Err(format!("无效的决策: {}", other)),
+    };
+    if !ok {
+        tracing::warn!("[Command] 计划 {} 决策失败（可能已决定或不存在）", plan_id);
+    }
+    Ok(ok)
+}
+
+// ===== MCP server 管理 =====
+
+/// 列出所有 MCP server（含运行时状态）
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Value>, String> {
+    state.mcp_manager.list_servers().await.into_iter()
+        .map(|s| serde_json::to_value(s).map_err(|e|e.to_string())).collect()
+}
+
+/// 读取已持久化的 MCP server 配置（含未连接的）
+#[tauri::command]
+pub fn list_mcp_server_configs(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<Value>, String> {
+    ensure_mcp_settings_window(&window)?;
+    let configs = state.mcp_manager.load_configs();
+    Ok(configs
+        .into_iter()
+        .map(serde_json::to_value)
+        .filter_map(Result::ok)
+        .collect())
+}
+
+/// 添加并连接 MCP server
+#[tauri::command]
+pub async fn add_mcp_server(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    config: crate::tools::McpServerConfig,
+) -> Result<Vec<String>, String> {
+    ensure_mcp_settings_window(&window)?;
+    state
+        .mcp_manager
+        .save_user_server(config)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 断开并移除 MCP server
+#[tauri::command]
+pub async fn remove_mcp_server(
+    window: tauri::WebviewWindow,
+    state: State<'_, Arc<AppState>>,
+    server_id: String,
+) -> Result<(), String> {
+    ensure_mcp_settings_window(&window)?;
+    state
+        .mcp_manager
+        .remove_server(&server_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn ensure_mcp_settings_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "config" { Ok(()) } else { Err("MCP 连接管理仅允许设置窗口调用".into()) }
+}
+
+#[tauri::command]
+pub async fn test_mcp_server(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, config: crate::tools::McpServerConfig) -> Result<Value, String> {
+    ensure_mcp_settings_window(&window)?;
+    state.mcp_manager.test_connection(config).await.map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub async fn reconnect_mcp_server(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, server_id: String) -> Result<Vec<String>, String> {
+    ensure_mcp_settings_window(&window)?;
+    state.mcp_manager.reconnect_server(&server_id).await.map_err(|e|e.to_string())
+}
+
+#[tauri::command]
+pub async fn reset_mcp_server_override(window: tauri::WebviewWindow, state: State<'_, Arc<AppState>>, server_id: String) -> Result<(), String> {
+    ensure_mcp_settings_window(&window)?;
+    let config = state.mcp_manager.load_configs().into_iter().find(|c|c.id == server_id).ok_or("MCP 配置不存在")?;
+    let plugin = config.source_plugin.ok_or("此连接不是插件提供的连接")?;
+    let key = crate::plugins::scan_inventory().into_iter().find(|p|p.name == plugin || p.key == plugin).map(|p|p.key).ok_or("来源插件不存在")?;
+    state.mcp_manager.clear_plugin_overrides(&plugin,Some(&server_id)).map_err(|e|e.to_string())?;
+    crate::plugins::load_one(&state.skill_service,&state.mcp_manager,&state.tool_system,&key,false).await?;
+    Ok(())
+}

@@ -1,0 +1,845 @@
+//! Mind —— 角色认知聚合句柄。
+//!
+//! Mind 不替代 PsychologyManager，只聚合它。已有心理状态（emotion/needs/persona/
+//! relationship）继续由 PsychologyManager 管理，Mind 只在其上增加 Belief/Goal/
+//! Attention 三个一等公民，并统一提供序列化与检索接口。
+//!
+//! 使用方式：
+//! - prompt 序列化：`mind.serialize_for_prompt()` → 结构化段落，替代散落 with_xxx
+//! - 检索预过滤：`mind.attention_snapshot()` → 传入 PrecisionFilterCriteria
+//! - Reflection 写回：`mind.apply_reflection(...)` → 由 ConsolidationPipeline 调用
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use parking_lot::RwLock;
+
+use crate::psychology::PsychologyManager;
+
+use super::attention::Attention;
+use super::belief::{BeliefStore, SharedBeliefStore};
+use super::current_activity::CurrentActivityTracker;
+use super::conversation::{ConversationOpportunities, ConversationOpportunity};
+use super::goal::{GoalStore, SharedGoalStore};
+use super::user_goals::UserGoalLedger;
+use super::working_memory::WorkingMemory;
+
+/// 内心 OS 累积缓冲区上限。
+///
+/// Event-driven current_thought synthesis keeps this buffer bounded.
+/// 超出时丢弃最旧条目，防止 long-idle 场景下 token 爆炸。
+const MAX_ACCUMULATED_THOUGHTS: usize = 6;
+
+/// 累积条目过期时间（秒）。drain 时早于此窗口的条目会被丢弃。
+///
+/// 5 小时：保证"深夜→清晨"这种跨段场景下，昨晚的思绪不会混入今早的独白。
+const ACCUMULATED_THOUGHT_TTL_SECS: i64 = 10 * 60;
+
+/// 带时间戳的 current_thought 快照（内心 OS 提示词累积注入用）
+#[derive(Debug, Clone)]
+pub struct ThoughtSnapshot {
+    /// Unix 秒（本地时区，仅用于展示格式化）
+    pub timestamp: i64,
+    /// 当时的 current_thought 内容
+    pub text: String,
+}
+
+/// 角色认知聚合句柄
+pub struct Mind {
+    pub personal: Arc<super::personal::Personal>,
+    pub char_id: String,
+    /// 已有心理架构（不持有所有权，Brain 仍是 owner，Mind 持有 Arc 引用）
+    pub psychology: Arc<PsychologyManager>,
+    /// 信念存储（Knowledge 层）
+    pub beliefs: SharedBeliefStore,
+    /// 目标集合（角色自身目标，影响 Attention 分配）
+    pub goals: SharedGoalStore,
+    /// 用户长期目标账本（用户的周~月级目标，带 deadline）
+    ///
+    /// 与 `goals` 的区别：`goals` 是角色自己的运行时目标（"陪伴主人"），
+    /// `user_goals` 是用户的人生阶段目标（"准备考研"），用于 prompt 注入
+    /// 让 LLM 有"用户当前处于什么阶段"的上下文。
+    pub user_goals: Arc<UserGoalLedger>,
+    /// 注意力（重启后从 attention.json 恢复，mind_tick 持续衰减）
+    pub attention: Arc<RwLock<Attention>>,
+    /// 工作记忆：30 秒级"正在想什么"缓冲区（重启后从 working_memory.json 恢复）
+    pub working_memory: Arc<RwLock<WorkingMemory>>,
+    /// 当前活动状态机：跨分钟级"正在做什么"（纯运行时，不持久化）
+    ///
+    /// 介于 WorldSnapshot（外部）和 WorkingMemory（瞬时想法）之间的中间层，
+    /// 记录活动类型 + 持续时间 + 最近相关事件，作为可持续感知的"正在做什么"上下文。
+    pub current_activity: Arc<CurrentActivityTracker>,
+    /// LLM 合成的"当前想法"缓存（事件驱动刷新 + 低频兜底）
+    ///
+    /// None 表示尚未完成首次 LLM 合成（冷启动时由模板 fallback 填充）。
+    pub current_thought: Arc<RwLock<Option<String>>>,
+    /// LLM 合成的"社交冲动"信号（0.0-1.0）
+    ///
+    /// 由 current_thought 的 LLM 调用顺便产出，表示角色"现在想主动和用户搭话"的强度。
+    /// 仅保留状态展示；主动搭话由结构化 conversation_intent 决定。
+    /// 默认 0.5（中性），LLM 失败时保持上次值。
+    pub social_urge: Arc<RwLock<f32>>,
+    pub thought_generated_at: Arc<RwLock<f64>>,
+    pub conversation_opportunities: Arc<RwLock<ConversationOpportunities>>,
+    pub peer_learning: Arc<RwLock<super::peer_learning::PeerLearning>>,
+    pub inbox: Arc<super::inbox::Inbox>,
+    pub thought_context_version: std::sync::atomic::AtomicU64,
+    pub thought_refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// current_thought 累积缓冲区（内心 OS 提示词注入用）
+    ///
+    /// 每次 `set_current_thought` 写入新值前，把即将被覆盖的旧值连同时间戳推入。
+    /// 内心 OS 触发时由调用方同步 drain，注入提示词后清空。
+    /// 纯运行时，不持久化；`reset_all` 时一并清空。
+    pub accumulated_thoughts: Arc<RwLock<Vec<ThoughtSnapshot>>>,
+    /// 是否需要重新合成当前想法（事件驱动触发时设 true，SelfUpdate 阶段检查并消费）
+    pub thought_refresh_requested: Arc<std::sync::atomic::AtomicBool>,
+    /// Native resident actor wake-up. A notification alone never requests a model call.
+    pub cognition_wake: Arc<tokio::sync::Notify>,
+    /// 持久化目录：`<user_data>/characters/<char_id>/mind/`
+    persistence_dir: std::path::PathBuf,
+}
+
+impl Mind {
+    /// 从已有 PsychologyManager 构建 Mind，并加载 Belief/Goal 持久化数据
+    pub fn load_or_init(char_id: &str, psychology: Arc<PsychologyManager>) -> Self {
+        let char_dir = crate::utils::path::get_companion_data_dir(char_id);
+        let mind_dir = char_dir.join("mind");
+
+        let beliefs = {
+            let path = mind_dir.join("beliefs.json");
+            let store = BeliefStore::load(&path);
+            Arc::new(RwLock::new(store))
+        };
+
+        let goals = {
+            let path = mind_dir.join("goals.json");
+            let store = GoalStore::load(&path);
+            Arc::new(RwLock::new(store))
+        };
+
+        let user_goals = Arc::new(UserGoalLedger::new(mind_dir.join("user_goals.json")));
+
+        // 恢复 Attention（上次关闭时的快照），并确保核心实体有基线权重
+        let attention = {
+            let path = mind_dir.join("attention.json");
+            let mut att = if path.exists() {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                serde_json::from_str::<Attention>(&content).unwrap_or_default()
+            } else {
+                Attention::new()
+            };
+            att.seed_baseline(chrono::Local::now().timestamp());
+            Arc::new(RwLock::new(att))
+        };
+
+        // 恢复 WorkingMemory（上次关闭时的快照，mind_tick 会自然衰减过期条目）
+        let working_memory = {
+            let path = mind_dir.join("working_memory.json");
+            if path.exists() {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                let wm = serde_json::from_str::<WorkingMemory>(&content).unwrap_or_default();
+                Arc::new(RwLock::new(wm))
+            } else {
+                Arc::new(RwLock::new(WorkingMemory::new()))
+            }
+        };
+        let current_activity = Arc::new(CurrentActivityTracker::new());
+        let mut conversation_opportunities = ConversationOpportunities::default();
+        conversation_opportunities.threads = crate::utils::fs::load_json_or_backup(&mind_dir.join("thought_threads.json")).unwrap_or_default();
+        conversation_opportunities.threads.prune(chrono::Utc::now().timestamp());
+        if conversation_opportunities.threads.continuation.retry_interrupted(chrono::Utc::now().timestamp()) {
+            if let Ok(json) = serde_json::to_string(&conversation_opportunities.threads) {
+                let _ = crate::utils::fs::write_atomic(&mind_dir.join("thought_threads.json"), &json);
+            }
+        }
+        let peer_learning = crate::utils::fs::load_json_or_backup(&mind_dir.join("peer_learning.json")).unwrap_or_default();
+
+        Self {
+            personal: super::personal::Personal::shared(mind_dir.join("personal.json")),
+            char_id: char_id.to_string(),
+            psychology,
+            beliefs,
+            goals,
+            user_goals,
+            attention,
+            working_memory,
+            current_activity,
+            current_thought: Arc::new(RwLock::new(None)),
+            social_urge: Arc::new(RwLock::new(0.5)),
+            thought_generated_at: Arc::new(RwLock::new(0.0)),
+            conversation_opportunities: Arc::new(RwLock::new(conversation_opportunities)),
+            peer_learning: Arc::new(RwLock::new(peer_learning)),
+            inbox: super::inbox::Inbox::shared(mind_dir.join("interaction_inbox.json")),
+            thought_context_version: std::sync::atomic::AtomicU64::new(0),
+            thought_refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            accumulated_thoughts: Arc::new(RwLock::new(Vec::new())),
+            thought_refresh_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cognition_wake: Arc::new(tokio::sync::Notify::new()),
+            persistence_dir: mind_dir,
+        }
+    }
+
+    /// 持久化 Belief、Goal、Attention 和 WorkingMemory
+    ///
+    /// Attention 和 WorkingMemory 在重启后恢复，避免每次启动都"失忆"。
+    /// Attention 衰减由 mind_tick 负责，持久化的快照可能略微过期但不影响正确性。
+    pub fn persist(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.persistence_dir)?;
+        {
+            let store = self.beliefs.read();
+            store.save(&self.persistence_dir.join("beliefs.json"))?;
+        }
+        {
+            let store = self.goals.read();
+            store.save(&self.persistence_dir.join("goals.json"))?;
+        }
+        // Attention 持久化
+        {
+            let att = self.attention.read();
+            let json = serde_json::to_string(&*att)?;
+            crate::utils::fs::write_atomic(&self.persistence_dir.join("attention.json"), &json)?;
+        }
+        // WorkingMemory 持久化
+        {
+            let wm = self.working_memory.read();
+            let json = serde_json::to_string(&*wm)?;
+            crate::utils::fs::write_atomic(&self.persistence_dir.join("working_memory.json"), &json)?;
+        }
+        self.save_thought_threads(&self.conversation_opportunities.write().threads)?;
+        self.save_peer_learning(&self.peer_learning.read())?;
+        Ok(())
+    }
+
+    // Call while holding the opportunities write lock, keeping atomic saves in state order.
+    fn save_thought_threads(&self, threads: &super::thought_threads::ThoughtThreads) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.persistence_dir)?;
+        crate::utils::fs::write_atomic(&self.persistence_dir.join("thought_threads.json"), &serde_json::to_string(threads)?)
+    }
+
+    fn save_peer_learning(&self, learning: &super::peer_learning::PeerLearning) -> std::io::Result<()> {
+        crate::utils::fs::write_atomic(&self.persistence_dir.join("peer_learning.json"), &serde_json::to_string(learning)?)
+    }
+
+    pub fn receive_peer_statement(&self, speaker: &str, id: &str, text: &str, concern: Option<String>, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        let mut learning = self.peer_learning.write();
+        let Some(statement) = learning.receive(&self.char_id, speaker, id, text, concern, now) else { return; };
+        if let Err(error) = self.save_peer_learning(&learning) { tracing::warn!("同伴发言来源保存失败: {error}"); }
+        self.psychology.observe_peer_message(&statement.text);
+        let event = statement.event();
+        // Preserve the host-authored concern reference instead of the generic event ID.
+        opportunities.record_peer_event(event);
+        if opportunities.threads.continuation.cancel() {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考计划取消保存失败: {error}"); }
+        }
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        opportunities.replace(None);
+        self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cognition_wake.notify_one();
+    }
+
+    pub fn activate_peer_fallbacks(&self, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        if opportunities.threads.activate_peer_fallbacks(now) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("同伴回退状态保存失败: {error}"); }
+            self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            opportunities.replace(None);
+            self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.cognition_wake.notify_one();
+        }
+    }
+
+    pub fn prepared_personal_event(&self, text: &str) -> Option<String> {
+        self.conversation_opportunities.read().prepared_personal_event(text)
+    }
+    pub fn peer_draft_is_current(&self, text: &str, now: i64) -> bool {
+        self.conversation_opportunities.read().peer_draft_is_current(text, now)
+    }
+    pub fn prepared_peer_message_id(&self, text: &str) -> Option<String> {
+        self.conversation_opportunities.read().prepared_peer_message_id(&self.char_id, text)
+    }
+
+    pub fn thought_threads_snapshot(&self, now: i64) -> Vec<super::thought_threads::ThoughtThread> {
+        self.conversation_opportunities.read().threads.snapshot(now, 3)
+    }
+
+    pub fn personal_thought_for_event(&self, event_id: &str, now: i64) -> Option<super::thought_threads::ThoughtThread> {
+        self.conversation_opportunities.read().threads.snapshot(now, 6).into_iter().find(|thread| thread.event_id() == event_id)
+    }
+
+    /// Mind 内部锁的争用探针（诊断用，非阻塞）。
+    ///
+    /// `mind_tick` 与 `persist` 会按 `attention → goals → beliefs → working_memory` 的顺序
+    /// 加锁并做文件 IO。若某个任务在这条路径上卡死，外部表现是：该角色的
+    /// `mind/*.json` 停止更新，且之后所有 `think` 都卡在 pipeline 之前、日志上毫无痕迹
+    /// （见 `brain.think_inner` 的入口打点）。这里用 `try_write` 做非阻塞探测：拿不到锁
+    /// 说明有人正持有它；持续拿不到就是卡死的强信号，直接把锁名打出来。
+    ///
+    /// **调用点必须选在调用方自己不持有任何 Mind 锁的位置**（当前为 `Brain::proactive_tick`
+    /// 入口，早于 `cognitive_tick` 的各阶段）。报告按角色节流，避免每 tick 刷屏。
+    pub fn log_contended_locks(&self, now: f64) {
+        // try_write 拿到即说明当前无争用；守卫在表达式结束时立刻释放。
+        let contended: Vec<&'static str> = [
+            ("attention", self.attention.try_write().is_none()),
+            ("goals", self.goals.try_write().is_none()),
+            ("beliefs", self.beliefs.try_write().is_none()),
+            ("working_memory", self.working_memory.try_write().is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, busy)| busy.then_some(name))
+        .collect();
+
+        static LAST_WARN: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
+        let mut last_warn = LAST_WARN
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if contended.is_empty() {
+            last_warn.remove(&self.char_id);
+            return;
+        }
+
+        const WARN_INTERVAL_SECS: f64 = 60.0;
+        if now - last_warn.get(&self.char_id).copied().unwrap_or(0.0) < WARN_INTERVAL_SECS {
+            return;
+        }
+        last_warn.insert(self.char_id.clone(), now);
+        tracing::warn!(
+            "[Mind:{}] 检测到内部锁被长期占用: {:?}（持续 {}s 以上）——\
+             持有者一旦阻塞，该角色的 think 会卡在 pipeline 之前、mind/*.json 也会停止更新。\
+             请检查持有该锁期间是否发生了阻塞调用。",
+            self.char_id,
+            contended,
+            WARN_INTERVAL_SECS as u64
+        );
+    }
+
+    /// Attention 快照（用于检索预过滤，clone 后释放锁）
+    pub fn attention_snapshot(&self) -> Attention {
+        self.attention.read().clone()
+    }
+
+    /// 取 Top-N 注意力焦点（prompt 注入用）
+    pub fn attention_top_n(&self, n: usize) -> Vec<(String, f32)> {
+        self.attention.read().top_n(n)
+            .into_iter()
+            .map(|(k, w)| (k.clone(), w))
+            .collect()
+    }
+
+    /// 提升 Attention（事件驱动入口）
+    pub fn boost_attention(&self, entity: &str, boost: f32, now: i64) {
+        self.attention.write().boost(entity, boost, now);
+    }
+
+    /// Attention 衰减（tick 驱动）
+    pub fn decay_attention(&self, factor: f32, floor: f32) {
+        self.attention.write().decay(factor, floor);
+    }
+
+    /// 推入工作记忆条目（对话/独白/世界事件后调用）
+    pub fn push_working_memory(
+        &self,
+        content: String,
+        source: super::working_memory::WorkingMemorySource,
+    ) {
+        let now = chrono::Local::now().timestamp();
+        self.working_memory.write().push(content, source, now);
+    }
+
+    /// 工作记忆序列化（prompt 注入用）
+    pub fn working_memory_prompt_section(&self, lang: &str) -> Option<String> {
+        self.working_memory.read().serialize_for_prompt(lang)
+    }
+
+    /// 清空工作记忆（会话关闭时调用）
+    pub fn clear_working_memory(&self) {
+        self.working_memory.write().clear();
+    }
+
+    /// 恢复出厂设置：清空所有认知层持久化状态
+    ///
+    /// 清空范围：
+    /// - beliefs（信念存储）
+    /// - goals（目标集合）
+    /// - attention（注意力焦点）
+    /// - working_memory（工作记忆缓冲区）
+    /// - current_thought（LLM 合成的当前想法缓存）
+    /// - accumulated_thoughts（内心 OS 用的累积缓冲区）
+    /// - thought_refresh_requested（刷新请求标志位）
+    ///
+    /// 心理架构（emotion/needs/relationship）由 PsychologyManager.reset_to_initial 负责。
+    /// 调用后会持久化清空后的状态到 mind/ 目录下的各 JSON 文件。
+    pub fn reset_all(&self) -> std::io::Result<()> {
+        self.personal.clear().map_err(std::io::Error::other)?;
+        {
+            let mut store = self.beliefs.write();
+            *store = BeliefStore::new();
+        }
+        {
+            let mut store = self.goals.write();
+            *store = GoalStore::new();
+        }
+        if let Err(e) = self.user_goals.clear_all() {
+            tracing::warn!("[Mind:{}] 清空用户目标失败: {}", self.char_id, e);
+        }
+        {
+            let mut att = self.attention.write();
+            *att = Attention::new();
+        }
+        {
+            let mut wm = self.working_memory.write();
+            wm.clear();
+        }
+        self.clear_current_thought();
+        *self.conversation_opportunities.write() = ConversationOpportunities::default();
+        *self.peer_learning.write() = super::peer_learning::PeerLearning::default();
+        self.inbox.clear().map_err(std::io::Error::other)?;
+        {
+            let mut acc = self.accumulated_thoughts.write();
+            acc.clear();
+        }
+        self.thought_refresh_requested
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.persist()
+    }
+
+    /// 读取 LLM 合成的"当前想法"缓存（clone 后释放锁）
+    pub fn current_thought_snapshot(&self) -> Option<String> {
+        self.current_thought.read().clone()
+    }
+
+    /// 清空"当前想法"缓存（功能禁用时调用，不推入累积缓冲区）
+    pub fn clear_current_thought(&self) {
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *self.current_thought.write() = None;
+        *self.social_urge.write() = 0.5;
+        *self.thought_generated_at.write() = 0.0;
+        self.conversation_opportunities.write().replace(None);
+    }
+
+    /// 写入 LLM 合成的"当前想法" + social_urge 信号
+    ///
+    /// 副作用：写入前把即将被覆盖的旧值（如非空）连同时间戳推入
+    /// `accumulated_thoughts` 缓冲区，供下次内心 OS 消费。
+    /// 超出 `MAX_ACCUMULATED_THOUGHTS` 时丢弃最旧条目。
+    pub fn set_current_thought(&self, output: super::conversation::ThoughtSynthesisOutput,
+        grounding: &super::thought_threads::ThoughtGrounding<'_>, user_present: bool, now: f64, context_version: u64) -> Vec<super::peer_learning::LearnedNote> {
+        let mut opportunities = self.conversation_opportunities.write();
+        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst) != context_version { return Vec::new(); }
+        // Only the exact records offered before this request may authorize a proposal.
+        let changed = opportunities.apply_synthesis(&output, grounding, user_present, now);
+        // A slow provider must not turn "in 60 seconds" into an immediate retry.
+        let planned = opportunities.threads.plan_continuation(output.next_thought.as_ref(), chrono::Utc::now().timestamp());
+        let learned = {
+            let mut learning = self.peer_learning.write();
+            let previous = learning.clone();
+            let notes = learning.learn(&output.learning_updates, now as i64);
+            if !notes.is_empty() {
+                if let Err(error) = self.save_peer_learning(&learning) {
+                    *learning = previous;
+                    tracing::warn!("同伴学习记录保存失败: {error}");
+                    Vec::new()
+                } else { notes }
+            } else { notes }
+        };
+        {
+            let mut cur = self.current_thought.write();
+            if let Some(prev) = cur.take() {
+                if !prev.trim().is_empty() {
+                    self.push_accumulated_thought(prev);
+                }
+            }
+            *cur = Some(output.thought);
+        }
+        *self.social_urge.write() = output.social_urge.clamp(0.0, 1.0);
+        *self.thought_generated_at.write() = chrono::Utc::now().timestamp() as f64;
+        if changed || planned {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                tracing::warn!(character=%self.char_id,"思绪保存失败: {error}");
+            }
+        }
+        self.cognition_wake.notify_one();
+        learned
+    }
+
+    pub fn fresh_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
+        self.conversation_opportunities.read().fresh(now)
+    }
+
+    pub fn take_conversation_opportunity(&self, now: f64) -> Option<ConversationOpportunity> {
+        self.take_conversation_opportunity_for(false, now)
+    }
+
+    pub fn take_conversation_opportunity_for(&self, peer: bool, now: f64) -> Option<ConversationOpportunity> {
+        let mut opportunities = self.conversation_opportunities.write();
+        let candidate = opportunities.take_for(peer, now);
+        if candidate.as_ref().is_some_and(|c| c.source == super::conversation::ConversationSource::ThoughtThread) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                tracing::warn!("思绪发言进度保存失败，暂不发言: {error}");
+                return None;
+            }
+        }
+        candidate
+    }
+
+    pub fn claim_due_continuation(&self, now: i64) -> bool {
+        let mut opportunities = self.conversation_opportunities.write();
+        let anchors = opportunities.threads.continuation_anchors(now, true);
+        let previous = opportunities.threads.continuation.clone();
+        let claimed = opportunities.threads.continuation.claim(&anchors, now);
+        if opportunities.threads.continuation != previous {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) {
+                opportunities.threads.continuation = previous;
+                tracing::warn!("思考计划领取保存失败，暂缓: {error}");
+                return false;
+            }
+        }
+        if claimed { self.thought_refresh_requested.store(true, std::sync::atomic::Ordering::Relaxed); }
+        claimed
+    }
+
+    pub fn retry_continuation(&self, now: i64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        if opportunities.threads.continuation.retry_interrupted(now) {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考重试保存失败: {error}"); }
+        }
+    }
+
+    pub fn restore_conversation_after_failure(&self, candidate: ConversationOpportunity, context_version: u64) {
+        let mut opportunities=self.conversation_opportunities.write();
+        if self.thought_context_version.load(std::sync::atomic::Ordering::SeqCst)==context_version {
+            opportunities.restore_after_failure(candidate);
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思绪重试进度保存失败: {error}"); }
+        }
+    }
+
+    pub fn record_opportunity_generated(&self, candidate: ConversationOpportunity, text: &str, now: f64) {
+        self.conversation_opportunities.write().record_prepared(candidate, text, now);
+    }
+
+    pub fn record_opportunity_delivered(&self, text: &str, now: f64) {
+        let mut opportunities = self.conversation_opportunities.write();
+        opportunities.record_delivered(text, now);
+        if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思绪投递进度保存失败: {error}"); }
+    }
+
+    /// 读取 social_urge 信号（0.0-1.0）
+    pub fn social_urge_snapshot(&self) -> f32 {
+        *self.social_urge.read()
+    }
+
+    pub fn fresh_social_urge_snapshot(&self, now: f64) -> Option<f32> {
+        let age = now - *self.thought_generated_at.read();
+        if (0.0..=120.0).contains(&age) { Some(self.social_urge_snapshot()) } else { None }
+    }
+
+    /// 把一条旧 current_thought 推入累积缓冲区（带本地时间戳）
+    fn push_accumulated_thought(&self, text: String) {
+        let mut buf = self.accumulated_thoughts.write();
+        buf.push(ThoughtSnapshot {
+            timestamp: chrono::Local::now().timestamp(),
+            text,
+        });
+        if buf.len() > MAX_ACCUMULATED_THOUGHTS {
+            let overflow = buf.len() - MAX_ACCUMULATED_THOUGHTS;
+            buf.drain(..overflow);
+        }
+    }
+
+    /// 同步 drain 累积缓冲区，返回全部快照并清空（内心 OS 触发时调用）
+    ///
+    /// 过滤规则（在 drain 时应用，保证"触发时刻"的精确语义）：
+    /// - 超过 `ACCUMULATED_THOUGHT_TTL_SECS`（默认 5 小时）的条目丢弃
+    /// - 剩余条目按写入顺序（即时间顺序）返回
+    pub fn drain_accumulated_thoughts(&self) -> Vec<ThoughtSnapshot> {
+        let mut buf = self.accumulated_thoughts.write();
+        let taken = std::mem::take(&mut *buf);
+        let original_len = taken.len();
+        let now = chrono::Local::now().timestamp();
+        let cutoff = now - ACCUMULATED_THOUGHT_TTL_SECS;
+        let fresh: Vec<ThoughtSnapshot> = taken
+            .into_iter()
+            .filter(|s| s.timestamp >= cutoff)
+            .collect();
+        let discarded = original_len.saturating_sub(fresh.len());
+        if discarded > 0 {
+            tracing::debug!(
+                "[accumulated_thoughts] drain: kept {}, discarded {} (TTL={}s)",
+                fresh.len(),
+                discarded,
+                ACCUMULATED_THOUGHT_TTL_SECS
+            );
+        }
+        fresh
+    }
+
+    /// 清空累积缓冲区（不调用 drain 的清理场景，如 reset_all）
+    pub fn clear_accumulated_thoughts(&self) {
+        self.accumulated_thoughts.write().clear();
+    }
+
+    /// 请求重新合成当前想法（事件驱动触发，下次 SelfUpdate 阶段消费）
+    pub fn request_thought_refresh(&self) {
+        self.invalidate_conversation_opportunity();
+        self.thought_refresh_requested
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cognition_wake.notify_one();
+    }
+
+    /// New input invalidates an earlier proposal without scheduling an extra request.
+    pub fn invalidate_conversation_opportunity(&self) {
+        self.thought_context_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut opportunities = self.conversation_opportunities.write();
+        opportunities.replace(None);
+        opportunities.cancel_peer_drafts();
+        if opportunities.threads.continuation.cancel() {
+            if let Err(error) = self.save_thought_threads(&opportunities.threads) { tracing::warn!("思考计划取消保存失败: {error}"); }
+        }
+    }
+
+    /// 消费刷新请求标志位（返回是否有待处理的刷新请求）
+    pub fn consume_thought_refresh(&self) -> bool {
+        self.thought_refresh_requested
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Inspect without consuming: a refresh delayed by rate limiting must remain pending.
+    pub fn thought_refresh_requested(&self) -> bool {
+        self.thought_refresh_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 当前念头序列化（prompt 注入用）
+    ///
+    /// 只输出 LLM 合成的当前想法摘要，不包含工作记忆条目（避免对话记录混入念头 section）。
+    pub fn working_memory_prompt_section_with_thought(&self, lang: &str) -> Option<String> {
+        let thought = self.current_thought_snapshot();
+        if let Some(t) = thought {
+            if !t.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("current_thoughts", lang);
+                return Some(format!("{}\n> {}", header, t));
+            }
+        }
+        None
+    }
+
+    /// Mind Tick —— 30 秒级认知节拍（无 LLM）
+    ///
+    /// 统一处理三个 Mind 一等公民的周期性更新：
+    /// 1. **Attention Drift**：基于 `last_activated` 的时间感知衰减
+    ///    （替代旧的固定 factor 衰减，避免频率敏感）
+    /// 2. **Goal Update**：优先级缓慢衰减 + 低优先级淘汰 + 活跃数上限（≤5）
+    /// 3. **Belief Consolidation**：按 `BeliefCategory` 差异化 confidence 衰减
+    ///    （Trait 不衰减 / State 高衰减）+ 低置信淘汰
+    /// 4. **Working Memory Decay**：30 秒级工作记忆衰减
+    /// 5. **Current Activity Expiry**：当前活动超时检查
+    ///
+    /// **Need Change 不在此处理**：由 `PsychologyManager::homeostasis_tick`（10s）
+    /// 和 `micro_tick`（3-5s）独立负责，Mind 不重复。
+    ///
+    /// 调用方应保证 ~30s 间隔（由 `Brain::proactive_tick` 节流）。
+    /// 每次调用后持久化 Belief/Goal（Attention 不持久化）。
+    pub fn mind_tick(&self, dt_secs: f64, now: i64) {
+        // 1. Attention Drift：基于时间的指数衰减
+        //    衰减率：每分钟衰减到 ~0.85（即 0.85^(dt/60)），低于 0.05 的条目移除
+        {
+            let mut att = self.attention.write();
+            let decay_factor = 0.85f32.powf((dt_secs / 60.0).max(0.0) as f32);
+            att.focus.retain(|_, f| {
+                f.weight *= decay_factor;
+                f.weight >= 0.05
+            });
+            att.seed_baseline(now);
+            att.last_updated = now;
+        }
+
+        // 2. Goal Update：优先级衰减 + 超时淘汰 + 活跃数上限
+        {
+            let mut store = self.goals.write();
+            let dt_factor = (dt_secs / 30.0).max(0.0);
+            for g in &mut store.goals {
+                if g.active {
+                    // 超时目标直接淘汰
+                    if g.is_expired(now) {
+                        g.active = false;
+                        continue;
+                    }
+                    // 优先级衰减：每 30s 衰减到 g.decay_rate（默认 0.97）
+                    g.priority *= g.decay_rate.powf(dt_factor);
+                    if g.priority < 0.1 {
+                        g.active = false;
+                    }
+                }
+            }
+            // 活跃数上限：保留 Top-5，其余置 inactive
+            let active_count = store.goals.iter().filter(|g| g.active).count();
+            if active_count > 5 {
+                let mut priorities: Vec<f64> = store
+                    .goals
+                    .iter()
+                    .filter(|g| g.active)
+                    .map(|g| g.priority)
+                    .collect();
+                priorities.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                // 第 5 个（index 4）的优先级作为阈值，低于此值的淘汰
+                if let Some(&threshold) = priorities.get(4) {
+                    for g in &mut store.goals {
+                        if g.active && g.priority < threshold {
+                            g.active = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Belief Consolidation：按 category 差异化 confidence 衰减
+        {
+            let mut store = self.beliefs.write();
+            let dt_min: f64 = (dt_secs / 60.0).max(0.0);
+            for b in &mut store.beliefs {
+                let decay_per_min: f64 = match b.category {
+                    super::belief::BeliefCategory::Trait => 1.0,         // 特质不衰减
+                    super::belief::BeliefCategory::Habit => 0.995,      // 习惯极慢衰减
+                    super::belief::BeliefCategory::Preference => 0.997, // 偏好几乎不衰减
+                    super::belief::BeliefCategory::State => 0.95,       // 状态高衰减
+                    super::belief::BeliefCategory::Relationship => 0.99, // 关系慢衰减
+                };
+                b.confidence *= decay_per_min.powf(dt_min);
+            }
+            // 淘汰低置信（< 0.1）
+            store.beliefs.retain(|b| b.confidence >= 0.1);
+        }
+
+        // 4. Working Memory Decay：30 秒级工作记忆衰减
+        {
+            self.working_memory.write().decay(dt_secs);
+        }
+
+        // 5. Current Activity Expiry：当前活动超时检查
+        //    超过最大持续时间（30 分钟）的活动自动回 Idle，
+        //    避免"在打 Minecraft"这种活动状态在用户离开后无限残留。
+        {
+            self.current_activity.check_expiry(now);
+        }
+
+        // 持久化 Belief/Goal/Attention/WorkingMemory
+        let _ = self.persist();
+    }
+
+    /// 持久化目录路径（外部检查用）
+    pub fn persistence_dir(&self) -> &std::path::PathBuf {
+        &self.persistence_dir
+    }
+
+    /// 序列化为 prompt 段落 —— 把 Belief / Goal / Attention 三个一等公民
+    /// 统一渲染成结构化文本，供 PromptBuildingStep 注入。
+    ///
+    /// 注意：本方法只输出 Mind 新增的三部分。已有的 Emotion/Persona/Relationship
+    /// 仍由 PsychologyManager 自己渲染，Mind 不重复输出。
+    ///
+    /// 返回 None 时表示三部分全空，不污染 prompt。
+    pub fn serialize_for_prompt(&self, lang: &str) -> Option<String> {
+        let lang_norm = crate::pipeline::prompt_modules::normalize_lang(lang);
+        let mut sections: Vec<String> = Vec::new();
+        sections.push(include_str!("../../prompts/framework/personal_companion.en.md").into());
+        sections.push(format!("[Personal continuity — attributed data]\n{}",self.personal.context(chrono::Utc::now().timestamp())));
+
+        // Belief：取置信度 Top-5，按 subject 分组展示
+        {
+            let store = self.beliefs.read();
+            let top = store.top_n_by_confidence(5);
+            if !top.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("beliefs", lang);
+                let mut lines = vec![header.to_string()];
+                for b in top {
+                    lines.push(format!("- {}", b.statement));
+                }
+                sections.push(lines.join("\n"));
+            }
+        }
+
+        // Goal：取活跃 Top-3
+        {
+            let store = self.goals.read();
+            let top = store.active_top_n(3);
+            if !top.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("current_goals", lang);
+                let mut lines = vec![header.to_string()];
+                for g in top {
+                    lines.push(format!("- {}", g.description));
+                }
+                sections.push(lines.join("\n"));
+            }
+        }
+
+        // Attention：取 Top-3 焦点实体
+        {
+            let top = self.attention_top_n(3);
+            if !top.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("attention_focus", lang);
+                let focus_label = match lang_norm {
+                    "en" => "Focus:",
+                    "ja" => "注目：",
+                    _ => "关注：",
+                };
+                let sep = match lang_norm {
+                    "en" => ", ",
+                    _ => "、",
+                };
+                let mut lines = vec![header.to_string()];
+                let entries: Vec<String> = top
+                    .iter()
+                    .map(|(entity, _w)| entity.clone())
+                    .collect();
+                lines.push(format!("{}{}", focus_label, entries.join(sep)));
+                sections.push(lines.join("\n"));
+            }
+        }
+
+        // User Goals：用户长期人生阶段目标（"准备考研" / "写毕业论文"），
+        // 让 LLM 知道"用户当前在忙什么人生大事"，辅助理解用户现实活动。
+        // 独立于角色的运行时 Goal 系统，由 reflection 阶段 LLM 抽取维护。
+        {
+            let active = self.user_goals.active_goals();
+            if !active.is_empty() {
+                let header = crate::pipeline::prompt_modules::section_heading("user_goals", lang);
+                let mut lines = vec![header.to_string()];
+                for g in &active {
+                    let deadline = g.deadline.map(|d| d.format("%m/%d").to_string());
+                    match deadline {
+                        Some(d) => lines.push(format!("- {}（截止 {}）", g.label, d)),
+                        None => lines.push(format!("- {}", g.label)),
+                    }
+                }
+                sections.push(lines.join("\n"));
+            }
+        }
+
+        // Current Activity：当前活动状态（跨分钟级持续状态）
+        if let Some(activity_section) = self.current_activity.serialize_for_prompt(
+            chrono::Local::now().timestamp(),
+            lang,
+        ) {
+            sections.push(activity_section);
+        }
+
+        let threads = self.conversation_opportunities.read().threads.prompt_snapshot(chrono::Utc::now().timestamp(), 3);
+        if !threads.is_empty() {
+            let label = match lang_norm {
+                "en" => "Your continuing personal thoughts (subjective, not facts about the user; answers may change them)",
+                "ja" => "続いている自分の考え（主観でありユーザーの事実ではない。回答に応じて見直す）",
+                _ => "你持续在意的事情（主观看法，不是用户事实；听到回答后可以改变）",
+            };
+            sections.push(format!("{label}\n{}", serde_json::to_string(&threads).unwrap_or_default()));
+        }
+        if let Some(notes) = self.peer_learning.read().prompt_notes() { sections.push(notes); }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
+        }
+    }
+}

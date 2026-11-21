@@ -1,0 +1,456 @@
+import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { invoke } from '@tauri-apps/api/core';
+import './PluginsPanel.css';
+import PluginInstallPanel from './PluginInstallPanel';
+import OptionalResourceSettings from '../settings/OptionalResourceSettings';
+import SkillsManager, { type SkillEntry } from './SkillsManager';
+
+/** 插件清单条目（对齐后端 plugins::PluginInventoryEntry） */
+interface PluginEntry {
+  enabled: boolean;
+  requirements: string[];
+  /** 稳定的插件目录 key，供后端重载/删除使用 */
+  key: string;
+  name: string;
+  version: string;
+  description: string;
+  skills: string[];
+  tools: string[];
+  mcp_servers: string[];
+  providers: string[];
+  status: string;
+  /** 信任状态：trusted / changed（曾信任但清单已变更）/ untrusted */
+  trust: string;
+  reason?: string | null;
+  dir: string;
+  capability_kind?: string;
+}
+
+/** 内置插件（播种体系所有，禁删；改内置的正确方式是复制为新插件） */
+const BUILTIN_PLUGIN_NAMES = ['llm-providers', 'plugin-authoring', '3d-apartment'];
+
+/** 插件运行时诊断（对齐后端 commands::plugins::plugin_diagnostics） */
+interface PluginDiagnostics {
+  last_report: {
+    plugins: string[];
+    skills: string[];
+    tools: string[];
+    mcp_servers: string[];
+    protocols: string[];
+    skipped: string[];
+  } | null;
+  /** 运行时静默决策登记（MCP 占用跳过 / 工具重名 / provider 冲突等），最新在前 */
+  events: string[];
+}
+
+const sectionTitle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: 700,
+  color: 'var(--panel-text)',
+  margin: '0',
+};
+
+/** 内联确认状态 */
+interface ConfirmState {
+  type: 'trust' | 'delete';
+  plugin: PluginEntry;
+}
+
+/** 设置窗口「插件/技能」页：盘点插件与技能清单（只读，不装载/卸载）。 */
+const PluginsPanel: React.FC = () => {
+  const { t, i18n } = useTranslation();
+  const zh = i18n.language.startsWith('zh');
+  const ja = i18n.language.startsWith('ja');
+  const kindLabels: Record<string, string> = zh ? {executable:'可执行扩展', data:'配置数据包', guidance:'使用指导包', mixed:'可执行扩展 · 附带指导'} : ja ? {executable:'実行機能',data:'設定データ',guidance:'利用ガイド',mixed:'実行機能・ガイド付き'} : {executable:'Executable extension',data:'Configuration data',guidance:'Usage guidance',mixed:'Executable extension with guidance'};
+  const [plugins, setPlugins] = useState<PluginEntry[] | null>(null);
+  const [skills, setSkills] = useState<SkillEntry[] | null>(null);
+  const [diag, setDiag] = useState<PluginDiagnostics | null>(null);
+  const [paths, setPaths] = useState<{ plugins_dir: string; skills_dir: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [p, s, d, dg] = await Promise.all([
+          invoke<PluginEntry[]>('list_plugins'),
+          invoke<SkillEntry[]>('list_skills'),
+          invoke<{ plugins_dir: string; skills_dir: string }>('plugin_paths'),
+          invoke<PluginDiagnostics>('plugin_diagnostics'),
+        ]);
+        if (cancelled) return;
+        setPlugins(p);
+        setSkills(s);
+        setPaths(d);
+        setDiag(dg);
+      } catch (e) {
+        if (!cancelled) setError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** 重新盘点插件/技能清单（重载/删除后调用） */
+  const refresh = async () => {
+    try {
+      const [p, s, dg] = await Promise.all([
+        invoke<PluginEntry[]>('list_plugins'),
+        invoke<SkillEntry[]>('list_skills'),
+        invoke<PluginDiagnostics>('plugin_diagnostics'),
+      ]);
+      setPlugins(p);
+      setSkills(s);
+      setDiag(dg);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const onReload = async (key: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke('reload_plugin', { name: key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.reload_failed', { error: String(e) }));
+    } finally { setBusy(false); }
+  };
+
+  /** 信任插件：记录清单指纹并立即装载（未信任插件的贡献不装载） */
+  const onTrust = async (plugin: PluginEntry) => {
+    setConfirm({ type: 'trust', plugin });
+  };
+
+  const executeTrust = async () => {
+    if (!confirm) return;
+    const plugin = confirm.plugin;
+    setBusy(true);
+    setConfirm(null);
+    setError(null);
+    try {
+      await invoke('trust_plugin', { key: plugin.key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.trust_failed', { error: String(e) }));
+    } finally { setBusy(false); }
+  };
+
+  const trustLabel = (trust: string): string => {
+    if (trust === 'trusted') return '';
+    return trust === 'changed'
+      ? t('config.plugins.status_changed')
+      : t('config.plugins.status_untrusted');
+  };
+
+  const onDelete = async (plugin: PluginEntry) => {
+    setConfirm({ type: 'delete', plugin });
+  };
+
+  const executeDelete = async () => {
+    if (!confirm) return;
+    const plugin = confirm.plugin;
+    setBusy(true);
+    setConfirm(null);
+    setError(null);
+    try {
+      await invoke('delete_plugin', { name: plugin.key });
+      await refresh();
+    } catch (e) {
+      setError(t('config.plugins.delete_failed', { error: String(e) }));
+    } finally { setBusy(false); }
+  };
+
+  const onToggle = async (plugin: PluginEntry) => {
+    setBusy(true); setError(null);
+    try { await invoke('set_plugin_enabled', { key: plugin.key, enabled: !plugin.enabled }); await refresh(); }
+    catch (e) { setError(String(e)); await refresh(); }
+    finally { setBusy(false); }
+  };
+  const statusLabel = (status: string) => ({
+    loaded: t('config.plugins.status_loaded'), skipped: t('config.plugins.status_skipped'),
+    disabled: zh ? '已禁用' : ja ? '無効' : 'Disabled',
+    untrusted: zh ? '等待信任' : ja ? '信頼が必要' : 'Awaiting trust',
+    installed: zh ? '已安装，未装载' : ja ? '未ロード' : 'Installed, inactive',
+    blocked: zh ? '缺少依赖' : ja ? '依存関係が必要' : 'Missing requirements',
+    partial: zh ? '部分可用' : ja ? '一部利用可能' : 'Partially loaded',
+  }[status] ?? status);
+
+  return (
+    <div className="plugins-page">
+      {/* 内联确认栏 */}
+      {confirm && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 14px',
+            borderRadius: 8,
+            border: '1px solid var(--panel-border-strong)',
+            background: 'var(--panel-surface)',
+          }}
+        >
+          <span style={{ fontSize: 13, color: 'var(--panel-text)', flex: 1 }}>
+            {confirm.type === 'trust'
+              ? t('config.plugins.trust_confirm', { name: confirm.plugin.name })
+              : t('config.plugins.delete_confirm', { name: confirm.plugin.name })}
+          </span>
+          <button
+            onClick={confirm.type === 'trust' ? executeTrust : executeDelete}
+            style={{
+              fontSize: 12,
+              padding: '4px 14px',
+              borderRadius: 6,
+              border: 'none',
+              background: confirm.type === 'delete' ? '#8B2C1F' : 'var(--panel-accent)',
+              color: '#fff',
+              cursor: 'pointer',
+              fontWeight: 600,
+            }}
+          >
+            {t('common.confirm')}
+          </button>
+          <button
+            onClick={() => setConfirm(null)}
+            style={{
+              fontSize: 12,
+              padding: '4px 14px',
+              borderRadius: 6,
+              border: '1px solid var(--panel-border)',
+              background: 'transparent',
+              color: 'var(--panel-text)',
+              cursor: 'pointer',
+            }}
+          >
+            {t('common.cancel')}
+          </button>
+        </div>
+      )}
+
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_plugins')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{zh ? '插件注册可执行能力、服务或配置数据；技能只提供按需读取的使用指导，不执行操作或授予权限。附带指导在下面的技能清单单独列出。' : ja ? 'プラグインは機能やデータを登録し、スキルは利用ガイドだけを提供します。' : 'Plugins register capabilities or data. Skills provide usage guidance and cannot execute operations or grant permissions. Bundled guidance is listed separately below.'}</p>
+      {error && <div role="alert" style={{ fontSize: 13, color: '#E53935' }}>{error}</div>}
+      <div className="plugins-list">
+      {plugins === null ? (
+        <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>{t('mind_inspector.common.loading')}</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {plugins.length === 0 && (
+            <div style={{ fontSize: 13, color: 'var(--panel-text-secondary)' }}>
+              {t('config.plugins.no_plugins')}
+              {paths && (
+                <span>{t('config.plugins.plugins_dir_hint', { dir: paths.plugins_dir })}</span>
+              )}
+            </div>
+          )}
+          {plugins.map((p) => (
+            <div
+              key={p.key}
+              className="plugins-package-card"
+              title={p.dir}
+              style={{
+                border: '1px solid var(--panel-border)',
+                borderRadius: 8,
+                padding: '8px 12px',
+                background: 'var(--panel-surface)',
+                boxShadow: 'var(--panel-shadow-subtle)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginBottom: 2 }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--panel-text)' }}>{p.name}</span>
+                <span style={{ fontSize: 11, color: 'var(--panel-text-tertiary)' }}>v{p.version}</span>
+                {p.capability_kind && <span style={{fontSize:11,color:'var(--panel-accent)'}}>{kindLabels[p.capability_kind]}</span>}
+                {BUILTIN_PLUGIN_NAMES.includes(p.name) && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 6px',
+                      borderRadius: 999,
+                      color: 'var(--panel-text-tertiary)',
+                      border: '1px solid var(--panel-border)',
+                    }}
+                  >
+                    {t('config.plugins.builtin')}
+                  </span>
+                )}
+                {trustLabel(p.trust) && (p.status !== 'untrusted' || p.trust === 'changed') && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 8px',
+                      borderRadius: 999,
+                      color: '#8a5a00',
+                      border: '1px solid var(--panel-border-strong)',
+                    }}
+                  >
+                    {trustLabel(p.trust)}
+                  </span>
+                )}
+                <span
+                  style={{
+                    fontSize: 11,
+                    padding: '1px 8px',
+                    borderRadius: 999,
+                    color: p.status === 'loaded' ? 'var(--panel-text)' : '#8B2C1F',
+                    border: `1px solid ${p.status === 'loaded' ? 'var(--panel-border-strong)' : 'var(--panel-border)'}`,
+                  }}
+                >
+                  {statusLabel(p.status)}
+                </span>
+                <div style={{ flex: 1 }} />
+                {!BUILTIN_PLUGIN_NAMES.includes(p.key) && <button disabled={busy} onClick={() => void onToggle(p)} style={{ fontSize: 11, padding: '3px 10px', borderRadius: 6, border: '1px solid var(--panel-border)', background: 'var(--panel-surface)', color: 'var(--panel-text)' }}>{p.enabled ? (zh ? '禁用' : ja ? '無効化' : 'Disable') : (zh ? '启用' : ja ? '有効化' : 'Enable')}</button>}
+                {!BUILTIN_PLUGIN_NAMES.includes(p.key) && p.enabled && p.trust !== 'trusted' && (
+                  <button
+                    disabled={busy}
+                    onClick={() => onTrust(p)}
+                    style={{
+                      fontSize: 11,
+                      padding: '3px 10px',
+                      borderRadius: 6,
+                      border: '1px solid var(--panel-border-strong)',
+                      background: 'var(--panel-surface)',
+                      color: 'var(--panel-text)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t('config.plugins.trust')}
+                  </button>
+                )}
+                {p.name !== '3d-apartment' && <button
+                  disabled={busy || !p.enabled || p.trust !== 'trusted'}
+                  onClick={() => onReload(p.key)}
+                  style={{
+                    fontSize: 11,
+                    padding: '3px 10px',
+                    borderRadius: 6,
+                    border: '1px solid var(--panel-border)',
+                    background: 'var(--panel-surface)',
+                    color: 'var(--panel-text)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {t('config.plugins.reload')}
+                </button>}
+                {!BUILTIN_PLUGIN_NAMES.includes(p.name) && (
+                  <button
+                    disabled={busy}
+                    onClick={() => onDelete(p)}
+                    style={{
+                      fontSize: 11,
+                      padding: '3px 10px',
+                      borderRadius: 6,
+                      border: '1px solid var(--panel-border)',
+                      background: 'var(--panel-surface)',
+                      color: '#8B2C1F',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t('config.plugins.delete')}
+                  </button>
+                )}
+              </div>
+              {p.description && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: 'var(--panel-text-secondary)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'normal',
+                    lineHeight: 1.65,
+                  }}
+                >
+                  {p.description}
+                </div>
+              )}
+              <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+                {[
+                  p.skills.length > 0 ? `${zh ? '附带使用指导' : ja ? '付属ガイド' : 'Bundled guidance'} ${p.skills.length}` : '',
+                  p.tools.length > 0 ? t('config.plugins.tools_count', { n: p.tools.length }) : '',
+                  p.providers.length > 0 ? t('config.plugins.providers_count', { n: p.providers.length }) : '',
+                  p.mcp_servers.length > 0 ? `MCP ${p.mcp_servers.length}` : '',
+                  p.reason ? t('config.plugins.skip_reason', { reason: p.reason }) : '',
+                ].filter(Boolean).join(' · ') || '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <OptionalResourceSettings scope="published" />
+      </div>
+      <PluginInstallPanel onInstalled={refresh} />
+
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_diag')}</div>
+      <div
+        className="plugins-diagnostics"
+        style={{
+          border: '1px solid var(--panel-border)',
+          borderRadius: 8,
+          padding: '10px 12px',
+          background: 'var(--panel-surface)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        {diag?.last_report ? (
+          <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+            {t('config.plugins.diag_last_report')}
+            {t('config.plugins.diag_loaded', { n: diag.last_report.plugins.length })}
+            {t('config.plugins.diag_skills', { n: diag.last_report.skills.length })}
+            {t('config.plugins.diag_tools', { n: diag.last_report.tools.length })}
+            {t('config.plugins.diag_mcp', { n: diag.last_report.mcp_servers.length })}
+            {diag.last_report.protocols.length > 0 &&
+              t('config.plugins.diag_protocols', { n: diag.last_report.protocols.length })}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: 'var(--panel-text-secondary)' }}>
+            {t('config.plugins.diag_no_report')}
+          </div>
+        )}
+        {diag && diag.last_report && diag.last_report.skipped.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#8a5a00' }}>
+              {t('config.plugins.diag_skipped_title', { n: diag.last_report.skipped.length })}
+            </div>
+            {diag.last_report.skipped.map((entry, i) => (
+              <div key={i} style={{ fontSize: 12, color: '#8a5a00', wordBreak: 'break-all' }}>
+                · {entry}
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--panel-text)' }}>
+            {t('config.plugins.diag_events')}
+          </div>
+          {diag && diag.events.length > 0 ? (
+            diag.events.map((entry, i) => (
+              <div key={i} style={{ fontSize: 12, color: 'var(--panel-text-secondary)', wordBreak: 'break-all' }}>
+                · {entry}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: 'var(--panel-text-tertiary)' }}>
+              {t('config.plugins.diag_no_events')}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="plugins-section-title" style={sectionTitle}>{t('config.plugins.section_skills')}</div><p style={{fontSize:12,color:'var(--panel-text-secondary)'}}>{t('config.plugins.workflow_help')}</p>
+      {error ? null : (
+        <SkillsManager skills={skills} skillsDir={paths?.skills_dir} onChanged={refresh} />
+      )}
+    </div>
+  );
+};
+
+export default PluginsPanel;

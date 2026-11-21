@@ -1,0 +1,161 @@
+import { defineConfig, type Plugin, type ResolvedConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import { resolve, join, dirname, basename, relative } from "node:path";
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+
+const host = process.env.TAURI_DEV_HOST;
+
+/** 仅将运行时使用的静态资源复制到构建目录。 */
+interface KeepEntry {
+  required?: boolean;
+  /** public 下的相对路径，可以是文件或目录。 */
+  path: string;
+  /**
+   * 文件名过滤器，仅对目录生效。
+   *
+   * 桌宠的素材目录里同时躺着运行时雪碧图和制图中间产物（逐帧原图、制图源），
+   * 前者要进包、后者全仓零引用，只能按文件名区分。
+   */
+  match?: RegExp;
+}
+
+function copyPublicAssets(): Plugin {
+  let config: ResolvedConfig;
+  const KEEP: KeepEntry[] = [
+    // 主窗口待机/高兴等姿态使用 chibi/*-atlas.webp（地址见 ChibiPetCanvas.css 的 --atlas-url）。
+    { path: "chibi/vivian-atlas.webp" },
+    { path: "chibi/nana-atlas.webp" },
+
+    // 走动/转身/眨眼/表情动作由 ChibiPetCanvas 内联引用这两处的雪碧图。同目录下的
+    // 逐帧序列与 walk/source 只是制图时的中间产物，运行时一次都不会加载。
+    { path: "chibi/walk", match: /-sheet\.webp$/ },
+    { path: "chibi/motion", match: /-sheet\.webp$/ },
+    // Only individual runtime stickers; no source art or preview sheets in the bundle.
+    { path: "stickers", match: /-v2\.webp$/ },
+    // Illustrated artwork used by the independent record pages.
+    { path: "record-art", match: /\.webp$/ },
+    { path: "fonts" },
+    { path: "wallpapers/riverside-original-enhanced.webp", required: true },
+    { path: "wallpapers/manhattan-dusk.webp", required: true },
+    { path: "icons" },
+    { path: "favicon.ico" },
+  ];
+
+  /** 统计目录下命中过滤器的文件数，用于确认过滤器没有把整个目录筛空。 */
+  const countMatched = (dir: string, match: RegExp, skipped: (path: string) => boolean): number => {
+    let total = 0;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (skipped(full)) continue;
+      if (entry.isDirectory()) total += countMatched(full, match, skipped);
+      else if (match.test(entry.name)) total += 1;
+    }
+    return total;
+  };
+
+  return {
+    name: "copy-public-assets",
+    apply: "build",
+    configResolved(resolved) {
+      config = resolved;
+    },
+    closeBundle() {
+      const publicDir = config.publicDir;
+      const outDir = resolve(config.root, config.build.outDir);
+      const missing: string[] = [];
+      const empty: string[] = [];
+      for (const entry of KEEP) {
+        const src = join(publicDir, entry.path);
+        if (!existsSync(src)) {
+          if (entry.required) throw new Error(`[copy-public-assets] 缺少必需的手机图片资源: ${entry.path}`);
+          missing.push(entry.path);
+          continue;
+        }
+        // 制图源目录（如 chibi/walk/source）里躺着同名图集的生成中间产物，
+        // 只看文件名的话会连它们一起打包，得按目录段排除。
+        const skipped = (candidate: string) =>
+          relative(src, candidate).split(/[\\/]/).includes("source");
+        if (entry.match && statSync(src).isDirectory() && countMatched(src, entry.match, skipped) === 0) {
+          empty.push(`${entry.path} (${entry.match})`);
+          continue;
+        }
+        const destination = join(outDir, entry.path);
+        mkdirSync(dirname(destination), { recursive: true });
+        cpSync(src, destination, {
+          recursive: true,
+          filter: entry.match
+            ? (source) => {
+                if (skipped(source)) return false;
+                if (statSync(source).isDirectory()) return true;
+                return entry.match!.test(basename(source));
+              }
+            : undefined,
+        });
+      }
+      console.log(`[copy-public-assets] 已复制明文资源: ${KEEP.length - missing.length - empty.length}/${KEEP.length}`);
+      if (missing.length > 0) {
+        console.warn(
+          `[copy-public-assets] 白名单条目在 public 下不存在，已跳过: ${missing.join(", ")}\n` +
+            `  若资源目录已改名或删除，请同步更新 KEEP，否则运行时会静默 404。`,
+        );
+      }
+      if (empty.length > 0) {
+        console.warn(
+          `[copy-public-assets] 白名单过滤器未命中任何文件，已跳过: ${empty.join(", ")}\n` +
+            `  素材命名规则变了却没同步过滤器时，图集会整体缺失且构建零报错。`,
+        );
+      }
+    },
+  };
+}
+
+export default defineConfig(async () => ({
+  plugins: [react(), copyPublicAssets()],
+  clearScreen: false,
+  server: {
+    port: 1420,
+    strictPort: true,
+    host: host || false,
+    hmr: host
+      ? {
+          protocol: "ws",
+          host,
+          port: 1421,
+        }
+      : undefined,
+    watch: {
+      ignored: ["**/src-tauri/**", "**/tmp/**", "**/temp/**", "**/output/**", "**/.webview-data/**"],
+    },
+  },
+  build: {
+    // 关闭默认的全量 public 拷贝，明文资源改由 copy-public-assets 按白名单复制
+    copyPublicDir: false,
+    // dist 是纯构建产物目录：chunk 名带内容 hash，旧版本不会被同名覆盖，
+    // 不清空就会随构建轮次持续累积并原样进安装包
+    emptyOutDir: true,
+    // WebView2 为常青 Chromium，无需兼容旧浏览器
+    target: "es2022",
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      input: resolve(process.cwd(), "index.html"),
+      output: {
+        // 按稳定 vendor 分组拆包，便于多 Tauri 窗口之间共享缓存、并行加载：
+        // - react/tauri/i18n：高频稳定依赖，各自独立缓存
+        // - 其余依赖保持 Vite 默认拆包，异步 chunk 按需加载
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (id.includes("@tauri-apps")) return "tauri";
+          // Match package roots; Pierre's /dist/react/ entry points stay lazy.
+          if (/\/node_modules\/(react|react-dom|react-is|scheduler|zustand)\//.test(id.replace(/\\/g, "/"))) {
+            return "react";
+          }
+          if (id.includes("/i18next/") || id.includes("/react-i18next/")) {
+            return "i18n";
+          }
+          // 其余依赖（含 mermaid 等动态 import 的库）保持 Vite 默认拆包，
+          // 让异步 chunk 按需加载，不合并成单一巨型 vendor 包。
+        },
+      },
+    },
+  },
+}));

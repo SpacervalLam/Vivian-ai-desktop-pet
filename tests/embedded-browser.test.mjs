@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict';
+import { buildSync } from 'esbuild';
+const { outputFiles } = buildSync({ entryPoints: ['src/components/mind-inspector/pages/browserModel.ts'], bundle: true, write: false, format: 'esm', platform: 'node' });
+const { mergeBrowserState, browserEntries, browserBytes, emptyBrowser } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
+const latest = { ...emptyBrowser, revision: 20, active: 'new' };
+assert.equal(mergeBrowserState(latest, { ...emptyBrowser, revision: 19, active: 'old' }).active, 'new');
+assert.equal(mergeBrowserState(emptyBrowser, latest).revision, 20);
+const pages = [{ title: 'One', url: 'https://example.com/first', at: 1 }, { title: 'Second page', url: 'https://example.com/second', at: 2 }];
+assert.deepEqual(browserEntries(pages, 'example SECOND').map(page => page.at), [2]);
+assert.deepEqual(browserEntries(pages, '').map(page => page.at), [2, 1]);
+assert.equal(pages[0].at, 1, 'search must not reorder the persisted history');
+assert.equal(browserBytes(-1), '—');
+assert.equal(browserBytes(1024), '1.0 KB');
+assert.equal(browserBytes(2097152), '2.0 MB');
+console.log('Embedded browser: state ordering, history/bookmark search and download sizes passed.');
+const library = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
+for (const page of library.browserLibraryPages) assert.equal(library.browserLibraryPage(library.browserLibraryUrl(page)), page);
+for (const url of ['https://example.com/#vivian-bookmarks','about:blank','about:blank#vivian-unknown','about:blank#vivian-history?x=1']) assert.equal(library.browserLibraryPage(url), null);
+console.log('Browser library pages: exact internal routes and external URL isolation passed.');
+
+const { browserSearchEngine, browserSearchInput } = library;
+assert.equal(browserSearchEngine(null), 'bing');
+assert.equal(browserSearchEngine('untrusted'), 'bing');
+for (const [engine, host, parameter] of [['bing', 'www.bing.com', 'q'], ['google', 'www.google.com', 'q'], ['baidu', 'www.baidu.com', 'wd']]) {
+  assert.equal(browserSearchEngine(engine), engine);
+  const query = '中文搜索 C++ & Rust #教程';
+  const target = new URL(browserSearchInput(`  ${query}  `, engine));
+  assert.equal(target.hostname, host);
+  assert.equal(target.searchParams.get(parameter), query);
+  assert.equal(target.hash, '');
+  for (const address of ['', 'example.com/a', 'https://example.com?q=a&b=c', 'localhost:3000', '127.0.0.1:8080', '[::1]:8080', 'about:blank', 'data:text/plain,hello', 'C:/my files/demo.html', '//server/share/a.html']) {
+    assert.equal(browserSearchInput(address, engine), address, 'addresses and local files bypass keyword search');
+  }
+}
+console.log('Browser search: three engines, encoded queries, preference fallback and address preservation passed.');
+
+const { browserAddressSuggestions } = library;
+const memory = [...pages,
+  { title: 'Second page again', url: 'https://example.com/second', at: 3 },
+  { title: 'Other site', url: 'https://other.test/', at: 4 }];
+assert.deepEqual(browserAddressSuggestions(memory, ''), [], 'memory stays quiet until the user types');
+assert.deepEqual(browserAddressSuggestions(memory, '   '), []);
+assert.deepEqual(browserAddressSuggestions(memory, 'example').map(page => page.url), ['https://example.com/second', 'https://example.com/first'], 'most recent visit per URL only');
+assert.equal(browserAddressSuggestions(memory, 'second')[0].at, 3);
+assert.deepEqual(browserAddressSuggestions(memory, 'other', 1).map(page => page.url), ['https://other.test/']);
+assert.deepEqual(browserAddressSuggestions(memory, 'other', 0), []);
+assert.deepEqual(browserAddressSuggestions(memory, 'other test', 3).map(page => page.url), ['https://other.test/'], 'all terms must match like the history search');
+assert.deepEqual(browserAddressSuggestions(memory, 'other missing'), []);
+console.log('Browser address memory: typed recall by title or address, recency order and dedupe passed.');
