@@ -88,6 +88,10 @@ pub struct PeerLearning {
 }
 
 impl PeerLearning {
+    pub(crate) fn recent_statements(&self, since: i64, now: i64) -> impl Iterator<Item = &PeerStatement> {
+        self.statements.iter().rev().filter(move |statement| (since..=now).contains(&statement.at))
+    }
+
     /// An utterance identity may be delivered again; it is still one observation.
     pub fn receive(
         &mut self,

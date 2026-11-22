@@ -59,6 +59,7 @@ fn anchors(char_id: &str, memory: &MemoryManager, now: i64) -> Vec<LearningAncho
                 ),
             ));
         }
+        anchors.extend(peer_anchors(&brain.mind.peer_learning.read(), now));
         for (name, reason, established) in brain
             .persona
             .self_profile
@@ -106,6 +107,8 @@ fn anchors(char_id: &str, memory: &MemoryManager, now: i64) -> Vec<LearningAncho
             m.timestamp <= now as f64
                 && now as f64 - m.timestamp <= 7.0 * 86400.0
                 && !m.tags.iter().any(|t| t == "presence_log")
+                && m.metadata["channel"] != "cross_character"
+                && m.metadata["content_type"] != "peer_learning"
                 && crate::memory::kinds::recallable(m)
                 && crate::memory::provenance::visible_to(&m.metadata, char_id)
         }) {
@@ -117,6 +120,26 @@ fn anchors(char_id: &str, memory: &MemoryManager, now: i64) -> Vec<LearningAncho
         }
     }
     anchors
+}
+
+fn peer_anchors(learning: &crate::mind::peer_learning::PeerLearning, now: i64) -> Vec<LearningAnchor> {
+    learning.recent_statements(now.saturating_sub(7 * 86_400), now)
+        .filter(|statement| statement.text.trim().chars().count() >= 6)
+        .take(3)
+        .map(|statement| LearningAnchor::new(
+            format!("peer:{}:{}", statement.speaker, statement.id),
+            "peer_conversation",
+            &statement.text,
+        ))
+        .collect()
+}
+
+fn is_personal_source(anchor: &LearningAnchor) -> bool {
+    matches!(anchor.source.as_str(), "personal_question" | "evolving_taste" | "exploring_taste" | "base_interest")
+}
+
+fn can_consider_learning(sources: &[LearningAnchor]) -> bool {
+    sources.iter().any(|a| is_personal_source(a) || a.source == "peer_conversation")
 }
 
 pub fn candidate(
@@ -132,12 +155,7 @@ pub fn candidate(
         return None;
     }
     let sources = anchors(char_id, memory, chrono::Utc::now().timestamp());
-    if !sources.iter().any(|a| {
-        matches!(
-            a.source.as_str(),
-            "personal_question" | "evolving_taste" | "exploring_taste" | "base_interest"
-        )
-    }) {
+    if !can_consider_learning(&sources) {
         return None;
     }
     let fresh = with_state(char_id, |s| {
@@ -176,22 +194,17 @@ pub async fn plan(
     }
     let now = chrono::Utc::now().timestamp();
     let sources = anchors(char_id, memory, now);
+    if !can_consider_learning(&sources) {
+        return vec![];
+    }
     // Existing tastes remain the perspective even after their source has been
     // considered. New user chatter must not erase the pet's own preferences.
     let perspective = sources
         .iter()
-        .filter(|a| {
-            matches!(
-                a.source.as_str(),
-                "personal_question" | "evolving_taste" | "exploring_taste" | "base_interest"
-            )
-        })
+        .filter(|a| is_personal_source(a))
         .map(|a| a.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    if perspective.is_empty() {
-        return vec![];
-    }
     let anchors = match with_state(char_id, |state| state.begin_evaluation(sources, now)) {
         Ok(anchors) => anchors,
         Err(error) => {

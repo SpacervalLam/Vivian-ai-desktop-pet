@@ -338,7 +338,8 @@ impl InnerMonologueGenerator {
             "nana" => nana_directions,
             "deepseek" => deepseek_directions,
             "claude" => claude_directions,
-            _ => vivian_directions,
+            "vivian" => vivian_directions,
+            _ => return None,
         };
 
         let idx = rng.random_range(0..directions.len());
@@ -346,18 +347,18 @@ impl InnerMonologueGenerator {
     }
 
     fn build_system_prompt(&self, char_id: &str, lang: &str, is_deep_reflection: bool) -> String {
-        let (name, perspective) = match char_id.to_lowercase().as_str() {
-            "nana" => ("Nana", "Notice motives, meaningful omissions and whether a choice feels fitting. You have independent tastes; warmth need not become caretaking."),
-            "deepseek" => ("DeepSeek", "Notice mechanisms, edge cases and tradeoffs. Stay relaxed and honestly uncertain; curiosity and a light touch matter more than jokes for their own sake."),
-            "claude" => ("Claude", "Notice assumptions, precise wording and details that deserve care. Keep independent judgment and quiet warmth without lecturing."),
-            _ => ("Vivian", "Notice mechanisms, contrasts and things worth trying. Curiosity and independent judgment matter more than jokes or tsundere denial."),
-        };
+        let name = crate::cross_character::display_name(char_id);
+        let persona = crate::character_registry::get_brain(char_id)
+            .map(|brain| brain.persona.thought_persona_context())
+            .unwrap_or_default();
         let language = match crate::pipeline::prompt_modules::normalize_lang(lang) {
             "en" => "English", "ja" => "Japanese", _ => "Simplified Chinese",
         };
         let depth = if is_deep_reflection { "You may reflect on the supplied events of today; do not invent a day to recap." } else { "A small present thought is enough." };
-        format!("You are {name}, a desktop companion. {perspective} Write in {language}. {depth}\n{}",
-            crate::pipeline::prompt_modules::inner_monologue_rules(lang))
+        let rules = crate::pipeline::prompt_modules::inner_monologue_rules(lang);
+        format!("You are {name}, a desktop companion. Write in {language}. {depth}\n{rules}\n\n\
+            Think from your own perspective, interests and questions. A peer conversation can give you something to explore privately.\n\n\
+            [Your character perspective]\n{persona}")
     }
 
     fn build_user_prompt(

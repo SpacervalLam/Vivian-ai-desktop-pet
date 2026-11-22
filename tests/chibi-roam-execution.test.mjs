@@ -175,6 +175,7 @@ try {
   send('cross:speech-finished', { stream_id: 'round-1', character_id: 'vivian' });
 
   send('cross:approach', { ...approach, stream_id: 'round-2', source_id: 'vivian', target_id: 'nana' });
+  send('cross:prepare-listener', { stream_id: 'round-2' });
   send('cross:start', { stream_id: 'round-2', speaker_id: 'vivian', listener_id: 'nana' });
   await advance(clock + 4_000);
   assert.equal(coordinator.peerConversationInProgress, true, 'listener holds through the previous round’s timeout');
@@ -190,6 +191,12 @@ try {
 
   fixture.position = { x: 630, y: 300 };
   send('cross:approach', { ...approach, stream_id: 'listener', source_id: 'vivian', target_id: 'nana' });
+  send('cross:prepare-listener', { stream_id: 'listener' });
+  await advance(clock + 40);
+  assert.match(pose(), /pose-think/, 'the reaction happens after arrival and before turning');
+  assert.notEqual(fixture.emitted.at(-1)?.payload.stream_id, 'listener');
+  await advance(clock + 2_000);
+  assert.equal(fixture.emitted.at(-1)?.payload.stream_id, 'listener', 'ready is sent after the turn and reaction');
   send('cross:start', { stream_id: 'listener', speaker_id: 'vivian', listener_id: 'nana' });
   await advance(clock + 200);
   assert.match(facingStyle().backgroundImage, /nana-turn-left-sheet/, 'the pet on the right faces left');
@@ -202,6 +209,16 @@ try {
   send('cross:speech-finished', { stream_id: 'listener', character_id: 'vivian' });
   await advance(clock + 200);
   assert.match(pose(), /pose-idle/);
+
+  Math.random = () => 0.5;
+  send('cross:approach', { ...approach, stream_id: 'direct-turn', source_id: 'vivian', target_id: 'nana' });
+  send('cross:prepare-listener', { stream_id: 'direct-turn' });
+  await advance(clock + 40);
+  assert.match(pose(), /pose-turn/, 'the other half of openings turn immediately');
+  await advance(clock + 200);
+  assert.equal(fixture.emitted.at(-1)?.payload.stream_id, 'direct-turn');
+  send('cross:error', { stream_id: 'direct-turn' });
+  await advance(clock + 200);
 
   send('cross:approach', { ...approach, stream_id: 'interrupted' });
   send('cross:start', { stream_id: 'interrupted', speaker_id: 'nana', listener_id: 'vivian' });

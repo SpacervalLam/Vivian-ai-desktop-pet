@@ -13,6 +13,9 @@ const context = await readFile('src-tauri/src/discovery/learning_context.rs', 'u
 const start = context.indexOf('static STATE_WRITE:');
 const end = context.indexOf('\nfn anchors(', start);
 assert.ok(start >= 0 && end > start);
+const peerStart = context.indexOf('\nfn peer_anchors(');
+const peerEnd = context.indexOf('\npub fn candidate(', peerStart);
+assert.ok(peerStart >= 0 && peerEnd > peerStart);
 await writeFile(path.join(dir, 'Cargo.toml'), `[package]
 name="vivian-interest-learning-tests"
 version="0.1.0"
@@ -46,9 +49,37 @@ mod persona {
  #[path="${rustPath('src-tauri/src/persona/self_profile.rs')}"] pub mod self_profile;
  #[path="${rustPath('src-tauri/src/persona/self_profile_store.rs')}"] pub mod self_profile_store;
 }
+mod mind {
+ mod conversation {
+  pub struct ConversationEvent { pub id:String,pub kind:String,pub at:f64,pub fact:String }
+ }
+ #[path="${rustPath('src-tauri/src/mind/peer_learning.rs')}"] pub mod peer_learning;
+}
 ${context.slice(start, end)}
+${context.slice(peerStart, peerEnd)}
 #[cfg(test)] mod persistence {
  use super::*;
+ #[test] fn peer_conversation_alone_can_start_owned_learning() {
+  use crate::mind::peer_learning::PeerLearning;
+  let mut received = PeerLearning::default();
+  let now = 8 * 86400;
+  received.receive("nana", "vivian", "expired", "过期的孔雀羽毛结构色话题", None, 30);
+  received.receive("nana", "vivian", "real", "孔雀羽毛的结构色会随着观察角度改变", None, now-10);
+  received.receive("nana", "vivian", "greeting", "你好呀", None, now-5);
+  received.receive("nana", "vivian", "future", "未来时间的结构色发言", None, now+10);
+  let anchors = peer_anchors(&received, now);
+  assert_eq!(anchors.len(), 1);
+  assert_eq!(anchors[0].id, "peer:vivian:real");
+  assert!(can_consider_learning(&anchors));
+  assert!(!can_consider_learning(&peer_anchors(&PeerLearning::default(), now)));
+  assert!(!can_consider_learning(&[LearningAnchor::new("user:msg", "recent_topic", "用户讨论过结构色") ]));
+  let fresh = with_state("nana", |state| state.begin_evaluation(anchors.clone(), now)).unwrap();
+  let proposal = LearningProposal {anchor_id:anchors[0].id.clone(),source_quote:anchors[0].text.clone(),
+   focus:"结构色".into(),query:"孔雀羽毛 结构色 观察角度".into(),question:"为什么观察角度能影响我看到的颜色？".into(),
+   personal_motive:"我好奇同一片羽毛看起来像换了颜色".into()};
+  assert!(with_state("nana", |state| state.reserve(proposal, &fresh, now)).unwrap().is_some());
+  assert!(with_state("nana", |state| state.preview(anchors, now+3600)).unwrap().is_empty());
+ }
  #[test] fn busy_and_thought_paths_share_reservations_but_characters_do_not() {
   let anchor=||LearningAnchor::new("memory:real-id","recent_topic","一次真实对话提到了游戏机制里的连锁反应");
   assert_eq!(with_state("shared",|s|s.begin_evaluation(vec![anchor()],86400)).unwrap().len(),1);

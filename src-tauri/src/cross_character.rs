@@ -258,16 +258,21 @@ impl<'a> PeerApproach<'a> {
         };
         let (send, ready) = tokio::sync::oneshot::channel();
         let send = parking_lot::Mutex::new(Some(send));
+        let (face_send, faced) = tokio::sync::oneshot::channel();
+        let face_send = parking_lot::Mutex::new(Some(face_send));
         let stream = self.stream_id.to_owned();
         let source = req.source_id.clone();
+        let target = req.target_id.clone();
         self.listener = Some(self.app.listen("cross:approach-complete", move |event| {
             let Ok(payload) = serde_json::from_str::<Value>(event.payload()) else { return; };
-            if payload["stream_id"].as_str() == Some(stream.as_str())
-                && payload["character_id"].as_str() == Some(source.as_str())
-            {
-                if let Some(send) = send.lock().take() {
-                    let _ = send.send(());
-                }
+            if payload["stream_id"].as_str() != Some(stream.as_str()) { return; }
+            let sender = match payload["character_id"].as_str() {
+                Some(id) if id == source => &send,
+                Some(id) if id == target => &face_send,
+                _ => return,
+            };
+            if let Some(sender) = sender.lock().take() {
+                let _ = sender.send(());
             }
         }));
         let area = monitor.work_area();
@@ -279,6 +284,9 @@ impl<'a> PeerApproach<'a> {
             },
         })).is_ok() {
             let _ = tokio::time::timeout(Duration::from_secs(18), ready).await;
+            if self.app.emit("cross:prepare-listener", json!({ "stream_id": self.stream_id })).is_ok() {
+                let _ = tokio::time::timeout(Duration::from_secs(3), faced).await;
+            }
         }
         if let Some(listener) = self.listener.take() {
             self.app.unlisten(listener);

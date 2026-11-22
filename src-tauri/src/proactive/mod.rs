@@ -1103,12 +1103,19 @@ impl ProactiveOrchestrator {
         let recent: Vec<serde_json::Value> = self.dialogue.read().as_ref().map(|dialogue| {
             let history = dialogue.get_history();
             history.iter().rev().take(6).rev().map(|message| {
-                let (_, speaker, _) = crate::cross_character::parse_any_speaker_prefix(&message.content);
+                let meta = message.meta.as_ref();
+                let speaker = meta.and_then(|meta| meta.communication.as_ref())
+                    .and_then(|context| context.speaker.as_deref());
                 let user_evidence = message.role == "user"
-                    && message.meta.as_ref().is_none_or(|meta| meta.source == crate::messages::MessageSource::User)
-                    && speaker.as_deref().is_none_or(|name| !crate::mind::is_known_char_name(name) && name != "I");
+                    && meta.is_none_or(|meta| meta.source == crate::messages::MessageSource::User
+                        && meta.channel.as_deref() != Some("cross_character"))
+                    && speaker.map_or_else(|| {
+                        crate::cross_character::parse_any_speaker_prefix(&message.content).1
+                            .as_deref().is_none_or(|name| !crate::mind::is_known_char_name(name) && name != "I")
+                    }, |name| name.eq_ignore_ascii_case("user"));
                 serde_json::json!({
-                    "speaker": message.role,
+                    "speaker": speaker.unwrap_or_else(|| if meta.and_then(|meta| meta.channel.as_deref()) == Some("cross_character")
+                        && message.role == "user" { "peer" } else { &message.role }),
                     "user_evidence": user_evidence,
                     "text": message.content.chars().take(240).collect::<String>(),
                     "seconds_ago": message.timestamp.map(|at| (now - at.timestamp() as f64).max(0.0)),

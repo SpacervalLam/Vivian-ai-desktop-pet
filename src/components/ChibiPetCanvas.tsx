@@ -1065,7 +1065,7 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         presenceModeRef.current === 'offline';
     }, []);
 
-    const facePeer = useCallback(async (peer: string, direction: ChibiDirection, cancelled: () => boolean, sideOn = false) => {
+    const facePeer = useCallback(async (peer: string, direction: ChibiDirection, cancelled: () => boolean, sideOn = false, react = false) => {
       const current = peerFacingRef.current;
       if (current?.peer === peer && current.direction === direction && current.token === sequenceTokenRef.current) return;
       const interrupted = () => cancelled() || peerMotionBlocked();
@@ -1076,7 +1076,12 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const facing = { peer, direction, token: ++sequenceTokenRef.current, shown: -1 };
       peerFacingRef.current = facing;
       const start = sideOn ? frames.length - 1 : 0;
-      if (await playFrames(spec, frames.slice(start), durations.slice(start), facing.token, spec.name,
+      if (react && Math.random() < 0.5) {
+        const puzzled = animation('think', characterId);
+        await playFrames(puzzled, Array.from({ length: puzzled.frames }, (_, index) => index),
+          puzzled.durations, facing.token, puzzled.name, undefined, interrupted);
+      }
+      if (!interrupted() && await playFrames(spec, frames.slice(start), durations.slice(start), facing.token, spec.name,
         direction, index => { facing.shown = start + index; }, interrupted)) return;
       if (peerFacingRef.current === facing) {
         peerFacingRef.current = null;
@@ -1725,6 +1730,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       const cross = crossPresentationRef.current;
       const meetings = new Map<string, {
         peer: string;
+        initiator: boolean;
+        preparing: boolean;
         approaching: boolean;
         ended: boolean;
         continuing: boolean;
@@ -1759,6 +1766,8 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
         const initiator = p.source_id === characterId;
         const meeting = {
           peer: initiator ? p.target_id : p.source_id,
+          initiator,
+          preparing: false,
           approaching: initiator && meetings.size === 0,
           ended: false,
           continuing: false,
@@ -1884,9 +1893,11 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
       void add<CrossPresentationEvent>('cross:start', p => {
         if (!cross.update(p)) return;
         refreshCross();
-        const stream = p.stream_id;
-        const meeting = stream ? meetings.get(stream) : undefined;
-        if (!stream || !meeting) return;
+      });
+      void add<{ stream_id: string }>('cross:prepare-listener', ({ stream_id: stream }) => {
+        const meeting = meetings.get(stream);
+        if (!meeting || meeting.preparing) return;
+        meeting.preparing = true;
         meeting.approaching = false;
         void (async () => {
           const self = getCurrentWindow();
@@ -1897,8 +1908,12 @@ export const ChibiPetCanvas = forwardRef<ChibiPetCanvasHandle, ChibiPetCanvasPro
           ]);
           const offset = peerPosition.x + peerSize.width / 2 - (ownPosition.x + ownSize.width / 2);
           if (Math.abs(offset) < 1) return;
-          await facePeer(meeting.peer, offset < 0 ? 'left' : 'right', () => !meetingWith(meeting.peer));
-        })().catch(error => console.warn('[chibi] Could not face peer', error));
+          await facePeer(meeting.peer, offset < 0 ? 'left' : 'right', () => !meetingWith(meeting.peer), false, !meeting.initiator);
+        })().catch(error => console.warn('[chibi] Could not face peer', error)).finally(() => {
+          if (!meeting.initiator) {
+            void getCurrentWindow().emit('cross:approach-complete', { stream_id: stream, character_id: characterId }).catch(() => {});
+          }
+        });
       });
       void add<CrossPresentationEvent>('cross:chunk', p => {
         if (cross.update(p, true)) refreshCross();
